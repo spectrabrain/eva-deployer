@@ -1,0 +1,14 @@
+{
+  "eva_app_deploy_version": "3.0.5",
+  "eva_app_chart_version": "2.1.3",
+  "eva_vision_deploy_version": "2.0.5",
+  "eva_vision_chart_version": "2.0.5",
+  "eva_agent_deploy_version": "3.0.4",
+  "eva_agent_chart_version": "3.0.4",
+  "eva_agent_vllm_chart_version": "3.0.4",
+  "eva_agent_init_chart_version": "1.0.0",
+  "qdrant_chart_version": "1.16.3",
+  "kustomize_version": "5.4.3",
+  "k3s_default_version": "v1.36.2+k3s1",
+  "n8n_image": "docker.n8n.io/n8nio/n8n:1.103.2"
+}

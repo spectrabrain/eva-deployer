@@ -1,0 +1,374 @@
+- name: Refresh MIG mode status before partition
+  ansible.builtin.command: nvidia-smi --query-gpu=index,mig.mode.current --format=csv,noheader
+  register: gpu_mig_mig_mode_before_partition
+  changed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Ensure MIG mode is enabled on all target GPUs before partition
+  ansible.builtin.assert:
+    that:
+      - (gpu_mig_mig_mode_before_partition.stdout_lines | select('search', ',\\s*Disabled\\s*$') | list | length) == 0
+    fail_msg: "MIG mode가 Disabled 인 GPU가 있어 분할을 진행할 수 없습니다. MIG enable 후 재부팅 상태를 확인하세요."
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: List MIG GPU instance profiles
+  ansible.builtin.command: nvidia-smi mig -lgip
+  register: gpu_mig_mig_profile_list
+  changed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Show MIG profile list
+  ansible.builtin.debug:
+    var: gpu_mig_mig_profile_list.stdout_lines
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Validate MIG profile id before partition
+  ansible.builtin.assert:
+    that:
+      - gpu_mig_mig_profile_id | string | trim | length > 0
+    fail_msg: "gpu_mig_mig_profile_id 값을 설정해야 GPU 분할을 진행할 수 있습니다."
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Build MIG profile id list string
+  ansible.builtin.set_fact:
+    gpu_mig_mig_profile_id_list: "{{ ([gpu_mig_mig_profile_id | string | trim] * (gpu_mig_mig_instance_count | int)) | join(',') }}"
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Gather service facts before partition display cleanup
+  ansible.builtin.service_facts:
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Stop known graphical display services before MIG partition
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - display-manager.service
+    - gdm.service
+    - gdm3.service
+    - lightdm.service
+    - sddm.service
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - item in ansible_facts.services
+
+- name: Force-stop display managers before MIG partition
+  ansible.builtin.shell: |
+    set -o pipefail
+    for svc in display-manager gdm gdm3 lightdm sddm; do
+      systemctl stop "${svc}" 2>/dev/null || true
+      systemctl stop "${svc}.service" 2>/dev/null || true
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Switch to multi-user target before MIG partition
+  ansible.builtin.command: systemctl isolate multi-user.target
+  # noqa: command-instead-of-module
+  register: gpu_mig_isolate_multi_user_before_partition
+  changed_when: gpu_mig_isolate_multi_user_before_partition.rc == 0
+  failed_when: gpu_mig_isolate_multi_user_before_partition.rc != 0
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Kill remaining GPU graphical processes before MIG partition
+  ansible.builtin.shell: |
+    set -o pipefail
+    xorg_pids="$(pgrep -f '^/usr/lib/xorg/Xorg([[:space:]]|$)' || true)"
+    gnome_shell_pids="$(pgrep -f '^/usr/bin/gnome-shell([[:space:]]|$)' || true)"
+    gnome_cc_pids="$(pgrep -f '^/usr/bin/gnome-control-center([[:space:]]|$)' || true)"
+
+    if [ -n "${xorg_pids}" ]; then
+      kill -9 ${xorg_pids}
+    fi
+    if [ -n "${gnome_shell_pids}" ]; then
+      kill -9 ${gnome_shell_pids}
+    fi
+    if [ -n "${gnome_cc_pids}" ]; then
+      kill -9 ${gnome_cc_pids}
+    fi
+  args:
+    executable: /bin/bash
+  register: gpu_mig_kill_gpu_graphics_before_partition
+  changed_when: false
+  failed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Verify no known graphical GPU processes remain before MIG partition
+  ansible.builtin.shell: |
+    set -o pipefail
+    nvidia-smi | awk '/Processes:/,0' | grep -E 'Xorg|gnome-shell|gnome-control-center' || true
+  args:
+    executable: /bin/bash
+  register: gpu_mig_gpu_graphics_before_partition
+  changed_when: false
+  failed_when: gpu_mig_gpu_graphics_before_partition.stdout | trim | length > 0
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Count existing MIG instances for desired profile on each GPU
+  ansible.builtin.shell: |
+    set -o pipefail
+    count="$(nvidia-smi mig -i {{ item }} -lgi | awk -v gpu="{{ item }}" -v profile="{{ gpu_mig_mig_profile_id }}" '
+      /^\|/ {
+        line=$0
+        gsub(/\|/, "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        split(line, f, /[[:space:]]+/)
+        if (f[1] == gpu && f[2] == "MIG" && f[4] == profile && f[5] ~ /^[0-9]+$/ && f[6] ~ /^[0-9]+:[0-9]+$/) {
+          c++
+        }
+      }
+      END { print c + 0 }
+    ')"
+    echo "${count:-0}"
+  args:
+    executable: /bin/bash
+  loop: "{{ gpu_mig_all_gpu_indices }}"
+  register: gpu_mig_existing_profile_counts
+  changed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Build MIG partition apply/skip GPU index lists
+  ansible.builtin.set_fact:
+    gpu_mig_partition_skip_gpu_indices: >-
+      {{
+        gpu_mig_existing_profile_counts.results
+        | selectattr('stdout', 'equalto', (gpu_mig_mig_instance_count | string))
+        | map(attribute='item')
+        | list
+      }}
+    gpu_mig_partition_apply_gpu_indices: >-
+      {{
+        gpu_mig_all_gpu_indices
+        | reject('in', (
+          gpu_mig_existing_profile_counts.results
+          | selectattr('stdout', 'equalto', (gpu_mig_mig_instance_count | string))
+          | map(attribute='item')
+          | list
+        ))
+        | list
+      }}
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Show MIG partition apply plan
+  ansible.builtin.debug:
+    msg:
+      - "Skip GPUs (already have profile {{ gpu_mig_mig_profile_id }} x{{ gpu_mig_mig_instance_count }}): {{ gpu_mig_partition_skip_gpu_indices }}"
+      - "Apply GPUs: {{ gpu_mig_partition_apply_gpu_indices }}"
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Apply MIG partition on each GPU using profile id
+  ansible.builtin.command: "nvidia-smi mig -i {{ item }} -cgi {{ gpu_mig_mig_profile_id_list }} -C"
+  loop: "{{ gpu_mig_partition_apply_gpu_indices }}"
+  register: gpu_mig_mig_partition_apply
+  changed_when: gpu_mig_mig_partition_apply.rc == 0
+  failed_when: gpu_mig_mig_partition_apply.rc != 0
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Ensure output directory exists for MIG yaml
+  ansible.builtin.file:
+    path: "{{ gpu_mig_mig_output_path | dirname }}"
+    state: directory
+    mode: "0755"
+  when:
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_generate_mig_yaml | bool
+
+- name: Render MIG partition yaml
+  ansible.builtin.template:
+    src: mig-partition.yaml.j2
+    dest: "{{ gpu_mig_mig_output_path }}"
+    mode: "0644"
+  when:
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_generate_mig_yaml | bool
+
+- name: Show MIG yaml result
+  ansible.builtin.debug:
+    msg: "MIG partition yaml 생성 완료: {{ gpu_mig_mig_output_path }}"
+  when:
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_generate_mig_yaml | bool
+
+- name: Mark MIG partition workflow completed
+  ansible.builtin.set_fact:
+    gpu_mig_apply_mig_completed: true
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Install auto-enable MIG script for next boot
+  ansible.builtin.copy:
+    dest: /usr/local/sbin/gpu-mig-auto-enable.sh
+    mode: "0755"
+    owner: root
+    group: root
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      selector="{{ gpu_mig_mig_selector_remote_dir }}/displaymodeselector"
+      desired_profile_id="{{ gpu_mig_mig_profile_id | string | trim }}"
+      desired_instance_count="{{ gpu_mig_mig_instance_count | int }}"
+      desired_profile_list="{{ ([gpu_mig_mig_profile_id | string | trim] * (gpu_mig_mig_instance_count | int)) | join(',') }}"
+
+      count_existing_instances() {
+        local gpu_idx="$1"
+        # `nvidia-smi mig -lgi` returns rc=6 when no instances exist; treat it as empty output.
+        local lgi_out
+        lgi_out="$(nvidia-smi mig -i "${gpu_idx}" -lgi 2>/dev/null || true)"
+        printf '%s\n' "${lgi_out}" \
+          | awk -v gpu="${gpu_idx}" -v profile="${desired_profile_id}" '
+              /^\|/ {
+                line=$0
+                gsub(/\|/, "", line)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+                split(line, f, /[[:space:]]+/)
+                if (f[1] == gpu && f[2] == "MIG" && f[4] == profile && f[5] ~ /^[0-9]+$/ && f[6] ~ /^[0-9]+:[0-9]+$/) {
+                  c++
+                }
+              }
+              END { print c + 0 }'
+      }
+
+      # Guard against early graphical clients grabbing GPUs before partitioning.
+      for svc in display-manager.service gdm.service gdm3.service lightdm.service sddm.service; do
+        systemctl stop "${svc}" 2>/dev/null || true
+      done
+
+      for wait_try in 1 2 3 4 5; do
+        if ! nvidia-smi | awk '/Processes:/,0' | grep -Eq 'Xorg|gnome-shell|gnome-control-center'; then
+          break
+        fi
+        echo "gpu-mig-auto-enable: waiting for graphical GPU clients to exit (${wait_try}/5)" >&2
+        sleep 2
+      done
+
+      if [ -x "${selector}" ]; then
+        "${selector}" --gpumode compute --auto
+      fi
+
+      mapfile -t gpu_indices < <(
+        nvidia-smi --query-gpu=index,mig.mode.current --format=csv,noheader \
+          | awk -F',' '{
+              gsub(/^[ \t]+|[ \t]+$/, "", $1);
+              gsub(/^[ \t]+|[ \t]+$/, "", $2);
+              if ($2 != "N/A") print $1;
+            }'
+      )
+
+      for idx in "${gpu_indices[@]}"; do
+        nvidia-smi -i "${idx}" -mig 1
+
+        if [ -n "${desired_profile_id}" ] && [ "${desired_instance_count}" -gt 0 ]; then
+          existing_count="$(count_existing_instances "${idx}")"
+
+          if [ "${existing_count:-0}" -ne "${desired_instance_count}" ]; then
+            applied=0
+            for attempt in 1 2 3; do
+              if nvidia-smi mig -i "${idx}" -cgi "${desired_profile_list}" -C; then
+                applied=1
+                break
+              fi
+              echo "gpu-mig-auto-enable: retry MIG partition on GPU ${idx} (${attempt}/3)" >&2
+              sleep 2
+            done
+
+            if [ "${applied}" -ne 1 ]; then
+              echo "gpu-mig-auto-enable: failed to apply MIG profile ${desired_profile_list} on GPU ${idx}" >&2
+              exit 1
+            fi
+
+            final_count="$(count_existing_instances "${idx}")"
+            if [ "${final_count:-0}" -ne "${desired_instance_count}" ]; then
+              echo "gpu-mig-auto-enable: MIG profile count mismatch on GPU ${idx} (have ${final_count:-0}, want ${desired_instance_count})" >&2
+              exit 1
+            fi
+          fi
+        fi
+      done
+  when:
+    - gpu_mig_apply_mig_completed | default(false) | bool
+    - gpu_mig_mig_gpu_indices | default([]) | length > 0
+
+- name: Install auto-enable MIG systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/gpu-mig-auto-enable.service
+    mode: "0644"
+    owner: root
+    group: root
+    content: |
+      [Unit]
+      Description=Auto enable NVIDIA MIG mode on boot
+      Wants=nvidia-persistenced.service
+      After=nvidia-persistenced.service
+      Before=display-manager.service
+      ConditionPathExists=/usr/local/sbin/gpu-mig-auto-enable.sh
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/gpu-mig-auto-enable.sh
+      RemainAfterExit=no
+
+      [Install]
+      WantedBy=multi-user.target
+  when:
+    - gpu_mig_apply_mig_completed | default(false) | bool
+    - gpu_mig_mig_gpu_indices | default([]) | length > 0
+
+- name: Enable auto-enable MIG systemd unit
+  ansible.builtin.systemd:
+    name: gpu-mig-auto-enable.service
+    daemon_reload: true
+    enabled: true
+  when:
+    - gpu_mig_apply_mig_completed | default(false) | bool
+    - gpu_mig_mig_gpu_indices | default([]) | length > 0

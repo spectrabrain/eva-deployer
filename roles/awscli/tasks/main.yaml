@@ -1,0 +1,112 @@
+- name: Check whether AWS CLI is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/aws
+  register: awscli_installed
+
+- name: Install AWS CLI when missing
+  when: not awscli_installed.stat.exists
+  block:
+    - name: Download AWS CLI
+      ansible.builtin.get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+        mode: '0644'
+      check_mode: false
+
+    - name: Unzip AWS CLI
+      ansible.builtin.unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp/
+        remote_src: true
+      check_mode: false
+
+    - name: Install AWS CLI
+      ansible.builtin.command: /tmp/aws/install
+      args:
+        creates: /usr/local/bin/aws
+
+    - name: Cleanup AWS CLI install files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/aws
+        - /tmp/awscliv2.zip
+
+- name: Skip AWS CLI install because it is already installed
+  ansible.builtin.debug:
+    msg: "AWS CLI already installed at /usr/local/bin/aws. Skipping install."
+  when: awscli_installed.stat.exists
+
+- name: Resolve AWS CLI target user
+  ansible.builtin.set_fact:
+    awscli_target_user: "{{ ansible_user | default(ansible_ssh_user) }}"
+  changed_when: false
+
+- name: Lookup home directory for AWS CLI target user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ awscli_target_user }}"
+
+- name: Set AWS CLI target home directory
+  ansible.builtin.set_fact:
+    awscli_target_home: "{{ getent_passwd[awscli_target_user][4] }}"
+  changed_when: false
+
+- name: Ensure AWS config directory exists for target user
+  ansible.builtin.file:
+    path: "{{ awscli_target_home }}/.aws"
+    state: directory
+    owner: "{{ awscli_target_user }}"
+    mode: '0700'
+
+- name: Configure AWS CLI credentials from aws_key.ini
+  no_log: true
+  block:
+    - name: Read aws_key.ini content
+      ansible.builtin.set_fact:
+        awscli_key_raw: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/aws_key.ini') }}"
+      changed_when: false
+
+    - name: Extract AWS credentials from aws_key.ini
+      ansible.builtin.set_fact:
+        awscli_access_key_id: "{{ (awscli_key_raw | regex_findall('(?m)^\\s*aws_access_key_id\\s*=\\s*(.+)\\s*$') | first | default('')) | trim }}"
+        awscli_secret_access_key: "{{ (awscli_key_raw | regex_findall('(?m)^\\s*aws_secret_access_key\\s*=\\s*(.+)\\s*$') | first | default('')) | trim }}"
+        awscli_region: "{{ (awscli_key_raw | regex_findall('(?m)^\\s*region\\s*=\\s*(.+)\\s*$') | first | default('')) | trim }}"
+      changed_when: false
+
+    - name: Resolve AWS region value
+      ansible.builtin.set_fact:
+        awscli_region_effective: "{{ awscli_region | default('') | trim | default(awscli_default_region | default('ap-northeast-2'), true) }}"
+      changed_when: false
+
+    - name: Validate extracted AWS credentials
+      ansible.builtin.assert:
+        that:
+          - awscli_access_key_id | length > 0
+          - awscli_secret_access_key | length > 0
+        fail_msg: "aws_key.ini must include aws_access_key_id and aws_secret_access_key entries."
+
+    - name: Set aws_access_key_id
+      ansible.builtin.command: aws configure set aws_access_key_id "{{ awscli_access_key_id }}"
+      changed_when: false
+      become: true
+      become_user: "{{ awscli_target_user }}"
+      environment:
+        HOME: "{{ awscli_target_home }}"
+
+    - name: Set aws_secret_access_key
+      ansible.builtin.command: aws configure set aws_secret_access_key "{{ awscli_secret_access_key }}"
+      changed_when: false
+      become: true
+      become_user: "{{ awscli_target_user }}"
+      environment:
+        HOME: "{{ awscli_target_home }}"
+
+    - name: Set AWS default region
+      ansible.builtin.command: aws configure set region "{{ awscli_region_effective }}"
+      changed_when: false
+      become: true
+      become_user: "{{ awscli_target_user }}"
+      environment:
+        HOME: "{{ awscli_target_home }}"

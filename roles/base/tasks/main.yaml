@@ -1,0 +1,69 @@
+- name: Remove stale NVIDIA container toolkit apt source before base apt update
+  ansible.builtin.file:
+    path: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    state: absent
+  when: not ansible_check_mode
+
+- name: Find base and NFS offline packages
+  ansible.builtin.find:
+    paths: "{{ playbook_dir }}/install/apt/debs"
+    patterns: "*.deb"
+    file_type: file
+  register: base_offline_packages
+  when: airgap_mode | default(false) | bool
+
+- name: Assert base and NFS offline packages are available
+  ansible.builtin.assert:
+    that:
+      - base_offline_packages.matched | int > 0
+    fail_msg: >-
+      Airgap base/NFS package bundle is missing. Run
+      install/download_offline_assets.sh on a matching Ubuntu host first.
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Install base and NFS packages from offline bundle
+  ansible.builtin.command:
+    cmd: >-
+      /bin/bash {{ playbook_dir }}/install/validate_offline_debs.sh
+      {{ playbook_dir }}/install/apt/debs
+  changed_when: false
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Install base and NFS packages from offline bundle
+  ansible.builtin.shell: >-
+    dpkg --unpack "{{ playbook_dir }}/install/apt/debs/"*.deb || true;
+    dpkg --configure --pending || true;
+    dpkg --unpack "{{ playbook_dir }}/install/apt/debs/"*.deb;
+    dpkg --configure --pending
+  args:
+    executable: /bin/bash
+  become: true
+  register: base_offline_install
+  changed_when: true
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Install base packages online
+  ansible.builtin.apt:
+    name:
+      - unzip
+      - curl
+      - gnupg
+      - nfs-kernel-server
+    state: present
+    update_cache: true
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Skip base package installation in check mode
+  ansible.builtin.debug:
+    msg: >-
+      Check mode skips apt package installation. On an airgap host, verify the
+      required base packages are already installed before running --check.
+  when: ansible_check_mode

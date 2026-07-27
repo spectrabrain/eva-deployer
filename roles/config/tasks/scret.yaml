@@ -1,0 +1,164 @@
+- name: Ensure local output directory variable for scret.yaml
+  ansible.builtin.set_fact:
+    config_eva_output_dir: "{{ config_eva_output_dir | default(playbook_dir ~ '/config/' ~ (ansible_host | default(inventory_hostname))) }}"
+  changed_when: false
+
+- name: Check argocd-manager service account exists
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - sa
+      - argocd-manager
+      - -n
+      - kube-system
+      - -o
+      - name
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: config_argocd_manager_sa
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Ensure argocd-manager resources exist in cluster
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    kubectl apply -f - <<'EOF'
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: argocd-manager
+      namespace: kube-system
+    EOF
+
+    kubectl apply -f - <<'EOF'
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: argocd-manager-role
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: cluster-admin
+    subjects:
+      - kind: ServiceAccount
+        name: argocd-manager
+        namespace: kube-system
+    EOF
+
+    kubectl apply -f - <<'EOF'
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: argocd-manager-token
+      namespace: kube-system
+      annotations:
+        kubernetes.io/service-account.name: argocd-manager
+    type: kubernetes.io/service-account-token
+    EOF
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - config_argocd_manager_sa.rc != 0
+
+- name: Read argocd-manager token (base64)
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - secret
+      - argocd-manager-token
+      - -n
+      - kube-system
+      - -o
+      - jsonpath={.data.token}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: config_argocd_manager_token_b64
+  changed_when: false
+  until: (config_argocd_manager_token_b64.stdout | length) > 0
+  retries: 20
+  delay: 2
+  when: not ansible_check_mode
+
+- name: Read argocd-manager CA cert (base64)
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - secret
+      - argocd-manager-token
+      - -n
+      - kube-system
+      - -o
+      - jsonpath={.data.ca\.crt}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: config_argocd_manager_ca_crt_b64
+  changed_when: false
+  until: (config_argocd_manager_ca_crt_b64.stdout | length) > 0
+  retries: 20
+  delay: 2
+  when: not ansible_check_mode
+
+- name: Read cluster API server endpoint
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - config
+      - view
+      - --minify
+      - -o
+      - jsonpath={.clusters[0].cluster.server}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: config_argocd_manager_server
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Build local cluster secret content
+  ansible.builtin.set_fact:
+    config_argocd_manager_token: "{{ config_argocd_manager_token_b64.stdout | b64decode }}"
+    config_argocd_manager_ca_crt: "{{ config_argocd_manager_ca_crt_b64.stdout }}"
+    config_argocd_manager_server_no_scheme: "{{ config_argocd_manager_server.stdout | regex_replace('^https?://', '') | regex_replace('/$', '') }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Build cluster server port
+  ansible.builtin.set_fact:
+    config_argocd_manager_server_port: >-
+      {{
+        (config_argocd_manager_server_no_scheme.split(':') | length > 1)
+        | ternary(config_argocd_manager_server_no_scheme.split(':')[-1], '6443')
+      }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Build external cluster server address
+  ansible.builtin.set_fact:
+    config_argocd_manager_server_external: "{{ ansible_host | default(inventory_hostname) }}:{{ config_argocd_manager_server_port }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Remove existing local scret.yaml on control node
+  ansible.builtin.file:
+    path: "{{ config_eva_output_dir }}/scret.yaml"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Write local scret.yaml on control node
+  ansible.builtin.template:
+    dest: "{{ config_eva_output_dir }}/scret.yaml"
+    src: scret.yaml.j2
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode

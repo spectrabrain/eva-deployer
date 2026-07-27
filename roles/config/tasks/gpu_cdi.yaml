@@ -1,0 +1,90 @@
+- name: Check nvidia-ctk binary exists
+  ansible.builtin.stat:
+    path: /usr/bin/nvidia-ctk
+  register: config_gpu_cdi_nvidia_ctk
+
+- name: Fail when nvidia-ctk is missing
+  ansible.builtin.fail:
+    msg: "nvidia-ctk not found at /usr/bin/nvidia-ctk. Install NVIDIA Container Toolkit first."
+  when:
+    - not config_gpu_cdi_nvidia_ctk.stat.exists
+
+- name: Ensure CDI directory exists
+  ansible.builtin.file:
+    path: /etc/cdi
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Force NVIDIA container runtime mode to cdi
+  ansible.builtin.lineinfile:
+    path: /etc/nvidia-container-runtime/config.toml
+    regexp: '^\s*#?\s*mode\s*='
+    line: 'mode = "cdi"'
+    insertafter: '^\[nvidia-container-runtime\]'
+
+- name: Generate NVIDIA CDI spec
+  ansible.builtin.command: /usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+  register: config_gpu_cdi_generate
+  changed_when: true
+
+- name: Collect MIG mode status for CDI service ordering
+  ansible.builtin.command: nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader
+  register: config_gpu_cdi_mig_mode_status
+  changed_when: false
+  failed_when: false
+
+- name: Check gpu-mig auto-enable systemd unit exists
+  ansible.builtin.stat:
+    path: /etc/systemd/system/gpu-mig-auto-enable.service
+  register: config_gpu_cdi_mig_auto_enable_unit
+
+- name: Decide whether CDI refresh should depend on MIG auto-enable service
+  ansible.builtin.set_fact:
+    config_gpu_cdi_require_mig_order: >-
+      {{
+        (config_gpu_cdi_mig_mode_status.rc == 0)
+        and (
+          (config_gpu_cdi_mig_mode_status.stdout_lines | default([]))
+          | map('trim')
+          | select('equalto', 'Enabled')
+          | list
+          | length
+        ) > 0
+        and (config_gpu_cdi_mig_auto_enable_unit.stat.exists | default(false))
+      }}
+  changed_when: false
+
+- name: Install NVIDIA CDI refresh systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/nvidia-cdi-refresh.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Regenerate NVIDIA CDI spec
+      Wants=nvidia-persistenced.service{% if config_gpu_cdi_require_mig_order | bool %} gpu-mig-auto-enable.service{% endif %}
+      After=nvidia-persistenced.service{% if config_gpu_cdi_require_mig_order | bool %} gpu-mig-auto-enable.service{% endif %}
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Reload systemd daemon for CDI service
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Enable NVIDIA CDI refresh service
+  ansible.builtin.systemd:
+    name: nvidia-cdi-refresh.service
+    enabled: true
+
+- name: Mark GPU CDI policy status
+  ansible.builtin.set_fact:
+    config_gpu_cdi_status: "enabled"
+  changed_when: false

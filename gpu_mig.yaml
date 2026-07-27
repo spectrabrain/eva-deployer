@@ -1,0 +1,15 @@
+PRO 5000 Blackwell:
+  gpu_mig_mig_profile_id: "73"
+  gpu_mig_mig_instance_count: 2
+
+NVIDIA RTX PRO 5000 Blackwell:
+  gpu_mig_mig_profile_id: "73"
+  gpu_mig_mig_instance_count: 2
+
+PRO 6000 Blackwell:
+  gpu_mig_mig_profile_id: "67"
+  gpu_mig_mig_instance_count: 4
+
+NVIDIA RTX PRO 6000 Blackwell Server Edition:
+  gpu_mig_mig_profile_id: "67"
+  gpu_mig_mig_instance_count: 4

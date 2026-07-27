@@ -1,0 +1,32 @@
+gpu_count: {{ config_effective_gpu_count | int }}
+gpu_specs: {{ config_gpu_specs | to_json }}
+mig_enabled: {{ config_mig_enabled | default(false) | bool }}
+mig_instance_count: {{ config_mig_instance_count | default(0) | int }}
+mig_instance_specs: {{ config_mig_instance_specs | default([]) | to_json }}
+nfs_share_path: {{ config_eva_nfs_share_path | to_json }}
+aws_dir: {{ config_eva_aws_dir | to_json }}
+auto_update : {{ config_eva_auto_update_status | default('disabled') }}
+auto_login : {{ config_eva_auto_login_status | default('enabled') }}
+gpu_cdi : {{ config_eva_gpu_cdi_status | default('enabled') }}
+app:
+  backendHost: {{ config_eva_backend_host | to_json }}
+  vision:
+    ml: "http://eva-vision.eva-vision:8000"
+  agent:
+    llm: "http://eva-agent.eva-agent"
+    vlm: "http://eva-agent.eva-agent"
+    requestTimeoutSeconds: {{ config_eva_request_timeout_seconds }}
+  pipeline:
+    detector:
+      workerNum: {{ config_eva_detector_worker_num }}
+    perceptor:
+      workerNum: {{ config_eva_perceptor_worker_num }}
+vllm:
+  servingEngineSpec:
+    modelSpec:
+      replicaCount: {{ config_eva_replica_count }}
+{% if (config_effective_gpu_count | int) > 1 %}
+      requestGPU: 1
+{% else %}
+      #requestGPU: 1
+{% endif %}

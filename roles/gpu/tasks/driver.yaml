@@ -1,0 +1,193 @@
+- name: Install GPU prerequisites
+  ansible.builtin.apt:
+    name:
+      - ubuntu-drivers-common
+      - pciutils
+    state: present
+    update_cache: true
+  when: not (airgap_mode | default(false) | bool)
+
+- name: Verify GPU prerequisite binary on airgap host
+  ansible.builtin.command: lspci -nn
+  register: gpu_lspci_prerequisite
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: airgap_mode | default(false) | bool
+
+- name: Fail when GPU prerequisite binary is missing on airgap host
+  ansible.builtin.assert:
+    that:
+      - gpu_lspci_prerequisite.rc == 0
+    fail_msg: >-
+      Airgap host is missing pciutils (lspci). Install pciutils from the
+      offline apt bundle before running the infrastructure playbook.
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Detect PCI devices
+  ansible.builtin.command: lspci -nn
+  register: gpu_pci_devices
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Set NVIDIA GPU presence flag
+  ansible.builtin.set_fact:
+    gpu_has_nvidia: "{{ 'nvidia' in (gpu_pci_devices.stdout | lower) }}"
+
+- name: Show GPU detection result
+  ansible.builtin.debug:
+    msg: "NVIDIA GPU detected: {{ gpu_has_nvidia }}"
+
+- name: Check NVIDIA driver availability with nvidia-smi
+  ansible.builtin.command: nvidia-smi
+  register: gpu_nvidia_smi_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - not ansible_check_mode
+
+- name: Install NVIDIA driver automatically (online)
+  ansible.builtin.command: ubuntu-drivers autoinstall
+  register: gpu_nvidia_driver_install
+  changed_when: >-
+    ('already installed' not in (gpu_nvidia_driver_install.stdout | lower))
+    and ('already installed' not in (gpu_nvidia_driver_install.stderr | lower))
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - not (airgap_mode | default(false) | bool)
+
+- name: Set offline NVIDIA driver parameters
+  ansible.builtin.set_fact:
+    gpu_driver_package: "{{ gpu_driver_package | default('nvidia-driver-580') }}"
+    gpu_driver_repo_tar_path: "{{ gpu_driver_repo_tar_path | default(playbook_dir ~ '/install/nvidia/nvidia-driver-repo.tar.gz') }}"
+    gpu_driver_repo_remote_dir: "{{ gpu_driver_repo_remote_dir | default('/opt/eva-offline/nvidia-driver-repo') }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Validate offline NVIDIA driver repository tar exists
+  ansible.builtin.stat:
+    path: "{{ gpu_driver_repo_tar_path }}"
+  register: gpu_driver_repo_tar_stat
+  delegate_to: localhost
+  become: false
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Fail when offline NVIDIA driver repository tar is missing
+  ansible.builtin.assert:
+    that:
+      - gpu_driver_repo_tar_stat.stat.exists
+    fail_msg: >-
+      오프라인 NVIDIA 드라이버 저장소 파일을 찾지 못했습니다:
+      {{ gpu_driver_repo_tar_path }}
+      먼저 install/build_nvidia_driver_repo.sh 를 실행하세요.
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Ensure offline NVIDIA repo directory exists
+  ansible.builtin.file:
+    path: "{{ gpu_driver_repo_remote_dir }}"
+    state: directory
+    mode: "0755"
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Copy offline NVIDIA driver repository tar
+  ansible.builtin.copy:
+    src: "{{ gpu_driver_repo_tar_path }}"
+    dest: /tmp/nvidia-driver-repo.tar.gz
+    mode: "0644"
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Extract offline NVIDIA driver repository
+  ansible.builtin.unarchive:
+    src: /tmp/nvidia-driver-repo.tar.gz
+    dest: "{{ gpu_driver_repo_remote_dir }}"
+    remote_src: true
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Configure offline NVIDIA apt source
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/eva-nvidia-offline.list
+    mode: "0644"
+    content: |
+      deb [trusted=yes] file:{{ gpu_driver_repo_remote_dir }} ./
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Install NVIDIA driver from offline repository
+  ansible.builtin.apt:
+    name: "{{ gpu_driver_package }}"
+    state: present
+    update_cache: true
+  register: gpu_nvidia_driver_install
+  when:
+    - not ansible_check_mode
+    - gpu_nvidia_smi_check.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Notify reboot requirement after NVIDIA driver install
+  ansible.builtin.debug:
+    msg: >-
+      NVIDIA GPU driver installation has been applied.
+      A system reboot is recommended before continuing workload setup.
+  when:
+    - gpu_nvidia_driver_install is defined
+    - gpu_nvidia_driver_install is changed
+
+- name: Stop execution on this host until reboot after NVIDIA driver install
+  ansible.builtin.meta: end_host
+  when:
+    - gpu_nvidia_driver_install is defined
+    - gpu_nvidia_driver_install is changed
+
+- name: Collect installed NVIDIA driver packages for hold
+  ansible.builtin.shell: |
+    set -o pipefail
+    dpkg -l | awk '/^ii/ && $2 ~ /^(nvidia-driver-|nvidia-dkms-|nvidia-kernel-|linux-modules-nvidia-)/ {print $2}' | sort -u
+  args:
+    executable: /bin/bash
+  register: gpu_nvidia_driver_packages_for_hold
+  changed_when: false
+  when:
+    - not ansible_check_mode
+
+- name: Hold installed NVIDIA driver packages to prevent auto updates
+  ansible.builtin.command: "apt-mark hold {{ item }}"
+  loop: "{{ gpu_nvidia_driver_packages_for_hold.stdout_lines }}"
+  register: gpu_nvidia_driver_hold_result
+  changed_when: "'set on hold' in (gpu_nvidia_driver_hold_result.stdout | lower)"
+  when:
+    - not ansible_check_mode
+    - (gpu_nvidia_driver_packages_for_hold.stdout_lines | default([])) | length > 0
+
+- name: Show NVIDIA driver hold result
+  ansible.builtin.debug:
+    msg:
+      - "NVIDIA driver auto-update blocked packages:"
+      - "{{ gpu_nvidia_driver_packages_for_hold.stdout_lines }}"
+  when:
+    - gpu_nvidia_driver_packages_for_hold is defined
+    - (gpu_nvidia_driver_packages_for_hold.stdout_lines | default([])) | length > 0

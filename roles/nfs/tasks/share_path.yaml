@@ -1,0 +1,46 @@
+- name: Detect local disk mount candidates from facts
+  ansible.builtin.set_fact:
+    nfs_local_mount_candidates: >-
+      {{
+        ansible_facts.mounts
+        | selectattr('device', 'match', '^/dev/')
+        | rejectattr('fstype', 'in', ['tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'nfs', 'nfs4', 'cifs'])
+        | rejectattr('fstype', 'in', ['fuse', 'fuse.sshfs'])
+        | rejectattr('fstype', 'match', '^fuse\\.')
+        | list
+      }}
+
+- name: Ensure local disk mount candidate exists
+  ansible.builtin.assert:
+    that:
+      - nfs_local_mount_candidates | length > 0
+    fail_msg: "로컬 디스크 마운트 후보를 찾지 못했습니다."
+
+- name: Detect largest local disk mount from facts
+  ansible.builtin.set_fact:
+    nfs_largest_local_mount: >-
+      {{ (nfs_local_mount_candidates | sort(attribute='size_total', reverse=true) | first).mount }}
+
+- name: Set NFS share path from largest local disk mount
+  ansible.builtin.set_fact:
+    nfs_share_path: >-
+      {{ nfs_share_path
+         | default((nfs_largest_local_mount | regex_replace('/+$', '')) ~ '/share/eva-agent') }}
+
+- name: Detect existing vLLM shared PV NFS path
+  ansible.builtin.command: >-
+    kubectl get pv eva-agent-vllm-shared-pvc-storage -o jsonpath='{.spec.nfs.path}'
+  register: nfs_vllm_pv_path
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig | default('/etc/rancher/k3s/k3s.yaml') }}"
+
+- name: Reuse existing vLLM PV base path when present
+  ansible.builtin.set_fact:
+    nfs_share_path: "{{ nfs_vllm_pv_path.stdout | regex_replace('/vllm-cache$', '') }}"
+  when:
+    - not ansible_check_mode
+    - nfs_vllm_pv_path.rc == 0
+    - nfs_vllm_pv_path.stdout | length > 0

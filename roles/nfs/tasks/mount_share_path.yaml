@@ -1,0 +1,80 @@
+- name: Resolve NFS share path
+  ansible.builtin.import_tasks: share_path.yaml
+
+- name: Ensure NFS share and cache directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0775'
+  loop:
+    - "{{ nfs_share_path }}"
+    - "{{ nfs_share_path }}/agent-cache"
+    - "{{ nfs_share_path }}/vllm-cache"
+  when: not ansible_check_mode
+
+- name: Set ownership and permissions for NFS share path
+  ansible.builtin.file:
+    path: "{{ nfs_share_path }}"
+    owner: "10001"
+    group: "10001"
+    mode: '0775'
+    recurse: true
+  when: not ansible_check_mode
+
+- name: Allow localhost-only NFS export for EVA Agent share
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    regexp: '^{{ (nfs_share_path | regex_escape) }}\s+127\.0\.0\.1\(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001\)$'
+    state: absent
+  when: not ansible_check_mode
+
+- name: Allow localhost-only NFS export for EVA Agent share
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    regexp: '^{{ (nfs_share_path | regex_escape) }}\s+127\.0\.0\.1\(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001\)$'
+    line: "{{ nfs_share_path }} 127.0.0.1(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001)"
+    create: true
+    mode: '0644'
+  register: nfs_exports_line
+  when: not ansible_check_mode
+
+- name: Reload NFS exports
+  ansible.builtin.command: exportfs -ra
+  changed_when: nfs_exports_line.changed
+  when: not ansible_check_mode
+
+- name: Restart NFS server
+  ansible.builtin.systemd:
+    name: nfs-kernel-server
+    state: restarted
+  when:
+    - not ansible_check_mode
+    - nfs_exports_line.changed
+
+- name: Show NFS exports on localhost
+  ansible.builtin.command: showmount -e localhost
+  register: nfs_showmount
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Ensure temporary NFS test mount directory exists
+  ansible.builtin.file:
+    path: /mnt/tmp
+    state: directory
+    mode: '0755'
+  when: not ansible_check_mode
+
+- name: Mount NFS share for validation
+  ansible.posix.mount:
+    path: /mnt/tmp
+    src: "localhost:{{ nfs_share_path }}"
+    fstype: nfs
+    opts: rw,nfsvers=4
+    state: mounted
+  when: not ansible_check_mode
+
+- name: Unmount NFS validation mount
+  ansible.posix.mount:
+    path: /mnt/tmp
+    state: unmounted
+  when: not ansible_check_mode

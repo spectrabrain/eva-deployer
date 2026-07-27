@@ -1,0 +1,67 @@
+- name: Disable apt periodic auto updates (20auto-upgrades)
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Download-Upgradeable-Packages "0";
+      APT::Periodic::AutocleanInterval "0";
+      APT::Periodic::Unattended-Upgrade "0";
+
+- name: Disable apt periodic jobs (10periodic)
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/10periodic
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Enable "0";
+      APT::Periodic::Update-Package-Lists "0";
+      APT::Periodic::Download-Upgradeable-Packages "0";
+      APT::Periodic::AutocleanInterval "0";
+      APT::Periodic::Unattended-Upgrade "0";
+
+- name: Disable unattended-upgrades behavior
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/51disable-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      APT::Periodic::Unattended-Upgrade "0";
+
+- name: Stop and mask apt auto update timers
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+  failed_when: false
+
+- name: Collect installed kernel and NVIDIA packages for hold
+  ansible.builtin.shell: |
+    dpkg -l \
+      | awk '$1 == "ii" && $2 ~ /^(linux-(image|headers|modules|generic|virtual|aws)|nvidia-driver-|nvidia-dkms-|nvidia-kernel-|linux-modules-nvidia-)/ {print $2}' \
+      | sort -u
+  args:
+    executable: /bin/bash
+  register: config_auto_update_packages_to_hold
+  changed_when: false
+
+- name: Hold kernel and NVIDIA packages to block auto upgrade
+  ansible.builtin.command: "apt-mark hold {{ item }}"
+  loop: "{{ config_auto_update_packages_to_hold.stdout_lines }}"
+  register: config_auto_update_hold_result
+  changed_when: "'set on hold' in (config_auto_update_hold_result.stdout | lower)"
+  when:
+    - config_auto_update_packages_to_hold.stdout_lines | length > 0
+
+- name: Mark auto-update policy status
+  ansible.builtin.set_fact:
+    config_auto_update_status: "disabled"
+  changed_when: false

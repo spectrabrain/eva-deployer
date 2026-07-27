@@ -1,0 +1,39 @@
+- name: Resolve kubectl install architecture and paths
+  ansible.builtin.set_fact:
+    kubectl_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
+    kubectl_offline_dir: "{{ playbook_dir }}/install/k8s"
+  changed_when: false
+
+- name: Get stable kubectl version from internet
+  ansible.builtin.uri:
+    url: https://dl.k8s.io/release/stable.txt
+    return_content: true
+  register: kubectl_version
+  changed_when: false
+  check_mode: false
+  when: not (airgap_mode | default(false) | bool)
+
+- name: Download kubectl from internet
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ kubectl_version.content | trim }}/bin/linux/{{ kubectl_arch }}/kubectl"
+    dest: /usr/local/bin/kubectl
+    mode: '0755'
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Read stable kubectl version from offline bundle
+  ansible.builtin.set_fact:
+    kubectl_version:
+      content: "{{ lookup('ansible.builtin.file', kubectl_offline_dir ~ '/stable.txt') | trim }}"
+  changed_when: false
+  when: airgap_mode | default(false) | bool
+
+- name: Copy kubectl from offline bundle
+  ansible.builtin.copy:
+    src: "{{ kubectl_offline_dir }}/kubectl-{{ kubectl_version.content | trim }}-linux-{{ kubectl_arch }}"
+    dest: /usr/local/bin/kubectl
+    mode: '0755'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool

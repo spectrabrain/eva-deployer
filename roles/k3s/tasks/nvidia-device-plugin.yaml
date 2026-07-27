@@ -1,0 +1,315 @@
+- name: Check NVIDIA device plugin daemonset exists
+  ansible.builtin.command:
+    cmd: kubectl -n kube-system get daemonset nvidia-device-plugin-daemonset
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_ds_check
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Resolve infra image repositories
+  ansible.builtin.set_fact:
+    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_project: "{{ repository_project | default('eva') }}"
+    repository_registry: >-
+      {{
+        repository_registry
+        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | regex_replace('^https?://', '')
+        | regex_replace('/+$', '')
+      }}
+  changed_when: false
+
+- name: Resolve infra image names
+  ansible.builtin.set_fact:
+    nvidia_device_plugin_image: >-
+      {{
+        nvidia_device_plugin_image | default(
+          ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+          | ternary('nvcr.io/nvidia/k8s-device-plugin:v0.18.0', repository_registry ~ '/' ~ repository_project ~ '/k8s-device-plugin:v0.18.0')
+        )
+      }}
+    nvidia_cuda_sample_image: >-
+      {{
+        nvidia_cuda_sample_image | default(
+          ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+          | ternary('nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0', repository_registry ~ '/' ~ repository_project ~ '/cuda-sample:vectoradd-cuda12.5.0')
+        )
+      }}
+  changed_when: false
+
+- name: Validate infra repository mode
+  ansible.builtin.assert:
+    that:
+      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+    fail_msg: >-
+      repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
+
+- name: Set NVIDIA device plugin manifest paths
+  ansible.builtin.set_fact:
+    nvidia_device_plugin_offline_src: "{{ playbook_dir }}/install/k8s/nvidia-device-plugin-v0.18.0.yml"
+    nvidia_device_plugin_offline_dst: /tmp/nvidia-device-plugin.yml
+  changed_when: false
+
+- name: Copy NVIDIA device plugin manifest from offline bundle
+  ansible.builtin.copy:
+    src: "{{ nvidia_device_plugin_offline_src }}"
+    dest: "{{ nvidia_device_plugin_offline_dst }}"
+    mode: '0644'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_nvidia_device_plugin_ds_check.rc != 0
+
+- name: Override NVIDIA device plugin image for repository mode
+  ansible.builtin.replace:
+    path: "{{ nvidia_device_plugin_offline_dst }}"
+    regexp: 'nvcr\.io/nvidia/k8s-device-plugin:v0\.18\.0'
+    replace: "{{ nvidia_device_plugin_image }}"
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_nvidia_device_plugin_ds_check.rc != 0
+
+- name: Create NVIDIA device plugin daemonset when absent
+  ansible.builtin.command:
+    cmd: >-
+      kubectl create -f
+      {{
+        nvidia_device_plugin_offline_dst
+        if (airgap_mode | default(false) | bool)
+        else 'https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.18.0/deployments/static/nvidia-device-plugin.yml'
+      }}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_apply
+  changed_when: "'created' in k3s_nvidia_device_plugin_apply.stdout"
+  when:
+    - not ansible_check_mode
+    - k3s_nvidia_device_plugin_ds_check.rc != 0
+
+- name: Set NVIDIA device plugin discovery and MIG strategy
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system set env ds/nvidia-device-plugin-daemonset
+      DEVICE_DISCOVERY_STRATEGY=nvml
+      MIG_STRATEGY=mixed
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_env
+  changed_when: "'updated' in k3s_nvidia_device_plugin_env.stdout"
+  when: not ansible_check_mode
+
+- name: Set NVIDIA device plugin runtimeClassName to nvidia
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system patch ds nvidia-device-plugin-daemonset --type=merge
+      -p '{"spec":{"template":{"spec":{"runtimeClassName":"nvidia"}}}}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_runtimeclass_patch
+  changed_when: "'patched' in k3s_nvidia_device_plugin_runtimeclass_patch.stdout"
+  when: not ansible_check_mode
+
+- name: Set NVIDIA device plugin container privileged
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system patch ds nvidia-device-plugin-daemonset --type=strategic
+      -p '{"spec":{"template":{"spec":{"containers":[{"name":"nvidia-device-plugin-ctr",
+      "securityContext":{"allowPrivilegeEscalation":true,"privileged":true}}]}}}}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_privileged_patch
+  changed_when: "'patched' in k3s_nvidia_device_plugin_privileged_patch.stdout"
+  when: not ansible_check_mode
+
+- name: Wait for patched NVIDIA device plugin daemonset rollout
+  ansible.builtin.command:
+    cmd: kubectl rollout status daemonset/nvidia-device-plugin-daemonset -n kube-system --timeout=600s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_rollout_patched
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Get NVIDIA device plugin daemonset pods
+  ansible.builtin.shell: >-
+    set -o pipefail &&
+    kubectl get pods -n kube-system --no-headers | awk '/nvidia-device-plugin-daemonset/{print $1}'
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_pods
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Show NVIDIA device plugin pods
+  ansible.builtin.debug:
+    var: k3s_nvidia_device_plugin_pods.stdout_lines
+  when: not ansible_check_mode
+
+- name: Read NVIDIA device plugin pod logs
+  ansible.builtin.command:
+    cmd: >-
+      kubectl logs -n kube-system
+      {{ k3s_nvidia_device_plugin_pods.stdout_lines[0] }} --tail=50
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_device_plugin_logs
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - k3s_nvidia_device_plugin_pods.stdout_lines | length > 0
+
+- name: Show NVIDIA device plugin logs
+  ansible.builtin.debug:
+    var: k3s_nvidia_device_plugin_logs.stdout_lines
+  when:
+    - not ansible_check_mode
+    - k3s_nvidia_device_plugin_pods.stdout_lines | length > 0
+
+- name: Check GPU allocatable on k3s nodes
+  ansible.builtin.command:
+    cmd: >-
+      kubectl get nodes
+      -o custom-columns=NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu
+      --no-headers
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_node_gpu_allocatable
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Show GPU allocatable on k3s nodes
+  ansible.builtin.debug:
+    var: k3s_node_gpu_allocatable.stdout_lines
+  when: not ansible_check_mode
+
+- name: Collect NVIDIA MIG resource keys from k3s nodes
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl get nodes -o yaml | awk -F: '/nvidia.com\/mig-/{gsub(/^[[:space:]]+/, "", $1); print $1}' | sort -u
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_node_mig_resource_keys_cmd
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Select NVIDIA resource for GPU validation
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_resource_key: >-
+      {{
+        (
+          k3s_node_mig_resource_keys_cmd.stdout_lines
+          | map('trim')
+          | reject('equalto', '')
+          | list
+          | first
+        ) | default('nvidia.com/gpu')
+      }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Show selected NVIDIA resource for GPU validation
+  ansible.builtin.debug:
+    msg: "GPU validation pod resource: {{ k3s_gpu_validation_resource_key }}"
+  when: not ansible_check_mode
+
+- name: Validate GPU workload execution on k3s
+  when: not ansible_check_mode
+  block:
+    - name: Ensure previous GPU validation pod is absent
+      ansible.builtin.command:
+        cmd: kubectl delete pod gpu-pod --ignore-not-found=true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+    - name: Create GPU validation pod manifest
+      ansible.builtin.copy:
+        dest: /tmp/k3s-gpu-pod.yaml
+        mode: '0644'
+        content: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: gpu-pod
+          spec:
+            restartPolicy: Never
+            runtimeClassName: nvidia
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+                effect: NoSchedule
+            containers:
+              - name: cuda-container
+                image: {{ nvidia_cuda_sample_image }}
+                resources:
+                  limits:
+                    "{{ k3s_gpu_validation_resource_key }}": 1
+
+    - name: Apply GPU validation pod
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/k3s-gpu-pod.yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: k3s_gpu_validation_pod_apply
+      changed_when: "'created' in k3s_gpu_validation_pod_apply.stdout or 'configured' in k3s_gpu_validation_pod_apply.stdout"
+
+    - name: Describe GPU validation pod
+      ansible.builtin.command:
+        cmd: kubectl describe pod gpu-pod
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: k3s_gpu_validation_pod_describe
+      changed_when: false
+
+    - name: Wait for GPU validation pod completion
+      ansible.builtin.command:
+        cmd: kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-pod --timeout=600s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: k3s_gpu_validation_pod_wait
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure GPU validation pod completed successfully
+      ansible.builtin.assert:
+        that:
+          - k3s_gpu_validation_pod_wait.rc == 0
+        fail_msg: >-
+          GPU validation pod did not reach Succeeded within timeout. Check `kubectl describe pod gpu-pod` for details.
+        success_msg: GPU validation pod reached Succeeded.
+
+    - name: Read GPU validation pod logs
+      ansible.builtin.command:
+        cmd: kubectl logs gpu-pod
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: k3s_gpu_validation_pod_logs
+      changed_when: false
+
+    - name: Verify GPU validation output
+      ansible.builtin.assert:
+        that:
+          - "'Test PASSED' in k3s_gpu_validation_pod_logs.stdout"
+        fail_msg: >-
+          GPU validation pod completed but expected 'Test PASSED' was not found in logs.
+        success_msg: GPU validation pod log contains 'Test PASSED'.
+
+  always:
+    - name: Cleanup GPU validation pod
+      ansible.builtin.command:
+        cmd: kubectl delete pod gpu-pod --ignore-not-found=true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false

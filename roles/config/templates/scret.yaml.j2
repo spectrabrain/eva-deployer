@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+    env: dev
+    provider: onprem
+type: Opaque
+stringData:
+  server: "{{ config_argocd_manager_server_external }}"
+  config: |
+    {
+      "bearerToken": "{{ config_argocd_manager_token }}",
+      "tlsClientConfig": {
+        "insecure": false,
+        "caData": "{{ config_argocd_manager_ca_crt }}"
+      }
+    }

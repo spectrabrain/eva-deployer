@@ -1,0 +1,124 @@
+- name: Download NVIDIA container toolkit GPG key (online)
+  ansible.builtin.get_url:
+    url: "{{ gpu_nvidia_ctk_gpg_url | default('https://nvidia.github.io/libnvidia-container/gpgkey') }}"
+    dest: /tmp/nvidia-container-toolkit.gpgkey
+    mode: '0644'
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Copy NVIDIA container toolkit GPG key (offline bundle)
+  ansible.builtin.copy:
+    src: "{{ gpu_nvidia_ctk_gpg_offline_path | default(playbook_dir ~ '/install/nvidia/libnvidia-container.gpgkey') }}"
+    dest: /tmp/nvidia-container-toolkit.gpgkey
+    mode: '0644'
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Install NVIDIA container toolkit keyring
+  ansible.builtin.command:
+    cmd: >-
+      gpg --dearmor --yes
+      -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      /tmp/nvidia-container-toolkit.gpgkey
+  register: gpu_nvidia_ctk_keyring
+  changed_when: true
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+
+- name: Download NVIDIA container toolkit apt source list (online)
+  ansible.builtin.get_url:
+    url: "{{ gpu_nvidia_ctk_list_url | default('https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list') }}"
+    dest: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    mode: '0644'
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Copy NVIDIA container toolkit apt source list (offline bundle)
+  ansible.builtin.copy:
+    src: "{{ gpu_nvidia_ctk_list_offline_path | default(playbook_dir ~ '/install/nvidia/nvidia-container-toolkit.list') }}"
+    dest: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    mode: '0644'
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+
+- name: Add signed-by option to NVIDIA container toolkit apt source
+  ansible.builtin.replace:
+    path: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    regexp: '^deb https://'
+    replace: 'deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://'
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+
+- name: Install NVIDIA container toolkit package
+  ansible.builtin.apt:
+    name:
+      - libnvidia-container1
+      - libnvidia-container-tools
+      - nvidia-container-toolkit-base
+      - nvidia-container-toolkit
+    state: present
+    update_cache: true
+    allow_change_held_packages: true
+  register: gpu_nvidia_ctk_install
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Find NVIDIA Container Toolkit offline packages
+  ansible.builtin.find:
+    paths: "{{ playbook_dir }}/install/nvidia/container-toolkit-debs"
+    patterns: "*.deb"
+    file_type: file
+  register: gpu_nvidia_ctk_offline_packages
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Assert NVIDIA Container Toolkit offline packages are available
+  ansible.builtin.assert:
+    that: gpu_nvidia_ctk_offline_packages.matched | int > 0
+    fail_msg: >-
+      NVIDIA Container Toolkit offline package bundle is missing under
+      install/nvidia/container-toolkit-debs.
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Install NVIDIA container toolkit package from offline apt bundle
+  ansible.builtin.shell: >-
+    dpkg --unpack {{ (gpu_nvidia_ctk_offline_packages.files | map(attribute='path') | sort | list) | join(' ') }}
+    && dpkg --configure $(for package in {{ (gpu_nvidia_ctk_offline_packages.files | map(attribute='path') | sort | list) | join(' ') }}; do dpkg-deb -f "$package" Package; done)
+  args:
+    executable: /bin/bash
+  register: gpu_nvidia_ctk_install
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Verify nvidia-ctk command
+  ansible.builtin.command: nvidia-ctk
+  register: gpu_nvidia_ctk_verify
+  changed_when: false
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+
+- name: Show nvidia-ctk verification output
+  ansible.builtin.debug:
+    var: gpu_nvidia_ctk_verify.stdout_lines
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode

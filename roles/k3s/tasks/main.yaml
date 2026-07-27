@@ -1,0 +1,15 @@
+- name: Install k3s
+  ansible.builtin.import_tasks: install.yaml
+
+- name: Configure kubeconfig
+  ansible.builtin.import_tasks: kubeconfig.yaml
+
+- name: Configure k3s nvidia runtime
+  ansible.builtin.import_tasks: nvidia-runtime.yaml
+  when:
+    - not (gpu_skip_driver_update | default(false) | bool)
+
+- name: Install nvidia device plugin
+  ansible.builtin.import_tasks: nvidia-device-plugin.yaml
+  when:
+    - not (gpu_skip_driver_update | default(false) | bool)

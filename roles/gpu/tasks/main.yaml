@@ -1,0 +1,31 @@
+- name: Detect PCI devices for GPU presence
+  ansible.builtin.command: lspci -nn
+  register: gpu_pci_devices
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Set NVIDIA GPU presence flag
+  ansible.builtin.set_fact:
+    gpu_has_nvidia: "{{ 'nvidia' in (gpu_pci_devices.stdout | lower) }}"
+
+- name: Show GPU detection result
+  ansible.builtin.debug:
+    msg: "NVIDIA GPU detected: {{ gpu_has_nvidia }}"
+
+- name: Install GPU driver
+  ansible.builtin.import_tasks: driver.yaml
+  when:
+    - not (gpu_skip_driver_update | default(false) | bool)
+
+- name: Skip GPU driver update by request
+  ansible.builtin.debug:
+    msg: "Skipping GPU driver update because gpu_skip_driver_update=true."
+  when:
+    - gpu_skip_driver_update | default(false) | bool
+
+- name: Install NVIDIA container toolkit
+  ansible.builtin.import_tasks: container-toolkit.yaml
+
+- name: Install CUDA toolkit
+  ansible.builtin.import_tasks: cuda.yaml

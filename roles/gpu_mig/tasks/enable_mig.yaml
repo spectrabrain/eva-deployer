@@ -1,0 +1,423 @@
+- name: Set MIG config inputs from top-level defaults
+  ansible.builtin.set_fact:
+    gpu_mig_enable_mig_workflow: "{{ gpu_mig_enable_mig_workflow | default(false) }}"
+    gpu_mig_apply_mig_partition: "{{ gpu_mig_apply_mig_partition | default(true) }}"
+    gpu_mig_generate_mig_yaml: "{{ gpu_mig_generate_mig_yaml | default(false) }}"
+    gpu_mig_mig_profile_id: "{{ gpu_mig_mig_profile_id | default('') }}"
+    gpu_mig_mig_instance_count: "{{ gpu_mig_mig_instance_count | default(7) | int }}"
+    gpu_mig_mig_output_path: "{{ gpu_mig_mig_output_path | default('/etc/nvidia-mig-manager/partition.yaml') }}"
+    gpu_mig_mig_selector_remote_dir: "{{ gpu_mig_mig_selector_remote_dir | default('/opt/mode_selector_1.72.0/linux') }}"
+    gpu_mig_mig_selector_local_base_dir: "{{ gpu_mig_mig_selector_local_base_dir | default(playbook_dir ~ '/install/display_mode_selector/mode_selector_1.72.0') }}"
+    gpu_mig_k8s_device_plugin_image: >-
+      {{ gpu_mig_k8s_device_plugin_image | default(
+        ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+        | ternary(
+            'nvcr.io/nvidia/k8s-device-plugin:v0.18.0',
+            (repository_registry | default('localhost:32080')) ~ '/' ~
+            (repository_project | default('eva')) ~ '/k8s-device-plugin:v0.18.0'
+          )
+      ) }}
+    gpu_mig_cuda_validation_image: >-
+      {{ gpu_mig_cuda_validation_image | default(
+        ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+        | ternary(
+            'nvcr.io/nvidia/cuda:12.5.0-base-ubuntu22.04',
+            (repository_registry | default('localhost:32080')) ~ '/' ~
+            (repository_project | default('eva')) ~ '/cuda:12.5.0-base-ubuntu22.04'
+          )
+      ) }}
+
+- name: Verify nvidia-smi is available
+  ansible.builtin.command: nvidia-smi --help-query-gpu
+  register: gpu_mig_nvidia_smi_check
+  changed_when: false
+  failed_when: gpu_mig_nvidia_smi_check.rc != 0
+
+- name: Collect GPU inventory
+  ansible.builtin.command: nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+  register: gpu_mig_gpu_inventory
+  changed_when: false
+
+- name: Set GPU facts
+  ansible.builtin.set_fact:
+    gpu_mig_detected_gpu_count: "{{ gpu_mig_gpu_inventory.stdout_lines | length }}"
+
+- name: Show detected GPU specs and count
+  ansible.builtin.debug:
+    msg:
+      - "Detected GPU count: {{ gpu_mig_detected_gpu_count }}"
+      - "GPU specs:"
+      - "{{ gpu_mig_gpu_inventory.stdout_lines }}"
+
+- name: Load GPU MIG model map from gpu_mig.yaml
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/gpu_mig.yaml"
+    name: gpu_mig_model_map
+  failed_when: false
+
+- name: Collect GPU model names
+  ansible.builtin.command: nvidia-smi --query-gpu=name --format=csv,noheader
+  register: gpu_mig_gpu_model_names_raw
+  changed_when: false
+
+- name: Build detected GPU model name list
+  ansible.builtin.set_fact:
+    gpu_mig_detected_model_names: >-
+      {{
+        gpu_mig_gpu_model_names_raw.stdout_lines
+        | map('trim')
+        | list
+      }}
+
+- name: Resolve matched GPU model key from map
+  ansible.builtin.set_fact:
+    gpu_mig_matched_model_key: >-
+      {{
+        (
+          gpu_mig_detected_model_names
+          | intersect((gpu_mig_model_map | default({})).keys() | list)
+          | list
+          | first
+        ) | default('')
+      }}
+
+- name: Override MIG profile settings from gpu_mig.yaml
+  ansible.builtin.set_fact:
+    gpu_mig_mig_profile_id: "{{ gpu_mig_model_map[gpu_mig_matched_model_key].gpu_mig_mig_profile_id | string }}"
+    gpu_mig_mig_instance_count: "{{ gpu_mig_model_map[gpu_mig_matched_model_key].gpu_mig_mig_instance_count | int }}"
+  when:
+    - gpu_mig_matched_model_key | length > 0
+
+- name: Show selected MIG profile settings
+  ansible.builtin.debug:
+    msg:
+      - "Matched GPU model key: {{ gpu_mig_matched_model_key | default('') }}"
+      - "MIG profile id: {{ gpu_mig_mig_profile_id }}"
+      - "MIG instance count: {{ gpu_mig_mig_instance_count }}"
+
+- name: Query MIG capability from GPUs
+  ansible.builtin.command: nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader
+  register: gpu_mig_mig_modes
+  changed_when: false
+
+- name: Count MIG-capable GPUs
+  ansible.builtin.set_fact:
+    gpu_mig_mig_capable_gpu_count: "{{ gpu_mig_mig_modes.stdout_lines | map('trim') | reject('equalto', 'N/A') | list | length }}"
+
+- name: Collect MIG mode status with indices
+  ansible.builtin.command: nvidia-smi --query-gpu=index,mig.mode.current --format=csv,noheader
+  register: gpu_mig_mig_mode_by_index
+  changed_when: false
+
+- name: Set MIG enabled/disabled GPU index lists
+  ansible.builtin.set_fact:
+    gpu_mig_mig_enabled_gpu_indices: >-
+      {{
+        gpu_mig_mig_mode_by_index.stdout_lines
+        | select('search', ',\\s*Enabled')
+        | map('split', ',')
+        | map('first')
+        | map('trim')
+        | list
+      }}
+    gpu_mig_mig_disabled_gpu_indices: >-
+      {{
+        gpu_mig_mig_mode_by_index.stdout_lines
+        | select('search', ',\\s*Disabled')
+        | map('split', ',')
+        | map('first')
+        | map('trim')
+        | list
+      }}
+    gpu_mig_all_enabled: "{{ (gpu_mig_mig_mode_by_index.stdout_lines | select('search', ',\\s*Disabled') | list | length) == 0 }}"
+
+- name: Show MIG capability summary
+  ansible.builtin.debug:
+    msg:
+      - "MIG-capable GPUs: {{ gpu_mig_mig_capable_gpu_count }} / {{ gpu_mig_detected_gpu_count }}"
+      - "MIG enabled GPU indices: {{ gpu_mig_mig_enabled_gpu_indices }}"
+      - "MIG disabled GPU indices: {{ gpu_mig_mig_disabled_gpu_indices }}"
+
+- name: Resolve mode selector architecture
+  ansible.builtin.set_fact:
+    gpu_mig_mig_selector_arch: >-
+      {{
+        'x64' if ansible_architecture in ['x86_64', 'amd64']
+        else ('aarch64' if ansible_architecture in ['aarch64', 'arm64'] else 'x86')
+      }}
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Validate mode selector binary exists on controller
+  ansible.builtin.stat:
+    path: "{{ gpu_mig_mig_selector_local_base_dir }}/linux/{{ gpu_mig_mig_selector_arch }}/displaymodeselector"
+  register: gpu_mig_mig_selector_binary_local
+  delegate_to: localhost
+  become: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Fail when mode selector binary is missing
+  ansible.builtin.assert:
+    that:
+      - gpu_mig_mig_selector_binary_local.stat.exists
+    fail_msg: >-
+      mode_selector binary를 찾지 못했습니다:
+      {{ gpu_mig_mig_selector_local_base_dir }}/linux/{{ gpu_mig_mig_selector_arch }}/displaymodeselector
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Ensure mode selector remote directory exists
+  ansible.builtin.file:
+    path: "{{ gpu_mig_mig_selector_remote_dir }}"
+    state: directory
+    mode: "0755"
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Copy mode selector linux folder
+  ansible.builtin.copy:
+    src: "{{ gpu_mig_mig_selector_local_base_dir }}/linux/{{ gpu_mig_mig_selector_arch }}/"
+    dest: "{{ gpu_mig_mig_selector_remote_dir }}/"
+    mode: preserve
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Gather service facts before stopping display stack
+  ansible.builtin.service_facts:
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Stop known graphical display services before MIG
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - display-manager.service
+    - gdm.service
+    - gdm3.service
+    - lightdm.service
+    - sddm.service
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - item in ansible_facts.services
+
+- name: Force-stop display managers by canonical and unit names
+  ansible.builtin.shell: |
+    set -o pipefail
+    for svc in display-manager gdm gdm3 lightdm sddm; do
+      systemctl stop "${svc}" 2>/dev/null || true
+      systemctl stop "${svc}.service" 2>/dev/null || true
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Switch to multi-user target before MIG
+  ansible.builtin.command: systemctl isolate multi-user.target
+  # noqa: command-instead-of-module
+  register: gpu_mig_isolate_multi_user
+  changed_when: gpu_mig_isolate_multi_user.rc == 0
+  failed_when: gpu_mig_isolate_multi_user.rc != 0
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Kill remaining GPU graphical processes before MIG
+  ansible.builtin.shell: |
+    set -o pipefail
+    xorg_pids="$(pgrep -f '^/usr/lib/xorg/Xorg([[:space:]]|$)' || true)"
+    gnome_shell_pids="$(pgrep -f '^/usr/bin/gnome-shell([[:space:]]|$)' || true)"
+    gnome_cc_pids="$(pgrep -f '^/usr/bin/gnome-control-center([[:space:]]|$)' || true)"
+
+    if [ -n "${xorg_pids}" ]; then
+      kill -9 ${xorg_pids}
+    fi
+    if [ -n "${gnome_shell_pids}" ]; then
+      kill -9 ${gnome_shell_pids}
+    fi
+    if [ -n "${gnome_cc_pids}" ]; then
+      kill -9 ${gnome_cc_pids}
+    fi
+  args:
+    executable: /bin/bash
+  register: gpu_mig_kill_gpu_graphics
+  changed_when: false
+  failed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Verify no known graphical GPU processes remain
+  ansible.builtin.shell: |
+    set -o pipefail
+    nvidia-smi | awk '/Processes:/,0' | grep -E 'Xorg|gnome-shell|gnome-control-center' || true
+  args:
+    executable: /bin/bash
+  register: gpu_mig_gpu_graphics_after_stop
+  changed_when: false
+  failed_when: gpu_mig_gpu_graphics_after_stop.stdout | trim | length > 0
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Ensure displaymodeselector is executable
+  ansible.builtin.file:
+    path: "{{ gpu_mig_mig_selector_remote_dir }}/displaymodeselector"
+    mode: "0755"
+    state: file
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: List GPU modes
+  become: true
+  ansible.builtin.command: ./displaymodeselector --listgpumodes
+  args:
+    chdir: "{{ gpu_mig_mig_selector_remote_dir }}"
+  register: gpu_mig_display_mode_list
+  changed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Show GPU mode list
+  ansible.builtin.debug:
+    var: gpu_mig_display_mode_list.stdout_lines
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Switch GPU mode to compute
+  become: true
+  ansible.builtin.command: ./displaymodeselector --gpumode compute --auto
+  args:
+    chdir: "{{ gpu_mig_mig_selector_remote_dir }}"
+  register: gpu_mig_display_mode_switch
+  changed_when: >-
+    ('Successfully updated GPU mode' in (gpu_mig_display_mode_switch.stdout | default('')))
+    or ('Compute' in (gpu_mig_display_mode_switch.stdout | default('')))
+    or ('Physical display disabled' in (gpu_mig_display_mode_switch.stdout | default('')))
+  failed_when: gpu_mig_display_mode_switch.rc != 0
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Refresh MIG mode status after compute-mode workflow
+  ansible.builtin.command: nvidia-smi --query-gpu=index,mig.mode.current --format=csv,noheader
+  register: gpu_mig_mig_mode_after_compute
+  changed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Set GPU index list for MIG enable
+  ansible.builtin.set_fact:
+    gpu_mig_all_gpu_indices: "{{ gpu_mig_mig_mode_after_compute.stdout_lines | map('split', ',') | map('first') | map('trim') | list }}"
+    gpu_mig_mig_capable_gpu_indices: >-
+      {{
+        gpu_mig_mig_mode_after_compute.stdout_lines
+        | reject('search', ',\\s*N/A\\s*$')
+        | map('split', ',')
+        | map('first')
+        | map('trim')
+        | list
+      }}
+    gpu_mig_disabled_gpu_indices_after_compute: >-
+      {{
+        gpu_mig_mig_mode_after_compute.stdout_lines
+        | select('search', ',\\s*Disabled\\s*$')
+        | map('split', ',')
+        | map('first')
+        | map('trim')
+        | list
+      }}
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Set target GPU indices for MIG enable
+  ansible.builtin.set_fact:
+    gpu_mig_mig_gpu_indices: "{{ gpu_mig_mig_capable_gpu_indices }}"
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Enable MIG mode on each GPU
+  ansible.builtin.command: "nvidia-smi -i {{ item }} -mig 1"
+  loop: "{{ gpu_mig_mig_gpu_indices }}"
+  register: gpu_mig_mig_enable_each_gpu
+  changed_when: gpu_mig_mig_enable_each_gpu.rc == 0
+  failed_when: >-
+    (gpu_mig_mig_enable_each_gpu.rc != 0)
+    and ('In use by another client' not in (gpu_mig_mig_enable_each_gpu.stdout | default('')))
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_mig_gpu_indices | length > 0
+
+- name: Refresh MIG mode status after MIG enable
+  ansible.builtin.command: nvidia-smi --query-gpu=index,mig.mode.current --format=csv,noheader
+  register: gpu_mig_mig_mode_after_enable
+  changed_when: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_mig_gpu_indices | length > 0
+
+- name: Set MIG status summary after MIG enable
+  ansible.builtin.set_fact:
+    gpu_mig_disabled_gpu_indices_after_enable: >-
+      {{
+        gpu_mig_mig_mode_after_enable.stdout_lines
+        | select('search', ',\\s*Disabled\\s*$')
+        | map('split', ',')
+        | map('first')
+        | map('trim')
+        | list
+      }}
+    gpu_mig_reboot_recommended: >-
+      {{
+        (
+          gpu_mig_mig_mode_after_enable.stdout_lines
+          | select('search', ',\\s*Disabled\\s*$')
+          | list
+          | length
+        ) > 0
+      }}
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_mig_gpu_indices | length > 0
+
+- name: Recommend reboot when MIG remains disabled
+  ansible.builtin.debug:
+    msg:
+      - "nvidia-smi -mig 1 실행 후에도 MIG Disabled GPU가 남아 있습니다: {{ gpu_mig_disabled_gpu_indices_after_enable }}"
+      - "재부팅을 권장합니다: sudo reboot"
+      - "재부팅 시 gpu-mig-auto-enable.service가 자동으로 MIG enable을 다시 시도합니다."
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_mig_gpu_indices | length > 0
+    - gpu_mig_reboot_recommended | bool
+
+- name: Skip MIG partition steps until reboot is completed
+  ansible.builtin.set_fact:
+    gpu_mig_apply_mig_partition: false
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_mig_gpu_indices | length > 0
+    - gpu_mig_reboot_recommended | bool

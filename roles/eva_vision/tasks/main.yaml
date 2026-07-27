@@ -1,0 +1,361 @@
+- name: Set EVA Vision install defaults (k3s/on-premise)
+  ansible.builtin.set_fact:
+    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_project: "{{ repository_project | default('eva') }}"
+    repository_registry: >-
+      {{
+        repository_registry
+        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | regex_replace('^https?://', '')
+        | regex_replace('/+$', '')
+      }}
+    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+    eva_vision_namespace: "{{ eva_vision_namespace | default('eva-vision') }}"
+    eva_vision_name: "{{ eva_vision_name | default(eva_vision_release | default('eva-vision')) }}"
+    eva_vision_deploy_version: "{{ eva_vision_deploy_version | mandatory }}"
+    eva_vision_workdir: "{{ eva_vision_workdir | default('/opt/eva-vision/' ~ eva_vision_deploy_version) }}"
+    eva_vision_deploy_values_dir: "{{ eva_vision_deploy_values_dir | default((eva_deploy_root | default(playbook_dir ~ '/deploy')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/vision') }}"
+    eva_vision_kubeconfig: "{{ eva_vision_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
+    eva_vision_chart_ref: "{{ eva_vision_chart_ref | default('eva-vision/eva-vision') }}"
+    eva_vision_chart_version: "{{ eva_vision_chart_version | mandatory }}"
+    eva_vision_offline_dir: "{{ eva_vision_offline_dir | default(playbook_dir ~ '/install/eva-vision') }}"
+    eva_vision_offline_chart_tgz: "{{ eva_vision_offline_chart_tgz | default((eva_vision_offline_dir | default(playbook_dir ~ '/install/eva-vision')) ~ '/eva-vision-' ~ eva_vision_chart_version ~ '.tgz') }}"
+    eva_vision_gpu_count: "{{ eva_vision_gpu_count | default(1) }}"
+    eva_vision_gpu_resource_name: "{{ eva_vision_gpu_resource_name | default('') }}"
+    eva_vision_pvc_size: "{{ eva_vision_pvc_size | default('20Gi') }}"
+    eva_vision_storage_class: "{{ eva_vision_storage_class | default('local-path') }}"
+    eva_vision_image_tag: "{{ eva_vision_image_tag | default(eva_vision_deploy_version) }}"
+    eva_vision_rollout_timeout: "{{ eva_vision_rollout_timeout | default('1800s') }}"
+    eva_vision_progress_deadline_seconds: "{{ eva_vision_progress_deadline_seconds | default(3600) }}"
+    eva_vision_skip_startup_warmup: "{{ eva_vision_skip_startup_warmup | default(true) }}"
+
+- name: Validate repository mode for EVA Vision
+  ansible.builtin.assert:
+    that:
+      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+    fail_msg: >-
+      repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
+
+- name: Resolve EVA Vision image repository
+  ansible.builtin.set_fact:
+    eva_vision_image_repository: >-
+      {{
+        eva_vision_image_repository | default(
+          (repository_mode == 'cloud_repository')
+          | ternary(
+              '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-vision',
+              repository_registry ~ '/' ~ repository_project ~ '/eva-vision'
+            )
+        )
+      }}
+
+- name: Detect MIG 1g.24gb allocatable resource
+  ansible.builtin.command: kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/mig-1g\.24gb}'
+  register: eva_vision_mig_allocatable
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Detect GPU allocatable resource
+  ansible.builtin.command: kubectl get nodes -o jsonpath='{.items[0].status.allocatable.nvidia\.com/gpu}'
+  register: eva_vision_gpu_allocatable
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Resolve EVA Vision GPU resource name automatically
+  ansible.builtin.set_fact:
+    eva_vision_gpu_resource_name: >-
+      {{
+        eva_vision_gpu_resource_name
+        if (eva_vision_gpu_resource_name | length > 0)
+        else (
+          (
+            (
+              (eva_vision_mig_enabled_from_config | default(false) | bool)
+              and (eva_vision_mig_allocatable.stdout | default('') | trim | length > 0)
+              and ((eva_vision_mig_allocatable.stdout | trim | int) > 0)
+            )
+            | ternary('nvidia.com/mig-1g.24gb', 'nvidia.com/gpu')
+          )
+        )
+      }}
+
+- name: Remove EVA Vision workspace if it exists
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}"
+    state: absent
+
+- name: Ensure EVA Vision workspace exists
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Check NVIDIA device plugin daemonset exists
+  ansible.builtin.command: kubectl get daemonset -A -o name
+  register: daemonsets_result
+  changed_when: false
+  check_mode: false
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Validate NVIDIA device plugin prerequisite
+  ansible.builtin.assert:
+    that:
+      - "'nvidia-device-plugin' in daemonsets_result.stdout"
+    fail_msg: "NVIDIA Device Plugin daemonset is not installed. Install it before EVA Vision deployment."
+    success_msg: "NVIDIA Device Plugin daemonset detected."
+
+- name: Add Helm repository for EVA Vision
+  ansible.builtin.command: helm repo add eva-vision https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/
+  register: helm_repo_eva_vision
+  changed_when: "'already exists' not in (helm_repo_eva_vision.stdout + helm_repo_eva_vision.stderr)"
+  failed_when:
+    - helm_repo_eva_vision.rc != 0
+    - "'already exists' not in (helm_repo_eva_vision.stdout + helm_repo_eva_vision.stderr)"
+  when: not (airgap_mode | default(false) | bool)
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Update Helm repositories
+  ansible.builtin.command: helm repo update
+  changed_when: true
+  when: not (airgap_mode | default(false) | bool)
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Ensure offline EVA Vision chart exists
+  ansible.builtin.stat:
+    path: "{{ eva_vision_offline_chart_tgz }}"
+  register: eva_vision_offline_chart
+  when: airgap_mode | default(false) | bool
+
+- name: Assert offline EVA Vision chart is prepared
+  ansible.builtin.assert:
+    that:
+      - eva_vision_offline_chart.stat.exists
+    fail_msg: >-
+      airgap_mode=true 인 경우 {{ eva_vision_offline_chart_tgz }} 파일이 필요합니다.
+      install/download_offline_assets.sh 를 먼저 실행하세요.
+  when: airgap_mode | default(false) | bool
+
+- name: Export default values.yaml from EVA Vision chart
+  ansible.builtin.shell: >-
+    helm show values {{ (eva_vision_offline_chart_tgz if (airgap_mode | default(false) | bool) else eva_vision_chart_ref) }} > {{ eva_vision_workdir }}/values.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Ensure EVA Vision deploy values directory exists on control node
+  ansible.builtin.file:
+    path: "{{ eva_vision_deploy_values_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Render EVA Vision k3s override values on control node
+  no_log: true
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/values/vision-k3s-override.yaml.j2"
+    dest: "{{ eva_vision_deploy_values_dir }}/vision-k3s-override.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy EVA Vision k3s override values to remote workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_vision_deploy_values_dir }}/vision-k3s-override.yaml"
+    dest: "{{ eva_vision_workdir }}/vision-k3s-override.yaml"
+    mode: "0644"
+  when: not ansible_check_mode
+
+- name: Check existing EVA Vision deployment
+  ansible.builtin.command: kubectl get deployment {{ eva_vision_name }} -n {{ eva_vision_namespace }}
+  register: eva_vision_deployment_exists
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Scale down existing EVA Vision deployment before reinstall
+  ansible.builtin.command: >-
+    kubectl scale deployment {{ eva_vision_name }} -n {{ eva_vision_namespace }} --replicas=0
+  register: eva_vision_scale_down
+  changed_when: "'scaled' in eva_vision_scale_down.stdout"
+  when:
+    - not ansible_check_mode
+    - eva_vision_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Force delete remaining EVA Vision pods before reinstall
+  ansible.builtin.command: >-
+    kubectl delete pod
+    -n {{ eva_vision_namespace }}
+    -l app.kubernetes.io/instance={{ eva_vision_name }}
+    --ignore-not-found=true
+    --grace-period=0
+    --force
+  register: eva_vision_force_delete
+  changed_when: "'deleted' in eva_vision_force_delete.stdout"
+  when:
+    - not ansible_check_mode
+    - eva_vision_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Wait until EVA Vision pods are terminated before reinstall
+  ansible.builtin.command: >-
+    kubectl wait --for=delete pod
+    -n {{ eva_vision_namespace }}
+    -l app.kubernetes.io/instance={{ eva_vision_name }}
+    --timeout=180s
+  register: eva_vision_wait_delete
+  changed_when: false
+  failed_when:
+    - eva_vision_wait_delete.rc != 0
+    - "'no matching resources found' not in eva_vision_wait_delete.stderr"
+  when:
+    - not ansible_check_mode
+    - eva_vision_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Deploy EVA Vision from online Helm repo
+  ansible.builtin.command: >-
+    helm upgrade --install {{ eva_vision_name }} {{ eva_vision_chart_ref }}
+    -n {{ eva_vision_namespace }}
+    --version {{ eva_vision_chart_version }}
+    --create-namespace
+    -f {{ eva_vision_workdir }}/values.yaml
+    -f {{ eva_vision_workdir }}/vision-k3s-override.yaml
+  register: eva_vision_deploy_online
+  changed_when: >-
+    'has been upgraded' in eva_vision_deploy_online.stdout
+    or 'has been installed' in eva_vision_deploy_online.stdout
+  when: not (airgap_mode | default(false) | bool)
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Deploy EVA Vision from offline chart
+  ansible.builtin.command: >-
+    helm upgrade --install {{ eva_vision_name }} {{ eva_vision_offline_chart_tgz }}
+    -n {{ eva_vision_namespace }}
+    --create-namespace
+    -f {{ eva_vision_workdir }}/values.yaml
+    -f {{ eva_vision_workdir }}/vision-k3s-override.yaml
+  register: eva_vision_deploy_offline
+  changed_when: >-
+    'has been upgraded' in eva_vision_deploy_offline.stdout
+    or 'has been installed' in eva_vision_deploy_offline.stdout
+  when: airgap_mode | default(false) | bool
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Extend EVA Vision deployment progress deadline
+  ansible.builtin.command: >-
+    kubectl patch deployment {{ eva_vision_name }}
+    -n {{ eva_vision_namespace }}
+    --type merge
+    -p '{"spec":{"progressDeadlineSeconds":{{ eva_vision_progress_deadline_seconds }}}}'
+  register: eva_vision_progress_deadline_patch
+  changed_when: "'patched' in eva_vision_progress_deadline_patch.stdout"
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Skip EVA Vision startup warmup during deployment
+  ansible.builtin.command: >-
+    kubectl patch deployment {{ eva_vision_name }}
+    -n {{ eva_vision_namespace }}
+    --type json
+    -p '[{"op":"add","path":"/spec/template/spec/containers/0/command","value":["/bin/bash","-lc","mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled 2>/dev/null || true; exec uv run ./run.sh serve --log-profile prod --foreground"]}]'
+  register: eva_vision_skip_warmup_patch
+  changed_when: "'patched' in eva_vision_skip_warmup_patch.stdout"
+  when:
+    - not ansible_check_mode
+    - eva_vision_skip_startup_warmup | bool
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Wait for EVA Vision deployment rollout
+  block:
+    - name: Check EVA Vision deployment rollout status
+      ansible.builtin.command: >-
+        kubectl rollout status deployment/{{ eva_vision_name }}
+        -n {{ eva_vision_namespace }}
+        --timeout={{ eva_vision_rollout_timeout }}
+      register: rollout_result
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+  rescue:
+    - name: Collect EVA Vision pods on rollout failure
+      ansible.builtin.command: >-
+        kubectl get pod -n {{ eva_vision_namespace }} -o wide
+      register: eva_vision_pods_on_fail
+      changed_when: false
+      failed_when: false
+      environment:
+        KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+    - name: Collect EVA Vision pod describe on rollout failure
+      ansible.builtin.shell: >-
+        kubectl describe pod -n {{ eva_vision_namespace }} -l app.kubernetes.io/name={{ eva_vision_name }}
+      args:
+        executable: /bin/bash
+      register: eva_vision_pod_describe_on_fail
+      changed_when: false
+      failed_when: false
+      environment:
+        KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+    - name: Collect EVA Vision namespace events on rollout failure
+      ansible.builtin.command: >-
+        kubectl get events -n {{ eva_vision_namespace }} --sort-by=.metadata.creationTimestamp
+      register: eva_vision_events_on_fail
+      changed_when: false
+      failed_when: false
+      environment:
+        KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+    - name: Print EVA Vision rollout diagnostics
+      ansible.builtin.debug:
+        msg:
+          - "rollout failed for deployment/{{ eva_vision_name }} in namespace {{ eva_vision_namespace }}"
+          - "pods:"
+          - "{{ eva_vision_pods_on_fail.stdout_lines | default([]) }}"
+          - "events:"
+          - "{{ eva_vision_events_on_fail.stdout_lines | default([]) }}"
+          - "describe:"
+          - "{{ eva_vision_pod_describe_on_fail.stdout_lines | default([]) }}"
+
+    - name: Fail with actionable EVA Vision rollout message
+      ansible.builtin.fail:
+        msg: >-
+          EVA Vision rollout failed. 위 diagnostics를 확인하세요.
+          remote_repository/local_repository 모드에서는 Harbor에 이미지가 준비되어 있어야 합니다:
+          {{ eva_vision_image_repository }}:{{ eva_vision_image_tag }}
+
+- name: Check EVA Vision pods
+  ansible.builtin.command: kubectl get pod -n {{ eva_vision_namespace }}
+  register: eva_vision_pods
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Show EVA Vision pod status
+  ansible.builtin.debug:
+    msg: "{{ eva_vision_pods.stdout_lines }}"

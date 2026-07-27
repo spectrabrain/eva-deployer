@@ -1,0 +1,18 @@
+# site_n8n.yaml
+- name: Deploy n8n on k3s
+  hosts: all
+  become: true
+  any_errors_fatal: true
+  serial: 1
+
+  pre_tasks:
+    - name: Resolve repository mode
+      ansible.builtin.set_fact:
+        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+        airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+      changed_when: false
+
+  tasks:
+    - name: STEP 1 - n8n
+      ansible.builtin.import_role:
+        name: n8n

@@ -1,0 +1,80 @@
+- name: Resolve Helm install architecture and paths
+  ansible.builtin.set_fact:
+    helm_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
+    helm_offline_dir: "{{ playbook_dir }}/install/helm"
+  changed_when: false
+
+- name: Download Helm install script from internet
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+    dest: /tmp/get_helm.sh
+    mode: '0700'
+  when: not (airgap_mode | default(false) | bool)
+
+- name: Install Helm from internet
+  ansible.builtin.command: /tmp/get_helm.sh
+  args:
+    creates: /usr/local/bin/helm
+  when: not (airgap_mode | default(false) | bool)
+
+- name: Read offline Helm version
+  ansible.builtin.set_fact:
+    helm_offline_version: "{{ lookup('ansible.builtin.file', helm_offline_dir ~ '/helm4-latest-version.txt') | trim }}"
+    helm_tmp_extract_dir: "/tmp/helm-{{ lookup('ansible.builtin.pipe', 'date +%s') }}"
+  changed_when: false
+  when: airgap_mode | default(false) | bool
+
+- name: Copy Helm archive from offline bundle
+  ansible.builtin.copy:
+    src: "{{ helm_offline_dir }}/helm-{{ helm_offline_version }}-linux-{{ helm_arch }}.tar.gz"
+    dest: /tmp/helm-offline.tar.gz
+    mode: '0644'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Ensure Helm extract directory exists
+  ansible.builtin.file:
+    path: "{{ helm_tmp_extract_dir }}"
+    state: directory
+    mode: '0755'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Extract Helm archive
+  ansible.builtin.unarchive:
+    src: /tmp/helm-offline.tar.gz
+    dest: "{{ helm_tmp_extract_dir }}"
+    remote_src: true
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Install Helm binary from offline bundle
+  ansible.builtin.copy:
+    src: "{{ helm_tmp_extract_dir }}/linux-{{ helm_arch }}/helm"
+    dest: /usr/local/bin/helm
+    remote_src: true
+    mode: '0755'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Cleanup Helm install artifacts
+  ansible.builtin.file:
+    path: /tmp/get_helm.sh
+    state: absent
+  when:
+    - not ansible_check_mode
+
+- name: Cleanup Helm offline install artifacts
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /tmp/helm-offline.tar.gz
+    - "{{ helm_tmp_extract_dir }}"
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool

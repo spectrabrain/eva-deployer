@@ -1,0 +1,337 @@
+- name: Check k3s API accessibility for MIG resource reconciliation
+  ansible.builtin.command:
+    cmd: kubectl get nodes --no-headers
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_nodes_check
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Skip k3s MIG reconciliation when kubectl is unavailable
+  ansible.builtin.debug:
+    msg: >-
+      k3s MIG 리소스 검증을 건너뜁니다.
+      (kubectl 접근 실패: {{ gpu_mig_k3s_nodes_check.stderr | default('unknown') }})
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc != 0
+
+- name: Check NVIDIA device plugin daemonset exists
+  ansible.builtin.command:
+    cmd: kubectl get daemonset nvidia-device-plugin-daemonset -n kube-system --no-headers
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_device_plugin_ds
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+
+- name: Set NVIDIA device plugin env for MIG exposure
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system set env ds/nvidia-device-plugin-daemonset
+      DEVICE_DISCOVERY_STRATEGY=nvml
+      MIG_STRATEGY=mixed
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_device_plugin_env
+  changed_when: "'set' in gpu_mig_k3s_device_plugin_env.stdout or 'updated' in gpu_mig_k3s_device_plugin_env.stdout"
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Set NVIDIA device plugin image for MIG profile compatibility
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system set image ds/nvidia-device-plugin-daemonset
+      nvidia-device-plugin-ctr={{ gpu_mig_k8s_device_plugin_image }}
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_device_plugin_image
+  changed_when: "'image updated' in gpu_mig_k3s_device_plugin_image.stdout"
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Set NVIDIA device plugin runtimeClassName to nvidia
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system patch ds nvidia-device-plugin-daemonset --type=merge
+      -p '{"spec":{"template":{"spec":{"runtimeClassName":"nvidia"}}}}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_device_plugin_runtimeclass_patch
+  changed_when: "'patched' in gpu_mig_k3s_device_plugin_runtimeclass_patch.stdout"
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Set NVIDIA device plugin container privileged
+  ansible.builtin.command:
+    cmd: >-
+      kubectl -n kube-system patch ds nvidia-device-plugin-daemonset --type=strategic
+      -p '{
+        "spec": {
+          "template": {
+            "spec": {
+              "containers": [{
+                "name": "nvidia-device-plugin-ctr",
+                "securityContext": {
+                  "allowPrivilegeEscalation": true,
+                  "privileged": true
+                }
+              }]
+            }
+          }
+        }
+      }'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_device_plugin_privileged_patch
+  changed_when: "'patched' in gpu_mig_k3s_device_plugin_privileged_patch.stdout"
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Restart NVIDIA device plugin daemonset after MIG partition
+  ansible.builtin.command:
+    cmd: kubectl rollout restart daemonset/nvidia-device-plugin-daemonset -n kube-system
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_device_plugin_restart
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Wait for NVIDIA device plugin daemonset rollout after restart
+  ansible.builtin.command:
+    cmd: kubectl rollout status daemonset/nvidia-device-plugin-daemonset -n kube-system --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_device_plugin_rollout
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Collect k3s node allocatable NVIDIA resources
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl get nodes -o yaml | grep 'nvidia.com/' || true
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_nvidia_allocatable
+  changed_when: false
+  retries: 20
+  delay: 15
+  until: gpu_mig_k3s_nvidia_allocatable.stdout is search('nvidia.com/mig-')
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Show k3s allocatable NVIDIA resources
+  ansible.builtin.debug:
+    var: gpu_mig_k3s_nvidia_allocatable.stdout_lines
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Validate k3s node allocatable contains MIG resources
+  ansible.builtin.assert:
+    that:
+      - gpu_mig_k3s_nvidia_allocatable.stdout is search('nvidia.com/mig-')
+    fail_msg: >-
+      k3s 노드 allocatable에 MIG 리소스(nvidia.com/mig-*)가 보이지 않습니다.
+      NVIDIA device plugin 설정/로그를 확인하세요.
+    success_msg: k3s 노드 allocatable에서 MIG 리소스를 확인했습니다.
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Collect MIG resource keys from k3s nodes
+  ansible.builtin.shell: |
+    set -o pipefail
+    kubectl get nodes -o yaml | awk -F: '/nvidia.com\/mig-/{gsub(/^[[:space:]]+/, "", $1); print $1}' | sort -u
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: gpu_mig_k3s_mig_resource_key_cmd
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Build MIG resource key list from collected output
+  ansible.builtin.set_fact:
+    gpu_mig_k3s_mig_resource_keys: "{{ gpu_mig_k3s_mig_resource_key_cmd.stdout_lines | map('trim') | reject('equalto', '') | list }}"
+    gpu_mig_k3s_first_mig_resource_key: >-
+      {{
+        (
+          gpu_mig_k3s_mig_resource_key_cmd.stdout_lines
+          | map('trim')
+          | reject('equalto', '')
+          | list
+          | first
+        ) | default('')
+      }}
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Show selected MIG resource key for pod validation
+  ansible.builtin.debug:
+    msg:
+      - "Detected MIG resource keys: {{ gpu_mig_k3s_mig_resource_keys }}"
+      - "Selected key for validation pod: {{ gpu_mig_k3s_first_mig_resource_key }}"
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+
+- name: Validate MIG-aware pod scheduling on k3s
+  when:
+    - not ansible_check_mode
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+    - gpu_mig_k3s_nodes_check.rc == 0
+    - gpu_mig_k3s_device_plugin_ds.rc == 0
+    - gpu_mig_k3s_first_mig_resource_key | length > 0
+  block:
+    - name: Ensure previous MIG validation pod is absent
+      ansible.builtin.command:
+        cmd: kubectl delete pod mig-gpu-pod --ignore-not-found=true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+    - name: Create MIG validation pod manifest
+      ansible.builtin.copy:
+        dest: /tmp/k3s-mig-gpu-pod.yaml
+        mode: "0644"
+        content: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: mig-gpu-pod
+          spec:
+            restartPolicy: Never
+            runtimeClassName: nvidia
+            tolerations:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+                effect: NoSchedule
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+                effect: NoSchedule
+            containers:
+              - name: mig-gpu-check
+                image: "{{ gpu_mig_cuda_validation_image }}"
+                command: ["bash", "-lc", "nvidia-smi -L && sleep 20"]
+                resources:
+                  limits:
+                    "{{ gpu_mig_k3s_first_mig_resource_key }}": 1
+
+    - name: Apply MIG validation pod
+      ansible.builtin.command:
+        cmd: kubectl apply -f /tmp/k3s-mig-gpu-pod.yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: gpu_mig_k3s_validation_pod_apply
+      changed_when: "'created' in gpu_mig_k3s_validation_pod_apply.stdout or 'configured' in gpu_mig_k3s_validation_pod_apply.stdout"
+
+    - name: Wait for MIG validation pod to become Running
+      ansible.builtin.command:
+        cmd: kubectl wait --for=jsonpath='{.status.phase}'=Running pod/mig-gpu-pod --timeout=300s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: gpu_mig_k3s_validation_pod_wait
+      changed_when: false
+
+    - name: Read MIG validation pod logs
+      ansible.builtin.command:
+        cmd: kubectl logs mig-gpu-pod
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: gpu_mig_k3s_validation_pod_logs
+      changed_when: false
+
+    - name: Show MIG validation pod logs
+      ansible.builtin.debug:
+        var: gpu_mig_k3s_validation_pod_logs.stdout_lines
+
+  always:
+    - name: Cleanup MIG validation pod
+      ansible.builtin.command:
+        cmd: kubectl delete pod mig-gpu-pod --ignore-not-found=true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - gpu_mig_k3s_nodes_check is defined
+        - gpu_mig_k3s_nodes_check.rc == 0

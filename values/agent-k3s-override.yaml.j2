@@ -1,0 +1,19 @@
+image:
+  repository: "{{ eva_agent_image_repository }}"
+  tag: "{{ eva_agent_image_tag }}"
+  pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
+
+sharedPvcStorage:
+  nfs:
+    path: "{{ eva_agent_nfs_share_path }}/agent-cache"
+
+{% if airgap_mode | default(false) | bool %}
+persistence:
+  s3Sync:
+    enabled: false
+
+ecrRefresh:
+  enabled: false
+
+imagePullSecrets: []
+{% endif %}

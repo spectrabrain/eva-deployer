@@ -1,0 +1,14 @@
+- name: Include MIG enable tasks
+  ansible.builtin.import_tasks: enable_mig.yaml
+
+- name: Include MIG partition apply tasks
+  ansible.builtin.import_tasks: apply_mig.yaml
+
+- name: Include k3s MIG reconciliation tasks
+  ansible.builtin.import_tasks: apply_k3s.yaml
+
+- name: Skip MIG workflow when disabled or no MIG-capable GPU
+  ansible.builtin.debug:
+    msg: "MIG 활성화 워크플로우를 건너뜁니다. (gpu_mig_enable_mig_workflow={{ gpu_mig_enable_mig_workflow }}, mig_capable={{ gpu_mig_mig_capable_gpu_count }})"
+  when:
+    - not (gpu_mig_enable_mig_workflow | bool) or (gpu_mig_mig_capable_gpu_count | int == 0)

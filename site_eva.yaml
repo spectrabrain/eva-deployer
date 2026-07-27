@@ -1,0 +1,54 @@
+# site_eva.yaml
+- name: Configure hosts
+  hosts: all
+  become: true
+  any_errors_fatal: true
+  serial: 1
+  vars_files:
+    - "{{ playbook_dir }}/versions.json"
+
+  pre_tasks:
+    - name: Resolve eva.yaml config host
+      ansible.builtin.set_fact:
+        eva_generated_config_host: "{{ ansible_host | default(inventory_hostname) }}"
+      changed_when: false
+
+    - name: Check generated eva.yaml exists on control node
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/config/{{ eva_generated_config_host }}/eva.yaml"
+      register: eva_generated_config_stat
+      delegate_to: localhost
+      become: false
+
+    - name: Ensure generated eva.yaml exists before EVA deployment
+      ansible.builtin.assert:
+        that:
+          - eva_generated_config_stat.stat.exists
+        fail_msg: >-
+          {{ playbook_dir }}/config/{{ eva_generated_config_host }}/eva.yaml 파일이 없습니다.
+          먼저 site_eva_config.yaml을 실행해 eva.yaml을 생성하세요.
+
+    - name: Load generated EVA configuration
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/config/{{ eva_generated_config_host }}/eva.yaml"
+        name: eva_generated_config
+
+    - name: Apply generated EVA configuration defaults
+      ansible.builtin.set_fact:
+        eva_agent_nfs_share_path: "{{ eva_generated_config.nfs_share_path | default(eva_agent_nfs_share_path | default(omit)) }}"
+        eva_agent_vllm_values_override_from_config: "{{ eva_generated_config.vllm | default({}) }}"
+        eva_vision_mig_enabled_from_config: "{{ eva_generated_config.mig_enabled | default(false) | bool }}"
+      changed_when: false
+
+  tasks:
+    - name: STEP 1 - eva-agent
+      ansible.builtin.import_role:
+        name: eva_agent
+
+    - name: STEP 2 - eva-vision
+      ansible.builtin.import_role:
+        name: eva_vision
+
+    - name: STEP 3 - eva-app
+      ansible.builtin.import_role:
+        name: eva_app

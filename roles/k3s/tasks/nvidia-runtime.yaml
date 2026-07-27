@@ -1,0 +1,108 @@
+- name: Verify nvidia-container-runtime binary exists
+  ansible.builtin.stat:
+    path: /usr/bin/nvidia-container-runtime
+  register: k3s_nvidia_runtime_binary
+  when: not ansible_check_mode
+
+- name: Fail when nvidia-container-runtime is missing
+  ansible.builtin.fail:
+    msg: >-
+      nvidia-container-runtime not found at /usr/bin/nvidia-container-runtime.
+      Install NVIDIA Container Toolkit before configuring k3s GPU runtime.
+  when:
+    - not ansible_check_mode
+    - not k3s_nvidia_runtime_binary.stat.exists
+
+- name: Verify nvidia-ctk binary exists
+  ansible.builtin.stat:
+    path: /usr/bin/nvidia-ctk
+  register: k3s_nvidia_ctk_binary
+  when: not ansible_check_mode
+
+- name: Fail when nvidia-ctk is missing
+  ansible.builtin.fail:
+    msg: >-
+      nvidia-ctk not found at /usr/bin/nvidia-ctk.
+      Install NVIDIA Container Toolkit before configuring k3s GPU runtime.
+  when:
+    - not ansible_check_mode
+    - not k3s_nvidia_ctk_binary.stat.exists
+
+- name: Remove broken containerd drop-in written by nvidia-ctk
+  ansible.builtin.file:
+    path: /etc/containerd/conf.d/99-nvidia.toml
+    state: absent
+  register: k3s_nvidia_ctk_dropin_cleanup
+  when: not ansible_check_mode
+
+- name: Check legacy containerd template path used by old GPU runtime task
+  ansible.builtin.stat:
+    path: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+  register: k3s_legacy_containerd_tmpl
+  when: not ansible_check_mode
+
+- name: Read legacy containerd template content
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+  register: k3s_legacy_containerd_tmpl_content
+  when:
+    - not ansible_check_mode
+    - k3s_legacy_containerd_tmpl.stat.exists
+
+- name: Remove legacy broken containerd template and config
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+    - /var/lib/rancher/k3s/agent/etc/containerd/config.toml
+  when:
+    - not ansible_check_mode
+    - k3s_legacy_containerd_tmpl.stat.exists
+    - "'imports = [\"/etc/containerd/conf.d/*.toml\"]' in (k3s_legacy_containerd_tmpl_content.content | b64decode)"
+    - "'version = 2' in (k3s_legacy_containerd_tmpl_content.content | b64decode)"
+
+- name: Restart k3s service
+  ansible.builtin.systemd:
+    name: k3s
+    state: restarted
+  register: k3s_nvidia_runtime_restart
+  when: not ansible_check_mode
+
+- name: Ensure NVIDIA RuntimeClass manifest exists
+  ansible.builtin.copy:
+    dest: /tmp/k3s-runtimeclass-nvidia.yaml
+    mode: '0644'
+    content: |
+      apiVersion: node.k8s.io/v1
+      kind: RuntimeClass
+      metadata:
+        name: nvidia
+      handler: nvidia
+  when: not ansible_check_mode
+
+- name: Apply NVIDIA RuntimeClass in k3s
+  ansible.builtin.command:
+    cmd: kubectl apply -f /tmp/k3s-runtimeclass-nvidia.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_runtimeclass_apply
+  changed_when: "'created' in k3s_nvidia_runtimeclass_apply.stdout or 'configured' in k3s_nvidia_runtimeclass_apply.stdout"
+  when: not ansible_check_mode
+
+- name: Verify NVIDIA runtimeclass in k3s
+  ansible.builtin.command:
+    cmd: kubectl get runtimeclass nvidia -o name
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_nvidia_runtimeclass
+  changed_when: false
+  retries: 20
+  delay: 6
+  until: k3s_nvidia_runtimeclass.rc == 0
+  when: not ansible_check_mode
+
+- name: Show NVIDIA runtimeclass
+  ansible.builtin.debug:
+    var: k3s_nvidia_runtimeclass.stdout_lines
+  when: not ansible_check_mode

@@ -1,0 +1,28 @@
+
+# prod
+# localhost:
+#   app:
+#     browserTitleName: "EVA SHEE (대상 사이트)"
+#     license:
+#       activation_mode: "offline"
+#       product_code: "eva-prod"
+#       api_key: "LICENSE_API_KEY"
+#       shared_key: "LICENSE_SHARED_KEY"
+#     pipeline:
+#       streamer:
+#         dispatcherFaceAnonymizerEnabled: true
+
+
+# dev
+# 10.186.0.75:
+#   app:
+#     browserTitleName: "EVA SHEE (대상 사이트)"
+#     license:
+#       activation_mode: "online"
+#       product_code: "eva-dev"
+#       api_key: "LICENSE_API_KEY"
+#       shared_key: "LICENSE_SHARED_KEY"
+#     pipeline:
+#       streamer:
+#         dispatcherFaceAnonymizerEnabled: true
+

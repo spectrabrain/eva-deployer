@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+config/
+deploy/
+
+logs/
+logs_*/
+logs_infra/
+logs_eva/
+install/
+!install/
+install/*
+!install/*.sh
+!install/*.txt
+install/manifest.txt
+
+*.ini
+
+# Always include config role files
+!roles/config/
+!roles/config/**
+
+# Deployment-specific EVA App host values (contains license credentials)
+values/app.yaml

@@ -1,0 +1,53 @@
+image:
+  repository: "{{ eva_vision_image_repository }}"
+  tag: "{{ eva_vision_deploy_version }}"
+  pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
+
+runtimeClassName: "nvidia"
+
+imagePullSecrets:
+  enabled: {{ (repository_mode == 'cloud_repository') | lower }}
+  create: false
+  name: "ecr-registry"
+
+replicaCount: 1
+
+strategy:
+  type: Recreate
+
+resources:
+  limits:
+    memory: "24Gi"
+    cpu: "4"
+  requests:
+    memory: "24Gi"
+    cpu: "2"
+
+gpu:
+  count: {{ eva_vision_gpu_count }}
+  cudaVisibleDevices: ""
+  mig:
+    resourceName: "{{ eva_vision_gpu_resource_name }}"
+  mps:
+    enabled: true
+    pipeDirectory: "/tmp/nvidia-mps"
+    logDirectory: "/tmp/nvidia-mps-log"
+
+probes:
+  liveness:
+    initialDelaySeconds: 3000
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+persistence:
+  enabled: false
+  storageClass: "{{ eva_vision_storage_class }}"
+  size: "{{ eva_vision_pvc_size }}"
+
+affinity: {}

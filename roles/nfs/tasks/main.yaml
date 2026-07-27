@@ -1,0 +1,16 @@
+- name: Configure NFS CSI repository settings
+  ansible.builtin.set_fact:
+    nfs_csi_image_prefix: >-
+      {{
+        (
+          repository_registry
+          | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        ) ~ '/' ~ (repository_project | default('eva'))
+      }}
+  when: (repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']
+
+- name: Install nfs
+  ansible.builtin.import_tasks: install.yaml
+
+- name: Configure Path
+  ansible.builtin.import_tasks: mount_share_path.yaml

@@ -1,0 +1,291 @@
+- name: Set EVA Agent install defaults (k3s)
+  ansible.builtin.set_fact:
+    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_project: "{{ repository_project | default('eva') }}"
+    repository_registry: >-
+      {{
+        repository_registry
+        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | regex_replace('^https?://', '')
+        | regex_replace('/+$', '')
+      }}
+    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+    eva_agent_namespace: "{{ eva_agent_namespace | default('eva-agent') }}"
+    eva_agent_deploy_version: "{{ eva_agent_deploy_version | mandatory }}"
+    eva_agent_workdir: "{{ eva_agent_workdir | default('/opt/eva-agent/' ~ eva_agent_deploy_version) }}"
+    eva_agent_deploy_values_dir: "{{ eva_agent_deploy_values_dir | default((eva_deploy_root | default(playbook_dir ~ '/deploy')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/agent') }}"
+    eva_agent_kubeconfig: "{{ eva_agent_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
+    eva_agent_install_root: "{{ eva_agent_install_root | default(playbook_dir ~ '/install') }}"
+    eva_agent_nfs_share_path: "{{ eva_agent_nfs_share_path | default('/data001/share/eva-agent') }}"
+    eva_agent_chart_version: "{{ eva_agent_chart_version | default(eva_agent_deploy_version) }}"
+    eva_agent_chart: "{{ eva_agent_chart | default('eva-agent/eva-agent') }}"
+    eva_agent_force_conflicts: "{{ eva_agent_force_conflicts | default(0) }}"
+    eva_agent_chartmuseum_base_url: >-
+      {{ eva_agent_chartmuseum_base_url
+         | default('https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/' ~ eva_agent_deploy_version) }}
+    eva_agent_image_tag: "{{ eva_agent_image_tag | default('') }}"
+    eva_agent_offline_dir: "{{ eva_agent_offline_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/eva-agent') }}"
+    eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default((eva_agent_offline_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/eva-agent')) ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"
+    eva_agent_offline_images_pulled_list: "{{ eva_agent_offline_images_pulled_list | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/images/images-pulled.txt') }}"
+
+- name: Validate repository mode for EVA Agent
+  ansible.builtin.assert:
+    that:
+      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+    fail_msg: >-
+      repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
+
+- name: Resolve EVA Agent repository override
+  ansible.builtin.set_fact:
+    eva_agent_image_repository: >-
+      {{
+        eva_agent_image_repository | default(
+          (repository_mode == 'cloud_repository')
+          | ternary(
+              '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent',
+              repository_registry ~ '/' ~ repository_project ~ '/eva-agent'
+            )
+        )
+      }}
+
+- name: Detect EVA Agent image tag from offline pulled list (airgap)
+  ansible.builtin.shell: >-
+    set -euo pipefail &&
+    if [ -f "{{ eva_agent_offline_images_pulled_list }}" ]; then
+      sed -n 's#^.*/mellerikat/release/eva-agent:\\([^[:space:]]*\\)$#\\1#p' "{{ eva_agent_offline_images_pulled_list }}" | head -n1;
+    fi
+  args:
+    executable: /bin/bash
+  register: eva_agent_offline_detected_tag
+  changed_when: false
+  when:
+    - airgap_mode | default(false) | bool
+    - (eva_agent_image_tag | default('') | length) == 0
+
+- name: Resolve EVA Agent image tag
+  ansible.builtin.set_fact:
+    eva_agent_image_tag: >-
+      {{
+        (eva_agent_image_tag | default('')) if ((eva_agent_image_tag | default('')) | length > 0)
+        else (
+          (airgap_mode | default(false) | bool)
+          | ternary(
+              (eva_agent_offline_detected_tag.stdout | default('')),
+              eva_agent_deploy_version
+            )
+        )
+      }}
+
+- name: Fallback EVA Agent image tag when unresolved
+  ansible.builtin.set_fact:
+    eva_agent_image_tag: "{{ eva_agent_deploy_version }}"
+  when: eva_agent_image_tag | length == 0
+
+- name: Ensure EVA Agent workspace exists
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ eva_agent_workdir }}"
+    - "{{ eva_agent_workdir }}/eva-agent"
+
+- name: Add Helm repository for EVA Agent
+  ansible.builtin.command: helm repo add eva-agent https://mellerikat.github.io/eva-agent
+  register: helm_repo_eva_agent
+  changed_when: "'already exists' not in (helm_repo_eva_agent.stdout + helm_repo_eva_agent.stderr)"
+  failed_when:
+    - helm_repo_eva_agent.rc != 0
+    - "'already exists' not in (helm_repo_eva_agent.stdout + helm_repo_eva_agent.stderr)"
+  when: not (airgap_mode | default(false) | bool)
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Update Helm repositories
+  ansible.builtin.command: helm repo update
+  changed_when: true
+  when: not (airgap_mode | default(false) | bool)
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Ensure offline EVA Agent chart exists
+  ansible.builtin.stat:
+    path: "{{ eva_agent_offline_chart_tgz }}"
+  register: eva_agent_offline_chart
+  when: airgap_mode | default(false) | bool
+
+- name: Assert offline EVA Agent chart is prepared
+  ansible.builtin.assert:
+    that:
+      - eva_agent_offline_chart.stat.exists
+    fail_msg: >-
+      airgap_mode=true 인 경우 {{ eva_agent_offline_chart_tgz }} 파일이 필요합니다.
+      install/download_offline_assets.sh 를 먼저 실행하세요.
+  when: airgap_mode | default(false) | bool
+
+- name: Export EVA Agent default values
+  ansible.builtin.shell: >-
+    helm show values {{ (eva_agent_offline_chart_tgz if (airgap_mode | default(false) | bool) else eva_agent_chart) }} > {{ eva_agent_workdir }}/eva-agent/values.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Download EVA Agent secret values from chartmuseum release
+  ansible.builtin.get_url:
+    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent/values-secret.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent/values-secret.yaml"
+    mode: "0644"
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Download EVA Agent k3s values from chartmuseum release
+  ansible.builtin.get_url:
+    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent/values-k3s.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent/values-k3s.yaml"
+    mode: "0644"
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Copy EVA Agent secret values from offline bundle
+  ansible.builtin.copy:
+    src: "{{ eva_agent_offline_dir }}/release/{{ eva_agent_deploy_version }}/eva-agent/values-secret.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent/values-secret.yaml"
+    mode: "0644"
+    remote_src: true
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Copy EVA Agent k3s values from offline bundle
+  ansible.builtin.copy:
+    src: "{{ eva_agent_offline_dir }}/release/{{ eva_agent_deploy_version }}/eva-agent/values-k3s.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent/values-k3s.yaml"
+    mode: "0644"
+    remote_src: true
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Check values-secret exists
+  ansible.builtin.stat:
+    path: "{{ eva_agent_workdir }}/eva-agent/values-secret.yaml"
+  register: eva_agent_values_secret_stat
+
+- name: Ensure EVA Agent deploy values directory exists on control node
+  ansible.builtin.file:
+    path: "{{ eva_agent_deploy_values_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Render EVA Agent k3s override values on control node
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/values/agent-k3s-override.yaml.j2"
+    dest: "{{ eva_agent_deploy_values_dir }}/agent-k3s-override.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy EVA Agent k3s override values to remote workspace
+  ansible.builtin.copy:
+    src: "{{ eva_agent_deploy_values_dir }}/agent-k3s-override.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent/agent-k3s-override.yaml"
+    mode: "0644"
+  when: not ansible_check_mode
+
+- name: Build EVA Agent helm command (online)
+  ansible.builtin.set_fact:
+    eva_agent_install_cmd_online: >-
+      helm upgrade --install eva-agent {{ eva_agent_chart }}
+      --version {{ eva_agent_chart_version }}
+      --namespace {{ eva_agent_namespace }}
+      --create-namespace
+      -f {{ eva_agent_workdir }}/eva-agent/values-k3s.yaml
+      {% if eva_agent_values_secret_stat.stat.exists %}-f {{ eva_agent_workdir }}/eva-agent/values-secret.yaml{% endif %}
+      -f {{ eva_agent_workdir }}/eva-agent/agent-k3s-override.yaml
+  when: not ansible_check_mode
+
+- name: Build EVA Agent helm command (airgap)
+  ansible.builtin.set_fact:
+    eva_agent_install_cmd_airgap: >-
+      helm upgrade --install eva-agent {{ eva_agent_offline_chart_tgz }}
+      --namespace {{ eva_agent_namespace }}
+      --create-namespace
+      -f {{ eva_agent_workdir }}/eva-agent/values-k3s.yaml
+      {% if eva_agent_values_secret_stat.stat.exists %}-f {{ eva_agent_workdir }}/eva-agent/values-secret.yaml{% endif %}
+      -f {{ eva_agent_workdir }}/eva-agent/agent-k3s-override.yaml
+  when: not ansible_check_mode
+
+- name: Check existing EVA Agent deployment
+  ansible.builtin.command: kubectl get deployment eva-agent -n {{ eva_agent_namespace }}
+  register: eva_agent_deployment_exists
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Scale down existing EVA Agent deployment before reinstall
+  ansible.builtin.command: kubectl scale deployment eva-agent -n {{ eva_agent_namespace }} --replicas=0
+  register: eva_agent_scale_down
+  changed_when: "'scaled' in eva_agent_scale_down.stdout"
+  when:
+    - not ansible_check_mode
+    - eva_agent_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Wait until EVA Agent pods are terminated before reinstall
+  ansible.builtin.command: kubectl wait --for=delete pod -n {{ eva_agent_namespace }} -l app.kubernetes.io/name=eva-agent --timeout=180s
+  register: eva_agent_wait_delete
+  changed_when: false
+  failed_when:
+    - eva_agent_wait_delete.rc != 0
+    - "'no matching resources found' not in eva_agent_wait_delete.stderr"
+  when:
+    - not ansible_check_mode
+    - eva_agent_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Install EVA Agent from online Helm repo
+  ansible.builtin.command: "{{ eva_agent_install_cmd_online }}"
+  args:
+    chdir: "{{ eva_agent_workdir }}"
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Install EVA Agent from offline chart
+  ansible.builtin.command: "{{ eva_agent_install_cmd_airgap }}"
+  args:
+    chdir: "{{ eva_agent_workdir }}"
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Check EVA Agent installation status
+  ansible.builtin.command: kubectl get all -n {{ eva_agent_namespace }}
+  register: eva_agent_status
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Show EVA Agent resources
+  ansible.builtin.debug:
+    msg: "{{ eva_agent_status.stdout_lines }}"

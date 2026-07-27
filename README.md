@@ -1,0 +1,806 @@
+# EVA Deployer
+
+EVA 설치 환경을 Ansible로 구성하는 deployer입니다. 권장 OS는 **Ubuntu 24.04**입니다.
+
+설치 시 이미지 출처는 `repository_mode`로 결정합니다. 기본값은 `cloud_repository`입니다.
+
+| mode | 용도 | 이미지 출처 |
+| --- | --- | --- |
+| `cloud_repository` | 대상 서버가 인터넷/ECR/Docker Hub/S3에 접근 가능 | AWS ECR/Docker Hub/S3 |
+| `remote_repository` | 인터넷 가능한 Main 서버의 Harbor를 Airgap 서버가 접근 가능 | Main Harbor |
+| `local_repository` | USB로 복사한 뒤 Airgap 서버 내부 Harbor 사용 | Local Harbor |
+
+`repository_registry`에는 k3s 노드가 접근할 수 있는 Harbor Registry 주소를 넣습니다. `https://` prefix는 넣지 않고 host 또는 host:port만 사용합니다.
+
+예시:
+
+```text
+harbor.main.local:32080
+10.158.2.10:32080
+localhost:32080
+```
+
+`localhost:32080`은 단일 서버에서 Local Harbor를 해당 포트로 띄운 경우의 예시입니다. Harbor의 `hostname` 또는 `http.port`를 다르게 설정했다면 `repository_registry`도 같은 값으로 맞춰야 합니다. 여러 노드에서 사용하는 경우에는 각 노드의 `localhost`가 서로 다르므로, 모든 노드가 접근 가능한 Harbor hostname 또는 IP를 사용합니다.
+
+`repository_project`는 Harbor project 이름입니다. 기본 예시는 `eva`이며, 이미지 주소는 아래처럼 만들어집니다.
+
+```text
+<repository_registry>/<repository_project>/eva-agent:3.0.4
+<repository_registry>/<repository_project>/eva-app:3.0.5
+<repository_registry>/<repository_project>/eva-vision:2.0.5
+```
+
+---
+
+## 1. 사전 준비 및 Repository 준비
+
+이 섹션은 설치 실행 전에 필요한 Python/Ansible, AWS 인증, asset, image, Harbor 준비 절차를 mode별로 설명합니다. 실제 설치 실행은 `인프라 설치`, `EVA 배포`, `n8n 설치` 섹션에서 mode별로 실행합니다.
+
+### 공통: 버전 단일 관리
+
+EVA App/Agent/Vision 및 chart 버전은 `versions.json` 한 곳에서 관리합니다.
+버전 업데이트 시 우선 이 파일만 수정하면:
+
+- Ansible 배포(`site_eva.yaml`)에 자동 반영
+- 다운로드 스크립트(`install/download_offline_assets.sh`, `install/download_eva_images.sh`, `install/download_n8n_images.sh`)에 자동 반영
+
+이미지/asset 다운로드 전에 먼저 `versions.json`을 수정하세요.
+
+Airgap 서버에 Docker가 설치되어 있지 않을 수 있으므로, 인터넷이 가능한 준비 서버에서 `install/download_offline_assets.sh`를 실행하면 Docker Engine, containerd, buildx, compose plugin 및 apt 의존성 `.deb` 파일도 `install/docker/debs/`에 함께 준비됩니다. `install/` 전체를 Airgap 서버로 복사한 뒤 설치를 실행하세요.
+
+이 스크립트는 Docker `.deb` 패키지와 실제 설치에 필요한 의존성 전체를 받기 위해 `apt-get update`를 실행하므로, 준비 서버에서 `root` 또는 비밀번호 없이 사용할 수 있는 `sudo` 권한이 필요합니다. 일반 사용자로 실행하는 경우 먼저 터미널에서 `sudo -v`를 실행해 인증한 뒤 다운로드 명령을 실행하세요. 준비 서버와 Airgap 서버는 같은 Ubuntu 릴리스 및 아키텍처를 사용해야 하며, 실행할 때마다 기존 `install/docker/debs/*.deb`는 최신 의존성 묶음으로 교체됩니다. 다운로드 후 `install/docker/debs/manifest.txt`가 생성되었는지도 확인하세요. 기존에 생성한 Docker `.deb` 묶음은 의존성이 부족할 수 있으므로 수정된 스크립트로 반드시 다시 생성해야 합니다.
+
+`install/apt/debs/` bundle은 base/NFS 의존성뿐 아니라 `systemd` 계열의 version-locked 패키지 세트도 함께 받습니다. 따라서 Airgap 서버가 준비 서버보다 한 Ubuntu patch level 낮아도 `systemd`와 `libsystemd0`의 정확한 버전 의존성으로 설치가 깨지는 문제를 방지합니다. 다만 이미 전달한 예전 bundle에는 이 보완이 없으므로, 준비 서버에서 최신 `./install/download_offline_assets.sh`를 실행한 뒤 `install/apt/debs/` 전체와 `manifest.txt`를 다시 복사해야 합니다.
+
+`local_repository`/`remote_repository`용 offline asset 다운로드는 `install/apt/debs/`에 base, NFS 서버 및 version-locked system package 의존성을 준비합니다. Airgap Ansible은 설치 전에 bundle과 현재 OS의 strict-version 의존성을 검사하여, 불완전하거나 대상 서버와 충돌하는 bundle을 `dpkg` 실행 전에 중단합니다. 수정된 스크립트 실행 후 `install/apt/debs/` 전체와 `manifest.txt`를 함께 복사해야 합니다.
+
+Airgap 서버에서 offline `.deb` 설치가 중간에 실패했거나 `dpkg --audit`에 미처리 패키지가 보이면, 인터넷 연결 없이 아래 명령으로 bundle을 검사하고 복구할 수 있습니다. 검증이 실패하면 bundle이 불완전하거나 현재 OS와 충돌하는 것이므로, 준비 서버에서 bundle을 다시 생성해 복사한 뒤 실행하세요.
+
+```bash
+cd /home/eva/eva-deployer
+./install/validate_offline_debs.sh ./install/apt/debs
+sudo ./install/repair_offline_debs.sh ./install/apt/debs
+sudo dpkg --audit
+```
+
+예시:
+
+```json
+{
+  "eva_app_deploy_version": "3.0.5",
+  "eva_app_chart_version": "2.1.3",
+  "eva_vision_deploy_version": "2.0.5",
+  "eva_vision_chart_version": "2.0.5"
+}
+```
+
+### 공통: AWS Key
+
+ECR 이미지, S3 모델, release asset을 인터넷 가능 환경에서 받을 때 필요합니다.
+
+```bash
+aws configure set aws_access_key_id <AK> --profile default
+aws configure set aws_secret_access_key <SK> --profile default
+aws configure set region ap-northeast-2 --profile default
+```
+
+### [cloud_repository]
+
+대상 서버가 인터넷/ECR/Docker Hub/S3에 직접 접근 가능한 모드입니다. 별도 Harbor 준비가 필요 없습니다.
+
+대상 서버에서 Python/Ansible을 준비합니다.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install ansible
+```
+
+대상 서버가 아래에 직접 접근할 수 있으면 됩니다.
+
+- AWS ECR
+- Docker Hub 또는 외부 container registry
+- S3 모델/릴리즈 버킷
+
+### [remote_repository]
+
+인터넷 가능한 Main 서버에 Harbor를 구성하고, 설치 대상 Airgap 서버는 Main Harbor에 접근 가능한 구조입니다.
+
+Main 서버에서 Python/Ansible을 준비합니다. Main 서버에서 Ansible을 실행해 Airgap 서버를 설치하는 흐름입니다.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install ansible
+```
+
+Main 서버에 Harbor를 설치합니다. Harbor는 Docker Engine과 Docker Compose plugin이 먼저 설치되어 실행 중이어야 합니다. `repository_registry`는 Harbor의 `hostname:32080`과 맞춰야 합니다.
+
+```bash
+# Docker가 없는 경우 먼저 Docker 설치 script를 실행합니다.
+./install/install_docker.sh
+
+# Docker 설치 및 실행을 확인한 뒤 Harbor를 시작합니다.
+./install/setup_harbor.sh --hostname harbor.main.local
+```
+
+비밀번호나 데이터 저장 경로를 바꾸고 싶으면 인자로 넘깁니다.
+
+```bash
+./install/setup_harbor.sh \
+  --hostname harbor.main.local \
+  --admin-password 'your-admin-password' \
+  --data-volume /data001/harbor
+```
+
+Harbor 기본값:
+
+- `HARBOR_VERSION`: `v2.15.2`
+- `http.port`: `32080` 고정
+- `hostname`: `localhost`
+- `harbor_admin_password`: `EVA123@`
+- `data_volume`: Harbor template 기본값 유지
+- `project`: `eva`
+
+Main 서버에서 asset과 이미지를 준비합니다.
+
+```bash
+# Harbor 로그인
+docker login harbor.main.local:32080 -u admin
+
+# chart/values/script/kustomize/manifest 등 설치 asset 다운로드
+# Docker Engine/Compose와 Ansible base/NFS role용 apt 의존성 .deb bundle도 함께 준비됩니다.
+# Docker apt 패키지 다운로드를 위해 sudo 인증 후 실행
+sudo -v && AWS_PROFILE=default ./install/download_offline_assets.sh
+
+# EVA 모델 캐시 다운로드 -> install/models
+AWS_PROFILE=default ./install/download_eva_models.sh
+
+# EVA/infra/n8n 이미지 pull 및 이미지 목록 생성
+AWS_PROFILE=default ./install/download_eva_images.sh
+./install/download_infra_images.sh
+./install/download_n8n_images.sh
+```
+
+이미지를 Main Harbor로 push합니다.
+
+```bash
+# EVA 이미지 push
+REPOSITORY_REGISTRY=harbor.main.local:32080 \
+REPOSITORY_PROJECT=eva \
+AWS_PROFILE=default \
+./install/push_images_to_repository.sh
+
+# Infra 이미지 push: nvidia-device-plugin, CUDA sample, MIG 검증용 CUDA
+IMAGE_LIST=./install/images/infra-images-pulled.txt \
+REPOSITORY_REGISTRY=harbor.main.local:32080 \
+REPOSITORY_PROJECT=eva \
+./install/push_images_to_repository.sh
+
+# n8n 이미지 push
+IMAGE_LIST=./install/images/n8n-images.txt \
+REPOSITORY_REGISTRY=harbor.main.local:32080 \
+REPOSITORY_PROJECT=eva \
+./install/push_images_to_repository.sh
+```
+
+준비 결과 Main Harbor에는 아래 형태의 이미지가 있어야 합니다.
+
+```text
+harbor.main.local:32080/eva/eva-agent:3.0.4
+harbor.main.local:32080/eva/eva-app:3.0.5
+harbor.main.local:32080/eva/eva-vision:2.0.5
+harbor.main.local:32080/eva/vllm-openai:v0.21.0
+harbor.main.local:32080/eva/qdrant:v1.16.3
+harbor.main.local:32080/eva/mysql:8.0.42-bookworm
+harbor.main.local:32080/eva/k8s-device-plugin:v0.18.0
+harbor.main.local:32080/eva/cuda-sample:vectoradd-cuda12.5.0
+harbor.main.local:32080/eva/cuda:12.5.0-base-ubuntu22.04
+harbor.main.local:32080/eva/n8n:1.103.2
+```
+
+`harbor.main.local:32080`을 Docker 또는 k3s에서 HTTP registry로 사용할 경우, 해당 노드의 Docker/containerd에 insecure registry 또는 인증서 신뢰 설정이 필요할 수 있습니다.
+
+### [local_repository]
+
+인터넷 가능 환경에서 필요한 파일을 모두 준비한 뒤, `eva-deployer` 폴더를 USB로 Airgap 서버에 복사합니다. Airgap 서버 내부에는 Local Harbor를 띄우고, k3s는 해당 Harbor에서 이미지를 pull합니다.
+
+인터넷 가능 환경에서 Airgap 서버용 Python/Ansible 패키지, asset, 이미지, Harbor offline installer를 준비합니다.
+
+```bash
+# Airgap 서버에서 Python venv/Ansible 설치에 필요한 패키지 다운로드
+./install/download_python_venv_debs.sh
+./install/download_ansible_wheels.sh
+
+# chart/values/script/kustomize/manifest 등 설치 asset 다운로드
+# Docker Engine/Compose와 Ansible base/NFS role용 apt 의존성 .deb bundle도 함께 준비됩니다.
+# Docker apt 패키지 다운로드를 위해 sudo 인증 후 실행
+sudo -v && AWS_PROFILE=default ./install/download_offline_assets.sh
+
+# EVA 모델 캐시 다운로드 -> install/models
+AWS_PROFILE=default ./install/download_eva_models.sh
+
+# EVA/infra/n8n 이미지 pull 및 이미지 목록 생성
+AWS_PROFILE=default ./install/download_eva_images.sh
+./install/download_infra_images.sh
+./install/download_n8n_images.sh
+
+# Airgap 서버에서 Local Harbor 설치에 필요한 Harbor offline installer 다운로드
+./install/setup_harbor.sh --download-only
+```
+
+USB로 이미지를 옮기기 위해 Docker image archive를 생성합니다. 이 archive는 k3s에 직접 import하는 용도가 아니라, Airgap 서버의 Local Harbor에 이미지를 seed하기 위한 용도입니다.
+
+```bash
+cat ./install/images/images-pulled.txt \
+    ./install/images/infra-images-pulled.txt \
+    ./install/images/n8n-images.txt \
+  | sort -u > ./install/images/repository-images.txt
+
+docker save \
+  -o ./install/images/repository-images.tar \
+  $(cat ./install/images/repository-images.txt)
+```
+
+저장 공간이 부족하면 `docker save` 후 인터넷 가능 환경의 Docker image를 삭제해도 됩니다. `repository-images.tar`와 `eva-deployer` 폴더를 Airgap 서버로 옮긴 뒤에는 Airgap 서버에서 다시 `docker load`합니다.
+
+```bash
+docker image rm $(cat ./install/images/repository-images.txt)
+```
+
+`eva-deployer` 폴더를 저장 매체로 복사하여 Airgap 서버로 이동합니다.
+
+Local Harbor의 실행 설정은 `eva-deployer` 밖의 `~/.local/share/eva-harbor`에 저장합니다. 이후에는 Harbor를 중지하지 않고 `eva-deployer` 전체를 다시 동기화할 수 있습니다.
+
+기존에 `eva-deployer/install/harbor/harbor`에 Harbor를 설치했다면, 기존 Harbor를 중지한 뒤 외부 runtime 경로로 한 번 이전합니다.
+
+```bash
+cd /home/eva/eva-deployer/install/harbor/harbor
+sudo docker compose down
+
+cd /home/eva/eva-deployer
+./install/setup_harbor.sh \
+  --hostname localhost \
+  --install-root ~/.local/share/eva-harbor
+```
+
+Airgap 서버에서 Python/Ansible을 설치합니다.
+
+```bash
+./install/install_python_venv_airgap.sh
+./install/install_ansible_airgap.sh
+source .venv/bin/activate
+ansible --version
+```
+
+Airgap 서버에서 Local Harbor를 설치합니다. 먼저 준비된 Docker `.deb` bundle로 Docker Engine과 Compose plugin을 설치한 뒤 Harbor를 실행해야 합니다.
+
+Harbor는 `localhost:32080`으로 실행됩니다. 최초 설치의 관리자 계정은 `admin`, 기본 비밀번호는 `EVA123@`입니다. 운영 환경에서는 `--admin-password`로 변경하세요.
+
+```bash
+# install/ 전체가 복사된 airgap 서버에서 Docker 설치
+sudo ./install/install_docker.sh --airgap
+```
+
+`docker` 그룹 권한을 적용하려면 SSH 세션을 종료한 뒤 다시 접속하세요.
+
+```bash
+./install/setup_harbor.sh \
+  --hostname localhost \
+  --install-root ~/.local/share/eva-harbor
+```
+
+이미 설치된 Harbor의 volume 경로만 바꾸려면 아래처럼 실행합니다.
+
+```bash
+./install/setup_harbor.sh \
+  --hostname localhost \
+  --install-root ~/.local/share/eva-harbor \
+  --data-volume /data001/harbor
+```
+
+이 경우 기존 `harbor_admin_password`는 명시하지 않으면 기존 `harbor.yml` 값을 유지합니다. 기존 Harbor 데이터는 자동 복사하지 않으므로, 새 경로는 빈 registry 저장소로 시작합니다.
+
+`repository-images.tar`는 Harbor에 직접 push할 수 없습니다. Docker daemon에 load한 뒤 Local Harbor로 push해야 합니다. push 중에는 archive, Docker image cache, Harbor registry가 일시적으로 모두 저장 공간을 사용합니다.
+
+Airgap 서버에서 이미지를 load한 뒤 Local Harbor로 push합니다.
+`push_images_to_repository.sh`는 `localhost:32080`의 `harbor.yml`에서 관리자 비밀번호를 읽어 자동으로 로그인합니다.
+
+```bash
+docker load -i ./install/images/repository-images.tar
+
+# EVA 이미지 push
+PULL_SOURCE_IMAGES=false \
+REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_PROJECT=eva \
+./install/push_images_to_repository.sh
+
+# Infra 이미지 push
+PULL_SOURCE_IMAGES=false \
+IMAGE_LIST=./install/images/infra-images-pulled.txt \
+REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_PROJECT=eva \
+./install/push_images_to_repository.sh
+
+# n8n 이미지 push
+PULL_SOURCE_IMAGES=false \
+IMAGE_LIST=./install/images/n8n-images.txt \
+REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_PROJECT=eva \
+./install/push_images_to_repository.sh
+```
+
+Harbor에 저장된 repository를 확인합니다.
+
+```bash
+curl -fsS -u "admin:${HARBOR_ADMIN_PASSWORD:-EVA123@}" \
+  'http://localhost:32080/api/v2.0/repositories?project_name=eva&page_size=100' \
+  | python3 -c 'import json, sys; print("\n".join(item["name"] for item in json.load(sys.stdin)))'
+```
+
+Harbor 확인 후 Docker cache와 archive가 더 이상 필요 없으면 삭제해 공간을 확보할 수 있습니다.
+
+```bash
+docker image rm $(cat ./install/images/repository-images.txt)
+docker image rm $(docker images --format '{{.Repository}}:{{.Tag}}' | awk '$0 ~ /^localhost:32080\/eva\// { print }')
+rm -f ./install/images/repository-images.tar
+```
+
+---
+
+## 2. Inventory
+
+원격 서버 설치:
+
+```ini
+{{IP}} ansible_user={{계정}} ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_become_password={{비밀번호}}
+```
+
+Airgap 서버에 SSH로 접속한 뒤, 해당 서버에서 직접 실행:
+
+```ini
+localhost ansible_connection=local ansible_become_password={{현재 로그인 계정의 sudo 비밀번호}}
+```
+
+`ansible_connection=local`을 지정하면 Ansible은 localhost에 SSH로 다시 접속하지 않고 현재 로그인한 계정으로 실행합니다.
+
+SSH 키:
+
+```bash
+ssh-keygen -t rsa -b 4096
+ssh-copy-id {{계정}}@{{IP}}
+```
+
+---
+
+## 3. 실행 공통
+
+`check`는 변경 없이 시뮬레이션하는 `--check` 실행입니다. `run`은 실제 서버에 변경을 적용합니다.
+
+로그 폴더는 playbook별로 먼저 생성합니다.
+
+```bash
+mkdir -p logs_precondition logs_infra logs_gpu_mig logs_eva logs_n8n
+```
+
+---
+
+## 4. 사전 점검
+
+대상 서버가 EVA 설치를 진행할 수 있는 상태인지 먼저 확인합니다. 이 단계는 서버 설정을 변경하지 않고, 점검 결과를 control node의 `config/<target-ip>/precondition.yaml`에 저장합니다.
+
+확인 항목:
+
+- Public outbound 확인: `https://ifconfig.me`로 public IP 조회 가능 여부
+- 외부 서비스 DNS/TCP/HTTPS 접근 확인: GitHub, Docker Hub, AWS ECR, S3
+- AWS CLI installer 다운로드 가능 여부: `https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip` partial download
+- DNS 설정 확인: `/etc/resolv.conf`
+- Routing table 확인: `ip route`
+- Kernel 정보 확인: `uname -a`
+- Disk 사용량 확인: `df -h`
+- MIG 활성화 사전 조건 확인: kernel lockdown, Secure Boot, NVIDIA Display Mode
+
+MIG 관련해서는 아래 명령 결과를 함께 저장합니다.
+
+```bash
+cat /sys/kernel/security/lockdown
+mokutil --sb-state
+nvidia-smi -q | grep -A5 "Display Mode"
+```
+
+`precondition.yaml`에서 특히 아래 값을 확인합니다.
+
+- `public_outbound.success`: public IP 조회 가능 여부
+- `external_services`: 외부 서비스별 DNS/TCP/HTTPS 접근 결과
+- `aws_cli_download.downloadable`: AWS CLI installer 다운로드 가능 여부
+- `mig_activation.possible`: MIG 활성화 가능 여부
+- `mig_activation.failed_reasons`: MIG 활성화가 어려운 경우 사유
+
+```bash
+ANSIBLE_LOG_PATH=logs_precondition/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_precondition.yaml --check 2>&1 | tee logs_precondition/ansible-check.log
+
+ANSIBLE_LOG_PATH=logs_precondition/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_precondition.yaml -vvv 2>&1 | tee logs_precondition/ansible-run.log
+```
+
+결과 확인:
+
+```bash
+ls -l ./config/<target-ip>/precondition.yaml
+```
+
+---
+
+## 5. 인프라 설치
+
+인프라는 k3s, kubectl, helm, NFS CSI, NVIDIA runtime/device-plugin 등을 구성합니다.
+
+### [cloud_repository]
+
+대상 서버가 인터넷/ECR/Docker Hub에 접근 가능한 경우입니다.
+
+```bash
+mkdir -p logs_infra
+
+ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml --check \
+  -e repository_mode=cloud_repository \
+  2>&1 | tee logs_infra/ansible-check.log
+
+ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml \
+  -e repository_mode=cloud_repository \
+  -vvv 2>&1 | tee logs_infra/ansible-run.log
+```
+
+### [remote_repository]
+
+Main Harbor에서 infra 이미지를 pull하는 경우입니다.
+
+```bash
+mkdir -p logs_infra
+
+ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml --check \
+  -e repository_mode=remote_repository \
+  -e repository_registry=harbor.main.local:32080 \
+  -e repository_project=eva \
+  2>&1 | tee logs_infra/ansible-check.log
+
+ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml \
+  -e repository_mode=remote_repository \
+  -e repository_registry=harbor.main.local:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_infra/ansible-run.log
+```
+
+### [local_repository]
+
+Airgap 서버 내부 Local Harbor에서 infra 이미지를 pull하는 경우입니다.
+
+```bash
+mkdir -p logs_infra
+
+ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml --check \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  2>&1 | tee logs_infra/ansible-check.log
+
+ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_infra/ansible-run.log
+```
+
+드라이버 패키지를 지정하려면 추가 변수로 넘깁니다.
+
+```bash
+.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -e gpu_driver_package=nvidia-driver-580 \
+  -vvv
+```
+
+결과 확인:
+
+```bash
+kubectl get nodes
+kubectl get ds -n kube-system | grep nvidia-device-plugin
+kubectl logs -n kube-system -l name=nvidia-device-plugin --tail=50
+```
+
+---
+
+## 6. GPU MIG 설정
+
+MIG 설정은 EVA 환경 설정 전에 수행합니다.
+
+MIG에서 `display_mode_selector`가 필요하면 인터넷 가능 환경에서 미리 받습니다.
+
+```bash
+AWS_PROFILE=default AWS_REGION=ap-northeast-2 ./install/download_display_mode_selector.sh
+```
+
+### [cloud_repository]
+
+```bash
+mkdir -p logs_gpu_mig
+
+ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_gpu_mig.yaml \
+  -e repository_mode=cloud_repository \
+  -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
+```
+
+### [remote_repository]
+
+```bash
+mkdir -p logs_gpu_mig
+
+ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_gpu_mig.yaml \
+  -e repository_mode=remote_repository \
+  -e repository_registry=harbor.main.local:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
+```
+
+### [local_repository]
+
+```bash
+mkdir -p logs_gpu_mig
+
+ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_gpu_mig.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
+```
+
+결과 확인:
+
+```bash
+nvidia-smi
+```
+
+---
+
+## 7. EVA 환경 설정
+
+`site_eva_config.yaml`은 EVA 배포에 필요한 설정 파일을 생성합니다. 생성된 값은 `config/<target>/eva.yaml`에 저장됩니다.
+
+### [cloud_repository]
+
+```bash
+mkdir -p logs_eva
+
+ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_eva_config.yaml \
+  -e repository_mode=cloud_repository \
+  -vvv 2>&1 | tee logs_eva/ansible-config.log
+```
+
+### [remote_repository]
+
+```bash
+mkdir -p logs_eva
+
+ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_eva_config.yaml \
+  -e repository_mode=remote_repository \
+  -e repository_registry=harbor.main.local:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_eva/ansible-config.log
+```
+
+### [local_repository]
+
+```bash
+mkdir -p logs_eva
+
+ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_eva_config.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_eva/ansible-config.log
+```
+
+결과 확인:
+
+```bash
+ls -l ./config/<target-ip>/eva.yaml
+```
+
+---
+
+## 8. EVA 배포
+
+`site_eva.yaml`은 EVA Agent, EVA Vision, EVA App을 배포합니다.
+
+배포 시 Helm values는 아래 순서로 적용합니다.
+
+- chart 기본 values
+- release에 포함된 k3s values 또는 secret values
+- 이 repository의 `values/*-k3s-override.yaml.j2`
+- `7. EVA 환경 설정`에서 생성된 `config/<target>/eva.yaml` 기반 override
+
+`values/` 폴더의 파일은 전체 values 사본이 아니라, EVA deployer가 책임지는 k3s/repository override만 담습니다. `repository_mode`, `repository_registry`, `repository_project`에 따른 image repository 변경과 k3s 실행에 필요한 값은 여기서 관리하고, 환경별 App/Agent 설정은 `site_eva_config.yaml`이 생성한 `config/<target>/eva.yaml` 값을 배포 단계에서 추가 override로 반영합니다.
+
+EVA App의 호스트별 설정은 로컬 전용 파일 `values/app.yaml` 하나에서 관리합니다. 이 파일에는 license credential이 포함될 수 있으므로 Git에 커밋하지 않습니다. 저장소에는 `values/app.yaml.sample`만 포함합니다.
+
+처음 설치할 때 sample을 복사합니다.
+
+```bash
+cp values/app.yaml.sample values/app.yaml
+```
+
+복사한 `values/app.yaml`의 최상위 키를 배포 대상의 `ansible_host` 또는 inventory hostname으로 지정합니다. license credential은 배포 환경별로 다르므로, `values/app.yaml.sample`에서 대상 환경의 블록을 선택해 주석을 해제하고 해당 환경에 발급된 키를 사용합니다. prod와 dev의 credential을 섞어 사용하면 안 됩니다.
+
+```yaml
+localhost:
+  app:
+    browserTitleName: "EVA SHEE (서초)"
+    license:
+      activation_mode: "offline"
+      product_code: "eva-prod"
+      api_key: "<PROD_API_KEY>"
+      shared_key: "<PROD_SHARED_KEY>"
+    pipeline:
+      streamer:
+        dispatcherFaceAnonymizerEnabled: true
+```
+
+prod는 `activation_mode: "offline"`, `product_code: "eva-prod"`와 prod용 API/shared key를 사용합니다. dev는 `activation_mode: "online"`, `product_code: "eva-dev"`와 dev용 API/shared key를 사용합니다.
+
+예를 들어 dev inventory에 `10.186.0.75`가 있으면 `10.186.0.75:` 아래에 dev 설정을 작성합니다. 해당 호스트 키가 없으면 기존 공통 설정만 적용됩니다. `values/app.yaml`이 없으면 호스트별 override 없이 배포합니다.
+
+배포 중 렌더링된 최종 override values는 control node의 `deploy/<target>/` 아래에 component별로 남습니다.
+
+```text
+deploy/<target>/
+  app/app-k3s-override.yaml
+  vision/vision-k3s-override.yaml
+  agent/agent-k3s-override.yaml
+  qdrant/qdrant-k3s-override.yaml
+  vllm/vllm-k3s-override.yaml
+  vllm/values-override-from-config.yaml
+```
+
+`vllm/values-override-from-config.yaml`은 `config/<target>/eva.yaml`에 vLLM override 값이 있을 때만 생성됩니다.
+
+### [cloud_repository]
+
+```bash
+mkdir -p logs_eva
+
+ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_eva.yaml \
+  -e repository_mode=cloud_repository \
+  -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
+```
+
+### [remote_repository]
+
+```bash
+mkdir -p logs_eva
+
+ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_eva.yaml \
+  -e repository_mode=remote_repository \
+  -e repository_registry=harbor.main.local:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
+```
+
+### [local_repository]
+
+```bash
+mkdir -p logs_eva
+
+ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_eva.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
+```
+
+vLLM GPU 프로파일을 지정하려면 추가 변수로 넘깁니다.
+
+```bash
+.venv/bin/ansible-playbook -i inventory.ini site_eva.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -e eva_agent_vllm_profile=A6000x1 \
+  -vvv
+```
+
+지원 프로파일:
+
+- `A6000x1`
+- `L40sx1`
+- `PRO5000x3`
+- `PRO6000-MIGx4`
+
+결과 확인:
+
+```bash
+kubectl get pods -A
+kubectl get svc -A
+```
+
+기본 포트는 `http://<target-ip>:32010/`입니다.
+
+---
+
+## 9. n8n 설치 (Optional)
+
+n8n은 EVA 설치와 분리해서 별도 playbook으로 실행합니다.
+
+### [cloud_repository]
+
+```bash
+mkdir -p logs_n8n
+
+ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_n8n.yaml \
+  -e repository_mode=cloud_repository \
+  -vvv 2>&1 | tee logs_n8n/ansible-run.log
+```
+
+### [remote_repository]
+
+Main Harbor에 아래 이미지가 준비되어 있어야 합니다.
+
+```text
+harbor.main.local:32080/eva/n8n:1.103.2
+```
+
+```bash
+mkdir -p logs_n8n
+
+ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_n8n.yaml \
+  -e repository_mode=remote_repository \
+  -e repository_registry=harbor.main.local:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_n8n/ansible-run.log
+```
+
+### [local_repository]
+
+Local Harbor에 아래 이미지가 준비되어 있어야 합니다.
+
+```text
+localhost:32080/eva/n8n:1.103.2
+```
+
+```bash
+mkdir -p logs_n8n
+
+ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
+.venv/bin/ansible-playbook -i inventory.ini site_n8n.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -vvv 2>&1 | tee logs_n8n/ansible-run.log
+```
+
+결과 확인:
+
+```bash
+kubectl get all -n n8n
+```
+
+브라우저에서 `http://<target-ip>:30678` 접속 후 n8n UI를 확인합니다.

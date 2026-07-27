@@ -1,0 +1,57 @@
+- name: Resolve auto-login user
+  ansible.builtin.set_fact:
+    config_auto_login_user: "{{ config_autologin_user | default(ansible_user | default(ansible_ssh_user | default(lookup('env', 'USER')))) }}"
+  changed_when: false
+
+- name: Ensure getty override directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/getty@tty1.service.d
+    state: directory
+    mode: "0755"
+
+- name: Configure tty1 auto-login
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/getty@tty1.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/sbin/agetty --autologin {{ config_auto_login_user }} --noclear %I $TERM
+
+- name: Reload systemd daemon for getty override
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart and enable getty tty1
+  ansible.builtin.systemd:
+    name: getty@tty1
+    enabled: true
+    state: restarted
+
+- name: Check whether gdm3 custom.conf exists
+  ansible.builtin.stat:
+    path: /etc/gdm3/custom.conf
+  register: config_auto_login_gdm3_custom_conf
+
+- name: Enable GDM3 automatic login
+  ansible.builtin.lineinfile:
+    path: /etc/gdm3/custom.conf
+    regexp: '^#?AutomaticLoginEnable='
+    line: 'AutomaticLoginEnable=True'
+    insertafter: '^\[daemon\]'
+  when: config_auto_login_gdm3_custom_conf.stat.exists
+
+- name: Set GDM3 automatic login user
+  ansible.builtin.lineinfile:
+    path: /etc/gdm3/custom.conf
+    regexp: '^#?AutomaticLogin='
+    line: 'AutomaticLogin={{ config_auto_login_user }}'
+    insertafter: '^AutomaticLoginEnable='
+  when: config_auto_login_gdm3_custom_conf.stat.exists
+
+- name: Mark auto-login policy status
+  ansible.builtin.set_fact:
+    config_auto_login_status: "enabled"
+  changed_when: false

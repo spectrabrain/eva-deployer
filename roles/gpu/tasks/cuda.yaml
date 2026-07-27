@@ -1,0 +1,93 @@
+- name: Check existing CUDA directories
+  ansible.builtin.shell: set -o pipefail && ls /usr/local/ | grep cuda
+  args:
+    executable: /bin/bash
+  register: gpu_cuda_existing_dirs
+  failed_when: false
+  changed_when: false
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+
+- name: Download CUDA keyring package (online)
+  ansible.builtin.get_url:
+    url: "{{ gpu_cuda_keyring_url | default('https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb') }}"
+    dest: /tmp/cuda-keyring_1.1-1_all.deb
+    mode: '0644'
+  register: gpu_cuda_keyring_download
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - gpu_cuda_existing_dirs.rc != 0
+    - not (airgap_mode | default(false) | bool)
+
+- name: Copy CUDA keyring package (offline bundle)
+  ansible.builtin.copy:
+    src: "{{ gpu_cuda_keyring_offline_path | default(playbook_dir ~ '/install/cuda/cuda-keyring_1.1-1_all.deb') }}"
+    dest: /tmp/cuda-keyring_1.1-1_all.deb
+    mode: '0644'
+  register: gpu_cuda_keyring_download
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - gpu_cuda_existing_dirs.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Install CUDA keyring package
+  ansible.builtin.apt:
+    deb: /tmp/cuda-keyring_1.1-1_all.deb
+    state: present
+  register: gpu_cuda_keyring_install
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - gpu_cuda_existing_dirs.rc != 0
+
+- name: Install CUDA toolkit 12.8
+  ansible.builtin.apt:
+    name: cuda-toolkit-12-8
+    state: present
+    update_cache: true
+  register: gpu_cuda_toolkit_install
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - gpu_cuda_existing_dirs.rc != 0
+    - not (airgap_mode | default(false) | bool)
+
+- name: Install CUDA toolkit 12.8 from offline apt metadata
+  ansible.builtin.apt:
+    name: cuda-toolkit-12-8
+    state: present
+    update_cache: false
+  register: gpu_cuda_toolkit_install
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - gpu_cuda_existing_dirs.rc != 0
+    - airgap_mode | default(false) | bool
+
+- name: Skip CUDA installation when CUDA already exists
+  ansible.builtin.debug:
+    msg: "CUDA directories already exist under /usr/local. Skip CUDA toolkit installation."
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+    - gpu_cuda_existing_dirs.rc == 0
+
+- name: Check CUDA install directories
+  ansible.builtin.shell: set -o pipefail && ls /usr/local/ | grep cuda
+  args:
+    executable: /bin/bash
+  register: gpu_cuda_dirs
+  changed_when: false
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode
+
+- name: Show CUDA install directories
+  ansible.builtin.debug:
+    var: gpu_cuda_dirs.stdout_lines
+  when:
+    - gpu_has_nvidia
+    - not ansible_check_mode

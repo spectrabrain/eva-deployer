@@ -1,0 +1,43 @@
+# site.yaml
+- name: Configure hosts
+  hosts: all
+  become: true
+  any_errors_fatal: true
+  serial: 1
+
+  pre_tasks:
+    - name: Resolve repository mode
+      ansible.builtin.set_fact:
+        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+        airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+      changed_when: false
+
+  tasks:
+
+    - name: STEP 1 - base
+      ansible.builtin.import_role:
+        name: base
+
+    - name: STEP 2 - docker
+      ansible.builtin.import_role:
+        name: docker
+
+    - name: STEP 3 - kubectl
+      ansible.builtin.import_role:
+        name: kubectl
+
+    - name: STEP 4 - helm
+      ansible.builtin.import_role:
+        name: helm
+
+    - name: STEP 5 - gpu
+      ansible.builtin.import_role:
+        name: gpu
+
+    - name: STEP 6 - k3s
+      ansible.builtin.import_role:
+        name: k3s
+
+    - name: STEP 7 - nfs
+      ansible.builtin.import_role:
+        name: nfs

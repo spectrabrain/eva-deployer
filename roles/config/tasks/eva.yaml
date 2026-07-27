@@ -1,0 +1,108 @@
+- name: Collect GPU inventory for eva.yaml
+  ansible.builtin.command: nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader
+  register: config_gpu_inventory
+  changed_when: false
+  failed_when: false
+
+- name: Set GPU facts for eva.yaml
+  ansible.builtin.set_fact:
+    config_detected_gpu_count: "{{ (config_gpu_inventory.stdout_lines | default([])) | length if config_gpu_inventory.rc == 0 else 0 }}"
+    config_gpu_specs: "{{ config_gpu_inventory.stdout_lines | default([]) if config_gpu_inventory.rc == 0 else [] }}"
+  changed_when: false
+
+- name: Collect MIG mode status for eva.yaml
+  ansible.builtin.command: nvidia-smi --query-gpu=mig.mode.current --format=csv,noheader
+  register: config_mig_mode_status
+  changed_when: false
+  failed_when: false
+
+- name: Collect MIG instance list for eva.yaml
+  ansible.builtin.command: nvidia-smi -L
+  register: config_mig_instance_list
+  changed_when: false
+  failed_when: false
+
+- name: Set MIG facts for eva.yaml
+  ansible.builtin.set_fact:
+    config_mig_enabled: >-
+      {{
+        (config_mig_mode_status.rc == 0)
+        and (
+          (config_mig_mode_status.stdout_lines | default([]))
+          | map('trim')
+          | select('equalto', 'Enabled')
+          | list
+          | length
+        ) > 0
+      }}
+    config_mig_instance_specs: >-
+      {{
+        (config_mig_instance_list.stdout_lines | default([]))
+        | select('search', 'MIG ')
+        | list
+        if config_mig_instance_list.rc == 0 else []
+      }}
+    config_mig_instance_count: >-
+      {{
+        (
+          (config_mig_instance_list.stdout_lines | default([]))
+          | select('search', 'MIG ')
+          | list
+          | length
+        )
+        if config_mig_instance_list.rc == 0 else 0
+      }}
+  changed_when: false
+
+- name: Set effective accelerator count for eva.yaml
+  ansible.builtin.set_fact:
+    config_effective_gpu_count: >-
+      {{
+        config_mig_instance_count | int
+        if (config_mig_enabled | bool) and ((config_mig_instance_count | int) > 0)
+        else config_detected_gpu_count | int
+      }}
+  changed_when: false
+
+- name: Resolve NFS share path for eva.yaml
+  ansible.builtin.include_role:
+    name: nfs
+    tasks_from: share_path
+
+- name: Build eva.yaml content
+  ansible.builtin.set_fact:
+    config_eva_perceptor_worker_num: "{{ [((config_effective_gpu_count | int) * 2), 8] | min }}"
+    config_eva_detector_worker_num: "{{ [((config_effective_gpu_count | int) * 8), 32] | min }}"
+    config_eva_request_timeout_seconds: "{{ 300 if (config_effective_gpu_count | int) >= 2 else 600 }}"
+    config_eva_replica_count: "{{ (config_effective_gpu_count | int) - 1 if (config_effective_gpu_count | int) > 1 else 1 }}"
+    config_eva_nfs_share_path: "{{ nfs_share_path | default('/share/eva-agent') }}"
+    config_eva_aws_dir: "{{ (awscli_target_home | default('/home/' ~ (ansible_user | default(ansible_ssh_user | default(lookup('env', 'USER')))))) ~ '/.aws' }}"
+    config_eva_backend_host: "{{ ansible_host | default(inventory_hostname) }}"
+    config_eva_auto_update_status: "{{ config_auto_update_status | default('disabled') }}"
+    config_eva_auto_login_status: "{{ config_auto_login_status | default('enabled') }}"
+    config_eva_gpu_cdi_status: "{{ config_gpu_cdi_status | default('enabled') }}"
+    config_eva_output_dir: "{{ playbook_dir }}/config/{{ ansible_host | default(inventory_hostname) }}"
+  changed_when: false
+
+- name: Ensure local eva.yaml output directory exists on control node
+  ansible.builtin.file:
+    path: "{{ config_eva_output_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+
+- name: Remove existing local eva.yaml on control node
+  ansible.builtin.file:
+    path: "{{ config_eva_output_dir }}/eva.yaml"
+    state: absent
+  delegate_to: localhost
+  become: false
+
+- name: Write eva.yaml on control node
+  ansible.builtin.template:
+    dest: "{{ config_eva_output_dir }}/eva.yaml"
+    src: eva.yaml.j2
+    mode: "0644"
+  delegate_to: localhost
+  become: false

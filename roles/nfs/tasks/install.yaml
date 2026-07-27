@@ -1,0 +1,66 @@
+- name: NFS CSI Driver Helm repo add
+  ansible.builtin.command: >-
+    helm repo add csi-driver-nfs
+    https://raw.githubusercontent.com/kubernetes-csi/csi-driver-nfs/master/charts
+  changed_when: false
+  when: not (airgap_mode | default(false) | bool)
+
+- name: NFS CSI Driver Helm repo update
+  ansible.builtin.command: helm repo update
+  changed_when: false
+  when: not (airgap_mode | default(false) | bool)
+
+- name: NFS CSI Driver install
+  ansible.builtin.command: >-
+    helm upgrade --install csi-driver-nfs csi-driver-nfs/csi-driver-nfs
+    --namespace kube-system
+    --version v4.11.0
+  changed_when: false
+  when: not (airgap_mode | default(false) | bool)
+
+- name: Copy NFS CSI chart from offline bundle
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/install/nfs/csi-driver-nfs-4.11.0.tgz"
+    dest: /tmp/csi-driver-nfs-4.11.0.tgz
+    mode: '0644'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: NFS CSI Driver install (offline chart)
+  ansible.builtin.command: >-
+    helm upgrade --install csi-driver-nfs /tmp/csi-driver-nfs-4.11.0.tgz
+    --namespace kube-system
+    --set-string image.nfs.repository={{ nfs_csi_image_prefix }}/nfsplugin
+    --set-string image.csiProvisioner.repository={{ nfs_csi_image_prefix }}/csi-provisioner
+    --set-string image.csiResizer.repository={{ nfs_csi_image_prefix }}/csi-resizer
+    --set-string image.csiSnapshotter.repository={{ nfs_csi_image_prefix }}/csi-snapshotter
+    --set-string image.livenessProbe.repository={{ nfs_csi_image_prefix }}/livenessprobe
+    --set-string image.nodeDriverRegistrar.repository={{ nfs_csi_image_prefix }}/csi-node-driver-registrar
+    --set-string image.externalSnapshotter.repository={{ nfs_csi_image_prefix }}/snapshot-controller
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: NFS server apt update
+  ansible.builtin.apt:
+    update_cache: true
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: NFS server install
+  ansible.builtin.apt:
+    name: nfs-kernel-server
+    state: present
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+
+- name: Skip NFS server package installation in check mode
+  ansible.builtin.debug:
+    msg: >-
+      Check mode skips NFS apt installation. Verify nfs-kernel-server is
+      already installed before running --check on an airgap host.
+  when: ansible_check_mode

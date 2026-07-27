@@ -1,0 +1,28 @@
+# site.yaml
+- name: Configure hosts
+  hosts: all
+  become: true
+  any_errors_fatal: true
+  serial: 1
+
+  pre_tasks:
+    - name: Resolve repository mode
+      ansible.builtin.set_fact:
+        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+        airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+      changed_when: false
+
+  tasks:
+    - name: STEP 1 - awscli
+      ansible.builtin.import_role:
+        name: awscli
+      when: not (airgap_mode | default(false) | bool)
+
+    - name: STEP 1.1 - skip awscli in airgap mode
+      ansible.builtin.debug:
+        msg: "airgap_mode=true 이므로 awscli role을 건너뜁니다."
+      when: airgap_mode | default(false) | bool
+
+    - name: STEP 2 - config
+      ansible.builtin.import_role:
+        name: config

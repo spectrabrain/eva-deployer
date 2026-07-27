@@ -1,0 +1,144 @@
+---
+- name: Check whether Docker is already installed
+  ansible.builtin.command: docker --version
+  register: docker_installed_check
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Install Docker engine when missing
+  when: docker_installed_check.rc != 0
+  block:
+    - name: Set Docker source parameters
+      ansible.builtin.set_fact:
+        docker_repo_url: "{{ docker_repo_url | default('https://download.docker.com/linux/ubuntu') }}"
+        docker_gpg_url: "{{ docker_gpg_url | default('https://download.docker.com/linux/ubuntu/gpg') }}"
+        docker_offline_gpg_path: "{{ docker_offline_gpg_path | default(playbook_dir ~ '/install/docker/docker.gpg') }}"
+        docker_offline_package_dir: "{{ docker_offline_package_dir | default(playbook_dir ~ '/install/docker/debs') }}"
+      changed_when: false
+
+    - name: Install Docker Engine on Ubuntu
+      become: true
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: true
+      when: not (airgap_mode | default(false) | bool)
+
+    - name: Find Docker offline packages
+      ansible.builtin.find:
+        paths: "{{ docker_offline_package_dir }}"
+        patterns: "*.deb"
+        file_type: file
+      register: docker_offline_packages
+      when: airgap_mode | default(false) | bool
+
+    - name: Assert Docker offline packages are available
+      ansible.builtin.assert:
+        that:
+          - docker_offline_packages.matched | int > 0
+        fail_msg: >-
+          Docker가 없는 airgap 서버에는 {{ docker_offline_package_dir }} 아래
+          Docker .deb bundle이 필요합니다. 준비 서버에서
+          install/download_offline_assets.sh를 먼저 실행하세요.
+      when:
+        - airgap_mode | default(false) | bool
+        - not ansible_check_mode
+
+    - name: Install Docker Engine from offline packages
+      ansible.builtin.shell: >-
+        apt-get install -y --no-download {{ docker_offline_package_dir }}/*.deb
+      args:
+        executable: /bin/bash
+      register: docker_offline_install
+      changed_when: true
+      when:
+        - airgap_mode | default(false) | bool
+        - not ansible_check_mode
+
+    - name: Resolve Docker apt architecture
+      ansible.builtin.set_fact:
+        docker_apt_arch: "{{ docker_arch_map.get(ansible_facts['architecture'], 'amd64') }}"
+      vars:
+        docker_arch_map:
+          x86_64: amd64
+          aarch64: arm64
+          armv7l: armhf
+          ppc64le: ppc64el
+          s390x: s390x
+
+    - name: Create directory for Docker GPG key
+      become: true
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker official GPG key (online)
+      become: true
+      ansible.builtin.get_url:
+        url: "{{ docker_gpg_url }}"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+        force: true
+      when: not (airgap_mode | default(false) | bool)
+
+    - name: Add Docker official GPG key (offline bundle)
+      become: true
+      ansible.builtin.copy:
+        src: "{{ docker_offline_gpg_path }}"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+        force: true
+      when: airgap_mode | default(false) | bool
+
+    - name: Add Docker repository to apt sources
+      become: true
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ docker_apt_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+          {{ docker_repo_url }} {{ ansible_facts['distribution_release'] }} stable
+        state: present
+        filename: docker
+      when: not (airgap_mode | default(false) | bool)
+
+    - name: Install Docker Engine and plugins
+      become: true
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+      when:
+        - not ansible_check_mode
+        - not (airgap_mode | default(false) | bool)
+
+- name: Skip Docker install because it is already installed
+  ansible.builtin.debug:
+    msg: "Docker already installed ({{ docker_installed_check.stdout }}). Skipping install."
+  when: docker_installed_check.rc == 0
+
+- name: Ensure Docker service is started and enabled
+  become: true
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  when: not ansible_check_mode
+
+- name: Add current user to docker group
+  become: true
+  ansible.builtin.user:
+    name: "{{ ansible_user | default(lookup('env', 'USER')) }}"
+    groups: docker
+    append: true
+  when: not ansible_check_mode

@@ -1,0 +1,14 @@
+- name: Apply auto-update settings
+  ansible.builtin.import_tasks: auto_update.yaml
+
+- name: Apply auto-login settings
+  ansible.builtin.import_tasks: auto_login.yaml
+
+- name: Apply GPU CDI settings
+  ansible.builtin.import_tasks: gpu_cdi.yaml
+
+- name: Write EVA summary file
+  ansible.builtin.import_tasks: eva.yaml
+
+- name: Write cluster secret file
+  ansible.builtin.import_tasks: scret.yaml

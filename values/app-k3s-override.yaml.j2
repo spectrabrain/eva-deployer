@@ -1,0 +1,66 @@
+image:
+  repository: "{{ eva_app_image_repository }}"
+  tag: "{{ eva_app_deploy_version }}"
+  pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
+
+app:
+  backendHost: "{{ eva_app_backend_host }}"
+  backendSecure: {{ eva_app_backend_secure | bool | lower }}
+  infraProvider: onprem
+  jwtSecret: "{{ eva_app_jwt_secret }}"
+  vision:
+    ml: "{{ eva_app_vision_ml }}"
+
+  agent:
+    llm: "{{ eva_app_agent_llm }}"
+    vlm: "{{ eva_app_agent_vlm }}"
+    requestTimeoutSeconds: {{ eva_app_agent_request_timeout_seconds }}
+
+  pipeline:
+    detector:
+      workerNum: {{ eva_app_pipeline_detector_worker_num }}
+    perceptor:
+      workerNum: {{ eva_app_pipeline_perceptor_worker_num }}
+
+  license:
+    activation_mode: "{{ eva_app_license_activation_mode }}"
+    product_code: "{{ eva_app_license_product_code }}"
+    api_key: "{{ eva_app_license_api_key }}"
+    shared_key: "{{ eva_app_license_shared_key }}"
+
+database:
+  name: "{{ eva_app_db_name }}"
+  type: internal
+  internal:
+    image: "{{ eva_app_mysql_image_repository }}:{{ eva_app_mysql_image_tag }}"
+    service:
+      nodePort: {{ eva_app_db_nodeport }}
+    user: "{{ eva_app_db_user }}"
+    password: "{{ eva_app_db_password }}"
+
+imagePullSecrets:
+  enabled: {{ (repository_mode == 'cloud_repository') | lower }}
+  create: {{ (repository_mode == 'cloud_repository') | lower }}
+  nameOverride: "ecr-registry"
+  account: "339713051385"
+  region: "ap-northeast-2"
+  authType: "{{ eva_app_image_pull_auth_type }}"
+  hostPath: "{{ eva_app_image_pull_host_path }}"
+  secretName: "{{ eva_app_image_pull_secret_name }}"
+  cronjob:
+    schedule: "{{ eva_app_image_pull_cron_schedule }}"
+    runMode: "{{ eva_app_image_pull_cron_run_mode }}"
+    runImmediately: {{ eva_app_image_pull_cron_run_immediately | bool | lower }}
+
+persistence:
+  type: hostPath
+  hostPath:
+    path: "{{ eva_app_host_path }}"
+
+pv:
+  create: false
+
+serviceAccount:
+  create: true
+
+replicaCount: 1

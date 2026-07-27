@@ -1,0 +1,298 @@
+- name: Set infra check parameters
+  ansible.builtin.set_fact:
+    base_infra_output_dir: "{{ playbook_dir }}/config/{{ ansible_host | default(inventory_hostname) }}"
+    base_infra_output_file: "{{ playbook_dir }}/config/{{ ansible_host | default(inventory_hostname) }}/precondition.yaml"
+    infra_check_urls:
+      - url: "https://github.com"
+        domain: "github.com"
+      - url: "https://api.github.com"
+        domain: "api.github.com"
+      - url: "https://raw.githubusercontent.com"
+        domain: "raw.githubusercontent.com"
+      - url: "https://registry-1.docker.io"
+        domain: "registry-1.docker.io"
+      - url: "https://auth.docker.io"
+        domain: "auth.docker.io"
+      - url: "https://api.ecr.ap-northeast-2.amazonaws.com"
+        domain: "api.ecr.ap-northeast-2.amazonaws.com"
+      - url: "https://s3.ap-northeast-2.amazonaws.com"
+        domain: "s3.ap-northeast-2.amazonaws.com"
+    infra_aws_cli_download_url: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+  changed_when: false
+
+- name: Ensure local infra output directory exists on control node
+  ansible.builtin.file:
+    path: "{{ base_infra_output_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Check public outbound connectivity and fetch public IP
+  ansible.builtin.command:
+    cmd: curl -s --max-time 10 https://ifconfig.me
+  register: infra_public_ip_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Resolve DNS for external service domains
+  ansible.builtin.command:
+    cmd: getent hosts {{ item.domain }}
+  loop: "{{ infra_check_urls }}"
+  register: infra_dns_checks
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Check TCP 443 connectivity for external services
+  ansible.builtin.wait_for:
+    host: "{{ item.domain }}"
+    port: 443
+    timeout: 5
+    connect_timeout: 5
+    state: started
+  loop: "{{ infra_check_urls }}"
+  register: infra_tcp_checks
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Check HTTPS HEAD for external services
+  ansible.builtin.uri:
+    url: "{{ item.url }}"
+    method: HEAD
+    return_content: false
+    timeout: 10
+    validate_certs: true
+  loop: "{{ infra_check_urls }}"
+  register: infra_https_checks
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Check AWS CLI installer partial download
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -fL \
+      --range 0-1023 \
+      --connect-timeout 10 \
+      --max-time 30 \
+      --output /dev/null \
+      --write-out 'http_code=%{http_code}\nsize_download=%{size_download}\nurl_effective=%{url_effective}\n' \
+      "{{ infra_aws_cli_download_url }}"
+  args:
+    executable: /bin/bash
+  register: infra_aws_cli_download_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Build AWS CLI download report
+  ansible.builtin.set_fact:
+    infra_aws_cli_download_report:
+      url: "{{ infra_aws_cli_download_url }}"
+      command: "curl -fL --range 0-1023 --connect-timeout 10 --max-time 30 --output /dev/null {{ infra_aws_cli_download_url }}"
+      downloadable: "{{ (infra_aws_cli_download_cmd.rc | default(1) | int) == 0 }}"
+      rc: "{{ infra_aws_cli_download_cmd.rc | default(-1) | int }}"
+      stdout_lines: "{{ infra_aws_cli_download_cmd.stdout_lines | default([]) }}"
+      stderr_lines: "{{ infra_aws_cli_download_cmd.stderr_lines | default([]) }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Read DNS configuration
+  ansible.builtin.slurp:
+    src: /etc/resolv.conf
+  register: infra_resolv_conf
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Read routing table
+  ansible.builtin.command:
+    cmd: ip route
+  register: infra_route_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Read kernel information
+  ansible.builtin.command:
+    cmd: uname -a
+  register: infra_uname_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Read disk usage
+  ansible.builtin.command:
+    cmd: df -h
+  register: infra_df_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Check kernel lockdown status for MIG activation
+  ansible.builtin.command:
+    cmd: cat /sys/kernel/security/lockdown
+  register: infra_mig_lockdown_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Check Secure Boot status for MIG activation
+  ansible.builtin.command:
+    cmd: mokutil --sb-state
+  register: infra_mig_secure_boot_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Check NVIDIA display mode status for MIG activation
+  ansible.builtin.shell: |
+    set -o pipefail
+    nvidia-smi -q | grep -A5 "Display Mode"
+  args:
+    executable: /bin/bash
+  register: infra_mig_display_mode_cmd
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Evaluate MIG activation precondition
+  ansible.builtin.set_fact:
+    infra_mig_lockdown_passed: >-
+      {{
+        (infra_mig_lockdown_cmd.rc | default(1) | int) == 0
+        and ('[none]' in (infra_mig_lockdown_cmd.stdout | default('') | lower))
+      }}
+    infra_mig_secure_boot_passed: >-
+      {{
+        (infra_mig_secure_boot_cmd.rc | default(1) | int) == 0
+        and ('secureboot disabled' in (infra_mig_secure_boot_cmd.stdout | default('') | lower))
+      }}
+    infra_mig_display_mode_passed: >-
+      {{
+        (infra_mig_display_mode_cmd.rc | default(1) | int) == 0
+        and ((infra_mig_display_mode_cmd.stdout | default('') | trim | length) > 0)
+        and ((infra_mig_display_mode_cmd.stdout_lines | default([]) | select('search', 'Display Active\\s*:\\s*Enabled') | list | length) == 0)
+        and ((infra_mig_display_mode_cmd.stdout_lines | default([]) | select('search', 'Display Attached\\s*:\\s*Yes') | list | length) == 0)
+      }}
+    infra_mig_display_active_enabled_lines: "{{ infra_mig_display_mode_cmd.stdout_lines | default([]) | select('search', 'Display Active\\s*:\\s*Enabled') | list }}"
+    infra_mig_display_attached_yes_lines: "{{ infra_mig_display_mode_cmd.stdout_lines | default([]) | select('search', 'Display Attached\\s*:\\s*Yes') | list }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Set MIG activation availability summary
+  ansible.builtin.set_fact:
+    infra_mig_activation_possible: >-
+      {{
+        (infra_mig_lockdown_passed | default(false) | bool)
+        and (infra_mig_secure_boot_passed | default(false) | bool)
+        and (infra_mig_display_mode_passed | default(false) | bool)
+      }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Build MIG activation report
+  ansible.builtin.set_fact:
+    infra_mig_activation_failed_reasons: >-
+      {{
+        []
+        + (
+          (not (infra_mig_lockdown_passed | default(false) | bool))
+          | ternary(['kernel lockdown 상태가 none이 아닙니다. displaymodeselector가 /dev/mem 접근에 실패할 수 있습니다.'], [])
+        )
+        + (
+          (not (infra_mig_secure_boot_passed | default(false) | bool))
+          | ternary(['Secure Boot가 disabled 상태가 아닙니다. kernel lockdown으로 /dev/mem 접근이 제한될 수 있습니다.'], [])
+        )
+        + (
+          (not (infra_mig_display_mode_passed | default(false) | bool))
+          | ternary(['NVIDIA Display Active/Attached 상태가 MIG 전환에 적합하지 않거나 nvidia-smi 결과를 확인하지 못했습니다.'], [])
+        )
+      }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Build MIG activation report object
+  ansible.builtin.set_fact:
+    infra_mig_activation_report:
+      possible: "{{ infra_mig_activation_possible | default(false) | bool }}"
+      message: >-
+        {{
+          (infra_mig_activation_possible | default(false) | bool)
+          | ternary(
+            'MIG 활성화 사전 조건을 만족합니다.',
+            'MIG 활성화 사전 조건을 만족하지 않습니다. 아래 명령어 결과와 failed_reasons를 확인하세요.'
+          )
+        }}
+      failed_reasons: "{{ infra_mig_activation_failed_reasons }}"
+      checks:
+        kernel_lockdown:
+          command: "cat /sys/kernel/security/lockdown"
+          success: "{{ (infra_mig_lockdown_cmd.rc | default(1) | int) == 0 }}"
+          passed: "{{ infra_mig_lockdown_passed | default(false) | bool }}"
+          rc: "{{ infra_mig_lockdown_cmd.rc | default(-1) | int }}"
+          stdout_lines: "{{ infra_mig_lockdown_cmd.stdout_lines | default([]) }}"
+          stderr_lines: "{{ infra_mig_lockdown_cmd.stderr_lines | default([]) }}"
+        secure_boot:
+          command: "mokutil --sb-state"
+          success: "{{ (infra_mig_secure_boot_cmd.rc | default(1) | int) == 0 }}"
+          passed: "{{ infra_mig_secure_boot_passed | default(false) | bool }}"
+          rc: "{{ infra_mig_secure_boot_cmd.rc | default(-1) | int }}"
+          stdout_lines: "{{ infra_mig_secure_boot_cmd.stdout_lines | default([]) }}"
+          stderr_lines: "{{ infra_mig_secure_boot_cmd.stderr_lines | default([]) }}"
+        nvidia_display_mode:
+          command: "nvidia-smi -q | grep -A5 \"Display Mode\""
+          success: "{{ (infra_mig_display_mode_cmd.rc | default(1) | int) == 0 }}"
+          passed: "{{ infra_mig_display_mode_passed | default(false) | bool }}"
+          rc: "{{ infra_mig_display_mode_cmd.rc | default(-1) | int }}"
+          display_active_enabled_lines: "{{ infra_mig_display_active_enabled_lines | default([]) }}"
+          display_attached_yes_lines: "{{ infra_mig_display_attached_yes_lines | default([]) }}"
+          stdout_lines: "{{ infra_mig_display_mode_cmd.stdout_lines | default([]) }}"
+          stderr_lines: "{{ infra_mig_display_mode_cmd.stderr_lines | default([]) }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Write precondition.yaml on control node
+  ansible.builtin.copy:
+    dest: "{{ base_infra_output_file }}"
+    mode: "0644"
+    content: |
+      generated_at: "{{ ansible_facts.date_time.iso8601 }}"
+      hostname: "{{ ansible_facts.hostname | default(inventory_hostname) }}"
+      local_ip: "{{ ansible_facts.default_ipv4.address | default(ansible_host | default(inventory_hostname)) }}"
+      public_outbound:
+        success: {{ (infra_public_ip_cmd.rc | default(1)) == 0 and ((infra_public_ip_cmd.stdout | default('') | trim | length) > 0) }}
+        public_ip: "{{ (infra_public_ip_cmd.stdout | trim) if ((infra_public_ip_cmd.rc | default(1)) == 0) else '' }}"
+      external_services:
+      {% for idx in range(infra_check_urls | length) %}
+        - url: "{{ infra_check_urls[idx].url }}"
+          domain: "{{ infra_check_urls[idx].domain }}"
+          dns_resolve_success: {{ (infra_dns_checks.results[idx].rc | default(1)) == 0 }}
+          resolved_ip: "{{ (infra_dns_checks.results[idx].stdout.split()[0]) if ((infra_dns_checks.results[idx].rc | default(1)) == 0 and (infra_dns_checks.results[idx].stdout | default('') | trim | length) > 0) else '' }}"
+          tcp_443_success: {{ (infra_tcp_checks.results[idx].state | default('')) == 'started' }}
+          https_head_success: {{ (infra_https_checks.results[idx].status | default(0) | int) > 0 }}
+      {% endfor %}
+      aws_cli_download:
+      {{ infra_aws_cli_download_report | default({}) | to_nice_yaml(indent=2) | indent(2, true) }}
+      dns_configuration: |
+      {% for line in ((infra_resolv_conf.content | default('') | b64decode).splitlines()) %}
+        {{ line }}
+      {% endfor %}
+      routing_table: |
+      {% for line in (infra_route_cmd.stdout_lines | default([])) %}
+        {{ line }}
+      {% endfor %}
+      kernel_information: "{{ infra_uname_cmd.stdout | default('') | trim }}"
+      disk_usage: |
+      {% for line in (infra_df_cmd.stdout_lines | default([])) %}
+        {{ line }}
+      {% endfor %}
+      mig_activation:
+      {{ infra_mig_activation_report | default({}) | to_nice_yaml(indent=2) | indent(2, true) }}
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode

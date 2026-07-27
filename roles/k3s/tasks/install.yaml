@@ -1,0 +1,179 @@
+- name: Resolve k3s install architecture and paths
+  ansible.builtin.set_fact:
+    k3s_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
+    k3s_offline_dir: "{{ playbook_dir }}/install/k3s"
+  changed_when: false
+
+- name: Download k3s install script from internet
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /tmp/install_k3s.sh
+    mode: '0755'
+  when: not (airgap_mode | default(false) | bool)
+
+- name: Install k3s with containerd runtime (online)
+  ansible.builtin.command: /tmp/install_k3s.sh
+  args:
+    creates: /usr/local/bin/k3s
+  when: not (airgap_mode | default(false) | bool)
+
+- name: Discover offline k3s binary candidates
+  ansible.builtin.set_fact:
+    k3s_offline_binaries: >-
+      {{
+        (
+          query('ansible.builtin.fileglob', k3s_offline_dir ~ '/k3s-*-linux-' ~ k3s_arch)
+          + query('ansible.builtin.fileglob', k3s_offline_dir ~ '/k3s-linux-' ~ k3s_arch)
+          + query('ansible.builtin.fileglob', k3s_offline_dir ~ '/k3s')
+        ) | sort
+      }}
+  changed_when: false
+  when: airgap_mode | default(false) | bool
+
+- name: Resolve offline k3s binary path
+  ansible.builtin.set_fact:
+    k3s_offline_binary_path: "{{ (k3s_offline_binaries | last) | default('') }}"
+  changed_when: false
+  when: airgap_mode | default(false) | bool
+
+- name: Validate offline k3s binary exists
+  ansible.builtin.assert:
+    that:
+      - k3s_offline_binary_path | length > 0
+    fail_msg: >-
+      Offline k3s binary not found in {{ k3s_offline_dir }}.
+      Run ./install/download_offline_assets.sh on online host and copy install/k3s/* to this server.
+  when: airgap_mode | default(false) | bool
+
+- name: Copy k3s install script from offline bundle
+  ansible.builtin.copy:
+    src: "{{ k3s_offline_dir }}/install_k3s.sh"
+    dest: /tmp/install_k3s.sh
+    mode: '0755'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Copy k3s binary from offline bundle
+  ansible.builtin.copy:
+    src: "{{ k3s_offline_binary_path }}"
+    dest: /usr/local/bin/k3s
+    mode: '0755'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Install k3s service using local binary (offline)
+  ansible.builtin.command:
+    cmd: /tmp/install_k3s.sh
+  environment:
+    INSTALL_K3S_SKIP_DOWNLOAD: "true"
+  args:
+    creates: /etc/systemd/system/k3s.service
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Find k3s airgap system images archive
+  ansible.builtin.find:
+    paths: "{{ k3s_offline_dir }}"
+    patterns: "k3s-airgap-images-*.tar.zst"
+    file_type: file
+  register: k3s_airgap_images_archives
+  when: airgap_mode | default(false) | bool
+
+- name: Ensure k3s airgap system images directory exists
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/images
+    state: directory
+    mode: '0755'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_airgap_images_archives.matched | int > 0
+
+- name: Copy k3s airgap system images archive
+  ansible.builtin.copy:
+    src: "{{ (k3s_airgap_images_archives.files | map(attribute='path') | sort | last) }}"
+    dest: /var/lib/rancher/k3s/agent/images/k3s-airgap-images.tar.zst
+    mode: '0644'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_airgap_images_archives.matched | int > 0
+
+- name: Import k3s airgap system images into containerd
+  ansible.builtin.command:
+    cmd: k3s ctr -n k8s.io images import /var/lib/rancher/k3s/agent/images/k3s-airgap-images.tar.zst
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_airgap_images_archives.matched | int > 0
+
+- name: Configure k3s local repository registry credentials
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/registries.yaml
+    mode: '0600'
+    content: |
+      mirrors:
+        "{{ repository_registry | default('localhost:32080') }}":
+          endpoint:
+            - "http://{{ repository_registry | default('localhost:32080') }}"
+      configs:
+        "{{ repository_registry | default('localhost:32080') }}":
+          auth:
+            username: "{{ harbor_admin_user | default('admin') }}"
+            password: "{{ harbor_admin_password | default('EVA123@') }}"
+          tls:
+            insecure_skip_verify: true
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - repository_mode | default('cloud_repository') in ['local_repository', 'remote_repository']
+
+- name: Restart k3s after registry configuration
+  ansible.builtin.service:
+    name: k3s
+    state: restarted
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - repository_mode | default('cloud_repository') in ['local_repository', 'remote_repository']
+
+- name: Find offline k3s container images archive
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/install/images/k3s-images.tar"
+  register: k3s_images_archive
+  when: airgap_mode | default(false) | bool
+
+- name: Copy offline k3s container images archive
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/install/images/k3s-images.tar"
+    dest: /tmp/k3s-images.tar
+    mode: '0644'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_images_archive.stat.exists
+
+- name: Import offline k3s container images
+  ansible.builtin.command:
+    cmd: k3s ctr -n k8s.io images import /tmp/k3s-images.tar
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_images_archive.stat.exists
+
+- name: Remove offline k3s container images archive
+  ansible.builtin.file:
+    path: /tmp/k3s-images.tar
+    state: absent
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - k3s_images_archive.stat.exists
+
+- name: Cleanup k3s install script
+  ansible.builtin.file:
+    path: /tmp/install_k3s.sh
+    state: absent

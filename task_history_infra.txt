@@ -1,0 +1,77 @@
+- timestamp: "2026-05-20 13:15:26"
+  task: "site_infra.yaml apply 실행 중 CUDA toolkit 설치 단계 실패 후 재시도"
+  step: "apply"
+
+  error_summary: >
+    gpu 역할의 "Install CUDA toolkit 12.8" 단계에서
+    developer.download.nvidia.com:443 연결 불가(Network is unreachable)로 실패.
+
+  root_cause: >
+    대용량 CUDA 패키지 설치 중 원격 호스트에서 절전 브로드캐스트가 발생했고,
+    이후 NVIDIA 저장소 연결이 끊겨 최종 cuda-toolkit-12-8 패키지 다운로드가 실패함.
+
+  fix_applied: >
+    Step 3를 중단 후 동일 playbook apply를 재실행하여 누락 패키지를 재다운로드/설치.
+    재실행에서 cuda-toolkit-12-8 설치가 정상 완료됨.
+
+  verification: >
+    재실행 결과 PLAY RECAP 기준 failed=0.
+    CUDA 디렉터리(/usr/local/cuda, /usr/local/cuda-12, /usr/local/cuda-12.8) 확인됨.
+
+  preventive_note: >
+    대용량 패키지 설치가 포함된 apply 실행 전 원격 호스트 절전/자동 suspend를 비활성화하고,
+    실패 시 즉시 apply 재실행으로 캐시된 패키지를 활용해 복구한다.
+
+  tags:
+    - cuda
+    - network-unreachable
+    - suspend
+    - apply-retry
+
+  related_files:
+    - site_infra.yaml
+    - roles/gpu/tasks/cuda.yaml
+    - logs_infra/ansible-run.log
+    - logs_infra/ansible-internal.log
+
+  retry_count: 1
+  status: "resolved"
+
+- timestamp: "2026-06-08 12:51:52"
+  task: "site_gpu_mig.yaml apply 실행 중 재부팅 이후 NVIDIA 드라이버 미인식 복구"
+  step: "apply"
+
+  error_summary: >
+    gpu_mig 역할의 "Collect GPU indices for MIG enable" 단계에서
+    nvidia-smi rc=9 (NVIDIA driver와 통신 불가)로 실패.
+
+  root_cause: >
+    apply 중 재부팅 후 시스템 커널이 6.17.0-1024-oem으로 부팅됐지만,
+    해당 커널용 NVIDIA 모듈이 미설치 상태여서 nvidia 모듈 로드가 불가능했음.
+
+  fix_applied: >
+    linux-modules-nvidia-580-open-6.17.0-1024-oem을 포함한
+    nvidia-driver-580-open 관련 패키지를 설치해 커널-드라이버 버전을 정합화함.
+
+  verification: >
+    원격에서 nvidia-smi -L 실행 결과 GPU 3장이 정상 조회됨.
+
+  preventive_note: >
+    재부팅을 수반하는 GPU 작업 전 현재 커널(uname -r)과
+    linux-modules-nvidia-* 패키지 매칭을 사전 점검하고,
+    mismatch 시 먼저 모듈 패키지를 설치한 뒤 apply를 진행한다.
+
+  tags:
+    - gpu-mig
+    - nvidia-driver
+    - kernel-mismatch
+    - reboot
+
+  related_files:
+    - site_gpu_mig.yaml
+    - roles/gpu_mig/tasks/enable_mig.yaml
+    - logs_infra/ansible-run.log
+    - task_history_infra.txt
+
+  retry_count: 1
+  status: "resolved"

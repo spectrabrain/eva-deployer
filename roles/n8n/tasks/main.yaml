@@ -12,7 +12,8 @@
       }}
     airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
     n8n_enabled: "{{ n8n_enabled | default(true) | bool }}"
-    n8n_image_tag: "{{ n8n_image_tag | default('1.103.2') }}"
+    n8n_pinned_image: "{{ n8n_pinned_image | default(deploy_versions.n8n_image) }}"
+    n8n_image_tag: "{{ n8n_image_tag | default((n8n_pinned_image | default(deploy_versions.n8n_image)) | regex_replace('^.*:', '')) }}"
     n8n_namespace: "{{ n8n_namespace | default('n8n') }}"
     n8n_app_name: "{{ n8n_app_name | default('n8n') }}"
     n8n_replicas: "{{ n8n_replicas | default(1) | int }}"
@@ -28,12 +29,23 @@
     n8n_webhook_path: "{{ n8n_webhook_path | default('/webhook/n8n/eva-alert') }}"
     n8n_workflow_webhook_node_path: "{{ (n8n_webhook_path | default('/webhook/n8n/eva-alert')) | regex_replace('^/webhook/', '') | regex_replace('^/', '') }}"
     n8n_workflow_name: "{{ n8n_workflow_name | default('EVA Alert Workflow') }}"
-    n8n_owner_email: "{{ n8n_owner_email | default('eva@mellerikat.com') }}"
+    n8n_owner_email: "{{ n8n_owner_email | default('eva@spectrabrain.ai') }}"
     n8n_owner_first_name: "{{ n8n_owner_first_name | default('eva') }}"
-    n8n_owner_last_name: "{{ n8n_owner_last_name | default('mellerikat') }}"
-    n8n_owner_password_plain: "{{ n8n_owner_password_plain | default('EVA123..') }}"
-    n8n_owner_password_hash: "{{ n8n_owner_password_hash | default('$2b$05$/v5gp0pVVt9ulY/tNANwa.7p9hOzpyTkhxTrlkrU50ufglDo/84Fm') }}"
+    n8n_owner_last_name: "{{ n8n_owner_last_name | default('spectrabrain') }}"
+    n8n_owner_password_plain: "{{ n8n_owner_password_plain | default('EVA!234qwer') }}"
     n8n_config_output_dir: "{{ playbook_dir }}/config/{{ ansible_host | default(inventory_hostname) }}"
+  no_log: true
+
+- name: Validate n8n owner password policy
+  ansible.builtin.assert:
+    that:
+      - n8n_owner_password_plain | length >= 8
+      - n8n_owner_password_plain | length <= 64
+      - n8n_owner_password_plain | regex_search('[0-9]') is not none
+      - n8n_owner_password_plain | regex_search('[A-Z]') is not none
+    fail_msg: >-
+      n8n_owner_password_plain은 8~64자이며 숫자와 대문자를 각각 하나 이상 포함해야 합니다.
+  when: n8n_enabled
 
 - name: Validate repository mode for n8n
   ansible.builtin.assert:
@@ -46,11 +58,11 @@
 
 - name: Resolve n8n image repository
   ansible.builtin.set_fact:
-    n8n_image: >-
+    n8n_deployment_image: >-
       {{
         n8n_image | default(
           (repository_mode == 'cloud_repository')
-          | ternary('docker.n8n.io/n8nio/n8n:' ~ n8n_image_tag, repository_registry ~ '/' ~ repository_project ~ '/n8n:' ~ n8n_image_tag)
+          | ternary(n8n_pinned_image, repository_registry ~ '/' ~ repository_project ~ '/n8n:' ~ n8n_image_tag)
         )
       }}
 
@@ -120,7 +132,8 @@
           spec:
             containers:
               - name: {{ n8n_app_name }}
-                image: {{ n8n_image }}
+                image: {{ n8n_deployment_image }}
+                imagePullPolicy: IfNotPresent
                 ports:
                   - containerPort: 5678
                 env:
@@ -138,16 +151,6 @@
                     value: "{{ n8n_protocol }}://{{ n8n_public_host }}:{{ n8n_node_port }}"
                   - name: WEBHOOK_URL
                     value: "{{ n8n_protocol }}://{{ n8n_public_host }}:{{ n8n_node_port }}{{ n8n_webhook_path }}"
-                  - name: N8N_INSTANCE_OWNER_MANAGED_BY_ENV
-                    value: "true"
-                  - name: N8N_INSTANCE_OWNER_EMAIL
-                    value: "{{ n8n_owner_email }}"
-                  - name: N8N_INSTANCE_OWNER_FIRST_NAME
-                    value: "{{ n8n_owner_first_name }}"
-                  - name: N8N_INSTANCE_OWNER_LAST_NAME
-                    value: "{{ n8n_owner_last_name }}"
-                  - name: N8N_INSTANCE_OWNER_PASSWORD_HASH
-                    value: "{{ n8n_owner_password_hash }}"
                 volumeMounts:
                   - name: n8n-data
                     mountPath: /home/node/.n8n
@@ -209,6 +212,60 @@
     - not ansible_check_mode
     - n8n_rollout is defined
     - n8n_rollout.rc == 0
+
+- name: Wait for n8n REST API initialization
+  ansible.builtin.uri:
+    url: "{{ n8n_protocol }}://{{ n8n_api_host }}:{{ n8n_node_port }}/rest/settings"
+    method: GET
+    return_content: true
+    status_code: [200, 404, 503]
+    timeout: 15
+    validate_certs: false
+  register: n8n_api_settings
+  retries: 60
+  delay: 2
+  until: (n8n_api_settings.status | default(0)) == 200
+  changed_when: false
+  failed_when: false
+  when:
+    - n8n_enabled
+    - not ansible_check_mode
+    - n8n_rollout is defined
+    - n8n_rollout.rc == 0
+
+- name: Assert n8n REST API initialization completed
+  ansible.builtin.assert:
+    that:
+      - (n8n_api_settings.status | default(0)) == 200
+    fail_msg: "n8n REST API did not become ready within the configured timeout."
+  when:
+    - n8n_enabled
+    - not ansible_check_mode
+    - n8n_rollout is defined
+    - n8n_rollout.rc == 0
+
+- name: Set up initial n8n owner
+  ansible.builtin.uri:
+    url: "{{ n8n_protocol }}://{{ n8n_api_host }}:{{ n8n_node_port }}/rest/owner/setup"
+    method: POST
+    body_format: json
+    body:
+      email: "{{ n8n_owner_email }}"
+      firstName: "{{ n8n_owner_first_name }}"
+      lastName: "{{ n8n_owner_last_name }}"
+      password: "{{ n8n_owner_password_plain }}"
+    return_content: true
+    status_code: [200, 201]
+    timeout: 15
+    validate_certs: false
+  register: n8n_owner_setup
+  no_log: true
+  when:
+    - n8n_enabled
+    - not ansible_check_mode
+    - n8n_rollout is defined
+    - n8n_rollout.rc == 0
+    - n8n_api_settings.json.data.userManagement.showSetupOnFirstLoad | default(false) | bool
 
 - name: Login to n8n REST API
   ansible.builtin.uri:
@@ -293,6 +350,7 @@
     body_format: json
     body:
       name: "{{ n8n_workflow_name }}"
+      active: false
       nodes:
         - id: "Webhook"
           name: "Webhook"
@@ -327,7 +385,7 @@
         (
           (n8n_create_workflow.json.data.id | string)
           if (n8n_create_workflow is defined and n8n_create_workflow.json is mapping and 'data' in n8n_create_workflow.json and 'id' in n8n_create_workflow.json.data)
-          else ''
+          else (n8n_create_workflow.json.id | default('') | string)
         )
       }}
     n8n_target_workflow_version_id: >-
@@ -338,7 +396,7 @@
         (
           (n8n_create_workflow.json.data.versionId | string)
           if (n8n_create_workflow is defined and n8n_create_workflow.json is mapping and 'data' in n8n_create_workflow.json and 'versionId' in n8n_create_workflow.json.data)
-          else ''
+          else (n8n_create_workflow.json.versionId | default('') | string)
         )
       }}
   changed_when: false
@@ -350,12 +408,13 @@
 
 - name: Activate EVA Alert workflow
   ansible.builtin.uri:
-    url: "{{ n8n_protocol }}://{{ n8n_api_host }}:{{ n8n_node_port }}/rest/workflows/{{ n8n_target_workflow_id }}/activate"
-    method: POST
+    url: "{{ n8n_protocol }}://{{ n8n_api_host }}:{{ n8n_node_port }}/rest/workflows/{{ n8n_target_workflow_id }}"
+    method: PATCH
     headers:
       Cookie: "{{ n8n_api_login.cookies_string }}"
     body_format: json
     body:
+      active: true
       versionId: "{{ n8n_target_workflow_version_id }}"
     return_content: true
     status_code: [200, 204]
@@ -380,7 +439,7 @@
       - "Webhook base: {{ n8n_protocol }}://{{ n8n_public_host }}:{{ n8n_node_port }}{{ n8n_webhook_path }}"
       - "Workflow name: {{ n8n_workflow_name }}"
       - "Workflow id: {{ n8n_target_workflow_id | default('') }}"
-      - "Bootstrap owner: {{ n8n_owner_email }} / EVA123.."
+      - "Bootstrap owner: {{ n8n_owner_email }}"
   when: n8n_enabled
 
 - name: Ensure local n8n config output directory exists on control node
@@ -399,7 +458,7 @@
 - name: Write n8n.yaml on control node
   ansible.builtin.copy:
     dest: "{{ n8n_config_output_dir }}/n8n.yaml"
-    mode: "0644"
+    mode: "0600"
     content: |
       endpoint: "{{ n8n_protocol }}://{{ n8n_public_host }}:{{ n8n_node_port }}"
       webhook_base: "{{ n8n_protocol }}://{{ n8n_public_host }}:{{ n8n_node_port }}{{ n8n_webhook_path }}"

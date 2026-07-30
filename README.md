@@ -2,41 +2,33 @@
 
 EVA 설치 환경을 Ansible로 구성하는 deployer입니다. 권장 OS는 **Ubuntu 24.04**입니다.
 
-설치 시 이미지 출처는 `repository_mode`로 결정합니다. 기본값은 `cloud_repository`입니다.
-
-| mode | 용도 | 이미지 출처 |
-| --- | --- | --- |
-| `cloud_repository` | 대상 서버가 인터넷/ECR/Docker Hub/S3에 접근 가능 | AWS ECR/Docker Hub/S3 |
-| `remote_repository` | 인터넷 가능한 Main 서버의 Harbor를 Airgap 서버가 접근 가능 | Main Harbor |
-| `local_repository` | USB로 복사한 뒤 Airgap 서버 내부 Harbor 사용 | Local Harbor |
-
-`repository_registry`에는 k3s 노드가 접근할 수 있는 Harbor Registry 주소를 넣습니다. `https://` prefix는 넣지 않고 host 또는 host:port만 사용합니다.
-
-예시:
-
-```text
-harbor.main.local:32080
-10.158.2.10:32080
-localhost:32080
-```
-
-`localhost:32080`은 단일 서버에서 Local Harbor를 해당 포트로 띄운 경우의 예시입니다. Harbor의 `hostname` 또는 `http.port`를 다르게 설정했다면 `repository_registry`도 같은 값으로 맞춰야 합니다. 여러 노드에서 사용하는 경우에는 각 노드의 `localhost`가 서로 다르므로, 모든 노드가 접근 가능한 Harbor hostname 또는 IP를 사용합니다.
-
-`repository_project`는 Harbor project 이름입니다. 기본 예시는 `eva`이며, 이미지 주소는 아래처럼 만들어집니다.
-
-```text
-<repository_registry>/<repository_project>/eva-agent:3.0.4
-<repository_registry>/<repository_project>/eva-app:3.0.5
-<repository_registry>/<repository_project>/eva-vision:2.0.5
-```
+설치 시 이미지 출처는 `repository_mode`로 결정합니다. 기본값은 `cloud_repository`이며, 모드별 준비 방법과 Repository 주소 규칙은 [1. 사전 준비 및 Repository 준비](#1-사전-준비-및-repository-준비)에서 설명합니다.
 
 ---
 
 ## 1. 사전 준비 및 Repository 준비
 
-이 섹션은 설치 실행 전에 필요한 Python/Ansible, AWS 인증, asset, image, Harbor 준비 절차를 mode별로 설명합니다. 실제 설치 실행은 `인프라 설치`, `EVA 배포`, `n8n 설치` 섹션에서 mode별로 실행합니다.
+이 섹션에서는 설치 전에 필요한 패키지·asset·이미지·Harbor를 준비합니다. 먼저 아래에서 하나의 Repository 모드를 선택하고, 해당 모드의 절차만 진행하세요. 실제 Ansible 설치 명령은 이후 `인프라 설치`, `EVA 배포`, `n8n 설치` 섹션에서 같은 모드로 실행합니다.
 
-### 공통: 버전 단일 관리
+### 1-1. Repository 모드 선택
+
+| 모드 | 사용 환경 | 준비/Ansible 실행 위치 | 대상 서버의 이미지 출처 | 파일 이동 |
+| --- | --- | --- | --- | --- |
+| `cloud_repository` | 대상 서버가 인터넷과 AWS에 직접 접근 가능 | 대상 서버 또는 별도 control node | 외부 Registry, ECR, S3 | 불필요 |
+| `remote_repository` | 대상 서버는 인터넷이 없지만 Main Harbor에는 연결 가능 | 인터넷 가능 Main 서버 | Main Harbor | 불필요 (Main 서버가 Ansible로 전달) |
+| `local_repository` | 대상 서버가 완전 Airgap | 인터넷 가능 준비 서버 → Airgap 서버 | Airgap 서버의 Local Harbor | USB 등 저장 매체 필요 |
+
+`remote_repository`와 `local_repository`는 실행 시 아래 변수를 반드시 함께 지정합니다.
+
+```text
+repository_mode=<remote_repository|local_repository>
+repository_registry=<Harbor host:port>
+repository_project=eva
+```
+
+`repository_registry`에는 `https://`를 제외한 **k3s 노드에서 실제 접근 가능한 주소**를 지정합니다. 단일 서버 Local Harbor의 기본값은 `localhost:32080`이지만, 여러 노드에서는 각 노드가 공통으로 접근 가능한 Harbor hostname 또는 IP를 사용해야 합니다.
+
+### 1-2. 모든 모드 공통: 버전 단일 관리
 
 EVA App/Agent/Vision 및 chart 버전은 `versions.json` 한 곳에서 관리합니다.
 버전 업데이트 시 우선 이 파일만 수정하면:
@@ -45,6 +37,29 @@ EVA App/Agent/Vision 및 chart 버전은 `versions.json` 한 곳에서 관리합
 - 다운로드 스크립트(`install/download_offline_assets.sh`, `install/download_eva_images.sh`, `install/download_n8n_images.sh`)에 자동 반영
 
 이미지/asset 다운로드 전에 먼저 `versions.json`을 수정하세요.
+
+예시:
+
+```json
+{
+  "eva_app_deploy_version": "3.0.5",
+  "eva_app_chart_version": "2.1.3",
+  "eva_vision_deploy_version": "2.0.5",
+  "eva_vision_chart_version": "2.0.5",
+  "n8n_image": "docker.n8n.io/n8nio/n8n:1.103.2"
+}
+```
+
+Harbor를 사용하는 모드에서는 이미지가 아래 형태로 저장됩니다.
+
+```text
+<repository_registry>/<repository_project>/eva-agent:<version>
+<repository_registry>/<repository_project>/eva-app:<version>
+<repository_registry>/<repository_project>/eva-vision:<version>
+<repository_registry>/<repository_project>/n8n:<version>
+```
+
+### 1-3. remote/local 공통: Airgap 설치 asset과 패키지 bundle
 
 Airgap 서버에 Docker가 설치되어 있지 않을 수 있으므로, 인터넷이 가능한 준비 서버에서 `install/download_offline_assets.sh`를 실행하면 Docker Engine, containerd, buildx, compose plugin 및 apt 의존성 `.deb` 파일도 `install/docker/debs/`에 함께 준비됩니다. `install/` 전체를 Airgap 서버로 복사한 뒤 설치를 실행하세요.
 
@@ -63,20 +78,9 @@ sudo ./install/repair_offline_debs.sh ./install/apt/debs
 sudo dpkg --audit
 ```
 
-예시:
+### 1-4. Cloud/Remote/Local 준비 서버: AWS 인증
 
-```json
-{
-  "eva_app_deploy_version": "3.0.5",
-  "eva_app_chart_version": "2.1.3",
-  "eva_vision_deploy_version": "2.0.5",
-  "eva_vision_chart_version": "2.0.5"
-}
-```
-
-### 공통: AWS Key
-
-ECR 이미지, S3 모델, release asset을 인터넷 가능 환경에서 받을 때 필요합니다.
+ECR 이미지, S3 모델, release asset을 인터넷 가능 환경에서 받을 때 필요합니다. `cloud_repository`는 대상 서버(또는 Ansible 실행 서버)에, `remote_repository`와 `local_repository`는 인터넷 가능 준비 서버에 설정하세요.
 
 ```bash
 aws configure set aws_access_key_id <AK> --profile default
@@ -84,9 +88,15 @@ aws configure set aws_secret_access_key <SK> --profile default
 aws configure set region ap-northeast-2 --profile default
 ```
 
-### [cloud_repository]
+### 1-5. cloud_repository: 대상 서버가 외부 Registry를 직접 사용
 
 대상 서버가 인터넷/ECR/Docker Hub/S3에 직접 접근 가능한 모드입니다. 별도 Harbor 준비가 필요 없습니다.
+
+1. 대상 서버(또는 대상 서버에 접속 가능한 control node)에 Python/Ansible을 준비합니다.
+2. 대상 서버가 AWS ECR, Docker Hub/외부 Registry, S3에 연결되는지 확인합니다.
+3. 이후 설치 단계에서 `-e repository_mode=cloud_repository`를 사용합니다.
+
+#### 대상 서버 또는 control node: Ansible 준비
 
 대상 서버에서 Python/Ansible을 준비합니다.
 
@@ -102,11 +112,18 @@ pip install ansible
 - Docker Hub 또는 외부 container registry
 - S3 모델/릴리즈 버킷
 
-### [remote_repository]
+### 1-6. remote_repository: Main Harbor를 대상 서버가 사용
 
 인터넷 가능한 Main 서버에 Harbor를 구성하고, 설치 대상 Airgap 서버는 Main Harbor에 접근 가능한 구조입니다.
 
+1. **Main 서버**에 Ansible, Docker, Harbor를 준비합니다.
+2. **Main 서버**에서 asset·모델·이미지를 내려받아 Main Harbor의 `eva` project로 push합니다.
+3. **대상 서버**에서 Main Harbor의 `hostname:32080`에 접근할 수 있어야 합니다.
+4. 이후 Main 서버에서 Ansible을 실행하며 `repository_registry=<Main Harbor host:32080>`를 지정합니다.
+
 Main 서버에서 Python/Ansible을 준비합니다. Main 서버에서 Ansible을 실행해 Airgap 서버를 설치하는 흐름입니다.
+
+#### Main 서버: Ansible과 Harbor 준비
 
 ```bash
 python3 -m venv .venv
@@ -141,6 +158,8 @@ Harbor 기본값:
 - `harbor_admin_password`: `EVA123@`
 - `data_volume`: Harbor template 기본값 유지
 - `project`: `eva`
+
+#### Main 서버: asset·모델·이미지 준비 및 Harbor push
 
 Main 서버에서 asset과 이미지를 준비합니다.
 
@@ -201,9 +220,16 @@ harbor.main.local:32080/eva/n8n:1.103.2
 
 `harbor.main.local:32080`을 Docker 또는 k3s에서 HTTP registry로 사용할 경우, 해당 노드의 Docker/containerd에 insecure registry 또는 인증서 신뢰 설정이 필요할 수 있습니다.
 
-### [local_repository]
+### 1-7. local_repository: USB로 전달한 이미지를 대상 서버 Local Harbor에 저장
 
 인터넷 가능 환경에서 필요한 파일을 모두 준비한 뒤, `eva-deployer` 폴더를 USB로 Airgap 서버에 복사합니다. Airgap 서버 내부에는 Local Harbor를 띄우고, k3s는 해당 Harbor에서 이미지를 pull합니다.
+
+1. **인터넷 가능 준비 서버**에서 Ansible wheel, Docker/apt bundle, asset, 모델, 이미지, Harbor installer를 모두 받습니다.
+2. `repository-images.tar`와 `eva-deployer` 전체를 USB 등으로 **Airgap 서버**에 복사합니다.
+3. **Airgap 서버**에서 Python/Ansible, Docker, Local Harbor를 설치하고 archive 이미지를 Harbor에 push합니다.
+4. 이후 Airgap 서버에서 Ansible을 실행하며 `repository_registry=localhost:32080`을 지정합니다.
+
+#### A. 인터넷 가능 준비 서버: 설치 파일과 이미지 준비
 
 인터넷 가능 환경에서 Airgap 서버용 Python/Ansible 패키지, asset, 이미지, Harbor offline installer를 준비합니다.
 
@@ -249,6 +275,8 @@ docker image rm $(cat ./install/images/repository-images.txt)
 ```
 
 `eva-deployer` 폴더를 저장 매체로 복사하여 Airgap 서버로 이동합니다.
+
+#### B. Airgap 서버: Python/Ansible·Docker·Local Harbor 설치
 
 Local Harbor의 실행 설정은 `eva-deployer` 밖의 `~/.local/share/eva-harbor`에 저장합니다. 이후에는 Harbor를 중지하지 않고 `eva-deployer` 전체를 다시 동기화할 수 있습니다.
 
@@ -302,6 +330,8 @@ sudo ./install/install_docker.sh --airgap
 이 경우 기존 `harbor_admin_password`는 명시하지 않으면 기존 `harbor.yml` 값을 유지합니다. 기존 Harbor 데이터는 자동 복사하지 않으므로, 새 경로는 빈 registry 저장소로 시작합니다.
 
 `repository-images.tar`는 Harbor에 직접 push할 수 없습니다. Docker daemon에 load한 뒤 Local Harbor로 push해야 합니다. push 중에는 archive, Docker image cache, Harbor registry가 일시적으로 모두 저장 공간을 사용합니다.
+
+#### C. Airgap 서버: Local Harbor에 이미지 seed
 
 Airgap 서버에서 이미지를 load한 뒤 Local Harbor로 push합니다.
 `push_images_to_repository.sh`는 `localhost:32080`의 `harbor.yml`에서 관리자 비밀번호를 읽어 자동으로 로그인합니다.

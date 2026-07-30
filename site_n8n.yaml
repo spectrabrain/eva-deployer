@@ -6,6 +6,19 @@
   serial: 1
 
   pre_tasks:
+    - name: Load deployment version catalogue
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/versions.json"
+        name: deploy_versions
+
+    - name: Validate pinned n8n image version
+      ansible.builtin.assert:
+        that:
+          - deploy_versions.n8n_image is defined
+          - deploy_versions.n8n_image | string | length > 0
+        fail_msg: >-
+          versions.json에 n8n_image을 설정하세요. 이 값은 n8n 이미지 다운로드와 기본 배포 버전에 함께 사용됩니다.
+
     - name: Resolve repository mode
       ansible.builtin.set_fact:
         repository_mode: "{{ repository_mode | default('cloud_repository') }}"

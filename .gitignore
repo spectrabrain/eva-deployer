@@ -34,3 +34,10 @@ install/manifest.txt
 
 # Deployment-specific EVA App host values (contains license credentials)
 values/app.yaml
+
+# EVA IAM host settings (contains secrets / client credentials)
+values/eva-iam.yaml
+
+# Keycloak realm exports contain client secrets + signing keys — never commit
+eva-iam-realm-*.json
+*-realm-export*.json

@@ -1,0 +1,37 @@
+# eva-iam 배포 설정 (호스트별). 긴 -e 대신 여기서 관리합니다.
+#   cp values/eva-iam.yaml.sample values/eva-iam.yaml   # 복사 후 편집 (git 커밋 금지)
+# 그러면 실행은 짧아집니다:
+#   ansible-playbook -i inventory.ini site_eva_iam.yaml -e eva_iam_become=false
+#   (eva_iam_become 은 play 단계 값이라 -e 또는 inventory 변수로만 지정 가능)
+#
+# 최상위 키 = 배포 대상 host (ansible_host / inventory hostname). 단일 호스트면 그 이름 한 블록.
+# (host-keyed 대신 그냥 eva_iam_* 키를 최상위에 평평하게 적어도 됩니다.)
+#
+# ⚠️ secret 류(admin/db/redis 비번, client secret)는 아래처럼 "비워두면"
+#    install마다 자동 생성되어 control node의 config/<host>/secrets/ 에 저장됩니다.
+#    (재실행 시 재사용 → 안정적, 환경마다 고유 → 보안 OK). 특정 값 고정이 필요할 때만 적으세요.
+
+eva-app-e2e.eva-dev.lge.com:
+  # --- 배포 위치/이미지 ---
+  eva_iam_namespace: eva-sso-test
+  eva_iam_host: eva-app-e2e.eva-dev.lge.com
+  eva_iam_workdir: /home/eva/.eva-iam
+  eva_iam_chart_dir: /home/eva/youngjun/eva-sso/deploy/helm/charts/eva-iam
+  eva_iam_image_tag: "0.1"                       # 이 환경은 로컬 import 이미지(:0.1)
+
+  # --- DB / 네트워킹 ---
+  eva_iam_db_service_type: ClusterIP             # 운영과 NodePort 충돌 회피
+  eva_iam_persistence_host_path: /eva-iam-test
+
+  # --- ingress / TLS ---
+  eva_iam_ingress_class: nginx
+  eva_iam_tls_host_path: /home/eva/certs         # helm Job이 여기 tls.crt/tls.key 로 secret 생성
+
+  # --- realm (raw 파일 + secret 재생성 여부) ---
+  eva_iam_realm_file: /home/eva/ansible_sso_test/eva-deployer/eva-iam-realm-0731.json
+  eva_iam_realm_regenerate_secrets: false   # true = confidential client secret 랜덤 생성
+
+  # --- secrets: 주석 처리 = 자동 생성(권장). 고정하려면 주석 해제 ---
+  # eva_iam_admin_password: ""
+  # eva_iam_db_password: ""
+  # eva_iam_redis_password: ""

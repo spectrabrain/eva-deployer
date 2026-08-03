@@ -1,0 +1,15 @@
+{#- Load the raw realm file (eva_iam_realm_file, e.g. the 0731 export) verbatim and replace ONLY
+    each confidential client's `secret` with a per-install generated+persisted value. Everything
+    else (realm settings, roles, mappers, IdPs, keys, ...) is kept exactly as in the source.
+    Dict order is preserved (from_json -> to_json), so only the secret strings change. -#}
+{%- set base = lookup('ansible.builtin.file', eva_iam_realm_file) | from_json -%}
+{#- Trigger on the presence of a `secret` KEY (even if blanked out to ""), so real secrets can be
+    removed from the source file. This targets exactly the confidential clients Keycloak exported a
+    secret for (e.g. eva-admin-api, m2m-service); public / bearer-only clients have no key. -#}
+{%- for c in base.clients | default([]) -%}
+{%-   if 'secret' in c -%}
+{%-     set _new = lookup('ansible.builtin.password', eva_iam_secret_dir ~ '/client_' ~ c.clientId ~ ' chars=ascii_letters,digits length=32') -%}
+{%-     set _ = c.update({'secret': _new | string}) -%}
+{%-   endif -%}
+{%- endfor -%}
+{{ base | to_json }}

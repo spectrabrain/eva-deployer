@@ -1,0 +1,67 @@
+config:
+  timezone: "{{ eva_iam_timezone }}"
+  host: "{{ eva_iam_host }}"
+
+keycloak:
+{% if (eva_iam_keycloak_image_repository | length > 0) or (eva_iam_image_tag | length > 0) %}
+  image:
+{% if eva_iam_keycloak_image_repository | length > 0 %}
+    repository: "{{ eva_iam_keycloak_image_repository }}"
+{% endif %}
+{% if eva_iam_image_tag | length > 0 %}
+    tag: "{{ eva_iam_image_tag }}"
+{% endif %}
+{% endif %}
+  config:
+    admin:
+      username: "{{ eva_iam_admin_username }}"
+      password: "{{ eva_iam_admin_password }}"
+
+dispatcher:
+{% if (eva_iam_dispatcher_image_repository | length > 0) or (eva_iam_image_tag | length > 0) %}
+  image:
+{% if eva_iam_dispatcher_image_repository | length > 0 %}
+    repository: "{{ eva_iam_dispatcher_image_repository }}"
+{% endif %}
+{% if eva_iam_image_tag | length > 0 %}
+    tag: "{{ eva_iam_image_tag }}"
+{% endif %}
+{% endif %}
+
+database:
+  type: "{{ eva_iam_db_type }}"
+  internal:
+    username: "{{ eva_iam_db_username }}"
+    password: "{{ eva_iam_db_password }}"
+    service:
+      type: "{{ eva_iam_db_service_type }}"
+{% if eva_iam_db_service_type == 'NodePort' %}
+      nodePort: {{ eva_iam_db_nodeport }}
+{% endif %}
+
+redis:
+  auth:
+    password: "{{ eva_iam_redis_password }}"
+
+imagePullSecrets:
+  enabled: {{ eva_iam_image_pull_enabled | bool | lower }}
+  create: {{ eva_iam_image_pull_create | bool | lower }}
+  account: "{{ eva_iam_ecr_account }}"
+  region: "{{ eva_iam_ecr_region }}"
+  authType: "{{ eva_iam_image_pull_auth_type }}"
+  hostPath: "{{ eva_iam_image_pull_host_path }}"
+
+ingress:
+  enabled: {{ eva_iam_ingress_enabled | bool | lower }}
+  ingressClassName: "{{ eva_iam_ingress_class }}"
+  tls:
+    create: {{ eva_iam_tls_create | bool | lower }}
+    authType: "{{ eva_iam_tls_auth_type }}"
+    hostPath: "{{ eva_iam_tls_host_path }}"
+    certFile: "{{ eva_iam_tls_cert_file }}"
+    keyFile: "{{ eva_iam_tls_key_file }}"
+
+persistence:
+  type: "{{ eva_iam_persistence_type }}"
+  hostPath:
+    path: "{{ eva_iam_persistence_host_path }}"

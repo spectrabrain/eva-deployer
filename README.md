@@ -46,7 +46,7 @@ EVA App/Agent/Vision 및 chart 버전은 `versions.json` 한 곳에서 관리합
   "eva_app_chart_version": "2.1.3",
   "eva_vision_deploy_version": "2.0.5",
   "eva_vision_chart_version": "2.0.5",
-  "n8n_image": "docker.n8n.io/n8nio/n8n:1.103.2"
+  "n8n_image": "docker.n8n.io/n8nio/n8n:2.32.7"
 }
 ```
 
@@ -276,11 +276,43 @@ docker image rm $(cat ./install/images/repository-images.txt)
 
 `eva-deployer` 폴더를 저장 매체로 복사하여 Airgap 서버로 이동합니다.
 
-#### B. Airgap 서버: Python/Ansible·Docker·Local Harbor 설치
+#### B. Airgap 서버: 실행 환경과 Local Harbor 설치
+
+다음 순서로 진행합니다. Python/Ansible은 Ansible 실행을 위해 먼저 설치하고, Local Harbor는 Docker Engine과 Compose plugin 설치가 완료된 뒤 시작합니다.
+
+##### 1. Python/Ansible 설치
+
+```bash
+./install/install_python_venv_airgap.sh
+./install/install_ansible_airgap.sh
+source .venv/bin/activate
+ansible --version
+```
+
+##### 2. Docker Engine과 Compose plugin 설치
+
+준비된 Docker `.deb` bundle로 Docker Engine과 Compose plugin을 설치합니다.
+
+```bash
+# install/ 전체가 복사된 airgap 서버에서 Docker 설치
+sudo ./install/install_docker.sh --airgap
+```
+
+`docker` 그룹 권한을 적용하려면 SSH 세션을 종료한 뒤 다시 접속하세요.
+
+##### 3. Local Harbor 설치 또는 이전
 
 Local Harbor의 실행 설정은 `eva-deployer` 밖의 `~/.local/share/eva-harbor`에 저장합니다. 이후에는 Harbor를 중지하지 않고 `eva-deployer` 전체를 다시 동기화할 수 있습니다.
 
-기존에 `eva-deployer/install/harbor/harbor`에 Harbor를 설치했다면, 기존 Harbor를 중지한 뒤 외부 runtime 경로로 한 번 이전합니다.
+새로 설치하는 경우 아래 명령을 실행합니다. Harbor는 `localhost:32080`으로 실행됩니다. 최초 설치의 관리자 계정은 `admin`, 기본 비밀번호는 `EVA123@`입니다. 운영 환경에서는 `--admin-password`로 변경하세요.
+
+```bash
+./install/setup_harbor.sh \
+  --hostname localhost \
+  --install-root ~/.local/share/eva-harbor
+```
+
+기존에 `eva-deployer/install/harbor/harbor`에 Harbor를 설치했다면, 위의 새 설치 대신 기존 Harbor를 중지한 뒤 외부 runtime 경로로 한 번 이전합니다.
 
 ```bash
 cd /home/eva/eva-deployer/install/harbor/harbor
@@ -292,33 +324,7 @@ cd /home/eva/eva-deployer
   --install-root ~/.local/share/eva-harbor
 ```
 
-Airgap 서버에서 Python/Ansible을 설치합니다.
-
-```bash
-./install/install_python_venv_airgap.sh
-./install/install_ansible_airgap.sh
-source .venv/bin/activate
-ansible --version
-```
-
-Airgap 서버에서 Local Harbor를 설치합니다. 먼저 준비된 Docker `.deb` bundle로 Docker Engine과 Compose plugin을 설치한 뒤 Harbor를 실행해야 합니다.
-
-Harbor는 `localhost:32080`으로 실행됩니다. 최초 설치의 관리자 계정은 `admin`, 기본 비밀번호는 `EVA123@`입니다. 운영 환경에서는 `--admin-password`로 변경하세요.
-
-```bash
-# install/ 전체가 복사된 airgap 서버에서 Docker 설치
-sudo ./install/install_docker.sh --airgap
-```
-
-`docker` 그룹 권한을 적용하려면 SSH 세션을 종료한 뒤 다시 접속하세요.
-
-```bash
-./install/setup_harbor.sh \
-  --hostname localhost \
-  --install-root ~/.local/share/eva-harbor
-```
-
-이미 설치된 Harbor의 volume 경로만 바꾸려면 아래처럼 실행합니다.
+기존 Harbor의 volume 경로만 바꾸려면 `--data-volume`을 추가합니다. 기존 `harbor.yml`의 관리자 비밀번호는 별도로 지정하지 않으면 유지됩니다. 기존 Harbor 데이터는 자동 복사하지 않으므로, 새 경로는 빈 registry 저장소로 시작합니다.
 
 ```bash
 ./install/setup_harbor.sh \
@@ -326,8 +332,6 @@ sudo ./install/install_docker.sh --airgap
   --install-root ~/.local/share/eva-harbor \
   --data-volume /data001/harbor
 ```
-
-이 경우 기존 `harbor_admin_password`는 명시하지 않으면 기존 `harbor.yml` 값을 유지합니다. 기존 Harbor 데이터는 자동 복사하지 않으므로, 새 경로는 빈 registry 저장소로 시작합니다.
 
 `repository-images.tar`는 Harbor에 직접 push할 수 없습니다. Docker daemon에 load한 뒤 Local Harbor로 push해야 합니다. push 중에는 archive, Docker image cache, Harbor registry가 일시적으로 모두 저장 공간을 사용합니다.
 

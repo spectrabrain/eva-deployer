@@ -1,10 +1,9 @@
-- name: Resolve eva-iam control-node paths (host settings + generated secrets)
+- name: Resolve eva-iam host settings file
   ansible.builtin.set_fact:
     eva_iam_values_host: "{{ ansible_host | default(inventory_hostname) }}"
     eva_iam_values_file: "{{ eva_iam_values_file | default(playbook_dir ~ '/values/eva-iam.yaml') }}"
-    # Generated secrets persist here on the control node (config/ is git-ignored). Stable across
-    # re-runs (reused if present), unique per host — solves 'same credentials everywhere'.
-    eva_iam_secret_dir: "{{ eva_iam_secret_dir | default(playbook_dir ~ '/config/' ~ (ansible_host | default(inventory_hostname)) ~ '/secrets') }}"
+    # Base dir for all eva-iam paths (workdir + node hostPath dirs). Everything hangs off this.
+    eva_iam_base_dir: "{{ eva_iam_base_dir | default(ansible_facts['env']['HOME'] ~ '/.eva-iam') }}"
 
 - name: Check for eva-iam host settings file on control node
   ansible.builtin.stat:
@@ -34,68 +33,43 @@
     repository_mode: "{{ repository_mode | default('cloud_repository') }}"
     eva_iam_namespace: "{{ eva_iam_namespace | default('eva-iam') }}"
     eva_iam_name: "{{ eva_iam_name | default('eva-iam') }}"
-    # Release identities ("<namespace>/<name>") this automation must never touch — e.g. an
-    # existing manually-installed production release. Deploying onto one of these is refused.
-    eva_iam_protected_releases: "{{ eva_iam_protected_releases | default(['eva-iam/eva-iam']) }}"
+    # Opt-in guard: release identities ("<namespace>/<name>") this automation must never overwrite.
+    # Empty by default; set e.g. -e '{"eva_iam_protected_releases": ["eva-iam/eva-iam"]}' to protect one.
+    eva_iam_protected_releases: "{{ eva_iam_protected_releases | default([]) }}"
     eva_iam_kubeconfig: "{{ eva_iam_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
-    # Local chart directory. Both repos live side by side under $HOME by default:
-    #   ~/deployer/eva-deployer (this repo)  and  ~/eva-sso (the SSO chart).
-    eva_iam_chart_dir: "{{ eva_iam_chart_dir | default(ansible_facts['env']['HOME'] ~ '/eva-sso/deploy/helm/charts/eva-iam') }}"
-    eva_iam_workdir: "{{ eva_iam_workdir | default('/opt/eva-iam') }}"
-    # Optional: override the realm import JSON with a raw file on the control node (e.g. a realm
-    # exported from the running instance). Empty = use the chart's built-in realm file as-is.
-    eva_iam_realm_file: "{{ eva_iam_realm_file | default('') }}"
-    # With eva_iam_realm_file: regenerate each confidential client's secret (unique per install,
-    # persisted under eva_iam_secret_dir) while keeping everything else in the file identical.
-    eva_iam_realm_regenerate_secrets: "{{ eva_iam_realm_regenerate_secrets | default(false) | bool }}"
-    # Path (relative to chart root) the chart imports the realm from — see values keycloak.realmImport.file.
-    eva_iam_realm_chart_relpath: "{{ eva_iam_realm_chart_relpath | default('files/eva-iam-realm.json') }}"
-    # Public hostname keycloak/dispatcher/ingress are all derived from (chart config.host).
-    eva_iam_host: "{{ eva_iam_host | default('eva-app-e2e.eva-dev.lge.com') }}"
-    eva_iam_timezone: "{{ eva_iam_timezone | default('Asia/Seoul') }}"
-    eva_iam_image_tag: "{{ eva_iam_image_tag | default(deploy_versions.eva_iam_image_tag | default('')) }}"
-    # Empty = use the chart's own image.repository (bare local image name in this env). Set to an
-    # ECR path (e.g. 339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-keycloak)
-    # to pull from ECR instead — requires valid AWS creds at eva_iam_image_pull_host_path.
-    eva_iam_keycloak_image_repository: "{{ eva_iam_keycloak_image_repository | default('') }}"
-    eva_iam_dispatcher_image_repository: "{{ eva_iam_dispatcher_image_repository | default('') }}"
-    eva_iam_admin_username: "{{ eva_iam_admin_username | default('admin') }}"
-    eva_iam_admin_password: "{{ eva_iam_admin_password | default('adminpass') }}"
-    eva_iam_db_type: "{{ eva_iam_db_type | default('internal') }}"
-    eva_iam_db_username: "{{ eva_iam_db_username | default('keycloak') }}"
-    eva_iam_db_password: "{{ eva_iam_db_password | default('strongpassword') }}"
-    # NodePort exposes postgres cluster-wide (one port only). For a test instance co-located
-    # with an existing release, prefer ClusterIP to avoid a NodePort collision entirely.
-    eva_iam_db_service_type: "{{ eva_iam_db_service_type | default('NodePort') }}"
-    eva_iam_db_nodeport: "{{ eva_iam_db_nodeport | default(32090) | int }}"
-    eva_iam_redis_password: "{{ eva_iam_redis_password | default('eva-redis-pass') }}"
-    # imagePullSecrets: ECR pull (chart default). The chart itself creates/renews the secret.
-    eva_iam_image_pull_enabled: "{{ eva_iam_image_pull_enabled | default(true) }}"
-    eva_iam_image_pull_create: "{{ eva_iam_image_pull_create | default(true) }}"
-    eva_iam_ecr_account: "{{ eva_iam_ecr_account | default('339713051385') }}"
-    eva_iam_ecr_region: "{{ eva_iam_ecr_region | default('ap-northeast-2') }}"
-    eva_iam_image_pull_auth_type: "{{ eva_iam_image_pull_auth_type | default('hostPath') }}"
+    # Workspace on the target where the rendered helm override values are written.
+    eva_iam_workdir: "{{ eva_iam_workdir | default(eva_iam_base_dir) }}"
+    # Published Helm chart. The realm (Keycloak/clients/secrets) is baked into the chart now —
+    # we only override the values below; no local chart copy or realm JSON handling needed.
+    eva_iam_chart_repo_name: "{{ eva_iam_chart_repo_name | default('eva-iam') }}"
+    eva_iam_chart_repo_url: "{{ eva_iam_chart_repo_url | default('https://mellerikat.github.io/eva-iam') }}"
+    eva_iam_chart_ref: "{{ eva_iam_chart_ref | default('eva-iam/eva-iam') }}"
+    eva_iam_chart_version: "{{ eva_iam_chart_version | default(deploy_versions.eva_iam_chart_version | mandatory) }}"
+    # config.host — keycloak/dispatcher/ingress all derive from it.
+    eva_iam_host: "{{ eva_iam_host | default('e2e.eva-dev.lge.com') }}"
+    # keycloak.realmConfig.substitutions (values injected into the chart's realm template)
+    eva_iam_admin_password: "{{ eva_iam_admin_password | default('ChangeMe-1!') }}"
+    eva_iam_admin_email: "{{ eva_iam_admin_email | default('admin@eva.com') }}"
+    # empty -> derived from host as https://<host>/* in the template
+    eva_iam_app_redirect_uri: "{{ eva_iam_app_redirect_uri | default('') }}"
+    # ingress
+    eva_iam_ingress_path: "{{ eva_iam_ingress_path | default('/iam') }}"
+    eva_iam_tls_host_path: "{{ eva_iam_tls_host_path | default(eva_iam_base_dir ~ '/certs') }}"
+    # persistence
+    eva_iam_persistence_host_path: "{{ eva_iam_persistence_host_path | default(eva_iam_base_dir ~ '/host-path') }}"
+    # database internal service NodePort
+    eva_iam_db_nodeport: "{{ eva_iam_db_nodeport | default(32091) | int }}"
+    # imagePullSecrets: ECR creds directory on the node (chart pulls images from ECR)
     eva_iam_image_pull_host_path: >-
       {{ eva_iam_image_pull_host_path
          | default('/home/' ~ (ansible_user | default(ansible_ssh_user | default('eva'))) ~ '/.aws') }}
-    # ingress + TLS (chart config)
-    eva_iam_ingress_enabled: "{{ eva_iam_ingress_enabled | default(true) }}"
-    eva_iam_ingress_class: "{{ eva_iam_ingress_class | default('nginx') }}"
-    eva_iam_tls_create: "{{ eva_iam_tls_create | default(true) }}"
-    eva_iam_tls_auth_type: "{{ eva_iam_tls_auth_type | default('hostPath') }}"
-    eva_iam_tls_host_path: "{{ eva_iam_tls_host_path | default('/root/certs') }}"
-    eva_iam_tls_cert_file: "{{ eva_iam_tls_cert_file | default('tls.crt') }}"
-    eva_iam_tls_key_file: "{{ eva_iam_tls_key_file | default('tls.key') }}"
-    eva_iam_persistence_type: "{{ eva_iam_persistence_type | default('hostPath') }}"
-    eva_iam_persistence_host_path: "{{ eva_iam_persistence_host_path | default('/eva-iam') }}"
 
 - name: Validate repository mode for EVA IAM
   ansible.builtin.assert:
     that:
       - repository_mode == 'cloud_repository'
     fail_msg: >-
-      eva_iam role은 현재 cloud_repository 모드만 지원합니다.
-      (커스텀 이미지는 ECR에서 pull합니다.)
+      eva_iam role은 현재 cloud_repository 모드만 지원합니다 (Helm repo + ECR pull).
 
 - name: Refuse to deploy onto a protected (existing) release
   ansible.builtin.assert:
@@ -106,79 +80,35 @@
       기존(운영) 릴리스를 건드리지 않도록 -e eva_iam_name=<다른 이름> -e eva_iam_namespace=<다른 ns> 로
       새 인스턴스를 지정하세요. (정말 덮어써야 하면 -e eva_iam_protected_releases='[]' 로 해제)
 
-- name: Assert local eva-iam chart directory exists on control node
-  ansible.builtin.stat:
-    path: "{{ eva_iam_chart_dir }}/Chart.yaml"
-  register: eva_iam_chart_stat
-  delegate_to: localhost
-  become: false
-
-- name: Fail if eva-iam chart is missing
-  ansible.builtin.assert:
-    that:
-      - eva_iam_chart_stat.stat.exists
-    fail_msg: >-
-      {{ eva_iam_chart_dir }}/Chart.yaml 이 없습니다.
-      eva-sso 리포를 clone 했는지 확인하거나 -e eva_iam_chart_dir=<경로> 로 지정하세요.
-
 - name: Ensure EVA IAM workspace exists on target
   ansible.builtin.file:
     path: "{{ eva_iam_workdir }}"
     state: directory
     mode: "0755"
 
-- name: Copy eva-iam chart to target workspace
-  ansible.builtin.copy:
-    src: "{{ eva_iam_chart_dir }}/"
-    dest: "{{ eva_iam_workdir }}/chart/"
-    mode: "0644"
-    directory_mode: "0755"
-  when: not ansible_check_mode
-
-# --- Realm import source (precedence: raw file [+regenerate secrets] > chart default) ---
-
-- name: Assert override realm file exists on control node
-  ansible.builtin.stat:
-    path: "{{ eva_iam_realm_file }}"
-  register: eva_iam_realm_file_stat
-  delegate_to: localhost
-  become: false
-  when: eva_iam_realm_file | length > 0
-
-- name: Fail if override realm file is missing
-  ansible.builtin.assert:
-    that:
-      - eva_iam_realm_file_stat.stat.exists
-    fail_msg: "eva_iam_realm_file={{ eva_iam_realm_file }} 파일을 control 노드에서 찾을 수 없습니다."
-  when: eva_iam_realm_file | length > 0
-
-- name: Overlay raw override realm file onto chart as-is (leaves ~/eva-sso untouched)
-  ansible.builtin.copy:
-    src: "{{ eva_iam_realm_file }}"
-    dest: "{{ eva_iam_workdir }}/chart/{{ eva_iam_realm_chart_relpath }}"
-    mode: "0644"
-  when:
-    - not ansible_check_mode
-    - eva_iam_realm_file | length > 0
-    - not (eva_iam_realm_regenerate_secrets | bool)
-
-- name: Overlay raw realm file with regenerated client secrets (everything else identical)
-  ansible.builtin.template:
-    src: eva-iam-realm-patch.json.j2
-    dest: "{{ eva_iam_workdir }}/chart/{{ eva_iam_realm_chart_relpath }}"
-    mode: "0644"
-  when:
-    - not ansible_check_mode
-    - eva_iam_realm_file | length > 0
-    - eva_iam_realm_regenerate_secrets | bool
-
-- name: Render eva-iam override values on target
+- name: Render eva-iam helm override values on target
   no_log: true
   ansible.builtin.template:
     src: eva-iam-k3s-override.yaml.j2
     dest: "{{ eva_iam_workdir }}/eva-iam-k3s-override.yaml"
     mode: "0644"
   when: not ansible_check_mode
+
+- name: Add Helm repository for eva-iam
+  ansible.builtin.command: helm repo add {{ eva_iam_chart_repo_name }} {{ eva_iam_chart_repo_url }}
+  register: eva_iam_repo_add
+  changed_when: "'already exists' not in (eva_iam_repo_add.stdout + eva_iam_repo_add.stderr)"
+  failed_when:
+    - eva_iam_repo_add.rc != 0
+    - "'already exists' not in (eva_iam_repo_add.stdout + eva_iam_repo_add.stderr)"
+  environment:
+    KUBECONFIG: "{{ eva_iam_kubeconfig }}"
+
+- name: Update Helm repository
+  ansible.builtin.command: helm repo update {{ eva_iam_chart_repo_name }}
+  changed_when: true
+  environment:
+    KUBECONFIG: "{{ eva_iam_kubeconfig }}"
 
 - name: Check k3s API accessibility for eva-iam
   ansible.builtin.command:
@@ -188,7 +118,7 @@
   register: eva_iam_k3s_check
   changed_when: false
 
-- name: Detect NodePort collision from another namespace (test alongside existing release)
+- name: Detect NodePort collision from another namespace
   ansible.builtin.shell: >-
     set -o pipefail;
     kubectl get svc -A
@@ -198,9 +128,7 @@
     executable: /bin/bash
   register: eva_iam_nodeport_conflict
   changed_when: false
-  when:
-    - not ansible_check_mode
-    - eva_iam_db_service_type == 'NodePort'
+  when: not ansible_check_mode
   environment:
     KUBECONFIG: "{{ eva_iam_kubeconfig }}"
 
@@ -211,16 +139,14 @@
     fail_msg: >-
       NodePort {{ eva_iam_db_nodeport }} 가 이미 다른 서비스에서 사용 중입니다:
       [{{ eva_iam_nodeport_conflict.stdout | default('') | trim }}].
-      기존 릴리스와 충돌하지 않도록 -e eva_iam_db_nodeport=<다른 포트>,
-      또는 -e eva_iam_db_service_type=ClusterIP 로 지정하세요.
-  when:
-    - not ansible_check_mode
-    - eva_iam_db_service_type == 'NodePort'
+      -e eva_iam_db_nodeport=<다른 포트> 로 지정하세요.
+  when: not ansible_check_mode
 
-- name: Install eva-iam from local chart
+- name: Install/upgrade eva-iam from Helm repo
   ansible.builtin.command: >-
-    helm upgrade --install {{ eva_iam_name }} {{ eva_iam_workdir }}/chart
+    helm upgrade --install {{ eva_iam_name }} {{ eva_iam_chart_ref }}
     -n {{ eva_iam_namespace }}
+    --version {{ eva_iam_chart_version }}
     --create-namespace
     -f {{ eva_iam_workdir }}/eva-iam-k3s-override.yaml
   register: eva_iam_install
@@ -250,33 +176,14 @@
   environment:
     KUBECONFIG: "{{ eva_iam_kubeconfig }}"
 
-- name: Verify keycloak realm endpoint responds inside the pod
-  ansible.builtin.shell: >-
-    set -o pipefail;
-    POD=$(kubectl get pods -n {{ eva_iam_namespace }}
-      -l component=eva-iam-keycloak
-      -o jsonpath='{.items[0].metadata.name}');
-    kubectl exec -n {{ eva_iam_namespace }} "$POD" --
-      curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/realms/eva-iam
-  args:
-    executable: /bin/bash
-  register: eva_iam_realm_check
-  changed_when: false
-  failed_when: false
-  when: not ansible_check_mode
-  environment:
-    KUBECONFIG: "{{ eva_iam_kubeconfig }}"
-
 - name: Show eva-iam deployment summary
   ansible.builtin.debug:
     msg:
       - "namespace/release : {{ eva_iam_namespace }}/{{ eva_iam_name }}"
-      - "hostname          : https://{{ eva_iam_host }}"
-      - "admin console     : https://{{ eva_iam_host }}/admin"
-      - "admin credentials : {{ eva_iam_admin_username }} / {{ eva_iam_admin_password }}"
+      - "chart             : {{ eva_iam_chart_ref }} {{ eva_iam_chart_version }}"
+      - "base URL          : https://{{ eva_iam_host }}{{ eva_iam_ingress_path }}"
+      - "admin console     : https://{{ eva_iam_host }}{{ eva_iam_ingress_path }}/admin"
       - "realm             : eva-iam"
-      - "realm endpoint    : HTTP {{ eva_iam_realm_check.stdout | default('n/a') }} (200/303 정상)"
-      - "generated secrets : {{ eva_iam_secret_dir }} (control node, git-ignored)"
       - "resources:"
       - "{{ eva_iam_resources.stdout_lines | default([]) }}"
   when: not ansible_check_mode

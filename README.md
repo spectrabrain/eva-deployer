@@ -65,11 +65,11 @@ Airgap 서버에 Docker가 설치되어 있지 않을 수 있으므로, 인터�
 
 이 스크립트는 Docker `.deb` 패키지와 실제 설치에 필요한 의존성 전체를 받기 위해 `apt-get update`를 실행하므로, 준비 서버에서 `root` 또는 비밀번호 없이 사용할 수 있는 `sudo` 권한이 필요합니다. 일반 사용자로 실행하는 경우 먼저 터미널에서 `sudo -v`를 실행해 인증한 뒤 다운로드 명령을 실행하세요. 준비 서버와 Airgap 서버는 같은 Ubuntu 릴리스 및 아키텍처를 사용해야 하며, 실행할 때마다 기존 `install/docker/debs/*.deb`는 최신 의존성 묶음으로 교체됩니다. 다운로드 후 `install/docker/debs/manifest.txt`가 생성되었는지도 확인하세요. 기존에 생성한 Docker `.deb` 묶음은 의존성이 부족할 수 있으므로 수정된 스크립트로 반드시 다시 생성해야 합니다.
 
-`install/apt/debs/` bundle은 base/NFS 의존성뿐 아니라 `systemd` 계열의 version-locked 패키지 세트도 함께 받습니다. 따라서 Airgap 서버가 준비 서버보다 한 Ubuntu patch level 낮아도 `systemd`와 `libsystemd0`의 정확한 버전 의존성으로 설치가 깨지는 문제를 방지합니다. 다만 이미 전달한 예전 bundle에는 이 보완이 없으므로, 준비 서버에서 최신 `./install/download_offline_assets.sh`를 실행한 뒤 `install/apt/debs/` 전체와 `manifest.txt`를 다시 복사해야 합니다.
+`install/apt/debs/` bundle은 Ansible base/NFS role에 필요한 `unzip`, `curl`, `gnupg`, `nfs-kernel-server`, `nfs-common`, `keyutils`와 그 일반 의존성을 준비합니다. `systemd`, `udev`, `libsystemd0`, `libudev1`, `dpkg`, `libc6` 같은 **OS 핵심 패키지는 bundle 및 Ansible base/NFS 설치 대상에서 제외**합니다. 준비 서버와 Airgap 서버의 Ubuntu patch level이 달라도 배포 중 OS 핵심 패키지가 섞여 설치되어 의존성이 깨지지 않게 하기 위함입니다.
 
-`local_repository`/`remote_repository`용 offline asset 다운로드는 `install/apt/debs/`에 base, NFS 서버 및 version-locked system package 의존성을 준비합니다. Airgap Ansible은 설치 전에 bundle과 현재 OS의 strict-version 의존성을 검사하여, 불완전하거나 대상 서버와 충돌하는 bundle을 `dpkg` 실행 전에 중단합니다. 수정된 스크립트 실행 후 `install/apt/debs/` 전체와 `manifest.txt`를 함께 복사해야 합니다.
+`local_repository`/`remote_repository`용 offline asset을 준비한 뒤에는 `install/apt/debs/` 전체와 `manifest.txt`를 함께 전달하세요. Airgap Ansible은 설치 전에 bundle의 package dependency를 검사하며, 설치 시에는 `apt-get --no-download`로 bundle 안의 일반 패키지만 설치합니다.
 
-Airgap 서버에서 offline `.deb` 설치가 중간에 실패했거나 `dpkg --audit`에 미처리 패키지가 보이면, 인터넷 연결 없이 아래 명령으로 bundle을 검사하고 복구할 수 있습니다. 검증이 실패하면 bundle이 불완전하거나 현재 OS와 충돌하는 것이므로, 준비 서버에서 bundle을 다시 생성해 복사한 뒤 실행하세요.
+Airgap 서버에서 offline `.deb` 설치가 중간에 실패했을 때, `systemd`/`udev`와 무관한 bundle 문제는 아래 명령으로 검사하고 복구합니다. `systemd`, `udev`, `libsystemd0`, `libudev1` 오류가 보이면 이 명령으로 bundle 전체를 재설치하지 말고 다음 `systemd recovery` 절차를 사용하세요.
 
 ```bash
 cd /home/eva/eva-deployer
@@ -77,6 +77,31 @@ cd /home/eva/eva-deployer
 sudo ./install/repair_offline_debs.sh ./install/apt/debs
 sudo dpkg --audit
 ```
+
+#### systemd recovery: 이미 OS 핵심 패키지 version mismatch가 발생한 경우
+
+기존 bundle 설치가 `libsystemd0` 또는 `libudev1`만 다른 patch version으로 바꿔 `systemd`/`udev` 의존성 오류가 발생한 경우, 전체 `install/` bundle을 다시 만들 필요가 없습니다. 인터넷 가능 준비 서버에서 현재 준비 서버와 같은 systemd 세트만 `install/recovery/`에 준비합니다.
+
+```bash
+# 준비 서버: 현재 systemd 세트의 버전을 확인
+dpkg-query -W -f='${Version}\n' systemd
+
+# 예: 255.4-1ubuntu8.16 systemd lockstep package 12개 준비
+./install/recovery/prepare.sh 255.4-1ubuntu8.16
+```
+
+생성된 `install/recovery/` 전체만 Airgap 서버로 전달합니다. Airgap 서버에서는 Ansible을 다시 실행하기 전에 아래 명령으로 recovery package 12개를 같은 version으로 설치합니다.
+
+```bash
+cd /home/eva/eva-deployer/install/recovery
+./recover.sh
+
+dpkg-query -W -f='${Package}\t${Version}\n' \
+  systemd systemd-sysv udev libsystemd0 libudev1
+sudo dpkg --audit
+```
+
+`recover.sh`가 성공하면 위 5개 package는 모두 `systemd-version.txt`에 기록된 동일 version이어야 하며, `sudo dpkg --audit` 출력은 없어야 합니다. 자세한 동작은 `install/recovery/README.md`를 참고하세요.
 
 ### 1-4. Cloud/Remote/Local 준비 서버: AWS 인증
 
@@ -168,7 +193,7 @@ Main 서버에서 asset과 이미지를 준비합니다.
 docker login harbor.main.local:32080 -u admin
 
 # chart/values/script/kustomize/manifest 등 설치 asset 다운로드
-# Docker Engine/Compose와 Ansible base/NFS role용 apt 의존성 .deb bundle도 함께 준비됩니다.
+# Docker Engine/Compose와 Ansible base/NFS role용 일반 apt 의존성 .deb bundle도 함께 준비됩니다.
 # Docker apt 패키지 다운로드를 위해 sudo 인증 후 실행
 sudo -v && AWS_PROFILE=default ./install/download_offline_assets.sh
 
@@ -239,7 +264,7 @@ harbor.main.local:32080/eva/n8n:1.103.2
 ./install/download_ansible_wheels.sh
 
 # chart/values/script/kustomize/manifest 등 설치 asset 다운로드
-# Docker Engine/Compose와 Ansible base/NFS role용 apt 의존성 .deb bundle도 함께 준비됩니다.
+# Docker Engine/Compose와 Ansible base/NFS role용 일반 apt 의존성 .deb bundle도 함께 준비됩니다.
 # Docker apt 패키지 다운로드를 위해 sudo 인증 후 실행
 sudo -v && AWS_PROFILE=default ./install/download_offline_assets.sh
 

@@ -1,0 +1,4 @@
+rclone copy . gdrive: \
+  --drive-root-folder-id "1PFmDAIxj-JzlEWgnWqLFKLfqz4ni5Xha" \
+  --exclude ".git/**" \
+  --progress

@@ -67,38 +67,6 @@ download_deb_packages() {
   )
 }
 
-download_version_locked_system_packages() {
-  local output_dir="$1"
-  local -a packages=(
-    systemd
-    systemd-dev
-    systemd-sysv
-    systemd-resolved
-    systemd-timesyncd
-    systemd-oomd
-    udev
-    libsystemd-shared
-    libsystemd0
-    libudev1
-    libnss-systemd
-    libpam-systemd
-  )
-  local -a available_packages=()
-  local package
-
-  for package in "${packages[@]}"; do
-    if apt-cache "${APT_CACHE_OPTIONS[@]}" policy "$package" \
-      | awk '/Candidate:/ { exit $2 == "(none)" }'; then
-      available_packages+=("$package")
-    fi
-  done
-
-  if [[ ${#available_packages[@]} -gt 0 ]]; then
-    echo "[info] downloading version-locked system package set: ${#available_packages[@]} packages"
-    download_deb_packages "$output_dir" "${available_packages[@]}"
-  fi
-}
-
 resolve_deb_packages() {
   local -a pending=("$@")
   local -A resolved=()
@@ -250,10 +218,27 @@ if command -v apt-get >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1; then
     nfs-common
     keyutils
   )
+  BASE_EXCLUDED_PACKAGES=(
+    systemd
+    systemd-dev
+    systemd-sysv
+    systemd-resolved
+    systemd-timesyncd
+    systemd-oomd
+    udev
+    libsystemd-shared
+    libsystemd0
+    libudev1
+    libnss-systemd
+    libpam-systemd
+    dpkg
+    libc6
+  )
   find "$BASE_DIR/apt/debs" -maxdepth 1 -type f -name '*.deb' -delete
   BASE_DEPENDENCIES="$(resolve_deb_packages "${BASE_PACKAGES[@]}")"
   mapfile -t BASE_DOWNLOAD_PACKAGES < <(
-    printf '%s\n' "$BASE_DEPENDENCIES"
+    printf '%s\n' "$BASE_DEPENDENCIES" \
+      | grep -F -x -v -f <(printf '%s\n' "${BASE_EXCLUDED_PACKAGES[@]}")
   )
   if [[ ${#BASE_DOWNLOAD_PACKAGES[@]} -eq 0 ]]; then
     echo "[ERROR] could not resolve base/NFS package dependencies from apt." >&2
@@ -261,10 +246,6 @@ if command -v apt-get >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1; then
   fi
   echo "[info] downloading base/NFS packages and dependencies: ${#BASE_DOWNLOAD_PACKAGES[@]} packages"
   download_deb_packages "$BASE_DIR/apt/debs" "${BASE_DOWNLOAD_PACKAGES[@]}"
-  # Packages such as systemd require an exact matching libsystemd0 version.
-  # Include the full systemd lockstep set even when it is already installed on
-  # the preparation host, because the airgap host can be one patch level behind.
-  download_version_locked_system_packages "$BASE_DIR/apt/debs"
   rm -rf "$BASE_DIR/apt/debs/partial" "$BASE_DIR/apt/debs/lock"
   find "$BASE_DIR/apt/debs" -maxdepth 1 -type f -name '*.deb' -print \
     | sort > "$BASE_DIR/apt/debs/manifest.txt"

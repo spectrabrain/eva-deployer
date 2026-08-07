@@ -15,7 +15,24 @@ if [[ ! -d "$PACKAGE_DIR" ]]; then
   exit 1
 fi
 
-mapfile -t packages < <(find "$PACKAGE_DIR" -maxdepth 1 -type f -name '*.deb' -print | sort)
+mapfile -t packages < <(
+  find "$PACKAGE_DIR" -maxdepth 1 -type f -name '*.deb'
+  ! -name 'systemd_*.deb'
+  ! -name 'systemd-dev_*.deb'
+  ! -name 'systemd-sysv_*.deb'
+  ! -name 'systemd-resolved_*.deb'
+  ! -name 'systemd-timesyncd_*.deb'
+  ! -name 'systemd-oomd_*.deb'
+  ! -name 'udev_*.deb'
+  ! -name 'libsystemd-shared_*.deb'
+  ! -name 'libsystemd0_*.deb'
+  ! -name 'libudev1_*.deb'
+  ! -name 'libnss-systemd_*.deb'
+  ! -name 'libpam-systemd_*.deb'
+  ! -name 'dpkg_*.deb'
+  ! -name 'libc6_*.deb'
+  -print | sort
+)
 if [[ ${#packages[@]} -eq 0 ]]; then
   echo "[ERROR] no .deb files found in $PACKAGE_DIR" >&2
   exit 1

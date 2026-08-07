@@ -1,0 +1,14 @@
+> rclone config
+name> gdrive
+Storage> drive
+client_id> 발급받은 OAuth Client ID
+client_secret> 발급받은 Client Secret
+scope> 1
+service_account_file> Enter
+Edit advanced config? n
+Use web browser? y
+
+rclone copy gdrive: . \
+  --drive-root-folder-id "1PFmDAIxj-JzlEWgnWqLFKLfqz4ni5Xha" \
+  --dry-run \
+  --progress

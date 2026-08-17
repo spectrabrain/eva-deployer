@@ -1,8 +1,40 @@
 # EVA Deployer
 
-EVA 설치 환경을 Ansible로 구성하는 deployer입니다. 권장 OS는 **Ubuntu 24.04**입니다.
+## 개요
 
-설치 시 이미지 출처는 `repository_mode`로 결정합니다. 기본값은 `cloud_repository`이며, 모드별 준비 방법과 Repository 주소 규칙은 [1. 사전 준비 및 Repository 준비](#1-사전-준비-및-repository-준비)에서 설명합니다.
+EVA Deployer는 Ansible로 EVA 설치 환경과 서비스를 구성하는 배포 도구입니다. 권장 OS는 **Ubuntu 24.04**입니다.
+
+EVA는 고객마다 Network와 Security 환경이 다르므로, 하나의 설치 Package를 모든 환경에 같은 방식으로 전달하기 어렵습니다. EVA Deployer는 고객별 Helm Chart나 제품 이미지를 따로 만들지 않고, **동일한 EVA Release에서 이미지 Repository의 공급 경로만 바꾸는 방식**으로 다양한 환경에 EVA를 배포합니다.
+
+### Repository 기반 Delivery Mode
+
+설치 시 이미지 출처는 `repository_mode`로 결정하며, 기본값은 `cloud_repository`입니다.
+
+| Repository 방식 | 적용 환경 | 설치 Image 공급 방식 |
+| --- | --- | --- |
+| `cloud_repository` | 대상 서버가 인터넷과 외부 Repository에 접근 가능 | AWS ECR, Docker Hub, S3 등 외부 Repository |
+| `remote_repository` | 대상 서버는 인터넷에 접근할 수 없지만 Main Server에 접근 가능 | Main Server의 Harbor |
+| `local_repository` | 외부 인터넷과 외부 Network가 모두 차단된 완전 폐쇄망 | 저장매체로 반입한 고객 내부 Harbor |
+
+`remote_repository`는 인터넷이 가능한 Main Server의 Harbor를 여러 EVA Server가 함께 사용할 수 있어, 다수 사업장에 같은 Release를 배포할 때 사용합니다. `local_repository`는 완전 폐쇄망에서 Local Harbor에 사전 반입한 이미지를 등록한 뒤 설치하는 방식입니다.
+
+### 동일 Release와 Version 관리
+
+세 Delivery Mode는 서로 다른 제품 또는 별도 Helm Chart가 아닙니다. 고객 Network 환경에 따라 Image 공급 경로만 달라지며, 실제 EVA Application 구성과 Version은 동일하게 유지합니다. EVA App·Agent·Vision과 Chart Version은 `versions.json`에서 단일하게 관리하고, `repository_registry`와 `repository_project`로 배포 대상 Repository를 지정합니다. EVA Deployer도 EVA 버전과 동일한 기준으로 버저닝하며, 특정 EVA 버전을 배포할 때 해당 버전을 지원하는 Deployer 버전을 함께 사용합니다.
+
+이 구조는 하나의 EVA Release를 인터넷 연결 환경, 제한된 내부망, 완전 폐쇄망에 반복 배포하면서도 고객별 Version 분기를 만들지 않도록 합니다.
+
+### Offline Delivery
+
+`local_repository` 환경에서는 필요한 항목을 표준 Offline Release Package로 사전에 준비합니다.
+
+- EVA 및 Infrastructure Container Image
+- AI Model, Helm Chart, 설치 Asset
+- Python·Ansible 패키지와 일반 apt 의존성 bundle
+- Harbor Offline Installer
+- Version Manifest와 설치·검증 Script
+
+폐쇄망에서는 누락된 Package 하나로 설치가 중단될 수 있으므로, 설치 전에 Package 구성·Version·manifest를 검증해야 합니다. 모드별 준비 절차와 Repository 주소 규칙은 [1. 사전 준비 및 Repository 준비](#1-사전-준비-및-repository-준비)에서 설명합니다.
 
 ---
 
@@ -30,7 +62,7 @@ repository_project=eva
 
 ### 1-2. 모든 모드 공통: 버전 단일 관리
 
-EVA App/Agent/Vision 및 chart 버전은 `versions.json` 한 곳에서 관리합니다.
+EVA App/Agent/Vision 및 Helm Chart 버전은 `versions.json` 한 곳에서 관리합니다. EVA Deployer도 EVA 버전과 동일한 기준으로 버저닝합니다. 따라서 특정 EVA 버전을 배포할 때는 해당 버전을 지원하는 Deployer 버전을 함께 사용해야 합니다.
 버전 업데이트 시 우선 이 파일만 수정하면:
 
 - Ansible 배포(`site_eva.yaml`)에 자동 반영

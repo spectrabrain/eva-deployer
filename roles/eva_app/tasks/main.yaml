@@ -26,6 +26,9 @@
     eva_app_backend_host: "{{ eva_app_backend_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
     eva_app_backend_secure: "{{ eva_app_backend_secure | default(false) }}"
     eva_app_jwt_secret: "{{ eva_app_jwt_secret | default('secret') }}"
+    # app.sso.* (eva-app chart 3.1.0+). Empty = 차트 기본값 유지, 렌더에서 생략됩니다.
+    eva_app_sso_base_url: "{{ eva_app_sso_base_url | default('') }}"
+    eva_app_sso_admin_client_secret: "{{ eva_app_sso_admin_client_secret | default('') }}"
     eva_app_vision_ml: "{{ eva_app_vision_ml | default('http://eva-vision.eva-vision:8000') }}"
     eva_app_agent_llm: "{{ eva_app_agent_llm | default('http://eva-agent.eva-agent') }}"
     eva_app_agent_vlm: "{{ eva_app_agent_vlm | default('http://eva-agent.eva-agent') }}"

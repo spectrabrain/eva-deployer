@@ -1,0 +1,62 @@
+# Rendered helm override for eva-iam on k3s (base: chart values.yaml).
+# Driven by eva_iam_* ansible variables — see roles/eva_iam/tasks/main.yaml for defaults.
+# Site-specific values belong in values/eva-iam.yaml, which is applied after this file.
+#
+# Keys here must match the chart's schema. Check after a chart bump:
+#   helm show values eva-iam/eva-iam --version <version>
+config:
+  host: "{{ eva_iam_host }}"
+
+keycloak:
+  # config-cli 로 표현 못 하는 realm 부분 (post-install/upgrade Job, kcadm)
+  realmPatch:
+    realmAdmin:
+      password: {{ eva_iam_admin_password | to_json }}
+    evaApp:
+      redirectUris:
+{% for uri in eva_iam_app_redirect_uris %}
+        - {{ uri | to_json }}
+{% endfor %}
+  realmConfig:
+    substitutions:
+      EVA_IAM_ADMIN_EMAIL: "{{ eva_iam_admin_email }}"
+
+ingress:
+  path: "{{ eva_iam_ingress_path }}"
+  tls:
+    authType: hostPath
+    hostPath: "{{ eva_iam_tls_host_path }}"
+
+persistence:
+  type: hostPath
+  hostPath:
+    path: "{{ eva_iam_persistence_host_path }}"
+
+pv:
+  create: false
+
+database:
+  type: internal
+  internal:
+    service:
+      nodePort: {{ eva_iam_db_nodeport }}
+    password: {{ eva_iam_db_password | to_json }}
+
+redis:
+  auth:
+    password: {{ eva_iam_redis_password | to_json }}
+  tls:
+    enabled: {{ eva_iam_redis_tls_enabled | bool | lower }}
+  external:
+    enabled: {{ eva_iam_redis_external_enabled | bool | lower }}
+    nodePort: {{ eva_iam_redis_nodeport }}
+
+imagePullSecrets:
+  enabled: {{ (repository_mode == 'cloud_repository') | lower }}
+  create: {{ (repository_mode == 'cloud_repository') | lower }}
+  authType: "{{ eva_iam_image_pull_auth_type }}"
+  hostPath: "{{ eva_iam_image_pull_host_path }}"
+  secretName: "{{ eva_iam_image_pull_secret_name }}"
+
+serviceAccount:
+  create: true

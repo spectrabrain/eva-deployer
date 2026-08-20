@@ -1,0 +1,35 @@
+# site_eva_app.yaml
+#
+# eva-app 만 배포합니다. site_eva.yaml 은 eva_agent → eva_vision → eva_app 묶음이라
+# app 만 다시 올리려면 agent/vision 까지 같이 돌았습니다. eva_app role 은
+# config/<host>/eva.yaml 의 값을 하나도 쓰지 않으므로(그 파일은 agent 의 nfs 경로,
+# vision 의 MIG 설정, vllm override 용입니다) site_eva_config.yaml 선행 없이 돕니다.
+#
+#   ansible-playbook -i inventory.ini site_eva_app.yaml
+#
+#   # airgap
+#   ansible-playbook -i inventory.ini site_eva_app.yaml \
+#     -e repository_mode=local_repository -e repository_registry=localhost:32080
+#
+#   # eva-iam 을 함께 쓰는 경우 (site_eva_iam.yaml 이 config/<host>/eva-iam.yaml 에 남긴 값)
+#     -e eva_app_sso_base_url=https://<host>/<path>
+#     -e eva_app_sso_admin_client_secret=<secret>
+#
+- name: Deploy EVA App
+  hosts: all
+  become: true
+  any_errors_fatal: true
+  serial: 1
+  vars_files:
+    - "{{ playbook_dir }}/versions.json"
+
+  pre_tasks:
+    - name: Resolve repository mode
+      ansible.builtin.set_fact:
+        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+      changed_when: false
+
+  tasks:
+    - name: STEP 1 - eva-app
+      ansible.builtin.import_role:
+        name: eva_app

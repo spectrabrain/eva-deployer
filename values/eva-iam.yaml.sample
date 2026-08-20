@@ -32,6 +32,21 @@
 #   eva_iam_redis_nodeport           32079
 #   eva_iam_image_pull_host_path     /home/eva/.aws               (노드 경로)
 #   eva_iam_node_user                eva   ← 위 노드 경로 3개의 뿌리 (/home/<user>)
+#
+# ── airgap (remote_repository / local_repository) ────────────────────────────
+#   -e repository_mode=local_repository -e repository_registry=<harbor host:port>
+#   면 아래가 자동으로 바뀝니다. 개별 지정도 가능합니다.
+#     차트         install/eva-iam/eva-iam-<version>.tgz     (Helm repo 대신)
+#                  → eva_iam_offline_chart_tgz
+#     이미지 5개   <registry>/<project>/{keycloak,dispatcher,keycloak-config-cli,
+#                                       postgres,redis}
+#                  → eva_iam_{keycloak,dispatcher,config_cli,postgres,redis}_image_repository
+#     ECR cronjob  자동으로 비활성화 (imagePullSecrets.enabled=false)
+#
+#   busybox:latest 와 bitnami/kubectl:latest 는 차트 3.1.0 에 override 키가 없어
+#   ansible 로 못 바꿉니다. k3s registries.yaml 의 docker.io mirror 로 우회하며,
+#   Harbor 에 원본 경로(library/busybox, bitnami/kubectl)로 push 되어 있어야 합니다.
+#   (install/push_images_to_repository.sh 의 MIRROR_PATH_IMAGES 가 처리)
 # ─────────────────────────────────────────────────────────────────────────────
 
 

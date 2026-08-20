@@ -76,6 +76,19 @@
   no_log: true
   ansible.builtin.set_fact:
     repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_project: "{{ repository_project | default('eva') }}"
+    # Harbor host:port, scheme/trailing slash stripped — same normalisation eva_app does.
+    repository_registry: >-
+      {{
+        repository_registry
+        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | regex_replace('^https?://', '')
+        | regex_replace('/+$', '')
+      }}
+    # remote/local_repository always implies airgap; -e airgap_mode=true forces it on.
+    airgap_mode: >-
+      {{ (airgap_mode | default(false) | bool)
+         or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}
     eva_iam_namespace: "{{ eva_iam_namespace | default('eva-iam') }}"
     eva_iam_name: "{{ eva_iam_name | default('eva-iam') }}"
     # Opt-in guard: release identities ("<namespace>/<name>") this automation must never overwrite.
@@ -132,6 +145,43 @@
                    ~ (ansible_host | default(inventory_hostname)) ~ '/iam') }}
     eva_iam_values_dest: "{{ (eva_iam_workdir | default(eva_iam_base_dir)) ~ '/eva-iam-host-override.yaml' }}"
 
+# Airgap: the chart comes from a .tgz under install/ instead of the Helm repo, and every
+# image is pulled from Harbor instead of ECR. Same arrangement as eva_app — the offline
+# bundle is expected at the same path on the target (install/ is copied over with the repo).
+- name: Resolve eva-iam chart source and image repositories
+  ansible.builtin.set_fact:
+    eva_iam_offline_dir: "{{ eva_iam_offline_dir | default(playbook_dir ~ '/install/eva-iam') }}"
+    eva_iam_offline_chart_tgz: >-
+      {{ eva_iam_offline_chart_tgz
+         | default((eva_iam_offline_dir | default(playbook_dir ~ '/install/eva-iam'))
+                   ~ '/eva-iam-' ~ eva_iam_chart_version ~ '.tgz') }}
+    # Harbor image names follow install/push_images_to_repository.sh, which flattens every
+    # source image to <registry>/<project>/<last path element>:<tag>.
+    eva_iam_keycloak_image_repository: >-
+      {{ eva_iam_keycloak_image_repository
+         | default(repository_registry ~ '/' ~ repository_project ~ '/keycloak') }}
+    eva_iam_dispatcher_image_repository: >-
+      {{ eva_iam_dispatcher_image_repository
+         | default(repository_registry ~ '/' ~ repository_project ~ '/dispatcher') }}
+    eva_iam_config_cli_image_repository: >-
+      {{ eva_iam_config_cli_image_repository
+         | default(repository_registry ~ '/' ~ repository_project ~ '/keycloak-config-cli') }}
+    eva_iam_postgres_image_repository: >-
+      {{ eva_iam_postgres_image_repository
+         | default(repository_registry ~ '/' ~ repository_project ~ '/postgres') }}
+    eva_iam_redis_image_repository: >-
+      {{ eva_iam_redis_image_repository
+         | default(repository_registry ~ '/' ~ repository_project ~ '/redis') }}
+
+# Everything below takes the chart from here, so repo-vs-tgz is decided in one place.
+- name: Resolve the eva-iam chart reference to install from
+  ansible.builtin.set_fact:
+    eva_iam_chart_source: >-
+      {{ eva_iam_offline_chart_tgz if (airgap_mode | bool) else eva_iam_chart_ref }}
+    # A .tgz is already version-pinned; --version on a local file is an error.
+    eva_iam_chart_version_arg: >-
+      {{ '' if (airgap_mode | bool) else ('--version ' ~ eva_iam_chart_version) }}
+
 # NodePort pre-flight has to look at the effective value: values/eva-iam.yaml is the
 # last -f, so an override there wins over the rendered template.
 - name: Resolve effective eva-iam NodePorts
@@ -169,9 +219,24 @@
 - name: Validate repository mode for EVA IAM
   ansible.builtin.assert:
     that:
-      - repository_mode == 'cloud_repository'
+      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode == 'cloud_repository' or repository_registry | length > 0
     fail_msg: >-
-      eva_iam role은 현재 cloud_repository 모드만 지원합니다 (Helm repo + ECR pull).
+      repository_mode 는 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry 가
+      필요합니다 (k3s 노드에서 접근 가능한 Harbor host:port).
+
+# busybox 와 bitnami/kubectl 은 차트 3.1.0 에 values 키가 없어(템플릿 하드코딩) Harbor 주소로
+# 바꿀 수 없고, 태그가 :latest 라 imagePullPolicy 도 Always 로 동작합니다. 따라서 airgap 에서는
+# k3s registries.yaml 의 docker.io mirror 로 우회해야 합니다 (roles/k3s/tasks/install.yaml 참고).
+- name: Warn about eva-iam images that cannot be redirected to Harbor
+  ansible.builtin.debug:
+    msg: >-
+      [경고] busybox:latest / bitnami/kubectl:latest 는 차트에 override 키가 없어
+      Docker Hub 를 직접 참조합니다. Harbor 의 library/bitnami 경로에 원본 이름 그대로 push 하고
+      /etc/rancher/k3s/registries.yaml 에 docker.io mirror 를 추가하세요.
+      (없으면 init container 와 TLS/realm-patch Job 이 ImagePullBackOff 로 멈춥니다)
+  when: airgap_mode | bool
 
 - name: Refuse to deploy onto a protected (existing) release
   ansible.builtin.assert:
@@ -192,6 +257,7 @@
   # Local, idempotent helm config write — run it in --check too, otherwise the
   # chart lookups below have no repo to read from and the dry run fails.
   check_mode: false
+  when: not (airgap_mode | bool)
   environment:
     KUBECONFIG: "{{ eva_iam_kubeconfig }}"
 
@@ -199,14 +265,32 @@
   ansible.builtin.command: helm repo update {{ eva_iam_chart_repo_name }}
   changed_when: true
   check_mode: false
+  when: not (airgap_mode | bool)
   environment:
     KUBECONFIG: "{{ eva_iam_kubeconfig }}"
+
+- name: Check the offline eva-iam chart on target
+  ansible.builtin.stat:
+    path: "{{ eva_iam_offline_chart_tgz }}"
+  register: eva_iam_offline_chart
+  check_mode: false
+  when: airgap_mode | bool
+
+- name: Assert the offline eva-iam chart is prepared
+  ansible.builtin.assert:
+    that:
+      - eva_iam_offline_chart.stat.exists
+    fail_msg: >-
+      airgap 모드에서는 {{ eva_iam_offline_chart_tgz }} 파일이 필요합니다.
+      인터넷이 가능한 준비 서버에서 install/download_offline_assets.sh 를 실행한 뒤
+      install/ 전체를 대상 서버로 복사하세요.
+  when: airgap_mode | bool
 
 # Ask the chart what it accepts instead of keeping a list here — a hardcoded list is
 # exactly the kind of mirror that went stale before.
 - name: Read the chart's own top-level value keys
   ansible.builtin.command: >-
-    helm show values {{ eva_iam_chart_ref }} --version {{ eva_iam_chart_version }}
+    helm show values {{ eva_iam_chart_source }} {{ eva_iam_chart_version_arg }}
   register: eva_iam_chart_defaults
   changed_when: false
   check_mode: false
@@ -319,11 +403,11 @@
     label: "{{ item.item | default('') }}"
   when: not ansible_check_mode
 
-- name: Install/upgrade eva-iam from Helm repo
+- name: Install/upgrade eva-iam from Helm repo or offline chart
   ansible.builtin.command: >-
-    helm upgrade --install {{ eva_iam_name }} {{ eva_iam_chart_ref }}
+    helm upgrade --install {{ eva_iam_name }} {{ eva_iam_chart_source }}
     -n {{ eva_iam_namespace }}
-    --version {{ eva_iam_chart_version }}
+    {{ eva_iam_chart_version_arg }}
     --create-namespace
     -f {{ eva_iam_workdir }}/values.yaml
     -f {{ eva_iam_workdir }}/eva-iam-k3s-override.yaml

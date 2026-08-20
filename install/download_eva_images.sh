@@ -17,7 +17,36 @@ EVA_AGENT_CHART_VERSION="${EVA_AGENT_CHART_VERSION:?missing EVA_AGENT_CHART_VERS
 EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_VLLM_CHART_VERSION (set in versions.json)}"
 EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in versions.json)}"
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in versions.json)}"
+EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in versions.json)}"
 EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-values-k3s.PRO6000-MIGx4.yaml}"
+
+# 받을 컴포넌트. 기본은 전부. 일부만 설치할 때는 그 컴포넌트만 지정하면 required 검사·렌더·
+# pull 이 모두 좁혀집니다. vllm 이미지가 커서 app/iam 만 볼 때는 차이가 큽니다.
+#   COMPONENTS="eva-app eva-iam" ./install/download_eva_images.sh
+COMPONENTS="${COMPONENTS:-all}"
+ALL_COMPONENTS="eva-app eva-vision eva-agent eva-agent-init eva-agent-vllm eva-agent-qdrant eva-iam"
+
+want() {
+  [[ "$COMPONENTS" == "all" ]] && return 0
+  local c
+  for c in $COMPONENTS; do
+    [[ "$c" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# 오타가 조용히 "아무것도 안 받음"으로 이어지지 않게 검증합니다.
+if [[ "$COMPONENTS" != "all" ]]; then
+  for c in $COMPONENTS; do
+    # shellcheck disable=SC2076
+    [[ " $ALL_COMPONENTS " == *" $c "* ]] || {
+      echo "[ERROR] 알 수 없는 컴포넌트: $c"
+      echo "        사용 가능: all | $ALL_COMPONENTS"
+      exit 1
+    }
+  done
+  echo "[info] COMPONENTS=$COMPONENTS (전체가 아닙니다)"
+fi
 
 for bin in helm docker; do
   command -v "$bin" >/dev/null 2>&1 || { echo "[ERROR] $bin not found"; exit 1; }
@@ -32,31 +61,35 @@ AGENT_CHART="$BASE_DIR/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
 VLLM_CHART="$BASE_DIR/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
 INIT_CHART="$BASE_DIR/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
 QDRANT_CHART="$BASE_DIR/qdrant/qdrant-${QDRANT_CHART_VERSION}.tgz"
+IAM_CHART="$BASE_DIR/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
 RELEASE_DIR="$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}"
 
-required_files=(
-  "$APP_CHART"
-  "$VISION_CHART"
-  "$AGENT_CHART"
-  "$VLLM_CHART"
-  "$INIT_CHART"
-  "$QDRANT_CHART"
-  "$RELEASE_DIR/eva-agent/values-k3s.yaml"
-  "$RELEASE_DIR/eva-agent/values-secret.yaml"
-  "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}"
-  "$RELEASE_DIR/eva-agent-qdrant/values-k3s.yaml"
-)
+required_files=()
+want eva-app          && required_files+=("$APP_CHART")
+want eva-vision       && required_files+=("$VISION_CHART")
+want eva-iam          && required_files+=("$IAM_CHART")
+want eva-agent-init   && required_files+=("$INIT_CHART" "$RELEASE_DIR/eva-agent-init/values-k3s.yaml")
+want eva-agent-qdrant && required_files+=("$QDRANT_CHART" "$RELEASE_DIR/eva-agent-qdrant/values-k3s.yaml")
+want eva-agent-vllm   && required_files+=("$VLLM_CHART" "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}")
+want eva-agent        && required_files+=("$AGENT_CHART" "$RELEASE_DIR/eva-agent/values-k3s.yaml" "$RELEASE_DIR/eva-agent/values-secret.yaml")
+
 for f in "${required_files[@]}"; do
   [[ -f "$f" ]] || { echo "[ERROR] missing file: $f"; echo "[hint] 먼저 ./install/download_offline_assets.sh 실행"; exit 1; }
 done
 
 echo "[info] Rendering charts to discover image list..."
-helm template eva-app "$APP_CHART" > "$RENDER_DIR/eva-app.yaml"
-helm template eva-vision "$VISION_CHART" > "$RENDER_DIR/eva-vision.yaml"
-helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
-helm template eva-agent-qdrant "$QDRANT_CHART" -f "$RELEASE_DIR/eva-agent-qdrant/values-k3s.yaml" > "$RENDER_DIR/eva-agent-qdrant.yaml"
-helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"
-helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/values-k3s.yaml" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" > "$RENDER_DIR/eva-agent.yaml"
+# 이전 실행이 남긴 렌더 결과가 섞이면 안 받은 컴포넌트의 이미지까지 목록에 들어옵니다.
+rm -f "$RENDER_DIR"/*.yaml
+want eva-app          && helm template eva-app "$APP_CHART" > "$RENDER_DIR/eva-app.yaml"
+want eva-vision       && helm template eva-vision "$VISION_CHART" > "$RENDER_DIR/eva-vision.yaml"
+want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
+want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" -f "$RELEASE_DIR/eva-agent-qdrant/values-k3s.yaml" > "$RENDER_DIR/eva-agent-qdrant.yaml"
+want eva-agent-vllm   && helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"
+want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/values-k3s.yaml" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" > "$RENDER_DIR/eva-agent.yaml"
+# imagePullSecrets off = airgap 렌더. 켜두면 ECR 로그인 cronjob 의 amazon/aws-cli 까지
+# 목록에 들어오는데, airgap 에서는 쓰이지 않습니다.
+want eva-iam          && helm template eva-iam "$IAM_CHART" \
+  --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-iam.yaml"
 
 awk '
   /^[[:space:]]*image:[[:space:]]*/ {

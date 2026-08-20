@@ -8,6 +8,13 @@ config:
   host: "{{ eva_iam_host }}"
 
 keycloak:
+{% if airgap_mode | bool %}
+  # airgap: 모든 이미지를 Harbor 에서 받습니다. cloud 모드에서는 이 블록을 렌더하지 않고
+  # 차트 기본값(ECR 주소)을 그대로 씁니다 — 여기 주소를 박아두면 차트 bump 때 낡습니다.
+  image:
+    repository: "{{ eva_iam_keycloak_image_repository }}"
+    pullPolicy: IfNotPresent
+{% endif %}
   # config-cli 로 표현 못 하는 realm 부분 (post-install/upgrade Job, kcadm)
   realmPatch:
     realmAdmin:
@@ -18,9 +25,20 @@ keycloak:
         - {{ uri | to_json }}
 {% endfor %}
   realmConfig:
+{% if airgap_mode | bool %}
+    image:
+      repository: "{{ eva_iam_config_cli_image_repository }}"
+{% endif %}
     substitutions:
       EVA_IAM_ADMIN_EMAIL: "{{ eva_iam_admin_email }}"
 
+{% if airgap_mode | bool %}
+dispatcher:
+  image:
+    repository: "{{ eva_iam_dispatcher_image_repository }}"
+    pullPolicy: IfNotPresent
+
+{% endif %}
 ingress:
   path: "{{ eva_iam_ingress_path }}"
   tls:
@@ -38,11 +56,19 @@ pv:
 database:
   type: internal
   internal:
+{% if airgap_mode | bool %}
+    image:
+      repository: "{{ eva_iam_postgres_image_repository }}"
+{% endif %}
     service:
       nodePort: {{ eva_iam_db_nodeport }}
     password: {{ eva_iam_db_password | to_json }}
 
 redis:
+{% if airgap_mode | bool %}
+  image:
+    repository: "{{ eva_iam_redis_image_repository }}"
+{% endif %}
   auth:
     password: {{ eva_iam_redis_password | to_json }}
   tls:

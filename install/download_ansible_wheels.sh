@@ -7,13 +7,11 @@ REQ_FILE="${BASE_DIR}/requirements-airgap.txt"
 MANIFEST="${WHEEL_DIR}/manifest.txt"
 
 command -v python3 >/dev/null 2>&1 || { echo "[ERROR] python3 not found"; exit 1; }
-python3 -m pip --version >/dev/null 2>&1 || {
-  echo "[ERROR] python3 -m pip 을 쓸 수 없습니다. 준비 서버에 python3-pip 을 설치하세요."
-  exit 1
-}
 
+# 연결성부터 봅니다. pip 이 없다는 안내를 먼저 내보내면, 정작 원인이 "여기는 airgap 서버라
+# 실행하면 안 된다"인 경우에 엉뚱한 곳(pip 설치)을 고치게 됩니다.
 # 이 스크립트는 인터넷이 되는 '준비 서버' 전용입니다. airgap 서버에서 실행하면 pip 이
-# 5회 재시도한 뒤에야 실패해서, 정작 원인(여기서 실행하면 안 됨)이 잘 안 보입니다.
+# 5회 재시도한 뒤에야 실패해서, 정작 원인이 잘 안 보입니다.
 if ! python3 -c "import socket; socket.create_connection(('pypi.org', 443), timeout=5).close()" 2>/dev/null; then
   cat >&2 <<'MSG'
 [ERROR] pypi.org 에 연결할 수 없습니다.
@@ -29,6 +27,23 @@ airgap 서버에서는 install/install_ansible_airgap.sh 만 실행합니다.
 MSG
   exit 1
 fi
+
+# pip 은 연결성 확인 뒤에 봅니다. 시스템 python3 에 pip 이 없어도 venv 안에는 있으므로,
+# venv 를 활성화하고 다시 실행하는 게 python3-pip 설치보다 간단합니다.
+python3 -m pip --version >/dev/null 2>&1 || {
+  cat >&2 <<'MSG'
+[ERROR] python3 -m pip 을 쓸 수 없습니다.
+
+아래 중 하나로 해결하세요.
+  1) venv 를 만들어 그 안에서 실행 (권장, sudo 불필요)
+       python3 -m venv /tmp/wheelbuild
+       source /tmp/wheelbuild/bin/activate
+       ./install/download_ansible_wheels.sh
+  2) 시스템에 pip 설치
+       sudo apt install -y python3-pip
+MSG
+  exit 1
+}
 
 LOCAL_PYTHON="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 

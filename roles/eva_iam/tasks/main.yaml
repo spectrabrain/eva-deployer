@@ -454,17 +454,30 @@
     executable: /bin/bash
     cmd: |
       set -euo pipefail
-      kubectl exec -n {{ eva_iam_namespace | quote }} deploy/{{ eva_iam_name }}-keycloak -- \
+      # -i 가 없으면 kubectl 이 stdin 을 컨테이너로 넘기지 않습니다. 그러면 아래 heredoc 이
+      # bash -s 에 전달되지 않아 아무것도 실행하지 않고 rc=0/빈 출력으로 끝나고, 시크릿이
+      # 조용히 빈 값으로 기록됩니다 (에러도 나지 않아 원인을 찾기 어렵습니다).
+      kubectl exec -i -n {{ eva_iam_namespace | quote }} deploy/{{ eva_iam_name }}-keycloak -- \
         bash -s -- {{ eva_iam_realm | quote }} {{ eva_iam_admin_api_client_id | quote }} <<'INNER'
       set -euo pipefail
       realm="$1"; client_id="$2"
-      : "${KEYCLOAK_ADMIN:?not set in the keycloak container}"
-      : "${KEYCLOAK_ADMIN_PASSWORD:?not set in the keycloak container}"
+      # Keycloak 26+ 는 KEYCLOAK_ADMIN* 대신 KC_BOOTSTRAP_ADMIN_* 를 씁니다. 어느 이름이
+      # 들어있든 찾도록 둘 다 봅니다 — 하나만 보면 이미지 bump 때 조용히 빈 값이 됩니다.
+      user="${KEYCLOAK_ADMIN:-${KC_BOOTSTRAP_ADMIN_USERNAME:-}}"
+      pass="${KEYCLOAK_ADMIN_PASSWORD:-${KC_BOOTSTRAP_ADMIN_PASSWORD:-}}"
+      if [ -z "$user" ] || [ -z "$pass" ]; then
+        echo "admin credentials not found in the keycloak container." >&2
+        echo "checked: KEYCLOAK_ADMIN(_PASSWORD), KC_BOOTSTRAP_ADMIN_USERNAME/PASSWORD" >&2
+        exit 1
+      fi
       kc=/opt/keycloak/bin/kcadm.sh
       cfg=$(mktemp)
       trap 'rm -f "$cfg"' EXIT
-      "$kc" config credentials --config "$cfg" --server http://localhost:8080 \
-        --realm master --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
+      # KC_HTTP_RELATIVE_PATH 가 '/' 가 아니면 kcadm 도 그 경로로 붙어야 합니다.
+      rel="${KC_HTTP_RELATIVE_PATH:-/}"
+      rel="${rel%/}"
+      "$kc" config credentials --config "$cfg" --server "http://localhost:8080${rel}" \
+        --realm master --user "$user" --password "$pass" >/dev/null
       id=$("$kc" get clients --config "$cfg" -r "$realm" \
         -q "clientId=$client_id" --fields id --format csv --noquotes)
       [ -n "$id" ] || { echo "client $client_id not found in realm $realm" >&2; exit 1; }
@@ -555,11 +568,24 @@
   ansible.builtin.debug:
     msg:
       - "namespace/release : {{ eva_iam_namespace }}/{{ eva_iam_name }}"
-      - "chart             : {{ eva_iam_chart_ref }} {{ eva_iam_chart_version }}"
+      - >-
+        chart             : {{ eva_iam_chart_source }}
+        {{ '(offline chart)' if (airgap_mode | bool) else eva_iam_chart_version }}
+      - "repository mode   : {{ repository_mode }}{{ ' / ' ~ repository_registry if (airgap_mode | bool) else '' }}"
       - "values (-f 순서)  : values.yaml -> eva-iam-k3s-override.yaml{{ ' -> eva-iam-host-override.yaml (' ~ eva_iam_values_file ~ ')' if (eva_iam_user_values | length > 0) else ' (host values 없음)' }}"
       - "base URL          : https://{{ eva_iam_effective_host }}{{ eva_iam_effective_ingress_path | regex_replace('/$', '') }}/"
       - "admin console     : https://{{ eva_iam_effective_host }}{{ eva_iam_effective_ingress_path | regex_replace('/$', '') }}/admin"
-      - "realm             : eva-iam"
+      - "realm             : {{ eva_iam_realm }}"
+      # eva-app 에 넘길 값이 어디 적혀 있는지. 이 파일은 아무것도 읽어가지 않으므로
+      # (사람이 보고 -e 로 넘기는 메모) 경로를 여기서 알려주지 않으면 찾기 어렵습니다.
+      - >-
+        eva-app SSO 설정   : {{ (eva_iam_app_config_dir ~ '/eva-iam.yaml')
+                                if eva_iam_write_app_config else '(eva_iam_write_app_config=false — 미작성)' }}
+      - >-
+        {{ '  → adminClientSecret 이 비어 있습니다. admin console > Clients > '
+           ~ eva_iam_admin_api_client_id ~ ' > Credentials 에서 복사하세요.'
+           if (eva_iam_write_app_config and (eva_iam_admin_api_client_secret | default('') | length == 0))
+           else '  → eva-app 배포 시 -e eva_app_sso_base_url= / -e eva_app_sso_admin_client_secret= 로 넘기세요.' }}
       - "resources:"
       - "{{ eva_iam_resources.stdout_lines | default([]) }}"
   when: not ansible_check_mode

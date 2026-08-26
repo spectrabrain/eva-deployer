@@ -19,6 +19,12 @@ EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in versions.json)}"
 EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in versions.json)}"
 EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-values-k3s.PRO6000-MIGx4.yaml}"
+EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-values-k3s.yaml}"
+# The Harbor values intentionally point at the target-side Local Harbor.  The
+# preparation host must instead pull the published source image before it is
+# re-tagged and pushed into that Harbor.
+EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE="${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE:-339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent-qdrant-snapshot-sync:0.1.0}"
+PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
 
 # 받을 컴포넌트. 기본은 전부. 일부만 설치할 때는 그 컴포넌트만 지정하면 required 검사·렌더·
 # pull 이 모두 좁혀집니다. vllm 이미지가 커서 app/iam 만 볼 때는 차이가 큽니다.
@@ -69,7 +75,7 @@ want eva-app          && required_files+=("$APP_CHART")
 want eva-vision       && required_files+=("$VISION_CHART")
 want eva-iam          && required_files+=("$IAM_CHART")
 want eva-agent-init   && required_files+=("$INIT_CHART" "$RELEASE_DIR/eva-agent-init/values-k3s.yaml")
-want eva-agent-qdrant && required_files+=("$QDRANT_CHART" "$RELEASE_DIR/eva-agent-qdrant/values-k3s.yaml")
+want eva-agent-qdrant && required_files+=("$QDRANT_CHART" "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}")
 want eva-agent-vllm   && required_files+=("$VLLM_CHART" "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}")
 want eva-agent        && required_files+=("$AGENT_CHART" "$RELEASE_DIR/eva-agent/values-k3s.yaml" "$RELEASE_DIR/eva-agent/values-secret.yaml")
 
@@ -83,7 +89,10 @@ rm -f "$RENDER_DIR"/*.yaml
 want eva-app          && helm template eva-app "$APP_CHART" > "$RENDER_DIR/eva-app.yaml"
 want eva-vision       && helm template eva-vision "$VISION_CHART" > "$RENDER_DIR/eva-vision.yaml"
 want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
-want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" -f "$RELEASE_DIR/eva-agent-qdrant/values-k3s.yaml" > "$RENDER_DIR/eva-agent-qdrant.yaml"
+want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \
+  -f "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}" \
+  --set-string "sidecarContainers[0].image=${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE}" \
+  > "$RENDER_DIR/eva-agent-qdrant.yaml"
 want eva-agent-vllm   && helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"
 want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/values-k3s.yaml" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" > "$RENDER_DIR/eva-agent.yaml"
 # imagePullSecrets off = airgap 렌더. 켜두면 ECR 로그인 cronjob 의 amazon/aws-cli 까지
@@ -130,8 +139,20 @@ fi
 
 while IFS= read -r image; do
   [[ -z "$image" ]] && continue
-  echo "[pull] $image"
-  if $DOCKER_CMD pull "${pull_args[@]}" "$image"; then
+  if [[ "$PULL_SOURCE_IMAGES" == "true" ]]; then
+    echo "[pull] $image"
+    image_available=false
+    if $DOCKER_CMD pull "${pull_args[@]}" "$image"; then
+      image_available=true
+    fi
+  else
+    echo "[local] $image"
+    image_available=false
+    if $DOCKER_CMD image inspect "$image" >/dev/null 2>&1; then
+      image_available=true
+    fi
+  fi
+  if [[ "$image_available" == "true" ]]; then
     echo "$image" >> "$IMAGE_DIR/images-pulled.txt"
   else
     echo "$image" >> "$IMAGE_DIR/images-missing.txt"

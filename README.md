@@ -405,6 +405,81 @@ docker image rm $(docker images --format '{{.Repository}}:{{.Tag}}' | awk '$0 ~ 
 rm -f ./install/images/repository-images.tar
 ```
 
+#### D. Qdrant 전용 Airgap/Harbor snapshot 검증
+
+Qdrant snapshot 변경만 확인할 때는 `values-k3s.harbor.yaml` profile을 사용합니다. 이 profile은 `qdrant-snapshot-sync`가 S3에 접속하지 않고 Local Harbor의 OCI artifact를 `oras pull`하여 snapshot PVC에 받은 뒤 Qdrant restore API를 호출합니다.
+
+준비 서버에서 필요한 파일은 아래입니다. `values-k3s.harbor.yaml`은 EVA Agent release `3.1.0`의 `eva-agent-qdrant/`에 포함되어 있어야 합니다.
+
+- `install/qdrant/qdrant-<version>.tgz`
+- `install/eva-agent/release/<release>/eva-agent-qdrant/values-k3s.harbor.yaml`
+- `install/eva-agent/release/<release>/plugins/eva-agent-qdrant/{post-renderer.sh,plugin.yaml}`
+- `install/tools/oras` — Local Harbor에 snapshot OCI artifact를 push하는 CLI
+- `install/images/images-pulled.txt` 및 `repository-images.tar` — `qdrant`와 `eva-agent-qdrant-snapshot-sync:0.1.0` 포함
+- `install/qdrant-snapshots/*.snapshot` — `SNAPSHOT_SPECS`에 지정된 snapshot 파일
+- `install/push_qdrant_snapshots_to_harbor.sh`
+
+`versions.json`을 대상 release/chart 버전으로 맞춘 뒤 준비 서버에서 실행합니다. `COMPONENTS`로 이미지 준비만 Qdrant로 제한할 수 있습니다.
+
+```bash
+EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+  AWS_PROFILE=default ./install/download_offline_assets.sh
+
+EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+  COMPONENTS=eva-agent-qdrant \
+  AWS_PROFILE=default ./install/download_eva_images.sh
+
+EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+  AWS_PROFILE=default ./install/download_qdrant_snapshots.sh
+```
+
+`repository-images.tar`, `eva-deployer/`, 그리고 `install/qdrant-snapshots/`를 폐쇄망 서버로 옮깁니다. Local Harbor 설치 및 Docker image seed 후 snapshot도 OCI artifact로 push합니다. artifact 이름은 `<registry>/eva/qdrant-snapshots:<SNAPSHOT_SPECS 첫 번째 필드>`입니다.
+
+```bash
+docker load -i ./install/images/repository-images.tar
+
+PULL_SOURCE_IMAGES=false \
+IMAGE_LIST=./install/images/images-pulled.txt \
+REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_PROJECT=eva \
+./install/push_images_to_repository.sh
+
+EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_PROJECT=eva \
+./install/push_qdrant_snapshots_to_harbor.sh
+```
+
+Qdrant만 배포하려면 (vLLM/EVA Agent 본체는 설치하지 않음) k3s와 Local Harbor가 준비된 뒤 아래 Helm 명령을 사용합니다. `qdrant-snapshot-harbor` Secret은 Harbor가 private project인 경우 ORAS 인증에 필요합니다.
+
+기존 `site_eva_agent.yaml` 전체 배포에 이 profile을 적용할 때는 아래 두 변수를 함께 지정합니다. 기본값은 기존 `values-k3s.yaml`/PVC 사전복사 방식이므로, 기존 Airgap 배포에는 영향이 없습니다.
+
+```text
+-e eva_agent_qdrant_values_file=values-k3s.harbor.yaml
+-e eva_agent_qdrant_snapshot_source=harbor
+```
+
+```bash
+kubectl create namespace eva-agent --dry-run=client -o yaml | kubectl apply -f -
+kubectl create serviceaccount sa-eva-agent -n eva-agent --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic qdrant-snapshot-harbor -n eva-agent \
+  --from-literal=username=admin \
+  --from-literal=password="${HARBOR_ADMIN_PASSWORD}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+helm upgrade --install eva-agent-qdrant ./install/qdrant/qdrant-<version>.tgz \
+  --namespace eva-agent --create-namespace \
+  --values ./install/eva-agent/release/<release>/eva-agent-qdrant/values-k3s.harbor.yaml \
+  --set-string image.repository=localhost:32080/eva/qdrant \
+  --set-string image.tag=v<version> \
+  --post-renderer ./install/eva-agent/release/<release>/plugins/eva-agent-qdrant/post-renderer.sh
+
+kubectl rollout status statefulset/eva-agent-qdrant -n eva-agent --timeout=900s
+kubectl logs -n eva-agent statefulset/eva-agent-qdrant -c qdrant-snapshot-sync
+```
+
+`docker network create --internal`은 Harbor/ORAS artifact 경로만 별도로 차단 검증할 때 사용하세요. 실제 host k3s 설치의 Pod network는 Docker의 사용자 정의 network에 자동으로 들어가지 않으므로, 이 명령 하나만으로 k3s Pod의 외부 통신이 차단되지는 않습니다. 실제 배포 검증은 서버의 외부 라우팅/DNS를 차단한 상태에서 위 Helm 배포를 실행해야 하며, Docker 기반 k3d 테스트라면 Harbor container와 모든 k3d node를 같은 `--internal` network에 연결하고 values의 `HARBOR_REGISTRY`를 그 network에서 해석되는 Harbor hostname:port로 바꿔야 합니다.
+
 ---
 
 ## 2. Inventory

@@ -12,7 +12,8 @@ source "$SCRIPT_DIR/load_versions.sh"
 load_deploy_versions
 
 EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in versions.json)}"
-VALUES_FILE="${BASE_DIR}/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-qdrant/values-k3s.yaml"
+EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-values-k3s.yaml}"
+VALUES_FILE="${BASE_DIR}/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}"
 
 if ! command -v aws >/dev/null 2>&1; then
   echo "[ERROR] aws CLI not found"

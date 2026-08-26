@@ -28,10 +28,11 @@ EVA_AGENT_CHART_VERSION="${EVA_AGENT_CHART_VERSION:?missing EVA_AGENT_CHART_VERS
 EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_VLLM_CHART_VERSION (set in versions.json)}"
 EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in versions.json)}"
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in versions.json)}"
+EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in versions.json)}"
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:?missing KUSTOMIZE_VERSION (set in versions.json)}"
 K3S_DEFAULT_VERSION="${K3S_DEFAULT_VERSION:?missing K3S_DEFAULT_VERSION (set in versions.json)}"
 
-mkdir -p "$BASE_DIR"/{aws,apt,docker,nvidia,cuda,helm,k3s,k8s,nfs,eva-app,eva-vision,eva-agent,qdrant,tools,images}
+mkdir -p "$BASE_DIR"/{aws,apt,docker,nvidia,cuda,helm,k3s,k8s,nfs,eva-app,eva-vision,eva-agent,eva-iam,qdrant,tools,images}
 mkdir -p "$BASE_DIR/docker/debs"
 mkdir -p "$BASE_DIR/apt/debs"
 mkdir -p "$BASE_DIR/nvidia/container-toolkit-debs"
@@ -347,8 +348,9 @@ if [[ -n "${HELM_VER}" ]]; then
   fetch "https://get.helm.sh/helm-${HELM_VER}-linux-arm64.tar.gz.sha256" "$BASE_DIR/helm/helm-${HELM_VER}-linux-arm64.tar.gz.sha256"
 fi
 
-# EVA App / Vision / Agent charts
+# EVA App / Vision / Agent / IAM charts
 fetch "https://mellerikat.github.io/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz" "$BASE_DIR/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
+fetch "https://mellerikat.github.io/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz" "$BASE_DIR/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
 fetch "https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/eva-vision-${EVA_VISION_CHART_VERSION}.tgz" "$BASE_DIR/eva-vision/eva-vision-${EVA_VISION_CHART_VERSION}.tgz"
 fetch "https://mellerikat.github.io/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
 fetch "https://mellerikat.github.io/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
@@ -403,6 +405,7 @@ eva_vision_chart: ${EVA_VISION_CHART_VERSION}
 eva_agent_chart: ${EVA_AGENT_CHART_VERSION}
 eva_agent_vllm_chart: ${EVA_AGENT_VLLM_CHART_VERSION}
 eva_agent_init_chart: ${EVA_AGENT_INIT_CHART_VERSION}
+eva_iam_chart: ${EVA_IAM_CHART_VERSION}
 qdrant_chart: ${QDRANT_CHART_VERSION}
 eva_agent_release_values: ${EVA_AGENT_RELEASE}
 kustomize: ${KUSTOMIZE_VERSION}

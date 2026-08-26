@@ -13,6 +13,12 @@ REPOSITORY_AUTO_LOGIN="${REPOSITORY_AUTO_LOGIN:-true}"
 REPOSITORY_USERNAME="${REPOSITORY_USERNAME:-${HARBOR_ADMIN_USER:-admin}}"
 REPOSITORY_PASSWORD="${REPOSITORY_PASSWORD:-${HARBOR_ADMIN_PASSWORD:-}}"
 LOCAL_HARBOR_YML="${LOCAL_HARBOR_YML:-$HOME/.local/share/eva-harbor/harbor/harbor.yml}"
+# 차트가 이미지 주소를 values 로 바꾸지 못하게 하드코딩해 둔 것들 (eva-iam 3.1.0 등).
+# 주소 없는 이름은 kubelet 이 docker.io 로 해석하므로 k3s registries.yaml 의 docker.io
+# mirror 로 Harbor 로 돌리는데, mirror 는 host 만 치환하고 경로는 그대로 보냅니다.
+# 따라서 이 이미지들만은 평탄화(<project>/<name>) 하지 않고 Docker Hub 경로 그대로
+# (library/busybox, bitnami/kubectl) push 해야 합니다.
+MIRROR_PATH_IMAGES="${MIRROR_PATH_IMAGES:-busybox:latest bitnami/kubectl:latest}"
 LEGACY_LOCAL_HARBOR_YML="$SCRIPT_DIR/harbor/harbor/harbor.yml"
 
 if [[ -z "$REPOSITORY_REGISTRY" ]]; then
@@ -141,5 +147,36 @@ while IFS= read -r source_image; do
 
   echo "$source_image $target_image" >> "$MAPPING_FILE"
 done < "$IMAGE_LIST"
+
+# docker.io mirror 용 사본. 위 평탄화된 사본과 별개로, 원본 경로를 유지한 이름으로도 push 합니다.
+dockerhub_path() {
+  local repo="${1%:*}"
+  # 단일 요소 이름(busybox)은 Docker Hub 공식 이미지이므로 library/ 를 붙입니다.
+  if [[ "$repo" != */* ]]; then
+    echo "library/$repo"
+  else
+    echo "$repo"
+  fi
+}
+
+for source_image in $MIRROR_PATH_IMAGES; do
+  [[ -z "$source_image" ]] && continue
+
+  target_image="${REPOSITORY_REGISTRY}/$(dockerhub_path "$source_image"):$(image_tag "$source_image")"
+  echo "[mirror] $source_image -> $target_image"
+
+  if [[ "$PULL_SOURCE_IMAGES" == "true" ]]; then
+    "$DOCKER_CMD" pull "$source_image"
+  fi
+
+  "$DOCKER_CMD" tag "$source_image" "$target_image"
+  if ! "$DOCKER_CMD" push "$target_image"; then
+    echo "[warn] push 실패: $target_image"
+    echo "       Harbor 에 '$(dockerhub_path "$source_image" | cut -d/ -f1)' project 가 없을 수 있습니다."
+    echo "       Harbor UI → Projects → New Project 로 만든 뒤 다시 실행하세요."
+  fi
+
+  echo "$source_image $target_image" >> "$MAPPING_FILE"
+done
 
 echo "[done] mapping: $MAPPING_FILE"

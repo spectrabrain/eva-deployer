@@ -1,0 +1,24 @@
+# site_eva_iam.yaml
+- name: Deploy EVA IAM (SSO / Keycloak) on k3s
+  hosts: all
+  # No root is required if the kubeconfig is user-readable and eva_iam_workdir is user-writable.
+  # Run sudo-less with:  -e eva_iam_become=false -e eva_iam_workdir=$HOME/.eva-iam
+  become: "{{ eva_iam_become | default(true) | bool }}"
+  any_errors_fatal: true
+  serial: 1
+
+  pre_tasks:
+    - name: Load deployment version catalogue
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/versions.json"
+        name: deploy_versions
+
+    - name: Resolve repository mode
+      ansible.builtin.set_fact:
+        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+      changed_when: false
+
+  tasks:
+    - name: STEP 1 - eva-iam
+      ansible.builtin.import_role:
+        name: eva_iam

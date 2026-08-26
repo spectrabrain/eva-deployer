@@ -8,6 +8,18 @@ app:
   backendSecure: {{ eva_app_backend_secure | bool | lower }}
   infraProvider: onprem
   jwtSecret: "{{ eva_app_jwt_secret }}"
+{% if (eva_app_sso_base_url | length > 0) or (eva_app_sso_admin_client_secret | length > 0) %}
+
+  # app.sso.* — eva-app chart 3.1.0 이상에서만 존재합니다.
+  # 지정하지 않은 키는 차트 기본값(realm/clientId/adminClientId/brokerMode 등)을 씁니다.
+  sso:
+{% if eva_app_sso_base_url | length > 0 %}
+    baseUrl: "{{ eva_app_sso_base_url }}"
+{% endif %}
+{% if eva_app_sso_admin_client_secret | length > 0 %}
+    adminClientSecret: "{{ eva_app_sso_admin_client_secret }}"
+{% endif %}
+{% endif %}
   vision:
     ml: "{{ eva_app_vision_ml }}"
 

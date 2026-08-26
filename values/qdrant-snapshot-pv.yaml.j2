@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: eva-agent-qdrant-snapshots-bootstrap-pv
+spec:
+  capacity:
+    storage: "{{ eva_agent_qdrant_snapshot_pv_size }}"
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: eva-agent-sc-bs
+  claimRef:
+    namespace: "{{ eva_agent_namespace }}"
+    name: "{{ eva_agent_qdrant_snapshot_pvc_name }}"
+  hostPath:
+    path: "{{ eva_agent_qdrant_snapshot_pv_hostpath }}"
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - "{{ eva_agent_qdrant_snapshot_pv_node }}"

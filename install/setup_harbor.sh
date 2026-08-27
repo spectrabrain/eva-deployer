@@ -4,7 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARBOR_VERSION="${HARBOR_VERSION:-v2.15.2}"
 HARBOR_PORT="32080"
-HARBOR_HOSTNAME="${HARBOR_HOSTNAME:-localhost}"
+# Harbor's `hostname` is its canonical client-facing address, not the Linux
+# hostname.  Leave it unset by default so a standalone Harbor server gets the
+# IPv4 selected by its default route.  `localhost` is not usable by Pods or
+# another k3s node.
+HARBOR_HOSTNAME="${HARBOR_HOSTNAME:-}"
 if [[ ${HARBOR_ADMIN_PASSWORD+x} ]]; then
   HARBOR_ADMIN_PASSWORD_EXPLICIT="true"
 else
@@ -27,7 +31,8 @@ usage() {
 Usage: HARBOR_VERSION=v2.15.2 ./install/setup_harbor.sh [options]
 
 Options:
-  --hostname <name>          Harbor hostname. Default: ${HARBOR_HOSTNAME}
+  --hostname <name>          Harbor canonical client address (DNS name or IP).
+                             Default: IPv4 selected from the default route
   --admin-password <value>   Harbor admin password. Default: EVA123@ on first install
   --password <value>         Alias for --admin-password
   --data-volume <path>       Override Harbor data_volume. Default: keep Harbor template default
@@ -56,6 +61,9 @@ Environment:
 
 Notes:
   - Harbor HTTP port is fixed to ${HARBOR_PORT}.
+  - --hostname is written to harbor.yml; it is not the Linux hostname.
+    Use a DNS name or IP reachable from all registry clients. If omitted, the
+    server's default-route IPv4 is used. Do not use localhost/127.0.0.1.
   - If --data-volume is omitted, the data_volume from harbor.yml.tmpl is preserved.
   - Keep the runtime path outside eva-deployer to avoid rsync overwriting Harbor configuration.
   - On existing Harbor installs, harbor_admin_password is preserved unless explicitly provided.
@@ -133,7 +141,7 @@ fi
 HARBOR_HOSTNAME="${HARBOR_HOSTNAME#http://}"
 HARBOR_HOSTNAME="${HARBOR_HOSTNAME#https://}"
 HARBOR_HOSTNAME="${HARBOR_HOSTNAME%/}"
-if [[ "$HARBOR_HOSTNAME" == *:* ]]; then
+if [[ -n "$HARBOR_HOSTNAME" && "$HARBOR_HOSTNAME" == *:* ]]; then
   host_part="${HARBOR_HOSTNAME%%:*}"
   port_part="${HARBOR_HOSTNAME##*:}"
   if [[ "$port_part" == "$HARBOR_PORT" ]]; then
@@ -162,12 +170,19 @@ detect_registry_host() {
   printf '%s\n' "$detected"
 }
 
+if [[ -z "$HARBOR_HOSTNAME" ]]; then
+  HARBOR_HOSTNAME="$(detect_registry_host)"
+  echo "[info] Harbor hostname not specified; using default-route IPv4: $HARBOR_HOSTNAME"
+fi
+
+if [[ "$HARBOR_HOSTNAME" == "localhost" || "$HARBOR_HOSTNAME" == "127.0.0.1" ]]; then
+  echo "[ERROR] --hostname must be a DNS name or IP reachable by registry clients, not $HARBOR_HOSTNAME" >&2
+  echo "        Omit --hostname to auto-detect this server's default-route IPv4." >&2
+  exit 1
+fi
+
 if [[ -z "$HARBOR_REGISTRY_ENDPOINT" ]]; then
-  if [[ "$HARBOR_HOSTNAME" == "localhost" || "$HARBOR_HOSTNAME" == "127.0.0.1" ]]; then
-    HARBOR_REGISTRY_ENDPOINT="$(detect_registry_host):${HARBOR_PORT}"
-  else
-    HARBOR_REGISTRY_ENDPOINT="${HARBOR_HOSTNAME}:${HARBOR_PORT}"
-  fi
+  HARBOR_REGISTRY_ENDPOINT="${HARBOR_HOSTNAME}:${HARBOR_PORT}"
 fi
 HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT#http://}"
 HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT#https://}"

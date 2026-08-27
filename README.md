@@ -458,14 +458,14 @@ Qdrant snapshot 변경만 확인할 때는 `values-k3s.harbor.yaml` profile을 �
 `versions.json`을 대상 release/chart 버전으로 맞춘 뒤 준비 서버에서 실행합니다. `COMPONENTS`로 이미지 준비만 Qdrant로 제한할 수 있습니다.
 
 ```bash
-EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
   AWS_PROFILE=default ./install/download_offline_assets.sh
 
-EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
   COMPONENTS=eva-agent-qdrant \
   AWS_PROFILE=default ./install/download_eva_images.sh
 
-EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
   AWS_PROFILE=default ./install/download_qdrant_snapshots.sh
 ```
 

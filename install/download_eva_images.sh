@@ -46,6 +46,15 @@ PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
 COMPONENTS="${COMPONENTS:-all}"
 ALL_COMPONENTS="eva-app eva-vision eva-agent eva-agent-init eva-agent-vllm eva-agent-qdrant eva-iam"
 
+# eva-agent는 agent-init·Qdrant·vLLM 릴리스를 함께 배포합니다. 선택 설치에서도
+# 해당 차트가 요구하는 이미지를 빠짐없이 받도록 의존성을 자동으로 포함합니다.
+#   COMPONENTS="eva-agent eva-vision" ./install/download_eva_images.sh
+if [[ "$COMPONENTS" != "all" && " $COMPONENTS " == *" eva-agent "* ]]; then
+  for dependency in eva-agent-init eva-agent-vllm eva-agent-qdrant; do
+    [[ " $COMPONENTS " == *" $dependency "* ]] || COMPONENTS+=" $dependency"
+  done
+fi
+
 want() {
   [[ "$COMPONENTS" == "all" ]] && return 0
   local c

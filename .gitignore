@@ -24,6 +24,7 @@ install/
 install/*
 !install/*.sh
 !install/*.txt
+!install/harbor-endpoint.yaml.sample
 install/manifest.txt
 
 *.ini

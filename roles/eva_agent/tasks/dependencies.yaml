@@ -631,7 +631,7 @@
   ansible.builtin.replace:
     path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
     regexp: '(- name: HARBOR_REGISTRY\s+value: )[^\r\n]+'
-    replace: '\1{{ eva_agent_qdrant_snapshot_harbor_registry_effective }}'
+    replace: '\g<1>{{ eva_agent_qdrant_snapshot_harbor_registry_effective }}'
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'

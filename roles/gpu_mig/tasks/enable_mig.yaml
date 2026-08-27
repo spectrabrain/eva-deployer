@@ -204,6 +204,10 @@
     - gdm3.service
     - lightdm.service
     - sddm.service
+  # display-manager.service 는 실제 DM 으로의 alias 라 systemd 모듈이 다루지 못하는
+  # 환경이 있습니다. 거기서 멈추면 뒤 항목이 처리되지 않으므로 실패를 삼킵니다 —
+  # 바로 아래 shell 태스크가 실제 중지를 보장합니다.
+  failed_when: false
   when:
     - gpu_mig_enable_mig_workflow | bool
     - gpu_mig_mig_capable_gpu_count | int > 0

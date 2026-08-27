@@ -1,3 +1,14 @@
+- name: Set base install defaults
+  ansible.builtin.set_fact:
+    # online(apt 모듈) 경로와 airgap(dpkg) 경로가 같은 목록을 봐야 합니다.
+    # airgap 쪽은 dpkg 로 개별 설치한 뒤 이 목록으로 결과를 검증하므로,
+    # 여기 없는 패키지는 누락돼도 드러나지 않습니다.
+    base_required_packages:
+      - unzip
+      - curl
+      - gnupg
+      - nfs-kernel-server
+
 - name: Remove stale NVIDIA container toolkit apt source before base apt update
   ansible.builtin.file:
     path: /etc/apt/sources.list.d/nvidia-container-toolkit.list
@@ -34,26 +45,71 @@
     - not ansible_check_mode
 
 - name: Install base and NFS packages from offline bundle
-  ansible.builtin.shell: >-
+  # 반드시 literal 블록(|)이어야 합니다. folded(>-) 로 쓰면 더 깊게 들여쓴 줄의 개행이
+  # 보존되어 find 의 ! -name 조건들이 각각 별도 명령으로 실행됩니다 — 제외 목록이
+  # 통째로 무시되고 libc6 / systemd 까지 설치 대상에 들어갑니다.
+  ansible.builtin.shell: |
+    set -uo pipefail
+    debs_dir="{{ playbook_dir }}/install/apt/debs"
+
+    # 실행 중인 시스템을 깨뜨릴 수 있는 패키지는 번들에 있어도 건드리지 않습니다.
     mapfile -d '' base_offline_debs < <(
-      find "{{ playbook_dir }}/install/apt/debs" -maxdepth 1 -type f -name '*.deb'
-      ! -name 'systemd_*.deb'
-      ! -name 'systemd-dev_*.deb'
-      ! -name 'systemd-sysv_*.deb'
-      ! -name 'systemd-resolved_*.deb'
-      ! -name 'systemd-timesyncd_*.deb'
-      ! -name 'systemd-oomd_*.deb'
-      ! -name 'udev_*.deb'
-      ! -name 'libsystemd-shared_*.deb'
-      ! -name 'libsystemd0_*.deb'
-      ! -name 'libudev1_*.deb'
-      ! -name 'libnss-systemd_*.deb'
-      ! -name 'libpam-systemd_*.deb'
-      ! -name 'dpkg_*.deb'
-      ! -name 'libc6_*.deb'
-      -print0
-    );
-    apt-get install -y --no-download "${base_offline_debs[@]}"
+      find "$debs_dir" \
+        -maxdepth 1 \
+        -type f \
+        -name '*.deb' \
+        ! -name 'systemd_*.deb' \
+        ! -name 'systemd-dev_*.deb' \
+        ! -name 'systemd-sysv_*.deb' \
+        ! -name 'systemd-resolved_*.deb' \
+        ! -name 'systemd-timesyncd_*.deb' \
+        ! -name 'systemd-oomd_*.deb' \
+        ! -name 'udev_*.deb' \
+        ! -name 'libsystemd-shared_*.deb' \
+        ! -name 'libsystemd0_*.deb' \
+        ! -name 'libudev1_*.deb' \
+        ! -name 'libnss-systemd_*.deb' \
+        ! -name 'libpam-systemd_*.deb' \
+        ! -name 'dpkg_*.deb' \
+        ! -name 'libc6_*.deb' \
+        -print0
+    )
+
+    if [ "${#base_offline_debs[@]}" -eq 0 ]; then
+      echo "[ERROR] $debs_dir 에 설치할 .deb 가 없습니다." >&2
+      echo "[hint]  준비 서버에서 ./install/download_offline_assets.sh 를 실행한 뒤 install/ 를 옮기세요." >&2
+      exit 1
+    fi
+    echo "[info] ${#base_offline_debs[@]} 개 패키지"
+
+    pkg_installed() {
+      [ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" = "install ok installed" ]
+    }
+
+    # airgap 에서는 apt 가 참조할 리포지토리가 없어 의존성 해결에 실패합니다. dpkg 로 직접
+    # 설치하되, 1차는 전부 한 번에 넘겨 dpkg 가 설치 순서를 계산하게 합니다.
+    dpkg -i "${base_offline_debs[@]}" || true
+
+    # 2차: 1차에서 의존성 순서 때문에 밀린 것만 개별 재시도합니다.
+    for deb in "${base_offline_debs[@]}"; do
+      name="$(dpkg-deb -f "$deb" Package 2>/dev/null)" || continue
+      pkg_installed "$name" || dpkg -i "$deb" || true
+    done
+
+    # || true 로 실패를 넘겼으니 결과는 반드시 확인해야 합니다. 여기서 멈추지 않으면
+    # nfs role 이나 한참 뒤 단계에서 엉뚱한 에러로 드러납니다.
+    missing=()
+    for pkg in {{ base_required_packages | join(' ') }}; do
+      pkg_installed "$pkg" || missing+=("$pkg")
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+      echo "[ERROR] 설치되지 않은 필수 패키지: ${missing[*]}" >&2
+      echo "[hint]  ./install/validate_offline_debs.sh $debs_dir 로 번들을 진단하고," >&2
+      echo "[hint]  준비 서버와 이 서버의 lsb_release 가 같은지 확인하세요." >&2
+      exit 1
+    fi
+    echo "[ok] 필수 패키지 확인 완료: {{ base_required_packages | join(' ') }}"
   args:
     executable: /bin/bash
   become: true
@@ -65,11 +121,7 @@
 
 - name: Install base packages online
   ansible.builtin.apt:
-    name:
-      - unzip
-      - curl
-      - gnupg
-      - nfs-kernel-server
+    name: "{{ base_required_packages }}"
     state: present
     update_cache: true
   when:

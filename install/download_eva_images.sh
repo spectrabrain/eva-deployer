@@ -18,6 +18,10 @@ EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_
 EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in versions.json)}"
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in versions.json)}"
 EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in versions.json)}"
+# 차트가 image.tag 를 생략하면 appVersion 을 쓰지만, roles/eva_app 은 eva_app_deploy_version
+# 을 태그로 박습니다. 렌더에도 같은 값을 넣어야 배포할 태그를 받습니다 — 안 그러면 Harbor 에
+# appVersion 태그만 올라가고 배포는 ImagePullBackOff 로 죽습니다.
+EVA_APP_DEPLOY_VERSION="${EVA_APP_DEPLOY_VERSION:?missing EVA_APP_DEPLOY_VERSION (set in versions.json)}"
 EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-values-k3s.PRO6000-MIGx4.yaml}"
 EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-values-k3s.yaml}"
 # The Harbor values intentionally point at the target-side Local Harbor.  The
@@ -86,7 +90,9 @@ done
 echo "[info] Rendering charts to discover image list..."
 # 이전 실행이 남긴 렌더 결과가 섞이면 안 받은 컴포넌트의 이미지까지 목록에 들어옵니다.
 rm -f "$RENDER_DIR"/*.yaml
-want eva-app          && helm template eva-app "$APP_CHART" > "$RENDER_DIR/eva-app.yaml"
+want eva-app          && helm template eva-app "$APP_CHART" \
+  --set image.tag="$EVA_APP_DEPLOY_VERSION" \
+  --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-app.yaml"
 want eva-vision       && helm template eva-vision "$VISION_CHART" > "$RENDER_DIR/eva-vision.yaml"
 want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
 want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \

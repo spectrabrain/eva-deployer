@@ -1,0 +1,797 @@
+<title>EVA Airgap Runbook</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  :root {
+    --ground:#F3F5F8; --surface:#FFFFFF; --ink:#171B21; --muted:#5A6472; --faint:#8A93A1;
+    --rule:#DCE1E8; --prep:#A2552A; --prep-soft:#F6EBE3; --target:#14666B; --target-soft:#E2F0F0;
+    --warn:#8A5A00; --warn-soft:#FBF2DE; --term-bg:#14181F; --term-ink:#DCE3EC;
+    --term-rule:#2A313C; --term-dim:#7E8899; --measure:68ch;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:#0F1319; --surface:#161B23; --ink:#E6EAF0; --muted:#A0AAB8; --faint:#6F7987;
+      --rule:#262D38; --prep:#DE9C6E; --prep-soft:#2A1F17; --target:#6BC6C6; --target-soft:#12262A;
+      --warn:#D9AC5A; --warn-soft:#251E10; --term-bg:#0A0D12; --term-ink:#D6DEE8;
+      --term-rule:#232A34; --term-dim:#79838F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#0F1319; --surface:#161B23; --ink:#E6EAF0; --muted:#A0AAB8; --faint:#6F7987;
+    --rule:#262D38; --prep:#DE9C6E; --prep-soft:#2A1F17; --target:#6BC6C6; --target-soft:#12262A;
+    --warn:#D9AC5A; --warn-soft:#251E10; --term-bg:#0A0D12; --term-ink:#D6DEE8;
+    --term-rule:#232A34; --term-dim:#79838F;
+  }
+
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:Newsreader, Georgia, "Times New Roman", serif;
+    font-size:17px; line-height:1.65; -webkit-font-smoothing:antialiased;
+  }
+  .wrap {
+    max-width:60rem; margin:0 auto;
+    padding:clamp(1.5rem,1rem + 3vw,4rem) clamp(1rem,0.5rem + 3vw,3rem) 6rem;
+    display:flex; flex-direction:column; gap:clamp(2rem,1.5rem + 2vw,3.25rem);
+  }
+
+  .masthead { display:flex; flex-direction:column; gap:1rem; }
+  .eyebrow {
+    font-family:Archivo, system-ui, sans-serif; font-size:0.72rem; font-weight:600;
+    letter-spacing:0.14em; text-transform:uppercase; color:var(--faint);
+  }
+  h1 {
+    font-family:Archivo, system-ui, sans-serif; font-weight:700;
+    font-size:clamp(2rem,1.4rem + 2.8vw,3.1rem); line-height:1.05;
+    letter-spacing:-0.02em; text-wrap:balance; margin:0;
+  }
+  .lede { max-width:var(--measure); margin:0; font-size:1.08rem; color:var(--muted); }
+
+  .facts {
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(11rem,1fr)); gap:1px;
+    background:var(--rule); border:1px solid var(--rule); border-radius:3px;
+    overflow:hidden; margin-top:0.5rem;
+  }
+  .fact { background:var(--surface); padding:0.85rem 1rem; }
+  .fact dt {
+    font-family:Archivo, system-ui, sans-serif; font-size:0.66rem; font-weight:600;
+    letter-spacing:0.12em; text-transform:uppercase; color:var(--faint); margin:0 0 0.3rem;
+  }
+  .fact dd {
+    margin:0; font-family:"IBM Plex Mono", ui-monospace, monospace;
+    font-size:0.85rem; font-variant-numeric:tabular-nums; word-break:break-all;
+  }
+
+  .legend {
+    display:flex; flex-wrap:wrap; gap:0.6rem 1.25rem; align-items:center;
+    padding:0.9rem 1.1rem; background:var(--surface); border:1px solid var(--rule);
+    border-radius:3px; font-size:0.9rem; color:var(--muted);
+  }
+  .chip {
+    display:inline-flex; align-items:center; gap:0.45rem;
+    font-family:Archivo, system-ui, sans-serif; font-size:0.7rem; font-weight:600;
+    letter-spacing:0.08em; text-transform:uppercase; padding:0.24rem 0.55rem;
+    border-radius:2px; white-space:nowrap;
+  }
+  .chip.prep { color:var(--prep); background:var(--prep-soft); }
+  .chip.target { color:var(--target); background:var(--target-soft); }
+  .chip.once { color:var(--muted); background:var(--ground); border:1px solid var(--rule); }
+  .chip.gate { color:var(--warn); background:var(--warn-soft); }
+
+  .phase { display:flex; flex-direction:column; gap:1.5rem; }
+  .phase-head {
+    display:flex; flex-wrap:wrap; align-items:baseline; gap:0.75rem;
+    padding-bottom:0.6rem; border-bottom:2px solid var(--ink);
+  }
+  .phase-head h2 {
+    font-family:Archivo, system-ui, sans-serif; font-weight:700; font-size:1.35rem;
+    letter-spacing:-0.01em; margin:0;
+  }
+  .phase-head p { margin:0; font-size:0.92rem; color:var(--muted); }
+
+  .step {
+    display:grid; grid-template-columns:2.4rem 1fr; gap:0 1rem;
+    padding-left:0.9rem; border-left:3px solid var(--rule);
+  }
+  .step.prep { border-left-color:var(--prep); }
+  .step.target { border-left-color:var(--target); }
+  .num {
+    font-family:Archivo, system-ui, sans-serif; font-weight:600; font-size:0.95rem;
+    font-variant-numeric:tabular-nums; color:var(--faint); padding-top:0.15rem;
+  }
+  .step-body { display:flex; flex-direction:column; gap:0.6rem; min-width:0; }
+  .step h3 {
+    font-family:Archivo, system-ui, sans-serif; font-weight:600; font-size:1.02rem;
+    margin:0; letter-spacing:-0.005em;
+    display:flex; flex-wrap:wrap; align-items:center; gap:0.6rem;
+  }
+  .step p { margin:0; max-width:var(--measure); font-size:0.95rem; color:var(--muted); }
+  .sub {
+    font-family:Archivo, system-ui, sans-serif; font-size:0.72rem; font-weight:600;
+    letter-spacing:0.08em; text-transform:uppercase; color:var(--faint); margin:0.3rem 0 0;
+  }
+
+  pre {
+    margin:0; background:var(--term-bg); color:var(--term-ink);
+    border:1px solid var(--term-rule); border-radius:4px; padding:0.9rem 1rem;
+    overflow-x:auto; font-family:"IBM Plex Mono", ui-monospace, monospace;
+    font-size:0.82rem; line-height:1.7; tab-size:2;
+  }
+  pre code { font:inherit; color:inherit; }
+  pre .c { color:var(--term-dim); }
+  code.inline {
+    font-family:"IBM Plex Mono", ui-monospace, monospace; font-size:0.86em;
+    background:var(--ground); border:1px solid var(--rule); border-radius:2px;
+    padding:0.08em 0.34em;
+  }
+
+  .note {
+    display:grid; grid-template-columns:auto 1fr; gap:0.75rem; padding:0.7rem 0.9rem;
+    background:var(--warn-soft); border-left:3px solid var(--warn);
+    border-radius:0 3px 3px 0; font-size:0.9rem; color:var(--ink); max-width:var(--measure);
+  }
+  .note .k {
+    font-family:Archivo, system-ui, sans-serif; font-size:0.66rem; font-weight:700;
+    letter-spacing:0.1em; text-transform:uppercase; color:var(--warn);
+    padding-top:0.28rem; white-space:nowrap;
+  }
+  .note p { margin:0; color:inherit; max-width:none; }
+
+  .paths {
+    background:var(--surface); border:1px solid var(--rule); border-radius:3px;
+    padding:1.1rem 1.25rem; display:flex; flex-direction:column; gap:0.7rem;
+  }
+  .paths h2 {
+    font-family:Archivo, system-ui, sans-serif; font-weight:700; font-size:1.1rem;
+    margin:0; letter-spacing:-0.01em;
+  }
+  .paths p { margin:0; max-width:var(--measure); font-size:0.95rem; color:var(--muted); }
+  .paths ol { margin:0; padding-left:1.2rem; font-size:0.95rem; color:var(--muted); }
+  .paths ol li { margin:0.3rem 0; }
+
+  table.pit {
+    width:100%; border-collapse:collapse; font-size:0.9rem;
+    background:var(--surface); border:1px solid var(--rule); border-radius:3px;
+  }
+  table.pit th, table.pit td {
+    text-align:left; padding:0.6rem 0.8rem; border-bottom:1px solid var(--rule);
+    vertical-align:top;
+  }
+  table.pit th {
+    font-family:Archivo, system-ui, sans-serif; font-size:0.68rem; font-weight:600;
+    letter-spacing:0.1em; text-transform:uppercase; color:var(--faint);
+  }
+  table.pit tr:last-child td { border-bottom:none; }
+  .tw { overflow-x:auto; }
+
+  footer {
+    border-top:1px solid var(--rule); padding-top:1.25rem;
+    font-size:0.88rem; color:var(--faint); max-width:var(--measure);
+  }
+
+  @media (max-width:34rem) {
+    .step { grid-template-columns:1fr; padding-left:0.75rem; }
+    .num { padding-top:0; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">폐쇄망 설치 절차 · 2026-08-26 검증</div>
+    <h1>EVA Airgap Runbook</h1>
+    <p class="lede">
+      인터넷이 닫힌 k3s 노드에 EVA 스택(iam · app · agent · vision)을 올리는 절차입니다. iam·app 까지는 실제로 검증했고, agent·vision 단계는 role 의 선행 조건을 정리한 것입니다.
+      호스트가 두 개라는 점이 이 작업의 핵심이라 모든 단계에 실행 위치를 표시했고,
+      ⚑ 는 통과하지 못하면 다음으로 가면 안 되는 지점입니다.
+    </p>
+
+    <dl class="facts">
+      <div class="fact"><dt>대상 노드</dt><dd>evashee / 10.158.200.113</dd></div>
+      <div class="fact"><dt>서비스 host</dt><dd>magok.eva.lge.com</dd></div>
+      <div class="fact"><dt>Registry</dt><dd>localhost:32080 / eva</dd></div>
+      <div class="fact"><dt>eva-app</dt><dd>chart 3.1.4 · app 3.1.2 · /</dd></div>
+      <div class="fact"><dt>eva-iam</dt><dd>chart 3.1.0 · /iam</dd></div>
+      <div class="fact"><dt>eva-agent</dt><dd>chart 3.0.4 · vllm · qdrant</dd></div>
+      <div class="fact"><dt>eva-vision</dt><dd>chart 2.0.5</dd></div>
+      <div class="fact"><dt>Ingress</dt><dd>traefik</dd></div>
+    </dl>
+  </header>
+
+  <div class="legend">
+    <span class="chip prep">준비 서버</span>
+    <span>인터넷 · docker · helm · ECR 자격증명</span>
+    <span class="chip target">대상 서버</span>
+    <span>airgap. Harbor 와 k3s 가 여기 있습니다.</span>
+    <span class="chip gate">⚑</span>
+    <span>검증 지점 — 여기서 멈추면 뒤가 전부 헛수고입니다.</span>
+  </div>
+
+  <section class="paths">
+    <h2>시작점에 따라 순서가 달라집니다</h2>
+    <div class="tw">
+      <table class="pit">
+        <thead><tr><th>시작 상태</th><th>순서</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>A.</strong> k3s · Harbor 가 이미 있음</td>
+            <td>아래 번호 그대로 (07 → 08 → 09 → 10 → 11 …)</td>
+          </tr>
+          <tr>
+            <td><strong>B.</strong> bare Ubuntu 24.04<br>(k3s · Harbor · docker 없음)</td>
+            <td><strong>10번을 09번보다 먼저</strong> — <code class="inline">site_infra.yaml</code> 이 ansible 로 실행되기 때문입니다</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <pre><code><span class="c">B 의 실제 순서</span>
+07 load + 무결성 확인
+08 docker 설치 → Harbor 설치 → 이미지 push
+10 ansible 설치            <span class="c">← 먼저</span>
+09 site_infra.yaml         <span class="c">← k3s + registries.yaml 을 여기서 함께 설치</span>
+11 인증서 …</code></pre>
+    <p>B 에서 추가로 필요한 것</p>
+    <ol>
+      <li><strong>wheelhouse 에 full <code class="inline">ansible</code></strong> — <code class="inline">site_infra.yaml</code> 의 nfs role 이 <code class="inline">ansible.posix.mount</code> 를 씁니다. <code class="inline">ansible-core</code> 단축로는 쓸 수 없습니다</li>
+      <li><strong>NVIDIA 드라이버 offline 리포</strong> — gpu role 이 <code class="inline">lspci</code> 로 GPU 를 감지하면 드라이버부터 설치합니다 (03번). 건너뛰려면 <code class="inline">-e gpu_skip_driver_update=true</code></li>
+      <li><strong>Ubuntu 릴리스 일치</strong> — <code class="inline">base</code> role 이 <code class="inline">install/apt/debs</code> 의 <code class="inline">.deb</code> 를 dpkg 로 설치합니다. 준비 서버와 릴리스·패치 레벨이 다르면 <code class="inline">libc6</code> 같은 의존성에서 깨집니다</li>
+    </ol>
+    <pre><code>lsb_release -a                                          <span class="c"># 양쪽에서 비교</span>
+./install/validate_offline_debs.sh ./install/apt/debs    <span class="c"># bundle 진단</span>
+sudo ./install/repair_offline_debs.sh ./install/apt/debs</code></pre>
+    <p>B 에서는 09번의 수동 <code class="inline">registries.yaml</code> 작성이 필요 없습니다 — <code class="inline">site_infra.yaml</code> 이 써줍니다.</p>
+  </section>
+
+  <!-- ============ PHASE 0 ============ -->
+  <section class="phase">
+    <div class="phase-head">
+      <h2>준비 서버 점검</h2>
+      <p>이걸 건너뛰면 옮긴 tar 가 깨져 있습니다</p>
+    </div>
+
+    <div class="step prep">
+      <div class="num">01</div>
+      <div class="step-body">
+        <h3>docker 이미지 스토어 확인 <span class="chip prep">준비 서버</span> <span class="chip gate">⚑</span></h3>
+        <p>containerd 이미지 스토어를 쓰는 docker 는 <code class="inline">docker save</code> 에서 레이어를 빼먹은 tar 를 만듭니다. 대상 서버에서 <code class="inline">docker load</code> 는 성공한 듯 보이지만 push 가 <code class="inline">failed to read config content</code> 로 실패합니다.</p>
+        <pre><code>docker info --format '{{.DriverStatus}}'</code></pre>
+        <p>출력에 containerd/snapshotter 가 보이면 끄고 재시작합니다. 기존 <code class="inline">daemon.json</code> 에 <code class="inline">insecure-registries</code> 등이 있으면 지우지 말고 <code class="inline">features</code> 항목만 추가하세요.</p>
+        <pre><code>sudo cat /etc/docker/daemon.json 2&gt;/dev/null
+
+sudo tee /etc/docker/daemon.json &gt;/dev/null &lt;&lt;'EOF'
+{ "features": { "containerd-snapshotter": false } }
+EOF
+sudo systemctl restart docker</code></pre>
+        <div class="note">
+          <span class="k">⚑ 멈춤</span>
+          <p>이 설정 없이 만든 bundle 은 04번 검증에서 걸립니다. 걸리지 않고 넘어가더라도 대상 서버에서 push 가 실패하므로, 여기서 확실히 해두는 게 가장 저렴합니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step prep">
+      <div class="num">02</div>
+      <div class="step-body">
+        <h3>versions.json 짝 맞추기 <span class="chip prep">준비 서버</span></h3>
+        <p>다운로드 스크립트가 이 파일을 읽어 <strong>무엇을 받을지</strong> 정합니다. 나중에 고치면 bundle 에는 옛 버전이 들어갑니다.</p>
+        <pre><code>cd &lt;repo 루트&gt;
+grep -E "eva_app_(chart|deploy)_version|eva_iam_chart_version" versions.json
+<span class="c">#   eva_app_chart_version  : 3.1.4</span>
+<span class="c">#   eva_app_deploy_version : 3.1.2   ← 차트 3.1.4 의 appVersion</span>
+<span class="c">#   eva_iam_chart_version  : 3.1.0</span></code></pre>
+        <div class="note">
+          <span class="k">주의</span>
+          <p>eva-app 은 role 이 이미지 태그를 <code class="inline">eva_app_deploy_version</code> 으로 <strong>강제</strong>합니다. 차트만 올리고 이 값을 두면 Harbor 에 없는 태그를 찾습니다. eva-iam 은 태그를 건드리지 않아 이 문제가 없습니다.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PHASE 1 ============ -->
+  <section class="phase">
+    <div class="phase-head">
+      <h2>bundle 만들기</h2>
+      <p>차트 · 이미지 · wheel</p>
+    </div>
+
+    <div class="step prep">
+      <div class="num">03</div>
+      <div class="step-body">
+        <h3>차트 · 패키지 · wheel <span class="chip prep">준비 서버</span></h3>
+        <pre><code>sudo -v &amp;&amp; ./install/download_offline_assets.sh
+./install/download_infra_images.sh
+./install/setup_harbor.sh --download-only
+
+<span class="c"># wheelhouse — 반드시 별도 실행</span>
+./install/download_python_venv_debs.sh
+TARGET_PYTHON=3.12 ./install/download_ansible_wheels.sh
+ls install/wheels/*.whl | wc -l</code></pre>
+        <p class="sub">bare Ubuntu + GPU 일 때</p>
+        <p>gpu role 이 드라이버부터 설치하므로 offline 리포가 필요합니다. <code class="inline">download_offline_assets.sh</code> 가 받는 container-toolkit 과는 별개입니다.</p>
+        <pre><code>./install/build_nvidia_driver_repo.sh nvidia-driver-580
+ls install/nvidia/
+<span class="c">#   nvidia-driver-repo/      ← 이 스크립트가 만듦</span>
+<span class="c">#   container-toolkit-debs/  ← download_offline_assets.sh 가 받음</span></code></pre>
+        <div class="note">
+          <span class="k">주의</span>
+          <p>마지막 두 줄을 <code class="inline">&amp;&amp;</code> 로 묶지 마세요. 앞 명령이 sudo 로 실패하면 wheel 다운로드가 조용히 건너뛰어집니다. <code class="inline">TARGET_PYTHON</code> 은 <strong>대상 서버</strong>의 Python 버전입니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step prep">
+      <div class="num">04</div>
+      <div class="step-body">
+        <h3>모델 캐시 <span class="chip prep">준비 서버</span></h3>
+        <p>eva-agent 와 vllm 이 쓰는 HuggingFace 모델입니다. bundle 에서 가장 큰 덩어리이고, eva_agent role 이 대상 서버에서 두 경로의 존재를 assert 합니다.</p>
+        <pre><code>AWS_PROFILE=default ./install/download_eva_models.sh
+du -sh install/models/*
+<span class="c">#   install/models/agent/hf</span>
+<span class="c">#   install/models/vllm/hf</span></code></pre>
+        <div class="note">
+          <span class="k">건너뛰기</span>
+          <p>iam · app 만 설치할 계획이면 이 단계는 생략합니다. 그 경우 05번에 <code class="inline">COMPONENTS="eva-app eva-iam"</code> 을 주면 agent · vision · vllm 이미지도 받지 않아 bundle 이 훨씬 작아집니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step prep">
+      <div class="num">05</div>
+      <div class="step-body">
+        <h3>이미지 <span class="chip prep">준비 서버</span> <span class="chip gate">⚑</span></h3>
+        <pre><code>rm -rf install/images
+
+<span class="c"># 전체 스택</span>
+AWS_PROFILE=default ./install/download_eva_images.sh
+./install/download_infra_images.sh
+
+<span class="c"># 일부만 — iam · app 만 볼 때</span>
+<span class="c"># COMPONENTS="eva-app eva-iam" AWS_PROFILE=default ./install/download_eva_images.sh</span></code></pre>
+        <p class="sub">GPU 프로파일 — vllm 이미지가 여기서 갈립니다</p>
+        <p><code class="inline">download_offline_assets.sh</code> 는 vllm values 4종(<code class="inline">A6000x1</code>, <code class="inline">L40sx1</code>, <code class="inline">PRO5000x3</code>, <code class="inline">PRO6000-MIGx4</code>)을 모두 받지만, 이미지 목록은 <strong>그중 하나로 렌더</strong>해서 만듭니다. 기본값은 <code class="inline">PRO6000-MIGx4</code> 입니다.</p>
+        <pre><code>ssh &lt;대상 서버&gt; 'nvidia-smi --query-gpu=name --format=csv,noheader'
+
+EVA_AGENT_VLLM_VALUES_FILE=values-k3s.L40sx1.yaml \
+  AWS_PROFILE=default ./install/download_eva_images.sh</code></pre>
+        <p>끝에 무결성 검사가 돕니다. 모든 줄이 <code class="inline">amd64/linux</code> 여야 합니다.</p>
+        <pre><code>[verify] 이미지 무결성 확인
+  ...eva-app:3.1.2         amd64/linux
+  ...keycloak:3.1.0        amd64/linux
+  mysql:8.0.42-bookworm    amd64/linux
+[verify] 이상 없음</code></pre>
+        <div class="note">
+          <span class="k">⚑ 멈춤</span>
+          <p><code class="inline">/</code> 처럼 앞이 빈 줄이 있으면 01번으로 돌아가세요. 그래도 남으면 그 이미지만 digest 로 받습니다 — <code class="inline">docker rmi -f</code> 를 먼저 해야 <code class="inline">Image is up to date</code> 로 건너뛰지 않습니다.</p>
+        </div>
+        <p class="sub">한 이미지만 복구</p>
+        <pre><code>REPO=&lt;레지스트리&gt;/&lt;경로&gt;/&lt;이미지&gt;
+docker manifest inspect "$REPO:&lt;태그&gt;" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+for m in d.get("manifests",[]):
+    p=m.get("platform",{}); print(p.get("os"),p.get("architecture"),m["digest"])'
+
+docker rmi -f "$REPO:&lt;태그&gt;"
+docker pull "$REPO@sha256:&lt;linux amd64 digest&gt;"
+docker tag  "$REPO@sha256:&lt;...&gt;" "$REPO:&lt;태그&gt;"
+docker image inspect "$REPO:&lt;태그&gt;" --format '{{.Architecture}}/{{.Os}}'</code></pre>
+      </div>
+    </div>
+
+    <div class="step prep">
+      <div class="num">06</div>
+      <div class="step-body">
+        <h3>tar 로 묶어 전송 <span class="chip prep">준비 서버</span></h3>
+        <pre><code>docker save -o install/images/repository-images.tar \
+  $(cat install/images/images-pulled.txt)
+ls -lh install/images/repository-images.tar     <span class="c"># 수 GB — 10K 면 01번 문제</span>
+
+rsync -a --info=progress2 --partial \
+  --exclude '.venv' --exclude '.git' --exclude 'install/images/rendered' \
+  ./ eva@10.158.200.113:/home/eva/eva-deployer-jj/</code></pre>
+        <p>전송 후 양쪽을 대조하면 누락을 바로 잡습니다.</p>
+        <pre><code>du -sh install/*
+ssh eva@10.158.200.113 'du -sh ~/eva-deployer-jj/install/*'</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PHASE 2 ============ -->
+  <section class="phase">
+    <div class="phase-head">
+      <h2>대상 서버 준비</h2>
+      <p>Harbor · mirror · ansible</p>
+    </div>
+
+    <div class="step target">
+      <div class="num">07</div>
+      <div class="step-body">
+        <h3>load 후 무결성 재확인 <span class="chip target">대상 서버</span> <span class="chip gate">⚑</span></h3>
+        <pre><code>cd ~/eva-deployer-jj
+docker load -i install/images/repository-images.tar
+
+while read -r i; do
+  printf '%-72s %s\n' "$i" \
+    "$(docker image inspect "$i" --format '{{.Architecture}}/{{.Os}}' 2>/dev/null)"
+done &lt; install/images/images-pulled.txt</code></pre>
+        <div class="note">
+          <span class="k">⚑ 멈춤</span>
+          <p>여기서도 전부 <code class="inline">amd64/linux</code> 여야 합니다. 한 줄이라도 <code class="inline">/</code> 면 그 이미지는 push·배포가 실패합니다. 이 서버에 예전 기록이 남아 있으면 새 tar 를 load 해도 건너뛰므로 <code class="inline">docker rmi -f &lt;이미지&gt;</code> 를 먼저 하세요.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">08</div>
+      <div class="step-body">
+        <h3>Harbor 로 push <span class="chip target">대상 서버</span></h3>
+        <p>docker · Harbor 가 없을 때만 앞 두 줄을 실행합니다.</p>
+        <pre><code>sudo ./install/install_docker.sh --airgap        <span class="c"># 후 SSH 재접속</span>
+./install/setup_harbor.sh --hostname localhost \
+  --install-root ~/.local/share/eva-harbor
+
+PULL_SOURCE_IMAGES=false IMAGE_LIST=install/images/images-pulled.txt \
+  REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
+  ./install/push_images_to_repository.sh
+
+PULL_SOURCE_IMAGES=false IMAGE_LIST=install/images/infra-images-pulled.txt \
+  REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
+  ./install/push_images_to_repository.sh</code></pre>
+        <p>스크립트가 <code class="inline">eva/&lt;이름&gt;</code> 으로 올리면서, <strong>레지스트리 주소가 없는 이미지는 Docker Hub 원본 경로로도</strong> 한 벌 더 올립니다 (<code class="inline">library/busybox</code>, <code class="inline">library/mysql</code>, <code class="inline">bitnami/kubectl</code> …). 다음 단계의 mirror 가 그 경로를 찾습니다. 필요한 Harbor project 도 자동으로 만듭니다.</p>
+        <pre><code>[mirror] 자동 선택: busybox:latest mysql:8.0.42-bookworm bitnami/kubectl:latest ...
+[project] 생성: bitnami
+[mirror] bitnami/kubectl:latest -> localhost:32080/bitnami/kubectl:latest</code></pre>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">09</div>
+      <div class="step-body">
+        <h3>docker.io mirror <span class="chip target">대상 서버</span> <span class="chip once">1회만</span> <span class="chip gate">⚑</span></h3>
+        <p>일부 차트는 <code class="inline">busybox:latest</code>, <code class="inline">mysql:8.0.42-bookworm</code> 처럼 이미지를 주소 없이 적어둡니다. kubelet 은 그런 이름을 docker.io 로 해석하므로 폐쇄망에서 실패합니다. mirror 는 차트를 건드리지 않고 그 요청을 Harbor 로 돌립니다.</p>
+        <div class="note">
+          <span class="k">순서</span>
+          <p><strong>bare Ubuntu 에서 시작한다면 10번(ansible 설치)을 먼저 하세요.</strong> <code class="inline">site_infra.yaml</code> 은 ansible 로 실행되므로 이 단계보다 ansible 이 먼저 있어야 합니다.</p>
+        </div>
+        <p class="sub">k3s 를 새로 깔 때 — k3s 와 registries.yaml 을 함께 설치</p>
+        <pre><code>ansible-playbook -i 'localhost,' -c local site_infra.yaml -K \
+  -e repository_mode=local_repository -e repository_registry=localhost:32080</code></pre>
+        <p class="sub">k3s 가 이미 있을 때</p>
+        <pre><code>sudo tee /etc/rancher/k3s/registries.yaml &gt;/dev/null &lt;&lt;'EOF'
+mirrors:
+  "localhost:32080":
+    endpoint:
+      - "http://localhost:32080"
+  "docker.io":
+    endpoint:
+      - "http://localhost:32080"
+configs:
+  "localhost:32080":
+    auth:
+      username: "admin"
+      password: "EVA123@"
+    tls:
+      insecure_skip_verify: true
+EOF
+
+sudo systemctl restart k3s
+sleep 25
+sudo k3s crictl pull docker.io/library/busybox:latest        &amp;&amp; echo "busybox OK"
+sudo k3s crictl pull docker.io/bitnami/kubectl:latest        &amp;&amp; echo "kubectl OK"
+sudo k3s crictl pull docker.io/library/mysql:8.0.42-bookworm &amp;&amp; echo "mysql OK"
+sudo k3s crictl pull localhost:32080/eva/eva-app:3.1.2       &amp;&amp; echo "eva-app OK"</code></pre>
+        <div class="note">
+          <span class="k">⚑ 멈춤</span>
+          <p>네 줄 모두 OK 여야 합니다. <code class="inline">ctr</code> 로는 검증되지 않습니다 — registries.yaml 을 읽지 않아 항상 인증 실패합니다. k3s 재시작은 재설치가 아니고 컨테이너는 containerd 가 계속 돌립니다 (control plane 만 20~30초 끊김).</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">10</div>
+      <div class="step-body">
+        <h3>ansible <span class="chip target">대상 서버</span></h3>
+        <pre><code>./install/install_python_venv_airgap.sh
+./install/install_ansible_airgap.sh
+source .venv/bin/activate
+ansible --version</code></pre>
+        <p><code class="inline">site_infra.yaml</code> 을 돌릴 계획이면 <strong>full <code class="inline">ansible</code> 이 필요합니다</strong> — nfs role 이 <code class="inline">ansible.posix.mount</code> 를 쓰기 때문입니다. <code class="inline">requirements-airgap.txt</code> 전체로 받은 wheelhouse 면 그대로 됩니다.</p>
+        <p>iam · app 만 배포하고 <code class="inline">site_infra.yaml</code> 을 건너뛸 때는 <code class="inline">ansible-core</code> 만으로도 충분합니다 (두 role 은 <code class="inline">ansible.builtin.*</code> 만 씁니다).</p>
+        <pre><code>ANSIBLE_AIRGAP_REQUIREMENTS="ansible-core==2.20.5" ./install/install_ansible_airgap.sh</code></pre>
+        <p><strong>SSH 세션마다 <code class="inline">source</code> 를 다시 하세요.</strong></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PHASE 3 ============ -->
+  <section class="phase">
+    <div class="phase-head">
+      <h2>배포</h2>
+      <p>인증서 → values → eva-iam → eva-app</p>
+    </div>
+
+    <div class="step target">
+      <div class="num">11</div>
+      <div class="step-body">
+        <h3>인증서와 kubeconfig <span class="chip target">대상 서버</span></h3>
+        <p>파일명은 <code class="inline">tls.crt</code> / <code class="inline">tls.key</code> 고정이고 내용이 PEM 이어야 합니다. eva-iam 과 eva-app 이 같은 디렉터리를 씁니다.</p>
+        <pre><code>sudo install -d /home/eva/certs
+sudo cp fullchain.pem /home/eva/certs/tls.crt
+sudo cp privkey.pem   /home/eva/certs/tls.key
+sudo chmod 600 /home/eva/certs/tls.key
+sudo head -1 /home/eva/certs/tls.crt        <span class="c"># BEGIN CERTIFICATE</span>
+
+sudo test -f /root/.kube/config \
+  || sudo install -Dm600 /etc/rancher/k3s/k3s.yaml /root/.kube/config</code></pre>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">12</div>
+      <div class="step-body">
+        <h3>values 두 개 <span class="chip target">대상 서버</span> <span class="chip gate">⚑</span></h3>
+        <p>heredoc 이 붙여넣기에서 자주 깨지므로 줄 단위로 씁니다.</p>
+        <pre><code>printf 'ingress:\n  ingressClassName: traefik\n' &gt; values/eva-iam.yaml
+
+printf '%s\n' \
+'localhost:' \
+'  app:' \
+'    license:' \
+'      activation_mode: "offline"' \
+'      product_code: "eva-prod"' \
+'      api_key: "&lt;라이선스 api_key&gt;"' \
+'      shared_key: "&lt;라이선스 shared_key&gt;"' \
+'    sso:' \
+'      realm: "eva-iam"' \
+'      clientId: "eva-app"' \
+'  ingress:' \
+'    tls:' \
+'      hostPath: /home/eva/certs' \
+&gt; values/app.yaml</code></pre>
+        <p class="sub">⚑ 검증 — ansible 이 읽기 전에</p>
+        <pre><code>python3 -c "
+import yaml,json
+for f in ('values/eva-iam.yaml','values/app.yaml'):
+    d=yaml.safe_load(open(f)); print(f, json.dumps(d, ensure_ascii=False))
+assert 'localhost' in yaml.safe_load(open('values/app.yaml')), 'app.yaml host 키 없음'
+print('OK')"</code></pre>
+        <div class="note">
+          <span class="k">차이</span>
+          <p>eva-iam 은 host 키 없이 최상위에 쓰지만, <strong>eva-app 은 host 키가 필수</strong>입니다 (없으면 파일 전체가 조용히 무시됨). <code class="inline">localhost</code> 는 <code class="inline">-i 'localhost,'</code> 로 돌릴 때의 이름입니다. <code class="inline">sso.realm</code>/<code class="inline">clientId</code> 는 차트 기본값이 <code class="inline">eva-sso</code>/<code class="inline">eva-app-kr-2</code> 라 반드시 덮어써야 하고, <code class="inline">activation_mode</code> 는 기본이 <code class="inline">online</code> 이라 폐쇄망에서 실패합니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">13</div>
+      <div class="step-body">
+        <h3>eva-iam 배포 <span class="chip target">대상 서버</span></h3>
+        <p>eva-app 이 루트를 쓰므로 eva-iam 은 <code class="inline">/iam</code> 서브패스로 둡니다. 그리고 eva-app 의 SSO 세션 저장소가 eva-iam 의 Redis 이므로 NodePort 를 열어야 합니다.</p>
+        <pre><code>ansible-playbook -i 'localhost,' -c local site_eva_iam.yaml -K \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e eva_iam_host=magok.eva.lge.com \
+  -e eva_iam_node_user=eva \
+  -e eva_iam_ingress_path=/iam \
+  -e eva_iam_redis_external_enabled=true \
+  -e eva_iam_redis_tls_enabled=true \
+  -e eva_iam_redis_nodeport=32070 \
+  -e '{"eva_iam_app_redirect_uris": ["https://magok.eva.lge.com/*"]}'
+
+cat config/localhost/eva-iam.yaml</code></pre>
+        <div class="note">
+          <span class="k">주의</span>
+          <p>같은 host 에서 eva-iam 과 eva-app 이 모두 <code class="inline">/</code> 를 쓰면 Keycloak 요청이 eva-app 으로 가서 <code class="inline">{"detail":{"code":"csrf_failed"}}</code> 같은 엉뚱한 응답이 돌아옵니다. eva-iam 차트는 <code class="inline">redis.tls.enabled=true</code> 일 때만 external 을 허용합니다. <code class="inline">--check</code> 를 붙이면 아무것도 설치되지 않습니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">14</div>
+      <div class="step-body">
+        <h3>eva-app 배포 <span class="chip target">대상 서버</span></h3>
+        <pre><code>ansible-playbook -i 'localhost,' -c local site_eva_app.yaml -K \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e eva_app_backend_host=magok.eva.lge.com \
+  -e eva_app_backend_secure=true \
+  -e eva_app_sso_base_url=https://magok.eva.lge.com/iam \
+  -e eva_app_sso_admin_client_secret='&lt;12번 hand-off 파일의 값&gt;'</code></pre>
+        <p><code class="inline">sso_base_url</code> 에 <strong><code class="inline">/iam</code> 을 빼먹으면</strong> OIDC discovery 를 못 찾습니다. <code class="inline">backend_host</code> 는 브라우저가 실제로 쓰는 주소여야 프론트가 백엔드를 찾습니다.</p>
+        <div class="note">
+          <span class="k">기존 릴리스</span>
+          <p>eva-app 이 이미 있으면 upgrade 가 되고 role 이 replicas=0 으로 내린 뒤 올리므로 다운타임이 생깁니다. 버전을 건너뛰는 재설치라면 <code class="inline">/eva-app</code> hostPath(MySQL) 를 지우는 편이 안전합니다.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+    <div class="step target">
+      <div class="num">15</div>
+      <div class="step-body">
+        <h3>eva.yaml 생성 <span class="chip target">대상 서버</span></h3>
+        <p>agent · vision role 은 <code class="inline">config/&lt;host&gt;/eva.yaml</code> 이 없으면 assert 로 멈춥니다. GPU 개수와 MIG 상태를 <code class="inline">nvidia-smi</code> 로 자동 감지해 만들어지므로 별도 값은 필요 없습니다.</p>
+        <pre><code>ansible-playbook -i 'localhost,' -c local site_eva_config.yaml -K \
+  -e repository_mode=local_repository -e repository_registry=localhost:32080
+
+cat config/localhost/eva.yaml
+<span class="c">#   gpu_count / mig_enabled / nfs_share_path / vllm.replicaCount ...</span></code></pre>
+        <div class="note">
+          <span class="k">참고</span>
+          <p>airgap 이면 <code class="inline">awscli</code> role 은 자동으로 건너뜁니다. <code class="inline">nfs_share_path</code> 기본값은 <code class="inline">/share/eva-agent</code> 이고, 다르면 <code class="inline">-e nfs_share_path=…</code> 로 지정하세요. iam · app 만 설치할 때는 이 단계가 필요 없습니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">16</div>
+      <div class="step-body">
+        <h3>eva-agent 배포 <span class="chip target">대상 서버</span></h3>
+        <p>agent · agent-init · vllm · qdrant 네 릴리스가 함께 올라갑니다. GPU 프로파일은 이미지를 받을 때 쓴 것과 <strong>같아야</strong> 합니다.</p>
+        <pre><code>ansible-playbook -i 'localhost,' -c local site_eva_agent.yaml -K \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e eva_agent_vllm_profile=PRO6000-MIGx4</code></pre>
+        <div class="note">
+          <span class="k">선행 조건</span>
+          <p>모델 캐시(<code class="inline">install/models/agent/hf</code>, <code class="inline">install/models/vllm/hf</code>)가 대상 서버에 있어야 합니다 — role 이 두 경로를 assert 합니다. 프로파일이 다운로드 때와 다르면 Harbor 에 없는 vllm 이미지를 찾게 됩니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">17</div>
+      <div class="step-body">
+        <h3>eva-vision 배포 <span class="chip target">대상 서버</span></h3>
+        <pre><code>ansible-playbook -i 'localhost,' -c local site_eva_vision.yaml -K \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080</code></pre>
+        <p>MIG 설정은 <code class="inline">eva.yaml</code> 에서 읽습니다. eva-app 은 <code class="inline">http://eva-vision.eva-vision:8000</code> 과 <code class="inline">http://eva-agent.eva-agent</code> 로 이 둘을 찾으므로, 배포되면 주소가 그대로 맞아떨어집니다.</p>
+        <div class="note">
+          <span class="k">묶음 playbook</span>
+          <p><code class="inline">site_eva.yaml</code> 은 agent → vision → app 을 한 번에 돌립니다. app 을 이미 올린 뒤라면 <strong>개별 playbook</strong>(위 두 개)을 쓰는 게 app 재시작을 피합니다.</p>
+        </div>
+      </div>
+    </div>
+
+  <!-- ============ PHASE 4 ============ -->
+  <section class="phase">
+    <div class="phase-head">
+      <h2>접속과 검증</h2>
+      <p>SSO 로그인까지 확인</p>
+    </div>
+
+    <div class="step target">
+      <div class="num">18</div>
+      <div class="step-body">
+        <h3>경로와 응답 확인 <span class="chip target">대상 서버</span></h3>
+        <pre><code>kubectl get ingress -A -o custom-columns='NS:.metadata.namespace,HOST:.spec.rules[0].host,PATH:.spec.rules[0].http.paths[0].path'
+<span class="c">#   eva-app   magok.eva.lge.com  /</span>
+<span class="c">#   eva-iam   magok.eva.lge.com  /iam</span>
+
+curl -sk https://magok.eva.lge.com/iam/realms/eva-iam/.well-known/openid-configuration \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'
+<span class="c">#   https://magok.eva.lge.com/iam/realms/eva-iam</span>
+
+curl -sk https://magok.eva.lge.com/ -o /dev/null -w 'app %{http_code}\n'
+nc -vz 10.158.200.113 32070          <span class="c"># redis 열렸는지</span>
+
+sudo KUBECONFIG=/root/.kube/config helm get values eva-app -n eva-app | grep -A5 -E "sso|license"</code></pre>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">19</div>
+      <div class="step-body">
+        <h3>브라우저 로그인 <span class="chip gate">⚑</span></h3>
+        <p><strong>반드시 <code class="inline">https://magok.eva.lge.com/</code> 로, 새 시크릿 창에서</strong> 접속하세요.</p>
+        <pre><code>https://magok.eva.lge.com/           <span class="c"># eva-app</span>
+https://magok.eva.lge.com/iam/admin/ <span class="c"># Keycloak 콘솔 (master admin/adminpass)</span></code></pre>
+        <div class="note">
+          <span class="k">주의</span>
+          <p>NodePort(<code class="inline">:32010</code>) 로 직접 붙지 마세요 — traefik 을 우회해 TLS 가 없고, uvicorn 로그에 <code class="inline">Invalid HTTP request received</code> 가 찍힙니다. <code class="inline">http://</code> 로 로그인을 시작하면 <code class="inline">redirect_uri</code> 가 등록값과 달라져 <code class="inline">invalid_grant / Code not valid</code> 가 납니다. 인가 코드는 <strong>한 번만</strong> 쓸 수 있어서, 실패한 콜백 URL 을 새로고침하면 같은 에러가 반복됩니다 — 캐시를 비우거나 시크릿 창에서 처음부터 시도하세요.</p>
+        </div>
+        <p class="sub">로그 확인</p>
+        <pre><code>kubectl logs -n eva-app deploy/eva-app --tail=50 | grep -iE "sso|redis|token"</code></pre>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">20</div>
+      <div class="step-body">
+        <h3>지우고 다시 <span class="chip target">대상 서버</span></h3>
+        <p>hostPath 를 남기면 DB 가 복원됩니다 — realm · 사용자 · client secret 이 그대로 살아납니다.</p>
+        <pre><code>sudo KUBECONFIG=/root/.kube/config helm uninstall eva-iam -n eva-iam
+kubectl delete ns eva-iam --wait=true
+sudo rm -rf /home/eva/.eva-iam/host-path     <span class="c"># keycloak DB</span>
+
+sudo KUBECONFIG=/root/.kube/config helm uninstall eva-app -n eva-app
+kubectl delete ns eva-app --wait=true
+sudo rm -rf /eva-app                          <span class="c"># eva-app / mysql</span></code></pre>
+        <p>Harbor 이미지 · registries.yaml mirror · 인증서 · <code class="inline">.venv</code> · values 파일은 남으므로, 재설치는 <strong>10번부터</strong> 하면 됩니다.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 함정 요약 ============ -->
+  <section class="phase">
+    <div class="phase-head">
+      <h2>겪었던 함정</h2>
+      <p>전부 “조용히 실패”하는 종류였습니다</p>
+    </div>
+
+    <div class="tw">
+      <table class="pit">
+        <thead><tr><th>증상</th><th>실제 원인</th><th>확인</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>push 가 <code class="inline">failed to read config content</code></td>
+            <td>준비 서버가 containerd 스토어 → tar 에 레이어 누락</td>
+            <td><code class="inline">docker image inspect … {{.Architecture}}</code></td>
+          </tr>
+          <tr>
+            <td>새 tar 를 load 해도 그대로</td>
+            <td>깨진 기록이 남아 load 가 건너뜀</td>
+            <td><code class="inline">docker rmi -f</code> 후 재시도</td>
+          </tr>
+          <tr>
+            <td>대상 서버 pip 이 ansible 을 못 찾음</td>
+            <td><code class="inline">&amp;&amp;</code> 로 묶어 wheel 다운로드가 실행되지 않음</td>
+            <td><code class="inline">ls install/wheels/*.whl | wc -l</code></td>
+          </tr>
+          <tr>
+            <td>realm-config Job 5분 타임아웃</td>
+            <td><code class="inline">busybox:latest</code> 가 docker.io 로 해석 → mirror 없음</td>
+            <td><code class="inline">crictl pull docker.io/library/busybox:latest</code></td>
+          </tr>
+          <tr>
+            <td>mysql Pod 만 ErrImagePull</td>
+            <td>eva-app 3.1.4 가 mysql 이미지를 하드코딩 (2.1.3 엔 키가 있었음)</td>
+            <td>Pod spec 의 image 값</td>
+          </tr>
+          <tr>
+            <td>ImagePullBackOff · 태그 없음</td>
+            <td>versions.json 을 다운로드 <em>후</em> 에 고침</td>
+            <td>Harbor artifacts API</td>
+          </tr>
+          <tr>
+            <td>values 가 안 먹은 듯한 배포</td>
+            <td>helm <code class="inline">-f</code> 가 2개 — host values 없음/빈 파일</td>
+            <td><code class="inline">helm get values</code></td>
+          </tr>
+          <tr>
+            <td>namespace 조차 안 생김</td>
+            <td><code class="inline">--check</code> dry-run</td>
+            <td>PLAY RECAP 의 skipped 수</td>
+          </tr>
+          <tr>
+            <td>Keycloak 이 <code class="inline">csrf_failed</code> 를 반환</td>
+            <td>eva-iam·eva-app 이 같은 host 의 <code class="inline">/</code> — 요청이 eva-app 으로</td>
+            <td>응답 본문 형식 (<code class="inline">detail</code> = eva-app)</td>
+          </tr>
+          <tr>
+            <td>Redis <code class="inline">Connection refused</code></td>
+            <td>eva-iam redis external 이 꺼져 있음 (TLS 필요)</td>
+            <td><code class="inline">nc -vz &lt;host&gt; 32070</code></td>
+          </tr>
+          <tr>
+            <td><code class="inline">invalid_grant</code> · <code class="inline">Invalid HTTP request</code></td>
+            <td>http 로 시작 · NodePort 직접 접속 · 코드 재사용</td>
+            <td>https + 시크릿 창으로 재시도</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      차트 쪽 미해결 과제: eva-iam 3.1.0/3.1.1 의 <code class="inline">busybox</code>·<code class="inline">bitnami/kubectl</code> 3곳과
+      eva-app 3.1.4 의 <code class="inline">mysql</code> 1곳이 이미지 주소를 values 로 바꿀 수 없게 하드코딩되어 있습니다.
+      같은 차트의 다른 컨테이너들은 <code class="inline">.Values.*.image.repository</code> 패턴을 쓰므로 그 패턴에 맞추면 mirror 우회가 불필요해집니다.
+      비밀번호는 아직 전부 차트 공개 기본값입니다.
+    </p>
+  </footer>
+
+</div>

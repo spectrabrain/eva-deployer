@@ -18,7 +18,8 @@ LOCAL_HARBOR_YML="${LOCAL_HARBOR_YML:-$HOME/.local/share/eva-harbor/harbor/harbo
 # mirror 로 Harbor 로 돌리는데, mirror 는 host 만 치환하고 경로는 그대로 보냅니다.
 # 따라서 이 이미지들만은 평탄화(<project>/<name>) 하지 않고 Docker Hub 경로 그대로
 # (library/busybox, bitnami/kubectl) push 해야 합니다.
-MIRROR_PATH_IMAGES="${MIRROR_PATH_IMAGES:-busybox:latest bitnami/kubectl:latest}"
+# 지정하지 않으면 아래에서 IMAGE_LIST 를 훑어 자동으로 고릅니다 (레지스트리 주소가 없는 이미지).
+MIRROR_PATH_IMAGES="${MIRROR_PATH_IMAGES:-}"
 LEGACY_LOCAL_HARBOR_YML="$SCRIPT_DIR/harbor/harbor/harbor.yml"
 
 if [[ -z "$REPOSITORY_REGISTRY" ]]; then
@@ -159,11 +160,63 @@ dockerhub_path() {
   fi
 }
 
+# 레지스트리 주소가 있는 이미지인지 판별합니다. 첫 요소에 '.' 이나 ':' 가 있거나 localhost 면
+# 호스트로 봅니다 (registry.k8s.io/..., 339…amazonaws.com/..., localhost:32080/...).
+has_registry_host() {
+  [[ "$1" == */* ]] || return 1
+  local first="${1%%/*}"
+  [[ "$first" == *.* || "$first" == *:* || "$first" == "localhost" ]]
+}
+
+# 차트가 이미지를 주소 없이 하드코딩해 두면 kubelet 이 docker.io 로 해석하므로, k3s
+# registries.yaml 의 docker.io mirror 를 타게 됩니다. mirror 는 host 만 치환하고 경로는
+# 그대로 보내기 때문에 Harbor 에도 원본 경로가 필요합니다. 어느 차트가 그럴지 미리 알 수
+# 없으므로, 목록에서 주소 없는 이미지를 전부 대상으로 삼습니다 (사본 몇 개가 늘 뿐입니다).
+if [[ -z "$MIRROR_PATH_IMAGES" ]]; then
+  while IFS= read -r image; do
+    [[ -z "$image" ]] && continue
+    has_registry_host "$image" || MIRROR_PATH_IMAGES+="$image "
+  done < "$IMAGE_LIST"
+  echo "[mirror] 자동 선택: ${MIRROR_PATH_IMAGES:-(없음)}"
+fi
+
+# Harbor 는 없는 project 로 push 하면 401 을 냅니다. bitnami/kubectl 처럼 project 가
+# 새로 필요한 경로를 위해, 가능하면 미리 만들어 둡니다 (이미 있으면 409 로 조용히 넘어감).
+ensure_harbor_project() {
+  local project="$1" code
+  [[ "$project" == "library" ]] && return 0
+
+  # login_repository() 는 기존 docker 자격증명이 있으면 harbor.yml 을 읽지 않고 끝냅니다.
+  # 그 경로로 왔으면 여기서 비밀번호를 채워야 API 호출이 됩니다 — 없으면 project 를 못 만들고
+  # push 가 401 로 실패합니다.
+  if [[ -z "${REPOSITORY_PASSWORD:-}" && "$REPOSITORY_REGISTRY" == "localhost:32080" ]]; then
+    REPOSITORY_PASSWORD="$(read_local_harbor_password)"
+  fi
+  if [[ -z "${REPOSITORY_PASSWORD:-}" ]]; then
+    echo "[warn] Harbor 비밀번호를 몰라 project 확인을 건너뜁니다: $project"
+    echo "       REPOSITORY_PASSWORD 또는 HARBOR_ADMIN_PASSWORD 를 지정하세요."
+    return 0
+  fi
+  code="$(curl -s -o /dev/null -w '%{http_code}' \
+    -u "${REPOSITORY_USERNAME}:${REPOSITORY_PASSWORD}" \
+    -X POST "http://${REPOSITORY_REGISTRY}/api/v2.0/projects" \
+    -H 'Content-Type: application/json' \
+    -d "{\"project_name\":\"${project}\",\"public\":true}" 2>/dev/null || true)"
+  case "$code" in
+    201) echo "[project] 생성: $project" ;;
+    409) ;;
+    *)   echo "[warn] project 확인 실패(HTTP ${code:-?}): $project — push 가 실패하면 수동 생성하세요" ;;
+  esac
+}
+
 for source_image in $MIRROR_PATH_IMAGES; do
   [[ -z "$source_image" ]] && continue
 
-  target_image="${REPOSITORY_REGISTRY}/$(dockerhub_path "$source_image"):$(image_tag "$source_image")"
+  mirror_repo="$(dockerhub_path "$source_image")"
+  target_image="${REPOSITORY_REGISTRY}/${mirror_repo}:$(image_tag "$source_image")"
   echo "[mirror] $source_image -> $target_image"
+
+  ensure_harbor_project "${mirror_repo%%/*}"
 
   if [[ "$PULL_SOURCE_IMAGES" == "true" ]]; then
     "$DOCKER_CMD" pull "$source_image"
@@ -172,8 +225,7 @@ for source_image in $MIRROR_PATH_IMAGES; do
   "$DOCKER_CMD" tag "$source_image" "$target_image"
   if ! "$DOCKER_CMD" push "$target_image"; then
     echo "[warn] push 실패: $target_image"
-    echo "       Harbor 에 '$(dockerhub_path "$source_image" | cut -d/ -f1)' project 가 없을 수 있습니다."
-    echo "       Harbor UI → Projects → New Project 로 만든 뒤 다시 실행하세요."
+    echo "       Harbor 에 '${mirror_repo%%/*}' project 가 없거나 권한이 없을 수 있습니다."
   fi
 
   echo "$source_image $target_image" >> "$MAPPING_FILE"

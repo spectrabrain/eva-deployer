@@ -14,6 +14,11 @@ keycloak:
   image:
     repository: "{{ eva_iam_keycloak_image_repository }}"
     pullPolicy: IfNotPresent
+  # keycloak Deployment 와 realm-config Job 의 initContainer (차트 3.1.3+ 에서 노출됨).
+  # 그 전 버전은 busybox 를 템플릿에 하드코딩해서 docker.io mirror 로 우회해야 했습니다.
+  initContainer:
+    image:
+      repository: "{{ eva_iam_busybox_image_repository }}"
 {% endif %}
   # config-cli 로 표현 못 하는 realm 부분 (post-install/upgrade Job, kcadm)
   realmPatch:
@@ -44,6 +49,12 @@ ingress:
   tls:
     authType: hostPath
     hostPath: "{{ eva_iam_tls_host_path }}"
+{% if airgap_mode | bool %}
+    # TLS Secret 을 만드는 Job 의 kubectl 이미지 (차트 3.1.3+ 에서 노출됨)
+    job:
+      kubectlImage:
+        repository: "{{ eva_iam_kubectl_image_repository }}"
+{% endif %}
 
 persistence:
   type: hostPath

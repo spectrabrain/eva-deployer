@@ -62,6 +62,16 @@
       repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
 
+- name: Validate EVA App chart version supports values-driven images
+  ansible.builtin.assert:
+    that:
+      - eva_app_chart_version is version('3.1.5', '>=')
+    fail_msg: >-
+      eva_app_chart_version={{ eva_app_chart_version }} 은 지원하지 않습니다.
+      values/app-k3s-override.yaml.j2 는 database.internal.image 를 repository/tag 맵으로 넘기는데,
+      3.1.4 이하 차트는 mysql 주소를 템플릿에 하드코딩하거나 문자열로 받습니다.
+      versions.json 의 eva_app_chart_version 을 3.1.5 이상으로 올리세요.
+
 - name: Resolve EVA App image repositories
   ansible.builtin.set_fact:
     eva_app_image_repository: >-
@@ -82,6 +92,15 @@
         )
       }}
     eva_app_mysql_image_tag: "{{ eva_app_mysql_image_tag | default('8.0.42-bookworm') }}"
+    # TLS Secret Job 과 ECR CronJob 이 쓰는 kubectl. 차트 3.1.5 에서 values 로 노출됐습니다.
+    # Harbor 이름은 install/push_images_to_repository.sh 의 평탄화 규칙을 따릅니다.
+    eva_app_kubectl_image_repository: >-
+      {{
+        eva_app_kubectl_image_repository | default(
+          (repository_mode == 'cloud_repository')
+          | ternary('bitnami/kubectl', repository_registry ~ '/' ~ repository_project ~ '/kubectl')
+        )
+      }}
 
 - name: Remove EVA App workspace if it exists
   ansible.builtin.file:

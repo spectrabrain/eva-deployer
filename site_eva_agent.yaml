@@ -4,6 +4,8 @@
   become: true
   any_errors_fatal: true
   serial: 1
+  vars_files:
+    - "{{ playbook_dir }}/versions.json"
 
   pre_tasks:
     - name: Resolve repository mode

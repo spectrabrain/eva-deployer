@@ -42,7 +42,6 @@
     eva_agent_qdrant_snapshots_volume_name: "{{ eva_agent_qdrant_snapshots_volume_name | default('eva-agent-qdrant-snapshots') }}"
     eva_agent_qdrant_snapshot_pv_size: "{{ eva_agent_qdrant_snapshot_pv_size | default('10Gi') }}"
     eva_agent_qdrant_offline_snapshot_dir: "{{ eva_agent_qdrant_offline_snapshot_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/qdrant-snapshots') }}"
-    eva_agent_qdrant_snapshot_pvc_name: "{{ eva_agent_qdrant_snapshot_pvc_name | default(eva_agent_qdrant_snapshots_volume_name ~ '-' ~ eva_agent_qdrant_statefulset_name ~ '-0') }}"
     eva_agent_harbor_config_path: >-
       {{
         eva_agent_harbor_config_path | default(
@@ -71,6 +70,16 @@
       - eva_agent_qdrant_snapshot_source in ['local_pv', 'harbor']
     fail_msg: >-
       eva_agent_qdrant_snapshot_source는 local_pv 또는 harbor여야 합니다.
+
+- name: Set local PV Qdrant snapshot PVC name
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_snapshot_pvc_name: >-
+      {{
+        eva_agent_qdrant_snapshot_pvc_name | default(
+          eva_agent_qdrant_snapshots_volume_name ~ '-' ~ eva_agent_qdrant_statefulset_name ~ '-0'
+        )
+      }}
+  when: eva_agent_qdrant_snapshot_source == 'local_pv'
 
 - name: Resolve EVA Agent dependency image repositories
   ansible.builtin.set_fact:
@@ -622,7 +631,7 @@
   ansible.builtin.replace:
     path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
     regexp: '(- name: HARBOR_REGISTRY\s+value: )[^\r\n]+'
-    replace: '\1{{ eva_agent_qdrant_snapshot_harbor_registry_effective }}'
+    replace: '\g<1>{{ eva_agent_qdrant_snapshot_harbor_registry_effective }}'
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'

@@ -36,7 +36,23 @@ REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY%/}"
 if [[ -z "$REPOSITORY_PASSWORD" && "$REPOSITORY_REGISTRY" == "localhost:32080" ]]; then
   HARBOR_YML="${LOCAL_HARBOR_YML:-$HOME/.local/share/eva-harbor/harbor/harbor.yml}"
   if [[ -f "$HARBOR_YML" ]]; then
-    REPOSITORY_PASSWORD="$(sed -nE 's/^harbor_admin_password:[[:space:]]*([^[:space:]#]+).*$/\1/p' "$HARBOR_YML" | head -n1)"
+    # harbor.yml commonly quotes the password.  Do not pass those YAML quotes
+    # to ORAS as part of the password (which turns a valid credential into 401).
+    REPOSITORY_PASSWORD="$(python3 - "$HARBOR_YML" <<'PY'
+import sys
+
+path = sys.argv[1]
+for line in open(path, encoding="utf-8"):
+    if line.lstrip().startswith("harbor_admin_password:"):
+        value = line.split(":", 1)[1].strip()
+        if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
+            value = value[1:-1]
+        else:
+            value = value.split(" #", 1)[0].rstrip()
+        print(value)
+        break
+PY
+)"
   fi
 fi
 [[ -n "$REPOSITORY_PASSWORD" ]] || { echo "[ERROR] REPOSITORY_PASSWORD or HARBOR_ADMIN_PASSWORD is required" >&2; exit 1; }
@@ -54,8 +70,14 @@ snapshot_specs="$(awk '
 ' "$VALUES_FILE")"
 [[ -n "$snapshot_specs" ]] || { echo "[ERROR] SNAPSHOT_SPECS not found in $VALUES_FILE" >&2; exit 1; }
 
+# Keep credentials out of the user's Docker/ORAS config.  The artifact seed is
+# often run as root from Ansible, so persisting them there is especially
+# surprising and makes airgap verification harder to reproduce.
+ORAS_REGISTRY_CONFIG="$(mktemp "${TMPDIR:-/tmp}/eva-oras-registry.XXXXXX")"
+trap 'rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
 printf '%s' "$REPOSITORY_PASSWORD" | "$ORAS_CMD" login --plain-http "$REPOSITORY_REGISTRY" \
-  --username "$REPOSITORY_USERNAME" --password-stdin
+  --username "$REPOSITORY_USERNAME" --password-stdin \
+  --registry-config "$ORAS_REGISTRY_CONFIG"
 
 # The deployer bundle may be mounted read-only while testing an air-gapped VM.
 # The manifest is only a local report, so use /tmp when the snapshot bundle is
@@ -71,15 +93,20 @@ while IFS='|' read -r artifact_tag snapshot_file logical_collection ignored; do
   snapshot_path="$SNAPSHOT_DIR/$snapshot_file"
   [[ -s "$snapshot_path" ]] || { echo "[ERROR] snapshot missing or empty: $snapshot_path" >&2; exit 1; }
   artifact_ref="$REPOSITORY_REGISTRY/$REPOSITORY_PROJECT/qdrant-snapshots:$artifact_tag"
-  echo "[push] $snapshot_path -> $artifact_ref"
-  # Give ORAS a path relative to the snapshot directory.  An absolute source
-  # path becomes the OCI layer title; ORAS pull intentionally refuses that
-  # title as path traversal inside the pod.
-  (
-    cd "$SNAPSHOT_DIR"
-    "$ORAS_CMD" push --plain-http "$artifact_ref" \
-      "$snapshot_file:application/vnd.mellerikat.qdrant.snapshot.v1"
-  )
+  if "$ORAS_CMD" manifest fetch --plain-http \
+    --registry-config "$ORAS_REGISTRY_CONFIG" "$artifact_ref" >/dev/null 2>&1; then
+    echo "[skip] $artifact_ref already exists"
+  else
+    echo "[push] $snapshot_path -> $artifact_ref"
+    # Give ORAS a path relative to the snapshot directory.  An absolute source
+    # path becomes the OCI layer title; ORAS pull intentionally refuses that
+    # title as path traversal inside the pod.
+    (
+      cd "$SNAPSHOT_DIR"
+      "$ORAS_CMD" push --plain-http --registry-config "$ORAS_REGISTRY_CONFIG" "$artifact_ref" \
+        "$snapshot_file:application/vnd.mellerikat.qdrant.snapshot.v1"
+    )
+  fi
   printf '%s|%s|%s\n' "$artifact_ref" "$snapshot_file" "$logical_collection" >> "$manifest"
 done <<< "$snapshot_specs"
 

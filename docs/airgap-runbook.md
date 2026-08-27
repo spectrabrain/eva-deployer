@@ -268,8 +268,29 @@ Harbor 설치가 `install/harbor-endpoint.yaml`을 생성합니다. 단일 서�
 한 벌 더 올립니다 (`library/busybox`, `library/mysql`, `bitnami/kubectl` …). 다음 단계의 mirror 가 그 경로를 찾습니다.
 필요한 Harbor project 도 자동으로 만듭니다.
 
+Qdrant snapshot은 Docker image가 아니라 `eva/qdrant-snapshots:<tag>` OCI artifact입니다. 따라서
+`push_images_to_repository.sh`만으로는 올라가지 않으며, 다음 독립 seed 단계를 한 번 실행해야 합니다.
+
 `adorsys/keycloak-config-cli`, `amazon/aws-cli` 의 mirror push 가 실패해도 무해합니다 —
 전자는 role 이 `eva/keycloak-config-cli` 로 주소를 지정하고, 후자는 airgap 에서 쓰이지 않습니다.
+
+### 08a. Qdrant snapshot OCI artifact seed · **[대상]** ⚑
+
+이 단계는 `setup_harbor.sh`나 `site_eva_agent.yaml`의 일부가 아닙니다. Harbor 설치와 image seed가 끝난 뒤,
+Qdrant를 배포하기 전에 한 번 수행하는 별도 준비 단계입니다. Harbor snapshot profile을 쓰지 않는 경우에는
+생략합니다.
+
+```bash
+EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+  REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
+  ./install/push_qdrant_snapshots_to_harbor.sh
+
+cat install/qdrant-snapshots/harbor-artifacts.txt
+```
+
+artifact가 이미 있으면 `[skip]`으로 끝나므로, 이전 Local Harbor/bundle을 새 deployer로 갱신한 경우에도
+안전하게 다시 실행할 수 있습니다. 이 단계를 통과해야 이후 Qdrant sidecar의 `oras pull`이 외부가 아닌 Harbor의
+`eva/qdrant-snapshots:<tag>`를 찾습니다.
 
 ### 09. docker.io mirror · **[대상]** · 1회만 ⚑
 
@@ -502,6 +523,8 @@ ansible-playbook -i 'localhost,' -c local site_eva_agent.yaml -K \
   경로의 `harbor.yml`이 있으면 role이 실제 관리자 비밀번호를 자동으로 읽으며, 명시한
   `harbor_admin_password`가 있으면 그 값이 우선합니다. Harbor를 기본 경로 이외에 설치했다면
   `eva_agent_harbor_config_path`에 해당 `harbor.yml` 경로를 지정합니다.
+- Harbor snapshot OCI artifact는 08a의 별도 준비 단계에서 seed합니다. 이 playbook은 기존 artifact를
+  `oras pull`하는 Kubernetes Secret과 Qdrant workload만 구성하며 Harbor에 artifact를 push하지 않습니다.
 - 배포 후 `kubectl logs -n eva-agent statefulset/eva-agent-qdrant -c qdrant-snapshot-sync --tail=100`에서
   `pulling <registry>/eva/qdrant-snapshots:...` 및 restore 성공 여부를 확인합니다. `ErrImagePull`이면
   `kubectl get pods -n eva-agent -l app.kubernetes.io/instance=eva-agent-qdrant -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u`

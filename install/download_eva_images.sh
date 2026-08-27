@@ -97,6 +97,9 @@ want eva-vision       && helm template eva-vision "$VISION_CHART" > "$RENDER_DIR
 want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
 want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \
   -f "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}" \
+  --set-string "image.repository=docker.io/qdrant/qdrant" \
+  --set-string "image.tag=v${QDRANT_CHART_VERSION}" \
+  --set-string "chartTests.dbInteraction.image=registry.suse.com/bci/bci-base:latest" \
   --set-string "sidecarContainers[0].image=${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE}" \
   > "$RENDER_DIR/eva-agent-qdrant.yaml"
 want eva-agent-vllm   && helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"

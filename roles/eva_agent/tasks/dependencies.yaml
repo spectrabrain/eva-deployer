@@ -43,6 +43,18 @@
     eva_agent_qdrant_snapshot_pv_size: "{{ eva_agent_qdrant_snapshot_pv_size | default('10Gi') }}"
     eva_agent_qdrant_offline_snapshot_dir: "{{ eva_agent_qdrant_offline_snapshot_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/qdrant-snapshots') }}"
     eva_agent_qdrant_snapshot_pvc_name: "{{ eva_agent_qdrant_snapshot_pvc_name | default(eva_agent_qdrant_snapshots_volume_name ~ '-' ~ eva_agent_qdrant_statefulset_name ~ '-0') }}"
+    eva_agent_harbor_config_path: >-
+      {{
+        eva_agent_harbor_config_path | default(
+          (
+            (ansible_facts['env']['SUDO_USER'] | default('')) not in ['', 'root']
+          )
+          | ternary(
+              '/home/' ~ (ansible_facts['env']['SUDO_USER'] | default('')) ~ '/.local/share/eva-harbor/harbor/harbor.yml',
+              ansible_facts['env']['HOME'] ~ '/.local/share/eva-harbor/harbor/harbor.yml'
+            )
+        )
+      }}
 
 - name: Validate repository mode for EVA Agent dependencies
   ansible.builtin.assert:
@@ -70,6 +82,14 @@
         )
       }}
     eva_agent_qdrant_image_tag: "{{ eva_agent_qdrant_image_tag | default('v' ~ eva_agent_qdrant_chart_version) }}"
+    eva_agent_qdrant_chart_test_image_repository: >-
+      {{
+        eva_agent_qdrant_chart_test_image_repository | default(
+          (repository_mode == 'cloud_repository')
+          | ternary('registry.suse.com/bci/bci-base', repository_registry ~ '/' ~ repository_project ~ '/bci-base')
+        )
+      }}
+    eva_agent_qdrant_chart_test_image_tag: "{{ eva_agent_qdrant_chart_test_image_tag | default('latest') }}"
     eva_agent_vllm_image_repository: >-
       {{
         eva_agent_vllm_image_repository | default(
@@ -551,11 +571,76 @@
       }}
   when: not ansible_check_mode
 
+- name: Discover the single k3s node InternalIP for Local Harbor snapshots
+  ansible.builtin.command: >-
+    kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}'
+  register: eva_agent_qdrant_local_harbor_node_ips
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+    - repository_registry == 'localhost:32080'
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Require a single k3s node for Local Harbor registry mode
+  ansible.builtin.assert:
+    that:
+      - (eva_agent_qdrant_local_harbor_node_ips.stdout | trim).split() | length == 1
+    fail_msg: >-
+      repository_registry=localhost:32080은 k3s 노드 자신의 Local Harbor를 뜻하므로 단일 노드에서만
+      지원합니다. 다중 노드에서는 모든 노드와 Pod에서 도달 가능한 Harbor host:port를
+      -e repository_registry=<host:port>로 지정하고, 필요하면
+      -e eva_agent_qdrant_snapshot_harbor_registry=<Pod용 host:port>도 지정하세요.
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+    - repository_registry == 'localhost:32080'
+
+- name: Set the Local Harbor snapshot endpoint from the k3s node InternalIP
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_local_harbor_registry: >-
+      {{ (eva_agent_qdrant_local_harbor_node_ips.stdout | trim).split()[0] ~ ':32080' }}
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+    - repository_registry == 'localhost:32080'
+    - eva_agent_qdrant_snapshot_harbor_registry is not defined
+
+- name: Resolve the Harbor endpoint used by the Qdrant snapshot sidecar
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_snapshot_harbor_registry_effective: >-
+      {{
+        eva_agent_qdrant_snapshot_harbor_registry
+        | default(eva_agent_qdrant_local_harbor_registry | default(repository_registry))
+      }}
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
 - name: Point Harbor Qdrant values at the selected registry
   ansible.builtin.replace:
     path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
     regexp: '(- name: HARBOR_REGISTRY\s+value: )[^\r\n]+'
-    replace: '\1{{ repository_registry }}'
+    replace: '\1{{ eva_agent_qdrant_snapshot_harbor_registry_effective }}'
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
+- name: Resolve Harbor registry placeholders in Qdrant values
+  ansible.builtin.replace:
+    path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    regexp: '<harbor_(base_url|registry)>'
+    replace: '{{ repository_registry }}'
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
+- name: Resolve Harbor project placeholder in Qdrant values
+  ansible.builtin.replace:
+    path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    regexp: '<harbor_project>'
+    replace: '{{ repository_project }}'
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
@@ -1003,6 +1088,53 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
+- name: Check Local Harbor configuration for Qdrant snapshot credentials
+  ansible.builtin.stat:
+    path: "{{ eva_agent_harbor_config_path }}"
+  register: eva_agent_local_harbor_config
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+    - repository_registry == 'localhost:32080'
+    - harbor_admin_password is not defined
+
+- name: Read Local Harbor admin password for Qdrant snapshot credentials
+  ansible.builtin.slurp:
+    src: "{{ eva_agent_harbor_config_path }}"
+  register: eva_agent_local_harbor_config_raw
+  no_log: true
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+    - repository_registry == 'localhost:32080'
+    - harbor_admin_password is not defined
+    - eva_agent_local_harbor_config.stat.exists
+
+- name: Resolve Local Harbor password for Qdrant snapshot credentials
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_harbor_password: >-
+      {{ (eva_agent_local_harbor_config_raw.content | b64decode | from_yaml).harbor_admin_password }}
+  no_log: true
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+    - repository_registry == 'localhost:32080'
+    - harbor_admin_password is not defined
+    - eva_agent_local_harbor_config.stat.exists
+
+- name: Require Local Harbor configuration or an explicit password for Qdrant snapshots
+  ansible.builtin.assert:
+    that:
+      - eva_agent_local_harbor_config.stat.exists
+    fail_msg: >-
+      Local Harbor 설정 파일을 찾지 못했습니다: {{ eva_agent_harbor_config_path }}
+      Harbor를 먼저 설치하거나 -e harbor_admin_password=<Harbor 관리자 비밀번호>를 지정하세요.
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+    - repository_registry == 'localhost:32080'
+    - harbor_admin_password is not defined
+
 - name: Create or update Harbor snapshot credentials for Qdrant
   ansible.builtin.shell: >-
     set -euo pipefail &&
@@ -1017,7 +1149,7 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
     HARBOR_USERNAME: "{{ harbor_admin_user | default('admin') }}"
-    HARBOR_PASSWORD: "{{ harbor_admin_password | default('EVA123@') }}"
+    HARBOR_PASSWORD: "{{ harbor_admin_password | default(eva_agent_qdrant_harbor_password | default('EVA123@')) }}"
   no_log: true
   when:
     - not ansible_check_mode

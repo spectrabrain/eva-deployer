@@ -20,6 +20,8 @@
     eva_agent_aws_profile: "{{ eva_agent_aws_profile | default('default') }}"
     eva_agent_sync_aws_credentials: "{{ eva_agent_sync_aws_credentials | default((not ((airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']))) | ternary(1, 0)) }}"
     eva_agent_qdrant_chart_version: "{{ eva_agent_qdrant_chart_version | default(qdrant_chart_version) | mandatory }}"
+    eva_agent_qdrant_values_file: "{{ eva_agent_qdrant_values_file | default('values-k3s.yaml') }}"
+    eva_agent_qdrant_snapshot_source: "{{ eva_agent_qdrant_snapshot_source | default(((eva_agent_qdrant_values_file | default('values-k3s.yaml')) == 'values-k3s.harbor.yaml') | ternary('harbor', 'local_pv')) }}"
     eva_agent_vllm_chart_version: "{{ eva_agent_vllm_chart_version | mandatory }}"
     eva_agent_vllm_profile: "{{ eva_agent_vllm_profile | default('PRO6000-MIGx4') }}"
     eva_agent_vllm_values_file: "{{ eva_agent_vllm_values_file | default('values-k3s.' ~ (eva_agent_vllm_profile | default('PRO6000-MIGx4')) ~ '.yaml') }}"
@@ -36,6 +38,11 @@
     eva_agent_offline_models_dir: "{{ eva_agent_offline_models_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/models') }}"
     eva_agent_offline_agent_model_dir: "{{ eva_agent_offline_agent_model_dir | default((eva_agent_offline_models_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/models')) ~ '/agent/hf') }}"
     eva_agent_offline_vllm_model_dir: "{{ eva_agent_offline_vllm_model_dir | default((eva_agent_offline_models_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/models')) ~ '/vllm/hf') }}"
+    eva_agent_qdrant_statefulset_name: "{{ eva_agent_qdrant_statefulset_name | default('eva-agent-qdrant') }}"
+    eva_agent_qdrant_snapshots_volume_name: "{{ eva_agent_qdrant_snapshots_volume_name | default('eva-agent-qdrant-snapshots') }}"
+    eva_agent_qdrant_snapshot_pv_size: "{{ eva_agent_qdrant_snapshot_pv_size | default('10Gi') }}"
+    eva_agent_qdrant_offline_snapshot_dir: "{{ eva_agent_qdrant_offline_snapshot_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/qdrant-snapshots') }}"
+    eva_agent_qdrant_snapshot_pvc_name: "{{ eva_agent_qdrant_snapshot_pvc_name | default(eva_agent_qdrant_snapshots_volume_name ~ '-' ~ eva_agent_qdrant_statefulset_name ~ '-0') }}"
 
 - name: Validate repository mode for EVA Agent dependencies
   ansible.builtin.assert:
@@ -45,6 +52,13 @@
     fail_msg: >-
       repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
+
+- name: Validate Qdrant snapshot source
+  ansible.builtin.assert:
+    that:
+      - eva_agent_qdrant_snapshot_source in ['local_pv', 'harbor']
+    fail_msg: >-
+      eva_agent_qdrant_snapshot_source는 local_pv 또는 harbor여야 합니다.
 
 - name: Resolve EVA Agent dependency image repositories
   ansible.builtin.set_fact:
@@ -419,8 +433,8 @@
 
 - name: Download eva-agent-qdrant environment values from chartmuseum release
   ansible.builtin.get_url:
-    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent-qdrant/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent-qdrant/values-k3s.yaml"
+    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
     mode: '0644'
   when:
     - not ansible_check_mode
@@ -465,8 +479,8 @@
 
 - name: Copy eva-agent-qdrant values from offline bundle
   ansible.builtin.copy:
-    src: "{{ eva_agent_offline_release_dir }}/eva-agent-qdrant/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent-qdrant/values-k3s.yaml"
+    src: "{{ eva_agent_offline_release_dir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
     mode: '0644'
     remote_src: true
   when:
@@ -507,6 +521,195 @@
   ansible.builtin.file:
     path: "{{ eva_agent_workdir }}/plugin/eva-agent-qdrant/post-renderer.sh"
     mode: '0755'
+
+- name: Load eva-agent-qdrant chart values
+  ansible.builtin.slurp:
+    src: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+  register: eva_agent_qdrant_values_raw
+  when: not ansible_check_mode
+
+- name: Parse Qdrant snapshot sync specs (SNAPSHOT_SPECS)
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_snapshot_spec_raw: >-
+      {{
+        (eva_agent_qdrant_values_raw.content | b64decode | from_yaml).sidecarContainers
+        | selectattr('name', 'equalto', 'qdrant-snapshot-sync')
+        | map(attribute='env') | first
+        | selectattr('name', 'equalto', 'SNAPSHOT_SPECS')
+        | map(attribute='value') | first
+        | trim
+      }}
+  when: not ansible_check_mode
+
+- name: Split Qdrant snapshot sync specs into lines
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_snapshot_spec_lines: >-
+      {{
+        eva_agent_qdrant_snapshot_spec_raw.split('\n')
+        | map('trim') | reject('equalto', '') | reject('match', '^#')
+        | list
+      }}
+  when: not ansible_check_mode
+
+- name: Point Harbor Qdrant values at the selected registry
+  ansible.builtin.replace:
+    path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    regexp: '(- name: HARBOR_REGISTRY\s+value: )[^\r\n]+'
+    replace: '\1{{ repository_registry }}'
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
+- name: Point Harbor Qdrant snapshot-sync image at the selected repository
+  ansible.builtin.replace:
+    path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    regexp: 'localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0'
+    replace: '{{ repository_registry }}/{{ repository_project }}/eva-agent-qdrant-snapshot-sync:0.1.0'
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
+- name: Check offline Qdrant snapshot files for airgap
+  ansible.builtin.stat:
+    path: "{{ eva_agent_qdrant_offline_snapshot_dir }}/{{ item.split('|')[1] }}"
+  loop: "{{ eva_agent_qdrant_snapshot_spec_lines }}"
+  register: eva_agent_qdrant_offline_snapshot_stats
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - not ansible_check_mode
+
+- name: Assert offline Qdrant snapshot files exist for airgap
+  ansible.builtin.assert:
+    that:
+      - (eva_agent_qdrant_offline_snapshot_stats.results | selectattr('stat.exists', 'equalto', true) | list | length) == (eva_agent_qdrant_snapshot_spec_lines | length)
+    fail_msg: >-
+      airgap_mode=true 인 경우 Qdrant snapshot 파일이 필요합니다.
+      먼저 ./install/download_qdrant_snapshots.sh 실행 후
+      {{ eva_agent_qdrant_offline_snapshot_dir }} 경로를 준비하세요.
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - not ansible_check_mode
+
+- name: Blank SNAPSHOT_SPECS s3Directory for airgap Qdrant snapshot sidecar
+  ansible.builtin.replace:
+    path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    regexp: "{{ item.split('|')[0] | regex_escape }}\\|{{ item.split('|')[1] | regex_escape }}\\|"
+    replace: "|{{ item.split('|')[1] }}|"
+  loop: "{{ eva_agent_qdrant_snapshot_spec_lines }}"
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+
+- name: Check existing Qdrant snapshot PVC
+  ansible.builtin.command: >-
+    kubectl get pvc {{ eva_agent_qdrant_snapshot_pvc_name }} -n {{ eva_agent_namespace }}
+  register: eva_agent_qdrant_snapshot_pvc_check
+  changed_when: false
+  failed_when: false
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Detect k3s node name for Qdrant snapshot PV pre-seed
+  ansible.builtin.command: kubectl get nodes -o jsonpath='{.items[*].metadata.name}'
+  register: eva_agent_qdrant_snapshot_nodes
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Ensure single-node cluster for Qdrant snapshot PV pre-seed
+  ansible.builtin.assert:
+    that:
+      - (eva_agent_qdrant_snapshot_nodes.stdout | trim).split() | length == 1
+    fail_msg: >-
+      Qdrant snapshot 오프라인 사전 시딩은 단일 노드 클러스터만 지원합니다.
+      현재 노드: {{ eva_agent_qdrant_snapshot_nodes.stdout }}
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+
+- name: Set Qdrant snapshot PV pre-seed facts
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_snapshot_pv_node: "{{ (eva_agent_qdrant_snapshot_nodes.stdout | trim).split()[0] }}"
+    eva_agent_qdrant_snapshot_pv_hostpath: "{{ (eva_agent_largest_local_mount | regex_replace('/+$', '')) ~ '/local/eva-agent-qdrant-snapshots-bootstrap' }}"
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+
+- name: Ensure Qdrant snapshot PV hostPath directory exists
+  ansible.builtin.file:
+    path: "{{ eva_agent_qdrant_snapshot_pv_hostpath }}/bootstrap"
+    state: directory
+    mode: '0775'
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+
+- name: Copy offline Qdrant snapshot files into hostPath directory
+  ansible.builtin.copy:
+    src: "{{ eva_agent_qdrant_offline_snapshot_dir }}/{{ item.split('|')[1] }}"
+    dest: "{{ eva_agent_qdrant_snapshot_pv_hostpath }}/bootstrap/{{ item.split('|')[1] }}"
+    mode: '0644'
+    remote_src: true
+  loop: "{{ eva_agent_qdrant_snapshot_spec_lines }}"
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+
+- name: Render Qdrant snapshot bootstrap PV manifest on control node
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/values/qdrant-snapshot-pv.yaml.j2"
+    dest: "{{ eva_agent_qdrant_deploy_values_dir }}/qdrant-snapshot-pv.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+
+- name: Copy Qdrant snapshot bootstrap PV manifest to remote workspace
+  ansible.builtin.copy:
+    src: "{{ eva_agent_qdrant_deploy_values_dir }}/qdrant-snapshot-pv.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent-qdrant/snapshot-bootstrap-pv.yaml"
+    mode: "0644"
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+
+- name: Apply Qdrant snapshot bootstrap PV
+  ansible.builtin.command: >-
+    kubectl apply -f {{ eva_agent_workdir }}/eva-agent-qdrant/snapshot-bootstrap-pv.yaml
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+    - eva_agent_qdrant_snapshot_source == 'local_pv'
+    - eva_agent_qdrant_snapshot_pvc_check.rc != 0
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
 - name: Detect Helm version
   ansible.builtin.command: helm version --short
@@ -800,6 +1003,26 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
+- name: Create or update Harbor snapshot credentials for Qdrant
+  ansible.builtin.shell: >-
+    set -euo pipefail &&
+    kubectl create secret generic qdrant-snapshot-harbor
+    --namespace {{ eva_agent_namespace }}
+    --from-literal=username="$HARBOR_USERNAME"
+    --from-literal=password="$HARBOR_PASSWORD"
+    --dry-run=client -o yaml |
+    kubectl apply -f -
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+    HARBOR_USERNAME: "{{ harbor_admin_user | default('admin') }}"
+    HARBOR_PASSWORD: "{{ harbor_admin_password | default('EVA123@') }}"
+  no_log: true
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
 - name: Check existing eva-agent-vllm deployment
   ansible.builtin.command: kubectl get deployment {{ eva_agent_vllm_engine_deployment_name }} -n {{ eva_agent_namespace }}
   register: eva_agent_vllm_deployment_exists
@@ -925,7 +1148,7 @@
     --version {{ eva_agent_qdrant_chart_version }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-qdrant/values-k3s.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}
     --values {{ eva_agent_workdir }}/eva-agent-qdrant/qdrant-k3s-override.yaml
     {{ eva_agent_qdrant_post_renderer_arg }}
   changed_when: true
@@ -941,7 +1164,7 @@
     helm upgrade --install eva-agent-qdrant {{ eva_agent_offline_qdrant_chart_tgz }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-qdrant/values-k3s.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}
     --values {{ eva_agent_workdir }}/eva-agent-qdrant/qdrant-k3s-override.yaml
     {{ eva_agent_qdrant_post_renderer_arg }}
   changed_when: true

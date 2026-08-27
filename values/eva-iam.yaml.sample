@@ -1,0 +1,113 @@
+# eva-iam 사이트별 values (호스트별). **선택 파일입니다** — 없으면 j2 기본값으로 배포됩니다.
+# values/app.yaml 과 같은 역할이며, 아래 예시는 전부 주석입니다. 필요한 키만 풀어 쓰세요.
+#   cp values/eva-iam.yaml.sample values/eva-iam.yaml   # 복사 후 편집 (git 커밋 금지)
+#   ansible-playbook -i inventory.ini site_eva_iam.yaml -e eva_iam_become=false
+#
+# ── 값이 적용되는 순서 (뒤에 오는 것이 이김) ──────────────────────────────────
+#   1. 차트 기본값                       helm show values eva-iam/eva-iam
+#   2. values/eva-iam-k3s-override.yaml.j2   ansible 변수로 렌더. 모든 사이트 공통 배선.
+#                                            값을 바꾸려면 -e eva_iam_host=... 처럼 변수로.
+#   3. 이 파일 (values/eva-iam.yaml)         사이트별 override. 차트 키를 그대로 씁니다.
+#
+# 즉 수동 배포 때 쓰던 prod_values.yaml 을 host 키 밑으로 한 단 들여쓰면 그대로 동작합니다.
+# 차트가 받는 키 전체 목록:
+#   helm show values eva-iam/eva-iam --version 3.1.0
+#
+# host 키 없이 차트 키를 최상위에 바로 써도 됩니다(모든 호스트 공용으로 취급).
+# 예외로 eva_iam_deploy: 블록만 helm 에 넘기지 않고 ansible 배포 노브로 씁니다.
+#
+# ── j2 가 채우는 기본값 (-e 로 바꿀 수 있는 것) ───────────────────────────────
+#   eva_iam_host                     노드 IP (ansible_default_ipv4)
+#   eva_iam_admin_password           EVAEVA123@   ← 차트 공개값. 운영은 반드시 변경
+#   eva_iam_admin_email              admin@eva.com
+#   eva_iam_app_redirect_uris        ["https://<eva_iam_host>/*"]
+#   eva_iam_ingress_path             /
+#   eva_iam_tls_host_path            /home/eva/certs              (노드 경로)
+#   eva_iam_persistence_host_path    /home/eva/.eva-iam/host-path (노드 경로)
+#   eva_iam_db_nodeport              32091
+#   eva_iam_db_password              strongpassword
+#   eva_iam_redis_password           eva-redis-pass
+#   eva_iam_redis_tls_enabled        false
+#   eva_iam_redis_external_enabled   false
+#   eva_iam_redis_nodeport           32079
+#   eva_iam_image_pull_host_path     /home/eva/.aws               (노드 경로)
+#   eva_iam_node_user                eva   ← 위 노드 경로 3개의 뿌리 (/home/<user>)
+#
+# ── airgap (remote_repository / local_repository) ────────────────────────────
+#   -e repository_mode=local_repository -e repository_registry=<harbor host:port>
+#   면 아래가 자동으로 바뀝니다. 개별 지정도 가능합니다.
+#     차트         install/eva-iam/eva-iam-<version>.tgz     (Helm repo 대신)
+#                  → eva_iam_offline_chart_tgz
+#     이미지 5개   <registry>/<project>/{keycloak,dispatcher,keycloak-config-cli,
+#                                       postgres,redis}
+#                  → eva_iam_{keycloak,dispatcher,config_cli,postgres,redis}_image_repository
+#     ECR cronjob  자동으로 비활성화 (imagePullSecrets.enabled=false)
+#
+#   busybox:latest 와 bitnami/kubectl:latest 는 차트 3.1.0 에 override 키가 없어
+#   ansible 로 못 바꿉니다. k3s registries.yaml 의 docker.io mirror 로 우회하며,
+#   Harbor 에 원본 경로(library/busybox, bitnami/kubectl)로 push 되어 있어야 합니다.
+#   (install/push_images_to_repository.sh 의 MIRROR_PATH_IMAGES 가 처리)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# e2e.eva-dev.lge.com:                 # 대상 host (ansible_host / inventory hostname)
+#   # --- ansible 배포 노브 (차트 values 아님, helm 에 전달되지 않음) ------------
+#   eva_iam_deploy:
+#     namespace: eva-iam
+#     # name: eva-iam                      # helm release 이름
+#     # chart_version: 3.1.0               # 생략 시 versions.json 값
+#     # base_dir: /home/eva/.eva-iam       # 타겟 작업 디렉터리 + hostPath 뿌리
+#     # kubeconfig: /home/eva/.kube/config
+#     # protected_releases: ["eva-iam/eva-iam"]   # 덮어쓰기 금지 목록
+#
+#   # --- 이하 전부 eva-iam 차트 values ----------------------------------------
+#   # 서비스 host. keycloak hostname, dispatcher issuer/jwksUrl, ingress host 가
+#   # 모두 여기서 파생됩니다.
+#   config:
+#     host: e2e.eva-dev.lge.com
+#
+#   keycloak:
+#     # config-cli 로 표현 못 하는 realm 부분을 post-install Job 이 kcadm 으로 적용.
+#     realmPatch:
+#       realmAdmin:
+#         # realm passwordPolicy 를 만족해야 함 — 10자 이상, 숫자 1, 특수문자 1,
+#         # username/email 과 달라야 함. 비밀번호가 없을 때만 설정되고,
+#         # 콘솔에서 바꾼 기존 비밀번호는 건드리지 않습니다.
+#         password: "EVAEVA123@"
+#       evaApp:
+#         # EVA App 이 서비스되는 주소. SSO host 와 다를 수 있습니다.
+#         # 추가만 되고 제거되지 않으므로, 지울 때는 admin console 에서 지우세요.
+#         redirectUris:
+#           - "https://eva-app-e2e.eva-dev.lge.com/*"
+#     realmConfig:
+#       substitutions:
+#         EVA_IAM_ADMIN_EMAIL: "admin@eva.com"
+#         # 주의: EVA_IAM_ADMIN_PASSWORD / EVA_APP_REDIRECT_URIS 는 차트 3.1.0 에서
+#         # 위 realmPatch 로 이동했습니다. 여기 남겨두면 렌더링이 실패합니다.
+#
+#   ingress:
+#     path: /
+#     tls:
+#       hostPath: /home/eva/certs        # 노드의 인증서 디렉터리 (tls.crt / tls.key)
+#
+#   persistence:
+#     hostPath:
+#       path: /home/eva/.eva-iam/host-path
+#
+#   database:
+#     internal:
+#       service:
+#         nodePort: 32091
+#
+#   # dispatcher 세션 저장소. 외부 노출(external)은 tls.enabled 가 참일 때만 허용됩니다.
+#   redis:
+#     auth:
+#       password: "eva-redis-pass"
+#     tls:
+#       enabled: true
+#     external:
+#       enabled: true
+#       nodePort: 32079
+#
+#   imagePullSecrets:
+#     hostPath: /home/eva/.aws           # ECR pull 자격증명이 있는 노드 디렉터리

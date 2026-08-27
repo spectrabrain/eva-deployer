@@ -119,6 +119,17 @@
         "{{ repository_registry | default('localhost:32080') }}":
           endpoint:
             - "http://{{ repository_registry | default('localhost:32080') }}"
+      {% if k3s_dockerhub_mirror_enabled | default(true) | bool %}
+        # 일부 차트는 이미지 주소를 values 로 바꿀 수 없게 하드코딩해 두었습니다
+        # (예: eva-iam 3.1.0 의 busybox:latest, bitnami/kubectl:latest). 주소 없는 이름은
+        # kubelet 이 docker.io 로 해석하므로, airgap 에서는 그 요청을 Harbor 로 돌려야 합니다.
+        # mirror 는 host 만 치환하고 뒤 경로는 그대로 보내므로, Harbor 에도 원본 경로
+        # (library/busybox, bitnami/kubectl) 로 push 되어 있어야 합니다 —
+        # install/push_images_to_repository.sh 의 MIRROR_PATH_IMAGES 가 그 일을 합니다.
+        "docker.io":
+          endpoint:
+            - "http://{{ repository_registry | default('localhost:32080') }}"
+      {% endif %}
       configs:
         "{{ repository_registry | default('localhost:32080') }}":
           auth:

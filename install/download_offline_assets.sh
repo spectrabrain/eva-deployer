@@ -22,16 +22,19 @@ else
 fi
 
 EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in versions.json)}"
+EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-values-k3s.yaml}"
 EVA_APP_CHART_VERSION="${EVA_APP_CHART_VERSION:?missing EVA_APP_CHART_VERSION (set in versions.json)}"
 EVA_VISION_CHART_VERSION="${EVA_VISION_CHART_VERSION:?missing EVA_VISION_CHART_VERSION (set in versions.json)}"
 EVA_AGENT_CHART_VERSION="${EVA_AGENT_CHART_VERSION:?missing EVA_AGENT_CHART_VERSION (set in versions.json)}"
 EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_VLLM_CHART_VERSION (set in versions.json)}"
 EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in versions.json)}"
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in versions.json)}"
+EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in versions.json)}"
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:?missing KUSTOMIZE_VERSION (set in versions.json)}"
 K3S_DEFAULT_VERSION="${K3S_DEFAULT_VERSION:?missing K3S_DEFAULT_VERSION (set in versions.json)}"
+ORAS_VERSION="${ORAS_VERSION:-1.3.3}"
 
-mkdir -p "$BASE_DIR"/{aws,apt,docker,nvidia,cuda,helm,k3s,k8s,nfs,eva-app,eva-vision,eva-agent,qdrant,tools,images}
+mkdir -p "$BASE_DIR"/{aws,apt,docker,nvidia,cuda,helm,k3s,k8s,nfs,eva-app,eva-vision,eva-agent,eva-iam,qdrant,tools,images}
 mkdir -p "$BASE_DIR/docker/debs"
 mkdir -p "$BASE_DIR/apt/debs"
 mkdir -p "$BASE_DIR/nvidia/container-toolkit-debs"
@@ -347,8 +350,9 @@ if [[ -n "${HELM_VER}" ]]; then
   fetch "https://get.helm.sh/helm-${HELM_VER}-linux-arm64.tar.gz.sha256" "$BASE_DIR/helm/helm-${HELM_VER}-linux-arm64.tar.gz.sha256"
 fi
 
-# EVA App / Vision / Agent charts
+# EVA App / Vision / Agent / IAM charts
 fetch "https://mellerikat.github.io/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz" "$BASE_DIR/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
+fetch "https://mellerikat.github.io/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz" "$BASE_DIR/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
 fetch "https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/eva-vision-${EVA_VISION_CHART_VERSION}.tgz" "$BASE_DIR/eva-vision/eva-vision-${EVA_VISION_CHART_VERSION}.tgz"
 fetch "https://mellerikat.github.io/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
 fetch "https://mellerikat.github.io/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
@@ -357,10 +361,11 @@ fetch "https://github.com/qdrant/qdrant-helm/releases/download/qdrant-${QDRANT_C
 
 # EVA Agent release values/templates/scripts
 AGENT_RELEASE_BASE="https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/${EVA_AGENT_RELEASE}"
+EVA_AGENT_QDRANT_VALUES_URL="${EVA_AGENT_QDRANT_VALUES_URL:-${AGENT_RELEASE_BASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}}"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-k3s.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-k3s.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-secret.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-secret.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent-init/values-k3s.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-init/values-k3s.yaml"
-fetch "${AGENT_RELEASE_BASE}/eva-agent-qdrant/values-k3s.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-qdrant/values-k3s.yaml"
+fetch "${EVA_AGENT_QDRANT_VALUES_URL}" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}"
 
 # Download all supported k3s GPU profile values for eva-agent-vllm
 VLLM_K3S_VALUES_FILES=(
@@ -384,6 +389,18 @@ fetch "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%
 tar -xzf "$BASE_DIR/tools/${KUSTOMIZE_ARCHIVE}" -C "$BASE_DIR/tools"
 chmod +x "$BASE_DIR/tools/kustomize"
 
+# ORAS is used on the Airgap server to seed Qdrant snapshot OCI artifacts into
+# Local Harbor.  The snapshot-sync container carries the same client for pod-side pulls.
+case "$(uname -m)" in
+  x86_64|amd64) ORAS_ARCH=amd64 ;;
+  aarch64|arm64) ORAS_ARCH=arm64 ;;
+  *) echo "[ERROR] unsupported architecture for ORAS: $(uname -m)" >&2; exit 1 ;;
+esac
+ORAS_ARCHIVE="oras_${ORAS_VERSION}_linux_${ORAS_ARCH}.tar.gz"
+fetch "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/${ORAS_ARCHIVE}" "$BASE_DIR/tools/${ORAS_ARCHIVE}"
+tar -xzf "$BASE_DIR/tools/${ORAS_ARCHIVE}" -C "$BASE_DIR/tools" oras
+chmod +x "$BASE_DIR/tools/oras"
+
 # Optional: build NVIDIA driver offline apt repo
 if [[ "${DOWNLOAD_NVIDIA_DRIVER_REPO:-true}" == "true" ]]; then
   chmod +x "$BASE_DIR/build_nvidia_driver_repo.sh"
@@ -403,6 +420,7 @@ eva_vision_chart: ${EVA_VISION_CHART_VERSION}
 eva_agent_chart: ${EVA_AGENT_CHART_VERSION}
 eva_agent_vllm_chart: ${EVA_AGENT_VLLM_CHART_VERSION}
 eva_agent_init_chart: ${EVA_AGENT_INIT_CHART_VERSION}
+eva_iam_chart: ${EVA_IAM_CHART_VERSION}
 qdrant_chart: ${QDRANT_CHART_VERSION}
 eva_agent_release_values: ${EVA_AGENT_RELEASE}
 kustomize: ${KUSTOMIZE_VERSION}

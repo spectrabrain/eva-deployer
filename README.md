@@ -369,6 +369,10 @@ Local Harbor의 실행 설정은 `eva-deployer` 밖의 `~/.local/share/eva-harbo
   --install-root ~/.local/share/eva-harbor
 ```
 
+설치가 끝나면 `install/harbor-endpoint.yaml`이 생성됩니다. 이 파일에는 비밀번호 없이
+Harbor의 k3s/Pod 접근 주소와 project만 들어 있습니다. Harbor와 k3s 배포 서버가 다르면 이 파일도
+USB bundle과 함께 배포 controller로 복사하세요.
+
 기존에 `eva-deployer/install/harbor/harbor`에 Harbor를 설치했다면, 위의 새 설치 대신 기존 Harbor를 중지한 뒤 외부 runtime 경로로 한 번 이전합니다.
 
 ```bash
@@ -486,12 +490,91 @@ Qdrant만 배포하려면 (vLLM/EVA Agent 본체는 설치하지 않음) k3s와 
 
 기존 `site_eva_agent.yaml` 전체 배포에 이 profile을 적용할 때는 아래 두 변수를 함께 지정합니다. 기본값은 기존 `values-k3s.yaml`/PVC 사전복사 방식이므로, 기존 Airgap 배포에는 영향이 없습니다.
 
-```text
--e eva_agent_qdrant_values_file=values-k3s.harbor.yaml
--e eva_agent_qdrant_snapshot_source=harbor
+```bash
+ansible-playbook -i 'localhost,' -c local site_eva_agent.yaml -K \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -e eva_agent_vllm_profile=PRO6000-MIGx4 \
+  -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
+  -e eva_agent_qdrant_snapshot_source=harbor
 ```
 
+`repository_registry`와 `repository_project`로 Qdrant 본체, snapshot-sync sidecar,
+snapshot OCI artifact repository와 Qdrant chart test 이미지 경로가 정해집니다. 즉 위 명령은 Qdrant 본체를
+`localhost:32080/eva/qdrant:v<chart-version>`으로, sidecar를
+`localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0`으로 배포합니다. 이 role은
+`qdrant-snapshot-harbor` Secret도 자동으로 만듭니다. 이 Secret은 Harbor 설치 단계에서
+생기는 것이 아니라, Harbor snapshot 모드의 Qdrant role이 Helm 설치 직전에 만드는 Qdrant
+전용 Kubernetes Secret입니다. Secret 이름은 고정이며, 사용자/비밀번호는
+`harbor_admin_user`와 `harbor_admin_password`를 사용합니다. 표준 Local Harbor
+(`~/.local/share/eva-harbor/harbor/harbor.yml`)를 사용하고 비밀번호를 별도로 넘기지 않으면,
+role이 그 파일에서 실제 `harbor_admin_password`를 읽어 Secret에 넣습니다. `-e
+harbor_admin_password=...`를 지정하면 그 값이 우선합니다.
+Harbor를 기본 경로가 아닌 곳에 설치했다면 `-e eva_agent_harbor_config_path=<harbor.yml 경로>`를
+지정합니다.
+
+기본 project는 세 단계 모두 `eva`이므로 별도 값이 필요 없습니다. project를 바꾸는 경우에만
+Harbor 설치의 `HARBOR_PROJECT`, image/snapshot push의 `REPOSITORY_PROJECT`, 배포의
+`repository_project`를 **같은 값**으로 지정해야 합니다. 세 값은 서로 자동 전달되지 않습니다.
+
+`localhost:32080`은 k3s가 이미지를 pull할 때는 노드의 Local Harbor를 뜻하지만, Pod 안의
+ORAS sidecar에서 `localhost`는 Pod 자신을 뜻합니다. 따라서 단일-node Local Harbor에서는 role이
+k3s node의 InternalIP:32080을 snapshot artifact endpoint로 자동 사용합니다. 이 endpoint는
+`install/setup_harbor.sh`가 생성한 `install/harbor-endpoint.yaml`에도 기록되며, agent playbook이
+자동으로 읽습니다. 다중 노드이거나 별도 Harbor를 쓴다면 Harbor 설치 시 실제 내부 DNS/IP를
+지정합니다.
+
 ```bash
+./install/setup_harbor.sh \
+  --hostname harbor.internal.example \
+  --registry-endpoint harbor.internal.example:32080 \
+  --project eva
+```
+
+별도 Harbor 서버의 metadata를 배포 controller에 복사한 뒤, k3s 설치와 agent 설치에 같은 파일을
+extra vars로 적용합니다. 그러면 containerd image pull과 Qdrant ORAS pull이 모두 실제 Harbor URL을
+사용합니다.
+
+```bash
+ansible-playbook -i inventory.ini site_infra.yaml \
+  -e repository_mode=remote_repository \
+  -e @install/harbor-endpoint.yaml
+
+ansible-playbook -i inventory.ini site_eva_agent.yaml \
+  -e repository_mode=remote_repository \
+  -e @install/harbor-endpoint.yaml \
+  -e harbor_admin_password='<Harbor admin password>' \
+  -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
+  -e eva_agent_qdrant_snapshot_source=harbor
+```
+
+여러 k3s 노드라면 `localhost:32080` 대신 **Pod에서 도달 가능한** Harbor hostname/IP와
+port를 `repository_registry`에 넣어야 합니다. `localhost`는 Qdrant Pod가 실행되는 노드의
+Harbor만 가리킵니다.
+
+배포 후에는 Qdrant Pod의 두 컨테이너 이미지가 모두 선택한 Harbor를 보는지와 snapshot 복구 상태를
+확인합니다.
+
+```bash
+kubectl get pods -n eva-agent -l app.kubernetes.io/instance=eva-agent-qdrant \
+  -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u
+kubectl logs -n eva-agent statefulset/eva-agent-qdrant -c qdrant-snapshot-sync --tail=100
+kubectl rollout status statefulset/eva-agent-qdrant -n eva-agent --timeout=900s
+```
+
+`<harbor_base_url>`가 보이거나 `ErrImagePull`이 나면 배포에 사용한
+`values-k3s.harbor.yaml`이 오래된 bundle일 수 있습니다. role은 이 placeholder를
+`repository_registry`로 치환하지만, 준비 단계에서는 최신 `download_eva_images.sh`로 image
+archive를 다시 만든 뒤 `push_images_to_repository.sh`와
+`push_qdrant_snapshots_to_harbor.sh`를 다시 실행하세요.
+
+```bash
+export REPOSITORY_REGISTRY=localhost:32080
+export REPOSITORY_PROJECT=eva
+NODE_INTERNAL_IP="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
+export SNAPSHOT_HARBOR_REGISTRY="${NODE_INTERNAL_IP}:32080"
+
 kubectl create namespace eva-agent --dry-run=client -o yaml | kubectl apply -f -
 kubectl create serviceaccount sa-eva-agent -n eva-agent --dry-run=client -o yaml | kubectl apply -f -
 kubectl create secret generic qdrant-snapshot-harbor -n eva-agent \
@@ -502,8 +585,12 @@ kubectl create secret generic qdrant-snapshot-harbor -n eva-agent \
 helm upgrade --install eva-agent-qdrant ./install/qdrant/qdrant-<version>.tgz \
   --namespace eva-agent --create-namespace \
   --values ./install/eva-agent/release/<release>/eva-agent-qdrant/values-k3s.harbor.yaml \
-  --set-string image.repository=localhost:32080/eva/qdrant \
+  --set-string image.repository="${REPOSITORY_REGISTRY}/${REPOSITORY_PROJECT}/qdrant" \
   --set-string image.tag=v<version> \
+  --set-string sidecarContainers[0].image="${REPOSITORY_REGISTRY}/${REPOSITORY_PROJECT}/eva-agent-qdrant-snapshot-sync:0.1.0" \
+  --set-string sidecarContainers[0].env[0].value="${SNAPSHOT_HARBOR_REGISTRY}" \
+  --set-string sidecarContainers[0].env[1].value="${REPOSITORY_PROJECT}" \
+  --set-string chartTests.dbInteraction.image="${REPOSITORY_REGISTRY}/${REPOSITORY_PROJECT}/bci-base:latest" \
   --post-renderer ./install/eva-agent/release/<release>/plugins/eva-agent-qdrant/post-renderer.sh
 
 kubectl rollout status statefulset/eva-agent-qdrant -n eva-agent --timeout=900s

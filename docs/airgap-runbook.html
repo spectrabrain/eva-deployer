@@ -179,10 +179,10 @@
 <div class="wrap">
 
   <header class="masthead">
-    <div class="eyebrow">폐쇄망 설치 절차 · 2026-08-26 검증</div>
+    <div class="eyebrow">폐쇄망 설치 절차 · 2026-08-27 검증</div>
     <h1>EVA Airgap Runbook</h1>
     <p class="lede">
-      인터넷이 닫힌 k3s 노드에 EVA 스택(iam · app · agent · vision)을 올리는 절차입니다. iam·app 까지는 실제로 검증했고, agent·vision 단계는 role 의 선행 조건을 정리한 것입니다.
+      인터넷이 닫힌 k3s 노드에 EVA 스택(iam · app · agent · vision)을 올리는 절차입니다. iam·app 및 Agent/Qdrant의 Harbor snapshot 경로는 실제 서버에서 검증했고, vision은 같은 bundle·Harbor 준비 절차를 사용합니다.
       호스트가 두 개라는 점이 이 작업의 핵심이라 모든 단계에 실행 위치를 표시했고,
       ⚑ 는 통과하지 못하면 다음으로 가면 안 되는 지점입니다.
     </p>
@@ -193,8 +193,9 @@
       <div class="fact"><dt>Registry</dt><dd>localhost:32080 / eva</dd></div>
       <div class="fact"><dt>eva-app</dt><dd>chart 3.1.4 · app 3.1.2 · /</dd></div>
       <div class="fact"><dt>eva-iam</dt><dd>chart 3.1.0 · /iam</dd></div>
-      <div class="fact"><dt>eva-agent</dt><dd>chart 3.0.4 · vllm · qdrant</dd></div>
-      <div class="fact"><dt>eva-vision</dt><dd>chart 2.0.5</dd></div>
+      <div class="fact"><dt>eva-agent</dt><dd>chart / deploy 3.1.0 · agent · init · vllm · qdrant</dd></div>
+      <div class="fact"><dt>Qdrant</dt><dd>chart 1.18.2 · Harbor OCI snapshot restore</dd></div>
+      <div class="fact"><dt>eva-vision</dt><dd>chart / deploy 3.1.0</dd></div>
       <div class="fact"><dt>Ingress</dt><dd>traefik</dd></div>
     </dl>
   </header>
@@ -207,6 +208,27 @@
     <span class="chip gate">⚑</span>
     <span>검증 지점 — 여기서 멈추면 뒤가 전부 헛수고입니다.</span>
   </div>
+
+  <section class="paths">
+    <h2>Qdrant snapshot 방식</h2>
+    <p>Agent 3.1.0의 Qdrant snapshot은 기존 <code class="inline">local_pv</code>와 Harbor OCI artifact 방식 중 하나를 선택합니다. 이 runbook은 USB 설치에서 node hostPath를 미리 seed하지 않아도 되는 <strong>harbor</strong> 방식을 권장합니다.</p>
+    <div class="tw">
+      <table class="pit">
+        <thead><tr><th>구분</th><th>local_pv (기존 호환)</th><th>harbor (권장)</th></tr></thead>
+        <tbody>
+          <tr><td>Qdrant values</td><td><code class="inline">values-k3s.yaml</code></td><td><code class="inline">values-k3s.harbor.yaml</code></td></tr>
+          <tr><td>snapshot 전달</td><td>대상 노드 hostPath/PV 사전 시딩</td><td>Local Harbor OCI artifact</td></tr>
+          <tr><td>배포 변수</td><td><code class="inline">eva_agent_qdrant_snapshot_source=local_pv</code></td><td><code class="inline">eva_agent_qdrant_snapshot_source=harbor</code></td></tr>
+          <tr><td>새 PVC의 노드 제약</td><td>단일 노드 사전 시딩 필요</td><td>Pod와 모든 node가 Harbor endpoint에 도달해야 함</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>두 방식을 섞으면 안 됩니다. 준비 서버의 <code class="inline">EVA_AGENT_QDRANT_SNAPSHOT_SOURCE</code>/<code class="inline">EVA_AGENT_QDRANT_VALUES_FILE</code>와 대상 서버의 Qdrant values/source 변수를 모두 같은 방식으로 맞춥니다.</p>
+    <pre><code>&lt;artifact-tag&gt;|&lt;snapshot-file&gt;|&lt;logical-collection&gt;
+
+eva_manual_qwen3vl_collections|eva_manual_qwen3vl_20260824.snapshot|eva_manual_qwen3vl</code></pre>
+    <p><code class="inline">values-k3s.harbor.yaml</code>의 <code class="inline">SNAPSHOT_SPECS</code>가 artifact tag·snapshot 파일·collection의 단일 기준입니다. 단일 노드 Local Harbor에는 Qdrant(<code class="inline">eva/qdrant:v1.18.2</code>), snapshot-sync(<code class="inline">eva/eva-agent-qdrant-snapshot-sync:0.1.0</code>), chart test용 <code class="inline">eva/bci-base:latest</code>, snapshot OCI artifact(<code class="inline">eva/qdrant-snapshots:&lt;tag&gt;</code>)가 있어야 합니다.</p>
+  </section>
 
   <section class="paths">
     <h2>시작점에 따라 순서가 달라집니다</h2>
@@ -299,14 +321,29 @@ grep -E "eva_app_(chart|deploy)_version|eva_iam_chart_version" versions.json
       <div class="num">03</div>
       <div class="step-body">
         <h3>차트 · 패키지 · wheel <span class="chip prep">준비 서버</span></h3>
-        <pre><code>sudo -v &amp;&amp; ./install/download_offline_assets.sh
+        <p>Agent/Qdrant를 Harbor snapshot 방식으로 설치한다면 <strong>처음 assets를 받을 때부터</strong> profile을 정합니다. <code class="inline">values-k3s.harbor.yaml</code>에는 snapshot-sync sidecar와 Harbor OCI artifact 정보가 있으므로, 기본 <code class="inline">local_pv</code> profile로 받으면 이후 image 목록에 sidecar가 빠질 수 있습니다.</p>
+        <pre><code>export EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor
+export EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml
+
+sudo -v
+./install/download_offline_assets.sh
 ./install/download_infra_images.sh
 ./install/setup_harbor.sh --download-only
 
 <span class="c"># wheelhouse — 반드시 별도 실행</span>
 ./install/download_python_venv_debs.sh
 TARGET_PYTHON=3.12 ./install/download_ansible_wheels.sh
-ls install/wheels/*.whl | wc -l</code></pre>
+ls install/wheels/*.whl | wc -l
+
+<span class="c"># Harbor profile · Qdrant chart · post-renderer · ORAS</span>
+test -f install/qdrant/qdrant-1.18.2.tgz
+test -f install/eva-agent/release/3.1.0/eva-agent-qdrant/values-k3s.harbor.yaml
+test -x install/eva-agent/release/3.1.0/plugins/eva-agent-qdrant/post-renderer.sh
+test -f install/eva-agent/release/3.1.0/plugins/eva-agent-qdrant/plugin.yaml
+test -x install/tools/oras
+
+grep -A4 -F 'SNAPSHOT_SPECS' \
+  install/eva-agent/release/3.1.0/eva-agent-qdrant/values-k3s.harbor.yaml</code></pre>
         <p class="sub">bare Ubuntu + GPU 일 때</p>
         <p>gpu role 이 드라이버부터 설치하므로 offline 리포가 필요합니다. <code class="inline">download_offline_assets.sh</code> 가 받는 container-toolkit 과는 별개입니다.</p>
         <pre><code>./install/build_nvidia_driver_repo.sh nvidia-driver-580
@@ -337,22 +374,55 @@ du -sh install/models/*
     </div>
 
     <div class="step prep">
+      <div class="num">04a</div>
+      <div class="step-body">
+        <h3>Qdrant snapshot <span class="chip prep">준비 서버</span></h3>
+        <p>Harbor snapshot profile에서는 Qdrant Pod가 USB의 snapshot 파일을 직접 읽지 않습니다. 이 파일은 대상 Local Harbor에 OCI artifact로 seed할 입력입니다. <code class="inline">SNAPSHOT_SPECS</code>는 선택한 <code class="inline">values-k3s.harbor.yaml</code>에서 읽으므로 파일명·artifact tag를 별도로 입력하지 않습니다.</p>
+        <pre><code>EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
+EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+AWS_PROFILE=default ./install/download_qdrant_snapshots.sh
+
+cat install/qdrant-snapshots/manifest.txt
+find install/qdrant-snapshots -maxdepth 1 -type f -name '*.snapshot' -size +0c \
+  -printf '%f %s bytes\n'</code></pre>
+        <div class="note">
+          <span class="k">현재 profile</span>
+          <p>3.1.0 기준 artifact는 <code class="inline">eva/qdrant-snapshots:eva_manual_qwen3vl_collections</code>, 원본 파일은 <code class="inline">eva_manual_qwen3vl_20260824.snapshot</code>입니다. 릴리스가 바뀌면 values의 <code class="inline">SNAPSHOT_SPECS</code>를 기준으로 다시 받습니다.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step prep">
       <div class="num">05</div>
       <div class="step-body">
         <h3>이미지 <span class="chip prep">준비 서버</span> <span class="chip gate">⚑</span></h3>
         <pre><code>rm -rf install/images
 
-<span class="c"># 전체 스택</span>
+<span class="c"># 전체 스택 (Agent/Qdrant Harbor snapshot 포함)</span>
+EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
+EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
 AWS_PROFILE=default ./install/download_eva_images.sh
 ./install/download_infra_images.sh
 
+<span class="c"># Agent · Vision만</span>
+<span class="c"># COMPONENTS="eva-agent eva-vision" \</span>
+<span class="c"># EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \</span>
+<span class="c"># EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \</span>
+<span class="c"># AWS_PROFILE=default ./install/download_eva_images.sh</span>
+
 <span class="c"># 일부만 — iam · app 만 볼 때</span>
 <span class="c"># COMPONENTS="eva-app eva-iam" AWS_PROFILE=default ./install/download_eva_images.sh</span></code></pre>
+        <p><code class="inline">COMPONENTS="eva-agent"</code>만 지정해도 downloader가 <code class="inline">eva-agent-init</code>, <code class="inline">eva-agent-vllm</code>, <code class="inline">eva-agent-qdrant</code>를 함께 포함합니다. Harbor profile에서는 Qdrant 본체, chart test용 <code class="inline">bci-base</code>, <code class="inline">eva-agent-qdrant-snapshot-sync</code> sidecar도 <code class="inline">images-pulled.txt</code>에 있어야 합니다.</p>
+        <pre><code>grep -E 'qdrant|snapshot-sync|bci-base' install/images/images-pulled.txt
+test ! -s install/images/images-missing.txt</code></pre>
+        <p>Qdrant만 점검하려면 <code class="inline">COMPONENTS="eva-agent-qdrant"</code>로 범위를 줄일 수 있습니다. 이 경우 Agent 본체와 vLLM 이미지는 포함되지 않으므로 전체 <code class="inline">site_eva_agent.yaml</code> 설치에는 사용할 수 없습니다.</p>
         <p class="sub">GPU 프로파일 — vllm 이미지가 여기서 갈립니다</p>
         <p><code class="inline">download_offline_assets.sh</code> 는 vllm values 4종(<code class="inline">A6000x1</code>, <code class="inline">L40sx1</code>, <code class="inline">PRO5000x3</code>, <code class="inline">PRO6000-MIGx4</code>)을 모두 받지만, 이미지 목록은 <strong>그중 하나로 렌더</strong>해서 만듭니다. 기본값은 <code class="inline">PRO6000-MIGx4</code> 입니다.</p>
         <pre><code>ssh &lt;대상 서버&gt; 'nvidia-smi --query-gpu=name --format=csv,noheader'
 
 EVA_AGENT_VLLM_VALUES_FILE=values-k3s.L40sx1.yaml \
+  EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
+  EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
   AWS_PROFILE=default ./install/download_eva_images.sh</code></pre>
         <p>끝에 무결성 검사가 돕니다. 모든 줄이 <code class="inline">amd64/linux</code> 여야 합니다.</p>
         <pre><code>[verify] 이미지 무결성 확인
@@ -387,12 +457,27 @@ docker image inspect "$REPO:&lt;태그&gt;" --format '{{.Architecture}}/{{.Os}}'
   $(cat install/images/images-pulled.txt)
 ls -lh install/images/repository-images.tar     <span class="c"># 수 GB — 10K 면 01번 문제</span>
 
+<span class="c"># Qdrant Harbor artifact seed의 입력도 같은 bundle에 포함</span>
+test -s install/qdrant-snapshots/eva_manual_qwen3vl_20260824.snapshot
+
 rsync -a --info=progress2 --partial \
   --exclude '.venv' --exclude '.git' --exclude 'install/images/rendered' \
   ./ eva@10.158.200.113:/home/eva/eva-deployer-jj/</code></pre>
         <p>전송 후 양쪽을 대조하면 누락을 바로 잡습니다.</p>
         <pre><code>du -sh install/*
 ssh eva@10.158.200.113 'du -sh ~/eva-deployer-jj/install/*'</code></pre>
+        <p>대용량 단일 <code class="inline">docker save</code>가 멈추거나 USB/rsync 재개 단위를 작게 해야 하면 image별 tar를 대신 씁니다. 완성된 파일은 건너뛰므로 중단 후 같은 블록을 다시 실행할 수 있습니다.</p>
+        <pre><code>mkdir -p install/images/tars
+n=0
+while IFS= read -r image; do
+  n=$((n + 1))
+  archive=$(printf 'install/images/tars/%02d-%s.tar' "$n" "$(basename "${image%%:*}")")
+  if [ -s "$archive" ]; then echo "[skip] $archive"; continue; fi
+  docker save "$image" &gt; "$archive"
+done &lt; install/images/images-pulled.txt
+
+find install/images/tars -name '*.tar*' -size -10M -print</code></pre>
+        <p>마지막 <code class="inline">find</code>는 아무것도 출력하지 않아야 합니다. 수동 USB bundle에는 image tar(또는 단일 archive) 외에 <code class="inline">install/qdrant-snapshots/</code>, <code class="inline">install/qdrant/</code>, <code class="inline">install/eva-agent/</code>, <code class="inline">install/tools/oras</code>, 모델과 deployer의 role/playbook 전체를 함께 넣습니다.</p>
       </div>
     </div>
   </section>
@@ -415,6 +500,11 @@ while read -r i; do
   printf '%-72s %s\n' "$i" \
     "$(docker image inspect "$i" --format '{{.Architecture}}/{{.Os}}' 2>/dev/null)"
 done &lt; install/images/images-pulled.txt</code></pre>
+        <p>image별 tar를 만든 경우에는 위의 <code class="inline">docker load</code> 한 줄 대신 다음을 실행합니다.</p>
+        <pre><code>for archive in install/images/tars/*.tar*; do
+  echo "[load] $archive"
+  docker load -i "$archive"
+done</code></pre>
         <div class="note">
           <span class="k">⚑ 멈춤</span>
           <p>여기서도 전부 <code class="inline">amd64/linux</code> 여야 합니다. 한 줄이라도 <code class="inline">/</code> 면 그 이미지는 push·배포가 실패합니다. 이 서버에 예전 기록이 남아 있으면 새 tar 를 load 해도 건너뛰므로 <code class="inline">docker rmi -f &lt;이미지&gt;</code> 를 먼저 하세요.</p>
@@ -442,6 +532,31 @@ PULL_SOURCE_IMAGES=false IMAGE_LIST=install/images/infra-images-pulled.txt \
         <pre><code>[mirror] 자동 선택: busybox:latest mysql:8.0.42-bookworm bitnami/kubectl:latest ...
 [project] 생성: bitnami
 [mirror] bitnami/kubectl:latest -> localhost:32080/bitnami/kubectl:latest</code></pre>
+        <pre><code>grep -E 'qdrant|snapshot-sync|bci-base' install/images/repository-mapping.txt</code></pre>
+        <p>Harbor 설치가 <code class="inline">install/harbor-endpoint.yaml</code>을 생성합니다. 단일 서버에서는 Agent playbook이 이 파일의 Pod 접근 endpoint를 Qdrant snapshot sidecar에 자동 적용합니다. Pod 안의 <code class="inline">localhost:32080</code>은 Harbor host가 아니라 그 Pod 자신이므로 sidecar endpoint로 고정하면 안 됩니다.</p>
+        <p>Qdrant snapshot은 Docker image가 아니라 <code class="inline">eva/qdrant-snapshots:&lt;tag&gt;</code> OCI artifact입니다. 따라서 <code class="inline">push_images_to_repository.sh</code>만으로는 올라가지 않으며, 다음 독립 seed 단계가 필요합니다.</p>
+      </div>
+    </div>
+
+    <div class="step target">
+      <div class="num">08a</div>
+      <div class="step-body">
+        <h3>Qdrant snapshot OCI artifact seed <span class="chip target">대상 서버</span> <span class="chip gate">⚑</span></h3>
+        <p>이 단계는 <code class="inline">setup_harbor.sh</code>나 <code class="inline">site_eva_agent.yaml</code>의 일부가 아닙니다. 순서는 반드시 <strong>Harbor 설치 → 일반 image push → snapshot OCI artifact push → Agent/Qdrant 배포</strong>입니다. 일반 image push가 먼저 끝나 <code class="inline">eva</code> project가 만들어져 있어야 합니다.</p>
+        <pre><code>EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
+  REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
+  ./install/push_qdrant_snapshots_to_harbor.sh
+
+cat install/qdrant-snapshots/harbor-artifacts.txt</code></pre>
+        <p>표준 Local Harbor(<code class="inline">~/.local/share/eva-harbor/harbor/harbor.yml</code>)에서는 helper가 실제 관리자 비밀번호를 자동으로 읽어 ORAS login을 합니다. 별도 Harbor이거나 기본 설치 경로라면 Pod와 대상 node에서 도달 가능한 registry endpoint 및 비밀번호를 함께 지정합니다.</p>
+        <pre><code>REPOSITORY_PASSWORD='&lt;Harbor 관리자 비밀번호&gt;' \
+REPOSITORY_REGISTRY=&lt;Pod와-node에서-도달-가능한-host:32080&gt; \
+REPOSITORY_PROJECT=eva \
+./install/push_qdrant_snapshots_to_harbor.sh</code></pre>
+        <div class="note">
+          <span class="k">⚑ 멈춤</span>
+          <p>이미 artifact가 있으면 <code class="inline">[skip]</code>으로 끝납니다. 현재 profile의 주소는 <code class="inline">localhost:32080/eva/qdrant-snapshots:eva_manual_qwen3vl_collections</code>입니다. 이 artifact가 없으면 Qdrant sidecar는 image pull이 성공해도 <code class="inline">oras pull</code>에서 <code class="inline">artifact not found</code>로 실패합니다.</p>
+        </div>
       </div>
     </div>
 
@@ -480,7 +595,10 @@ sleep 25
 sudo k3s crictl pull docker.io/library/busybox:latest        &amp;&amp; echo "busybox OK"
 sudo k3s crictl pull docker.io/bitnami/kubectl:latest        &amp;&amp; echo "kubectl OK"
 sudo k3s crictl pull docker.io/library/mysql:8.0.42-bookworm &amp;&amp; echo "mysql OK"
-sudo k3s crictl pull localhost:32080/eva/eva-app:3.1.2       &amp;&amp; echo "eva-app OK"</code></pre>
+sudo k3s crictl pull localhost:32080/eva/eva-app:3.1.2       &amp;&amp; echo "eva-app OK"
+sudo k3s crictl pull localhost:32080/eva/qdrant:v1.18.2      &amp;&amp; echo "qdrant OK"
+sudo k3s crictl pull localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0 \
+  &amp;&amp; echo "qdrant snapshot-sync OK"</code></pre>
         <div class="note">
           <span class="k">⚑ 멈춤</span>
           <p>네 줄 모두 OK 여야 합니다. <code class="inline">ctr</code> 로는 검증되지 않습니다 — registries.yaml 을 읽지 않아 항상 인증 실패합니다. k3s 재시작은 재설치가 아니고 컨테이너는 containerd 가 계속 돌립니다 (control plane 만 20~30초 끊김).</p>
@@ -632,11 +750,53 @@ cat config/localhost/eva.yaml
         <pre><code>ansible-playbook -i 'localhost,' -c local site_eva_agent.yaml -K \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
-  -e eva_agent_vllm_profile=PRO6000-MIGx4</code></pre>
+  -e repository_project=eva \
+  -e eva_agent_vllm_profile=PRO6000-MIGx4 \
+  -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
+  -e eva_agent_qdrant_snapshot_source=harbor</code></pre>
         <div class="note">
           <span class="k">선행 조건</span>
-          <p>모델 캐시(<code class="inline">install/models/agent/hf</code>, <code class="inline">install/models/vllm/hf</code>)가 대상 서버에 있어야 합니다 — role 이 두 경로를 assert 합니다. 프로파일이 다운로드 때와 다르면 Harbor 에 없는 vllm 이미지를 찾게 됩니다.</p>
+          <p>모델 캐시(<code class="inline">install/models/agent/hf</code>, <code class="inline">install/models/vllm/hf</code>)가 대상 서버에 있어야 합니다 — role 이 두 경로를 assert 합니다. 프로파일이 다운로드 때와 다르면 Harbor 에 없는 vllm 이미지를 찾게 됩니다. <code class="inline">values-k3s.harbor.yaml</code>과 <code class="inline">eva_agent_qdrant_snapshot_source=harbor</code>는 함께 지정해야 합니다.</p>
         </div>
+        <p>role은 offline Qdrant chart, 선택한 Harbor values, post-renderer를 workspace로 복사하고 <code class="inline">&lt;harbor_base_url&gt;</code>/<code class="inline">&lt;harbor_registry&gt;</code>/<code class="inline">&lt;harbor_project&gt;</code> placeholder를 <code class="inline">repository_registry</code>/<code class="inline">repository_project</code>로 치환해 Qdrant·chart test image를 Harbor로 고정합니다.</p>
+        <p>Harbor snapshot profile에서 <code class="inline">repository_registry</code>와 <code class="inline">repository_project</code>는 Qdrant 본체, snapshot-sync sidecar, OCI snapshot artifact의 registry/repository가 됩니다. 단일 노드 Local Harbor의 <code class="inline">localhost:32080</code>은 Pod loopback 문제가 있으므로 role이 node InternalIP:32080으로 자동 변환하며, <code class="inline">install/harbor-endpoint.yaml</code>이 있으면 그 endpoint를 우선 사용합니다.</p>
+        <p><code class="inline">qdrant-snapshot-harbor</code>는 Harbor 설치 때 생기는 값이 아니라, Harbor snapshot mode에서 role이 Helm 설치 직전에 만드는 Qdrant 전용 Kubernetes Secret입니다. 표준 Local Harbor 경로의 <code class="inline">harbor.yml</code>이 있으면 실제 관리자 비밀번호를 읽고, 별도 Harbor에서는 <code class="inline">-e harbor_admin_password='&lt;Harbor 관리자 비밀번호&gt;'</code>를 지정합니다.</p>
+        <p>이 playbook은 artifact를 Harbor에 push하지 않습니다. 08a의 artifact seed가 선행되어야 하며, 배포 중 sidecar가 artifact를 pull한 뒤 collection을 restore합니다.</p>
+        <p>여러 k3s node 또는 별도 Harbor에서는 <code class="inline">localhost:32080</code> 대신 <strong>Pod와 모든 node에서 도달 가능한</strong> DNS/IP:port를 씁니다.</p>
+        <pre><code>ansible-playbook -i inventory.ini site_eva_agent.yaml \
+  -e repository_mode=remote_repository \
+  -e @install/harbor-endpoint.yaml \
+  -e harbor_admin_password='&lt;Harbor 관리자 비밀번호&gt;' \
+  -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
+  -e eva_agent_qdrant_snapshot_source=harbor</code></pre>
+        <p>Pod 내부의 <code class="inline">localhost</code>는 Harbor host가 아니라 그 Pod 자신입니다. snapshot sidecar의 <code class="inline">HARBOR_REGISTRY</code>를 <code class="inline">localhost:32080</code>으로 수동 고정하지 않습니다.</p>
+        <pre><code>kubectl get pods -n eva-agent -l app.kubernetes.io/instance=eva-agent-qdrant -w
+
+kubectl get pods -n eva-agent -l app.kubernetes.io/instance=eva-agent-qdrant \
+  -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}' \
+  | sort -u
+
+kubectl logs -n eva-agent statefulset/eva-agent-qdrant \
+  -c qdrant-snapshot-sync --tail=100
+
+kubectl rollout status statefulset/eva-agent-qdrant \
+  -n eva-agent --timeout=900s
+
+kubectl exec -n eva-agent statefulset/eva-agent-qdrant \
+  -c qdrant-snapshot-sync -- \
+  curl -fsS http://127.0.0.1:6333/collections/eva_manual_qwen3vl</code></pre>
+        <p>정상 sidecar log에는 <code class="inline">pulling</code>, <code class="inline">restoring</code>이 보이고, 현재 collection은 <code class="inline">status: green</code>, <code class="inline">points_count: 62</code>입니다. 정상 순서는 artifact pull → <code class="inline">/qdrant/snapshots/bootstrap</code>에 snapshot 저장 → collection restore → readiness file 생성 후 StatefulSet Ready입니다. <code class="inline">oras pull</code> 401은 Secret 비밀번호 또는 Pod용 Harbor endpoint 문제이고, <code class="inline">artifact not found</code>는 08a seed 누락 또는 profile/tag 불일치입니다.</p>
+        <div class="tw">
+          <table class="pit">
+            <thead><tr><th>증상</th><th>원인</th><th>조치</th></tr></thead>
+            <tbody>
+              <tr><td><code class="inline">ErrImagePull</code> / <code class="inline">NotFound</code></td><td>새 <code class="inline">images-pulled.txt</code> 기준 image push 미실행</td><td>tar load 후 image push를 재실행하고 mapping·<code class="inline">crictl pull</code>로 확인</td></tr>
+              <tr><td>Pod image에 <code class="inline">&lt;harbor_base_url&gt;</code>가 남음</td><td>오래된 Harbor values 또는 수동 Helm 배포</td><td>최신 bundle/role로 재배포하고 image·artifact를 다시 seed</td></tr>
+              <tr><td>snapshot source/profile 불일치</td><td><code class="inline">harbor</code> source와 <code class="inline">values-k3s.yaml</code>을 섞음</td><td>준비·push·배포를 모두 Harbor values + <code class="inline">harbor</code>로 통일</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Qdrant만 재배포하더라도 <code class="inline">images-pulled.txt</code> 또는 <code class="inline">SNAPSHOT_SPECS</code>가 바뀌었다면 일반 image push와 08a snapshot artifact push를 <strong>둘 다</strong> 다시 실행합니다.</p>
       </div>
     </div>
 
@@ -782,6 +942,17 @@ sudo rm -rf /eva-app                          <span class="c"># eva-app / mysql<
           </tr>
         </tbody>
       </table>
+    </div>
+  </section>
+
+  <section class="phase">
+    <div class="phase-head">
+      <h2>보류 이슈</h2>
+      <p>기능 검증과 별개로 후속 조치가 필요한 보안 항목</p>
+    </div>
+    <div class="note">
+      <span class="k">권한</span>
+      <p><code class="inline">roles/config/tasks/scret.yaml</code>은 현재 <code class="inline">config/&lt;host&gt;/scret.yaml</code>을 <code class="inline">0644</code>로 생성합니다. 이 파일에는 cluster-admin 권한의 <code class="inline">argocd-manager</code> ServiceAccount bearer token이 있어 같은 서버의 다른 로컬 사용자가 읽고 재사용할 수 있습니다. 2026-08-27 Agent/Vision Airgap 설치 테스트에서 확인했으며 기능 영향은 없습니다. 후속으로 task의 출력 권한을 <code class="inline">0600</code>으로 바꾸고 role을 대상 서버에 전달한 뒤 <code class="inline">site_eva_config.yaml</code>을 재실행합니다. 파일 내용은 출력하지 않고 권한만 검증합니다.</p>
     </div>
   </section>
 

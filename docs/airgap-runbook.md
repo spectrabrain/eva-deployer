@@ -253,8 +253,16 @@ PULL_SOURCE_IMAGES=false IMAGE_LIST=install/images/images-pulled.txt \
 
 PULL_SOURCE_IMAGES=false IMAGE_LIST=install/images/infra-images-pulled.txt \
   REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
-  ./install/push_images_to_repository.sh
+./install/push_images_to_repository.sh
 ```
+
+Harbor 설치가 `install/harbor-endpoint.yaml`을 생성합니다. 단일 서버에서는 agent playbook이 이
+파일의 Pod 접근 endpoint를 자동으로 Qdrant snapshot sidecar에 적용합니다. Harbor와 k3s 서버가
+다르면 이 파일도 배포 controller로 옮기고, `site_infra.yaml` 및 `site_eva_agent.yaml` 실행에
+`-e @install/harbor-endpoint.yaml`을 추가합니다. 별도 Harbor 설치에서는 `--hostname`과
+`--registry-endpoint <내부 DNS/IP:32080>`을 실제 접근 주소로 지정합니다. metadata에는 비밀번호를
+넣지 않으므로 별도 Harbor 서버의 agent 배포에는 `-e harbor_admin_password='<Harbor 비밀번호>'`도
+지정합니다.
 
 스크립트가 `eva/<이름>` 으로 올리면서, **레지스트리 주소가 없는 이미지는 Docker Hub 원본 경로로도**
 한 벌 더 올립니다 (`library/busybox`, `library/mysql`, `bitnami/kubectl` …). 다음 단계의 mirror 가 그 경로를 찾습니다.
@@ -474,11 +482,30 @@ agent · agent-init · vllm · qdrant 네 릴리스가 함께 올라갑니다.
 ansible-playbook -i 'localhost,' -c local site_eva_agent.yaml -K \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
-  -e eva_agent_vllm_profile=PRO6000-MIGx4
+  -e repository_project=eva \
+  -e eva_agent_vllm_profile=PRO6000-MIGx4 \
+  -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
+  -e eva_agent_qdrant_snapshot_source=harbor
 ```
 
 - 모델 캐시(`install/models/agent/hf`, `install/models/vllm/hf`)가 대상 서버에 있어야 합니다
 - GPU 프로파일이 05번 다운로드 때와 다르면 Harbor 에 없는 vllm 이미지를 찾게 됩니다
+- Qdrant Harbor snapshot profile에서는 `repository_registry`와 `repository_project`가 Qdrant 본체,
+  snapshot-sync sidecar, OCI snapshot artifact의 registry/repository가 됩니다. 단일 노드 Local Harbor는
+  `localhost:32080`을 씁니다. 이때 role은 Pod 안의 ORAS가 host loopback을 보지 않도록 node
+  InternalIP:32080을 snapshot endpoint로 자동 변환하며, `harbor-endpoint.yaml`이 있으면 그 파일의
+  endpoint를 우선 적용합니다. 여러 노드/별도 Harbor는 실제 접근 가능한 Harbor hostname/IP:port를
+  `harbor-endpoint.yaml`로 전달해 `repository_registry`에 적용합니다.
+- `qdrant-snapshot-harbor`는 Harbor 설치 과정에서 생기는 값이 아니라, Qdrant Harbor snapshot
+  mode에서 role이 Helm 설치 직전에 만드는 Qdrant 전용 Kubernetes Secret입니다. 이름은 고정이고
+  사용자/비밀번호는 `harbor_admin_user`/`harbor_admin_password`를 사용합니다. 표준 Local Harbor
+  경로의 `harbor.yml`이 있으면 role이 실제 관리자 비밀번호를 자동으로 읽으며, 명시한
+  `harbor_admin_password`가 있으면 그 값이 우선합니다. Harbor를 기본 경로 이외에 설치했다면
+  `eva_agent_harbor_config_path`에 해당 `harbor.yml` 경로를 지정합니다.
+- 배포 후 `kubectl logs -n eva-agent statefulset/eva-agent-qdrant -c qdrant-snapshot-sync --tail=100`에서
+  `pulling <registry>/eva/qdrant-snapshots:...` 및 restore 성공 여부를 확인합니다. `ErrImagePull`이면
+  `kubectl get pods -n eva-agent -l app.kubernetes.io/instance=eva-agent-qdrant -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u`
+  로 이미지가 모두 선택한 Harbor를 가리키는지 확인한 뒤 image/snapshot push 단계를 다시 실행합니다.
 
 ### 17. eva-vision 배포 · **[대상]**
 

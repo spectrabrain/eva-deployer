@@ -12,6 +12,38 @@
         airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
       changed_when: false
 
+    - name: Resolve Harbor endpoint metadata path
+      ansible.builtin.set_fact:
+        eva_agent_harbor_endpoint_file: >-
+          {{ eva_agent_harbor_endpoint_file | default(playbook_dir ~ '/install/harbor-endpoint.yaml') }}
+      when: repository_mode in ['remote_repository', 'local_repository']
+      changed_when: false
+
+    - name: Check Harbor endpoint metadata on deployment controller
+      ansible.builtin.stat:
+        path: "{{ eva_agent_harbor_endpoint_file }}"
+      register: eva_agent_harbor_endpoint_file_stat
+      delegate_to: localhost
+      become: false
+      when: repository_mode in ['remote_repository', 'local_repository']
+
+    - name: Load Harbor endpoint metadata
+      ansible.builtin.include_vars:
+        file: "{{ eva_agent_harbor_endpoint_file }}"
+        name: eva_agent_harbor_endpoint
+      when:
+        - repository_mode in ['remote_repository', 'local_repository']
+        - eva_agent_harbor_endpoint_file_stat.stat.exists
+
+    - name: Apply Harbor endpoint metadata to the Qdrant snapshot sidecar
+      ansible.builtin.set_fact:
+        eva_agent_qdrant_snapshot_harbor_registry: "{{ eva_agent_harbor_endpoint.harbor_registry }}"
+      when:
+        - repository_mode in ['remote_repository', 'local_repository']
+        - eva_agent_harbor_endpoint_file_stat.stat.exists
+        - eva_agent_qdrant_snapshot_harbor_registry is not defined
+      changed_when: false
+
     - name: Resolve eva.yaml config host
       ansible.builtin.set_fact:
         eva_agent_config_host: "{{ eva_agent_config_host | default(ansible_host | default(inventory_hostname)) }}"

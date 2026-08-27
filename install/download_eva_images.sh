@@ -23,7 +23,17 @@ EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (s
 # appVersion 태그만 올라가고 배포는 ImagePullBackOff 로 죽습니다.
 EVA_APP_DEPLOY_VERSION="${EVA_APP_DEPLOY_VERSION:?missing EVA_APP_DEPLOY_VERSION (set in versions.json)}"
 EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-values-k3s.PRO6000-MIGx4.yaml}"
-EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-values-k3s.yaml}"
+EVA_AGENT_QDRANT_SNAPSHOT_SOURCE="${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE:-local_pv}"
+case "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" in
+  local_pv) qdrant_default_values_file="values-k3s.yaml" ;;
+  harbor)   qdrant_default_values_file="values-k3s.harbor.yaml" ;;
+  *)
+    echo "[ERROR] EVA_AGENT_QDRANT_SNAPSHOT_SOURCE must be local_pv or harbor" >&2
+    exit 1
+    ;;
+esac
+EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-$qdrant_default_values_file}"
+echo "[info] Qdrant snapshot source=${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE}, values=${EVA_AGENT_QDRANT_VALUES_FILE}"
 # The Harbor values intentionally point at the target-side Local Harbor.  The
 # preparation host must instead pull the published source image before it is
 # re-tagged and pushed into that Harbor.
@@ -97,6 +107,9 @@ want eva-vision       && helm template eva-vision "$VISION_CHART" > "$RENDER_DIR
 want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
 want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \
   -f "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}" \
+  --set-string "image.repository=docker.io/qdrant/qdrant" \
+  --set-string "image.tag=v${QDRANT_CHART_VERSION}" \
+  --set-string "chartTests.dbInteraction.image=registry.suse.com/bci/bci-base:latest" \
   --set-string "sidecarContainers[0].image=${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE}" \
   > "$RENDER_DIR/eva-agent-qdrant.yaml"
 want eva-agent-vllm   && helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"

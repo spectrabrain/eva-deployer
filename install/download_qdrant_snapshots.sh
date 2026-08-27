@@ -12,7 +12,17 @@ source "$SCRIPT_DIR/load_versions.sh"
 load_deploy_versions
 
 EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in versions.json)}"
-EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-values-k3s.yaml}"
+EVA_AGENT_QDRANT_SNAPSHOT_SOURCE="${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE:-local_pv}"
+case "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" in
+  local_pv) qdrant_default_values_file="values-k3s.yaml" ;;
+  harbor)   qdrant_default_values_file="values-k3s.harbor.yaml" ;;
+  *)
+    echo "[ERROR] EVA_AGENT_QDRANT_SNAPSHOT_SOURCE must be local_pv or harbor" >&2
+    exit 1
+    ;;
+esac
+EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-$qdrant_default_values_file}"
+echo "[info] Qdrant snapshot source=${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE}, values=${EVA_AGENT_QDRANT_VALUES_FILE}"
 VALUES_FILE="${BASE_DIR}/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}"
 
 if ! command -v aws >/dev/null 2>&1; then

@@ -2,3 +2,9 @@ image:
   repository: "{{ eva_agent_qdrant_image_repository }}"
   tag: "{{ eva_agent_qdrant_image_tag }}"
   pullPolicy: IfNotPresent
+
+# The Qdrant chart emits this image only for `helm test`, but keep it in the
+# same registry as the StatefulSet so an air-gapped test does not pull SUSE.
+chartTests:
+  dbInteraction:
+    image: "{{ eva_agent_qdrant_chart_test_image_repository }}:{{ eva_agent_qdrant_chart_test_image_tag }}"

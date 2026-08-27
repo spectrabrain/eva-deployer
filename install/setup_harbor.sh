@@ -4,7 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARBOR_VERSION="${HARBOR_VERSION:-v2.15.2}"
 HARBOR_PORT="32080"
-HARBOR_HOSTNAME="${HARBOR_HOSTNAME:-localhost}"
+# Harbor's `hostname` is its canonical client-facing address, not the Linux
+# hostname.  Leave it unset by default so a standalone Harbor server gets the
+# IPv4 selected by its default route.  `localhost` is not usable by Pods or
+# another k3s node.
+HARBOR_HOSTNAME="${HARBOR_HOSTNAME:-}"
 if [[ ${HARBOR_ADMIN_PASSWORD+x} ]]; then
   HARBOR_ADMIN_PASSWORD_EXPLICIT="true"
 else
@@ -13,8 +17,10 @@ fi
 HARBOR_ADMIN_PASSWORD="${HARBOR_ADMIN_PASSWORD:-EVA123@}"
 HARBOR_DATA_VOLUME="${HARBOR_DATA_VOLUME:-}"
 HARBOR_PROJECT="${HARBOR_PROJECT:-eva}"
+HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT:-}"
 HARBOR_ASSET_DIR="${HARBOR_ASSET_DIR:-$SCRIPT_DIR/harbor}"
 HARBOR_INSTALL_ROOT="${HARBOR_INSTALL_ROOT:-$HOME/.local/share/eva-harbor}"
+HARBOR_ENDPOINT_FILE="${HARBOR_ENDPOINT_FILE:-$SCRIPT_DIR/harbor-endpoint.yaml}"
 DOWNLOAD_ONLY="false"
 SKIP_INSTALL="false"
 SKIP_PROJECT="false"
@@ -25,13 +31,17 @@ usage() {
 Usage: HARBOR_VERSION=v2.15.2 ./install/setup_harbor.sh [options]
 
 Options:
-  --hostname <name>          Harbor hostname. Default: ${HARBOR_HOSTNAME}
+  --hostname <name>          Harbor canonical client address (DNS name or IP).
+                             Default: IPv4 selected from the default route
   --admin-password <value>   Harbor admin password. Default: EVA123@ on first install
   --password <value>         Alias for --admin-password
   --data-volume <path>       Override Harbor data_volume. Default: keep Harbor template default
   --install-root <path>      Harbor runtime/extract path. Default: ${HARBOR_INSTALL_ROOT}
   --asset-dir <path>         Harbor offline installer path. Default: ${HARBOR_ASSET_DIR}
   --project <name>           Harbor project to create. Default: ${HARBOR_PROJECT}
+  --registry-endpoint <host:port>
+                             Address that k3s nodes and Pods use for Harbor
+  --endpoint-file <path>     Write portable Harbor endpoint metadata here
   --download-only            Download offline installer only
   --skip-install             Configure harbor.yml but do not run install.sh
   --skip-project             Do not create Harbor project
@@ -46,9 +56,14 @@ Environment:
   HARBOR_INSTALL_ROOT        Same as --install-root
   HARBOR_ASSET_DIR           Same as --asset-dir
   HARBOR_PROJECT             Same as --project
+  HARBOR_REGISTRY_ENDPOINT   Same as --registry-endpoint
+  HARBOR_ENDPOINT_FILE       Same as --endpoint-file
 
 Notes:
   - Harbor HTTP port is fixed to ${HARBOR_PORT}.
+  - --hostname is written to harbor.yml; it is not the Linux hostname.
+    Use a DNS name or IP reachable from all registry clients. If omitted, the
+    server's default-route IPv4 is used. Do not use localhost/127.0.0.1.
   - If --data-volume is omitted, the data_volume from harbor.yml.tmpl is preserved.
   - Keep the runtime path outside eva-deployer to avoid rsync overwriting Harbor configuration.
   - On existing Harbor installs, harbor_admin_password is preserved unless explicitly provided.
@@ -80,6 +95,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --project)
       HARBOR_PROJECT="${2:?--project requires a value}"
+      shift 2
+      ;;
+    --registry-endpoint)
+      HARBOR_REGISTRY_ENDPOINT="${2:?--registry-endpoint requires a value}"
+      shift 2
+      ;;
+    --endpoint-file)
+      HARBOR_ENDPOINT_FILE="${2:?--endpoint-file requires a value}"
       shift 2
       ;;
     --download-only)
@@ -118,7 +141,7 @@ fi
 HARBOR_HOSTNAME="${HARBOR_HOSTNAME#http://}"
 HARBOR_HOSTNAME="${HARBOR_HOSTNAME#https://}"
 HARBOR_HOSTNAME="${HARBOR_HOSTNAME%/}"
-if [[ "$HARBOR_HOSTNAME" == *:* ]]; then
+if [[ -n "$HARBOR_HOSTNAME" && "$HARBOR_HOSTNAME" == *:* ]]; then
   host_part="${HARBOR_HOSTNAME%%:*}"
   port_part="${HARBOR_HOSTNAME##*:}"
   if [[ "$port_part" == "$HARBOR_PORT" ]]; then
@@ -129,6 +152,45 @@ if [[ "$HARBOR_HOSTNAME" == *:* ]]; then
     exit 1
   fi
 fi
+
+detect_registry_host() {
+  local detected
+  detected="$(ip -4 route show default 2>/dev/null | awk '
+    / src / {
+      for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }
+    }
+  ')"
+  if [[ -z "$detected" ]]; then
+    detected="$(hostname -I 2>/dev/null | awk '{ print $1 }')"
+  fi
+  [[ -n "$detected" ]] || {
+    echo "[ERROR] internal registry address could not be detected; use --registry-endpoint <host:port>" >&2
+    exit 1
+  }
+  printf '%s\n' "$detected"
+}
+
+if [[ -z "$HARBOR_HOSTNAME" ]]; then
+  HARBOR_HOSTNAME="$(detect_registry_host)"
+  echo "[info] Harbor hostname not specified; using default-route IPv4: $HARBOR_HOSTNAME"
+fi
+
+if [[ "$HARBOR_HOSTNAME" == "localhost" || "$HARBOR_HOSTNAME" == "127.0.0.1" ]]; then
+  echo "[ERROR] --hostname must be a DNS name or IP reachable by registry clients, not $HARBOR_HOSTNAME" >&2
+  echo "        Omit --hostname to auto-detect this server's default-route IPv4." >&2
+  exit 1
+fi
+
+if [[ -z "$HARBOR_REGISTRY_ENDPOINT" ]]; then
+  HARBOR_REGISTRY_ENDPOINT="${HARBOR_HOSTNAME}:${HARBOR_PORT}"
+fi
+HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT#http://}"
+HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT#https://}"
+HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT%/}"
+[[ "$HARBOR_REGISTRY_ENDPOINT" == *:* ]] || {
+  echo "[ERROR] --registry-endpoint must include host:port: $HARBOR_REGISTRY_ENDPOINT" >&2
+  exit 1
+}
 
 if [[ $EUID -eq 0 ]]; then
   SUDO_CMD=""
@@ -221,6 +283,31 @@ for line in path.read_text().splitlines():
         print(match.group(1).strip().strip('"\''))
         break
 PY
+}
+
+write_harbor_endpoint_metadata() {
+  local endpoint_dir
+  endpoint_dir="$(dirname "$HARBOR_ENDPOINT_FILE")"
+  mkdir -p "$endpoint_dir"
+  python3 - "$HARBOR_ENDPOINT_FILE" "$HARBOR_REGISTRY_ENDPOINT" "$HARBOR_PROJECT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+registry = sys.argv[2]
+project = sys.argv[3]
+path.write_text(
+    '# Generated by install/setup_harbor.sh. Copy this file with the USB bundle '
+    'to the k3s deployment controller.\n'
+    f'harbor_registry: {json.dumps(registry)}\n'
+    f'repository_project: {json.dumps(project)}\n'
+)
+PY
+  chmod 0644 "$HARBOR_ENDPOINT_FILE"
+  echo "[config] Harbor endpoint metadata: $HARBOR_ENDPOINT_FILE"
+  echo "         harbor_registry: $HARBOR_REGISTRY_ENDPOINT"
+  echo "         repository_project: $HARBOR_PROJECT"
 }
 
 mkdir -p "$HARBOR_ASSET_DIR" "$HARBOR_INSTALL_ROOT"
@@ -418,6 +505,8 @@ else
   (cd "$HARBOR_DIR" && run_cmd docker compose ps)
 fi
 
+write_harbor_endpoint_metadata
+
 if [[ "$SKIP_PROJECT" == "true" ]]; then
   echo "[skip] project creation skipped"
   exit 0
@@ -466,4 +555,4 @@ fi
 
 echo "[done] Harbor is ready: $HARBOR_URL"
 echo "       project: $HARBOR_PROJECT"
-echo "       repository_registry: ${HARBOR_HOSTNAME}:${HARBOR_PORT}"
+echo "       repository_registry: $HARBOR_REGISTRY_ENDPOINT"

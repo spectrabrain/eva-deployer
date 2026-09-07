@@ -63,4 +63,38 @@ PY
   export EVA_AGENT_RELEASE EVA_AGENT_DEPLOY_VERSION EVA_AGENT_CHART_VERSION
   export EVA_AGENT_VLLM_CHART_VERSION EVA_AGENT_INIT_CHART_VERSION EVA_IAM_CHART_VERSION
   export QDRANT_CHART_VERSION KUSTOMIZE_VERSION K3S_DEFAULT_VERSION N8N_IMAGE
+
+  # 환경변수가 versions.json 을 조용히 이깁니다 (위 eval 의 -z 검사). 셸에 남은 export 때문에
+  # 파일과 다른 버전이 쓰이면 몇 단계 뒤에 "없는 파일/태그" 로만 드러나므로, 어느 값이 어디서
+  # 왔는지 여기서 밝힙니다. VERSIONS_QUIET=1 로 끌 수 있습니다.
+  if [[ -z "${VERSIONS_QUIET:-}" ]]; then
+    local name json_value
+    echo "[versions] $versions_file"
+    for name in EVA_APP_CHART_VERSION EVA_APP_DEPLOY_VERSION EVA_IAM_CHART_VERSION \
+                EVA_AGENT_RELEASE EVA_AGENT_CHART_VERSION EVA_VISION_CHART_VERSION; do
+      json_value="$(
+        python3 - "$versions_file" "$name" <<'PY'
+import json, sys
+mapping = {
+    "EVA_APP_CHART_VERSION": ["eva_app_chart_version"],
+    "EVA_APP_DEPLOY_VERSION": ["eva_app_deploy_version"],
+    "EVA_IAM_CHART_VERSION": ["eva_iam_chart_version"],
+    "EVA_AGENT_RELEASE": ["eva_agent_release", "eva_agent_deploy_version"],
+    "EVA_AGENT_CHART_VERSION": ["eva_agent_chart_version"],
+    "EVA_VISION_CHART_VERSION": ["eva_vision_chart_version"],
+}
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for key in mapping.get(sys.argv[2], []):
+    if data.get(key) is not None:
+        print(data[key]); break
+PY
+      )"
+      if [[ "${!name:-}" != "$json_value" ]]; then
+        printf '[versions]   %-26s %-12s <- 환경변수 (파일: %s)\n' \
+          "$name" "${!name:-(없음)}" "${json_value:-없음}"
+      else
+        printf '[versions]   %-26s %s\n' "$name" "${!name:-(없음)}"
+      fi
+    done
+  fi
 }

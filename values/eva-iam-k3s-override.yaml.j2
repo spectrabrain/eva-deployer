@@ -6,6 +6,14 @@
 #   helm show values eva-iam/eva-iam --version <version>
 config:
   host: "{{ eva_iam_host }}"
+{% if eva_iam_public_url | length > 0 %}
+  # 외부 URL 을 통째로 덮어씁니다 (차트 3.1.4+). publicPort 보다 우선합니다.
+  publicUrl: "{{ eva_iam_public_url }}"
+{% elif eva_iam_public_port | length > 0 %}
+  # ingress 컨트롤러가 443 이 아닌 포트로 노출될 때만 (차트 3.1.4+).
+  # host 에는 :port 를 붙이지 마세요 — Ingress/TLS host 가 그 값을 그대로 씁니다.
+  publicPort: "{{ eva_iam_public_port }}"
+{% endif %}
 
 keycloak:
 {% if airgap_mode | bool %}

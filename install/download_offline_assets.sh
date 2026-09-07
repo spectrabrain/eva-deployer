@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 이 스크립트는 fetch 하나가 실패하면 set -e 로 즉시 죽습니다. 그때 "어디까지 받았는지"를
+# 알려주지 않으면, 반쯤 만들어진 번들을 완성품으로 착각하고 두세 단계 뒤에서야 드러납니다.
+# manifest.txt 는 맨 마지막에 쓰이므로 완주 여부의 유일한 신뢰 신호입니다.
+on_error() {
+  local rc=$? line="$1"
+  echo >&2
+  echo "[ERROR] download_offline_assets.sh 가 ${line}행에서 실패했습니다 (rc=${rc})." >&2
+  echo "        번들은 미완성입니다. 위 로그의 마지막 [download] URL 을 확인하세요 —" >&2
+  echo "        404 면 그 파일이 이 릴리스에 없다는 뜻입니다." >&2
+  echo "        완주하면 ${BASE_DIR:-install}/manifest.txt 가 생깁니다. 없으면 다시 실행하세요." >&2
+  exit "$rc"
+}
+trap 'on_error $LINENO' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="${BASE_DIR:-$SCRIPT_DIR}"
 source "$SCRIPT_DIR/load_versions.sh"
@@ -375,7 +389,17 @@ EVA_AGENT_QDRANT_VALUES_URL="${EVA_AGENT_QDRANT_VALUES_URL:-${AGENT_RELEASE_BASE
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-k3s.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-k3s.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-secret.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-secret.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent-init/values-k3s.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-init/values-k3s.yaml"
-fetch "${EVA_AGENT_QDRANT_VALUES_URL}" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}"
+# 릴리스마다 이 파일이 빠지는 일이 있습니다 (agent 3.1.0 에 없었고, plugins/eva-agent-qdrant/*
+# 는 있었습니다). 여기서 죽으면 vllm values·kustomize·oras·manifest 까지 전부 안 받아지므로,
+# 원인과 우회 방법을 그 자리에서 알려줍니다.
+if ! fetch_optional "${EVA_AGENT_QDRANT_VALUES_URL}" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}"; then
+  echo "[ERROR] qdrant values 를 받지 못했습니다:" >&2
+  echo "        ${EVA_AGENT_QDRANT_VALUES_URL}" >&2
+  echo "        404 면 agent 릴리스 ${EVA_AGENT_RELEASE} 에 이 파일이 배포되지 않은 것입니다." >&2
+  echo "        다른 릴리스의 파일로 우회할 수 있습니다 (내용이 버전 비의존적입니다):" >&2
+  echo "        EVA_AGENT_QDRANT_VALUES_URL=<다른 릴리스의 url> $0" >&2
+  exit 1
+fi
 
 # Download all supported k3s GPU profile values for eva-agent-vllm
 VLLM_K3S_VALUES_FILES=(

@@ -25,6 +25,10 @@
     eva_app_offline_chart_tgz: "{{ eva_app_offline_chart_tgz | default((eva_app_offline_dir | default(playbook_dir ~ '/install/eva-app')) ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}"
     eva_app_backend_host: "{{ eva_app_backend_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
     eva_app_backend_secure: "{{ eva_app_backend_secure | default(false) }}"
+    # app.backendSecurePort (차트 3.1.8+) → configmap 의 BACKEND_SECURE_PORT.
+    # 프론트가 백엔드 주소를 만들 때 쓰는 외부 포트입니다. ingress 가 443 이 아닌 포트로
+    # 노출될 때만 바꾸세요. 빈 값이면 렌더에서 생략하고 차트 기본값(443)을 씁니다.
+    eva_app_backend_secure_port: "{{ eva_app_backend_secure_port | default('') }}"
     eva_app_jwt_secret: "{{ eva_app_jwt_secret | default('secret') }}"
     # app.sso.* (eva-app chart 3.1.0+). Empty = 차트 기본값 유지, 렌더에서 생략됩니다.
     eva_app_sso_base_url: "{{ eva_app_sso_base_url | default('') }}"
@@ -71,6 +75,17 @@
       values/app-k3s-override.yaml.j2 는 database.internal.image 를 repository/tag 맵으로 넘기는데,
       3.1.4 이하 차트는 mysql 주소를 템플릿에 하드코딩하거나 문자열로 받습니다.
       versions.json 의 eva_app_chart_version 을 3.1.5 이상으로 올리세요.
+
+- name: Validate EVA App chart version supports backendSecurePort
+  ansible.builtin.assert:
+    that:
+      - eva_app_chart_version is version('3.1.8', '>=')
+    fail_msg: >-
+      eva_app_backend_secure_port={{ eva_app_backend_secure_port }} 는 차트 3.1.8 이상에서만
+      동작합니다 (app.backendSecurePort → BACKEND_SECURE_PORT). 지금 차트는
+      {{ eva_app_chart_version }} 이라 이 값이 조용히 무시되고 프론트가 잘못된 포트를 씁니다.
+      versions.json 의 eva_app_chart_version 을 올리거나 이 값을 지우세요.
+  when: eva_app_backend_secure_port | length > 0
 
 - name: Resolve EVA App image repositories
   ansible.builtin.set_fact:

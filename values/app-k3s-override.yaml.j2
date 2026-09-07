@@ -4,8 +4,13 @@ image:
   pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
 
 app:
+  # IP 를 넣어도 됩니다 — 차트 3.1.8+ 는 IP 일 때 Ingress 규칙에서 host 를 생략합니다.
   backendHost: "{{ eva_app_backend_host }}"
   backendSecure: {{ eva_app_backend_secure | bool | lower }}
+{% if eva_app_backend_secure_port | length > 0 %}
+  # 차트 3.1.8+ — 프론트가 쓰는 외부 HTTPS 포트 (BACKEND_SECURE_PORT)
+  backendSecurePort: {{ eva_app_backend_secure_port }}
+{% endif %}
   infraProvider: onprem
   jwtSecret: "{{ eva_app_jwt_secret }}"
 {% if (eva_app_sso_base_url | length > 0) or (eva_app_sso_admin_client_secret | length > 0) %}

@@ -104,7 +104,14 @@
     eva_iam_chart_ref: "{{ eva_iam_chart_ref | default('eva-iam/eva-iam') }}"
     eva_iam_chart_version: "{{ eva_iam_chart_version | default(deploy_versions.eva_iam_chart_version | mandatory) }}"
     # config.host — keycloak hostname, dispatcher issuer/jwksUrl, ingress host derive from it.
+    # host-only 로 두세요. 차트가 Ingress/TLS host 에 그대로 쓰기 때문에 :port 를 붙이면 깨집니다.
+    # IP 를 넣어도 됩니다 — 차트 3.1.4+ 는 IP 일 때 Ingress 규칙에서 host 를 생략합니다
+    # (Kubernetes 가 spec.rules[].host 에 IP 를 허용하지 않기 때문입니다).
     eva_iam_host: "{{ eva_iam_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
+    # config.publicPort / config.publicUrl (차트 3.1.4+). ingress 컨트롤러가 443 이 아닌
+    # 포트로 노출될 때만 씁니다. 빈 값이면 렌더에서 생략하고 차트 기본 동작을 따릅니다.
+    eva_iam_public_port: "{{ eva_iam_public_port | default('') }}"
+    eva_iam_public_url: "{{ eva_iam_public_url | default('') }}"
     # keycloak.realmPatch
     eva_iam_admin_password: "{{ eva_iam_admin_password | default('EVAEVA123@') }}"
     eva_iam_admin_email: "{{ eva_iam_admin_email | default('admin@eva.com') }}"
@@ -201,6 +208,10 @@
             else []) }}
     eva_iam_effective_host: "{{ eva_iam_user_values.config.host | default(eva_iam_host) }}"
     eva_iam_effective_ingress_path: "{{ eva_iam_user_values.ingress.path | default(eva_iam_ingress_path) }}"
+    eva_iam_effective_public_port: >-
+      {{ eva_iam_user_values.config.publicPort | default(eva_iam_public_port) }}
+    eva_iam_effective_public_url: >-
+      {{ eva_iam_user_values.config.publicUrl | default(eva_iam_public_url) }}
 
 - name: Resolve eva-iam generated config for eva-app
   ansible.builtin.set_fact:
@@ -211,9 +222,19 @@
       {{ eva_iam_app_config_dir
          | default(playbook_dir ~ '/config/' ~ (ansible_host | default(inventory_hostname))) }}
     # app.sso.baseUrl — keycloak 이 서비스되는 주소. ingress.path 가 '/' 면 호스트만.
+    # 차트 3.1.4+ 의 eva-iam.baseUrl 헬퍼와 우선순위를 맞춰야 합니다. 어긋나면 eva-app 이
+    # 토큰 issuer 와 다른 주소로 discovery 를 호출해 invalid_grant 로 실패합니다.
+    #   publicUrl > host:publicPort + path > host + path
     eva_iam_app_sso_base_url: >-
-      {{ 'https://' ~ eva_iam_effective_host
-         ~ (eva_iam_effective_ingress_path | regex_replace('/$', '')) }}
+      {{
+        (eva_iam_effective_public_url | regex_replace('/$', ''))
+        if (eva_iam_effective_public_url | length > 0)
+        else (
+          'https://' ~ eva_iam_effective_host
+          ~ ((':' ~ eva_iam_effective_public_port) if (eva_iam_effective_public_port | length > 0) else '')
+          ~ (eva_iam_effective_ingress_path | regex_replace('/$', ''))
+        )
+      }}
 
 - name: Warn when the realm admin password is left at the chart's published default
   ansible.builtin.debug:
@@ -233,6 +254,26 @@
       repository_mode 는 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry 가
       필요합니다 (k3s 노드에서 접근 가능한 Harbor host:port).
+
+- name: Validate eva-iam chart version supports publicPort / publicUrl
+  ansible.builtin.assert:
+    that:
+      - eva_iam_chart_version is version('3.1.4', '>=')
+    fail_msg: >-
+      eva_iam_public_port / eva_iam_public_url 은 차트 3.1.4 이상에서만 동작합니다
+      (config.publicPort / config.publicUrl). 지금 차트는 {{ eva_iam_chart_version }} 이라
+      이 값이 조용히 무시되고, eva-app 에 넘기는 ssoBaseUrl 만 포트가 붙어 토큰 issuer 와
+      어긋납니다. versions.json 의 eva_iam_chart_version 을 올리거나 이 값을 지우세요.
+  when: (eva_iam_public_port | length > 0) or (eva_iam_public_url | length > 0)
+
+- name: Validate eva-iam host is host-only
+  ansible.builtin.assert:
+    that:
+      - "':' not in eva_iam_host or eva_iam_host is search('^[0-9a-fA-F:]+$')"
+    fail_msg: >-
+      eva_iam_host={{ eva_iam_host }} 에 포트가 붙어 있습니다. 차트가 이 값을 Ingress 와
+      TLS 의 host 로 그대로 쓰기 때문에 :port 를 넣으면 배포가 거부됩니다.
+      외부 포트가 443 이 아니면 eva_iam_public_port 로 따로 지정하세요.
 
 # busybox 와 bitnami/kubectl 은 차트 3.1.0 에 values 키가 없어(템플릿 하드코딩) Harbor 주소로
 # 바꿀 수 없고, 태그가 :latest 라 imagePullPolicy 도 Always 로 동작합니다. 따라서 airgap 에서는
@@ -581,8 +622,8 @@
         {{ '(offline chart)' if (airgap_mode | bool) else eva_iam_chart_version }}
       - "repository mode   : {{ repository_mode }}{{ ' / ' ~ repository_registry if (airgap_mode | bool) else '' }}"
       - "values (-f 순서)  : values.yaml -> eva-iam-k3s-override.yaml{{ ' -> eva-iam-host-override.yaml (' ~ eva_iam_values_file ~ ')' if (eva_iam_user_values | length > 0) else ' (host values 없음)' }}"
-      - "base URL          : https://{{ eva_iam_effective_host }}{{ eva_iam_effective_ingress_path | regex_replace('/$', '') }}/"
-      - "admin console     : https://{{ eva_iam_effective_host }}{{ eva_iam_effective_ingress_path | regex_replace('/$', '') }}/admin"
+      - "base URL          : {{ eva_iam_app_sso_base_url }}/"
+      - "admin console     : {{ eva_iam_app_sso_base_url }}/admin"
       - "realm             : {{ eva_iam_realm }}"
       # eva-app 에 넘길 값이 어디 적혀 있는지. 이 파일은 아무것도 읽어가지 않으므로
       # (사람이 보고 -e 로 넘기는 메모) 경로를 여기서 알려주지 않으면 찾기 어렵습니다.

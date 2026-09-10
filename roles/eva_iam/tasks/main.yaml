@@ -59,15 +59,15 @@
 
 # Root of the node-side hostPath tree (certs, persistence, ECR creds). Pods read
 # these off the node's filesystem, so it must be a real directory on the node.
-# Defaults to the EVA service account's home; deliberately fixed rather than derived
-# from $HOME/ansible_user, so a deploy driven from a personal account does not
-# silently point hostPaths at that account's home.
+# Defaults to the EVA service account's home; dynamically derived from ansible_user
+# so it matches eva_app's behavior.
 # One knob moves all three: -e eva_iam_node_home=/home/<user>
 # (or -e eva_iam_node_user=<user>)
 - name: Resolve node-side home for eva-iam hostPath defaults
   ansible.builtin.set_fact:
+    eva_iam_node_user: "{{ eva_iam_node_user | default(ansible_user | default(ansible_ssh_user | default('eva'))) }}"
     eva_iam_node_home: >-
-      {{ eva_iam_node_home | default('/home/' ~ (eva_iam_node_user | default('eva'))) }}
+      {{ eva_iam_node_home | default('/home/' ~ eva_iam_node_user) }}
 
 # Deploy-level knobs plus the variables that drive values/eva-iam-k3s-override.yaml.j2 —
 # same arrangement as eva_app. Site-specific values go in values/eva-iam.yaml instead,

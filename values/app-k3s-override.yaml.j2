@@ -72,18 +72,11 @@ imagePullSecrets:
     schedule: "{{ eva_app_image_pull_cron_schedule }}"
     runMode: "{{ eva_app_image_pull_cron_run_mode }}"
     runImmediately: {{ eva_app_image_pull_cron_run_immediately | bool | lower }}
-{% if airgap_mode | bool %}
-    # cronjob 은 imagePullSecrets.enabled=false 인 airgap 에서 렌더되지 않지만,
-    # 켜서 쓰는 경우를 위해 주소를 맞춰 둡니다 (차트 3.1.5+ 에서 노출됨).
-    image:
-      repository: "{{ eva_app_kubectl_image_repository }}"
-{% endif %}
-{% if airgap_mode | bool %}
-
 ingress:
   tls:
-    # TLS Secret 을 만드는 Job 의 kubectl 이미지 (차트 3.1.5+ 에서 노출됨).
-    # 그 전에는 bitnami/kubectl 이 주소 없이 들어가 docker.io mirror 가 필요했습니다.
+    authType: hostPath
+    hostPath: "{{ eva_app_tls_host_path }}"
+{% if airgap_mode | bool %}
     job:
       kubectlImage:
         repository: "{{ eva_app_kubectl_image_repository }}"

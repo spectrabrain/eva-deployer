@@ -37,7 +37,7 @@ echo "[info] Qdrant snapshot source=${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE}, values=
 # The Harbor values intentionally point at the target-side Local Harbor.  The
 # preparation host must instead pull the published source image before it is
 # re-tagged and pushed into that Harbor.
-EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE="${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE:-339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent-qdrant-snapshot-sync:0.1.0}"
+EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE="${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE:amazon/aws-cli:2.33.8}"
 PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
 
 # 받을 컴포넌트. 기본은 전부. 일부만 설치할 때는 그 컴포넌트만 지정하면 required 검사·렌더·

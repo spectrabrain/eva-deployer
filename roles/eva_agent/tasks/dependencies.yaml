@@ -20,7 +20,7 @@
     eva_agent_aws_profile: "{{ eva_agent_aws_profile | default('default') }}"
     eva_agent_sync_aws_credentials: "{{ eva_agent_sync_aws_credentials | default((not ((airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']))) | ternary(1, 0)) }}"
     eva_agent_qdrant_chart_version: "{{ eva_agent_qdrant_chart_version | default(qdrant_chart_version) | mandatory }}"
-    eva_agent_qdrant_values_file: "{{ eva_agent_qdrant_values_file | default('values-k3s.yaml') }}"
+    eva_agent_qdrant_values_file: "{{ eva_agent_qdrant_values_file | default('values-k3s.s3.yaml') }}"
     eva_agent_qdrant_snapshot_source: "{{ eva_agent_qdrant_snapshot_source | default(((eva_agent_qdrant_values_file | default('values-k3s.yaml')) == 'values-k3s.harbor.yaml') | ternary('harbor', 'local_pv')) }}"
     eva_agent_vllm_chart_version: "{{ eva_agent_vllm_chart_version | mandatory }}"
     eva_agent_vllm_profile: "{{ eva_agent_vllm_profile | default('PRO6000-MIGx4') }}"

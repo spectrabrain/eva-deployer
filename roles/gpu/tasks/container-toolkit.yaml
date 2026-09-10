@@ -48,6 +48,7 @@
   when:
     - gpu_has_nvidia
     - not ansible_check_mode
+    - airgap_mode | default(false) | bool
 
 - name: Add signed-by option to NVIDIA container toolkit apt source
   ansible.builtin.replace:

@@ -42,6 +42,11 @@ EVA는 고객마다 Network와 Security 환경이 다르므로, 하나의 설치
 
 이 섹션에서는 설치 전에 필요한 패키지·asset·이미지·Harbor를 준비합니다. 먼저 아래에서 하나의 Repository 모드를 선택하고, 해당 모드의 절차만 진행하세요. 실제 Ansible 설치 명령은 이후 `인프라 설치`, `EVA 배포`, `n8n 설치` 섹션에서 같은 모드로 실행합니다.
 
+> **설치 사용자 계정은 `eva` 사용을 권장합니다.**
+> 
+> 일부 기본 설정(예: `/home/eva/.aws`, `/home/eva/certs`)이 `eva` 계정을 기준으로 구성되어 있습니다.
+> 다른 계정을 사용하는 경우 관련 경로를 환경에 맞게 수정해야 할 수 있습니다.
+
 ### 1-1. Repository 모드 선택
 
 | 모드 | 사용 환경 | 준비/Ansible 실행 위치 | 대상 서버의 이미지 출처 | 파일 이동 |
@@ -603,6 +608,25 @@ kubectl logs -n eva-agent statefulset/eva-agent-qdrant -c qdrant-snapshot-sync
 
 ## 2. Inventory
 
+cloud_repository 모드 설치:
+
+inventory.ini
+```ini
+[all]
+localhost ansible_connection=local ansible_become_password=<sudo 비밀번호>
+
+[all:vars]
+repository_mode=cloud_repository
+```
+
+aws_key.ini
+```ini
+aws_access_key_id = <YOUR_ACCESS_KEY>
+aws_secret_access_key = <YOUR_SECRET_KEY>
+region = ap-northeast-2
+```
+
+
 원격 서버 설치:
 
 ```ini
@@ -933,6 +957,121 @@ deploy/<target>/
 
 ### [cloud_repository]
 
+## 1. TLSStore 생성 (IP 사용시에만)
+
+```bash
+kubectl create secret tls eva-tls-for-traefik \
+  -n kube-system \
+  --cert=/home/eva/certs/tls.crt \
+  --key=/home/eva/certs/tls.key
+```
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: kube-system
+spec:
+  defaultCertificate:
+    secretName: eva-tls-for-traefik
+EOF
+```
+
+## 2. EVA IAM 설치
+
+사전 확인
+
+```bash
+ls -ld /home/home/.aws
+ls -ld /home/eva/certs
+```
+
+설치 명령어 실행
+
+eva_iam_host: 실제 사용할 host url (IP or DNS)
+eva_iam_ingress_path: 주소 뒤 구분 path
+eva_iam_app_redirect_uris: eva-app에서 사용할 https url + /*
+
+**설치 시 BECOME password는 sudo 비밀번호입니다.** 
+
+```bash
+ansible-playbook -i 'localhost,' -c local site_eva_iam.yaml -K \
+  -e repository_mode=cloud_repository \
+  -e eva_iam_host=10.158.2.185 \
+  -e eva_iam_node_user=eva \
+  -e eva_iam_ingress_path=/iam \
+  -e eva_iam_redis_external_enabled=true \
+  -e eva_iam_redis_tls_enabled=true \
+  -e eva_iam_redis_nodeport=32070 \
+  -e '{"eva_iam_app_redirect_uris": ["https://10.158.2.185/*"]}'
+
+```
+설치가 정상적으로 완료되면, 현재 경로의 config 폴더 내 eva-iam.yaml에 credential 값이 저장됩니다.
+해당 값을 EVA APP 설치 시 입력으로 넣어줍니다.
+
+## 4. EVA APP 설치
+
+```bash
+ansible-playbook -i 'localhost,' -c local site_eva_app.yaml -K \
+  -e repository_mode=cloud_repository \
+  -e repository_registry=localhost:32080 \
+  -e eva_app_backend_host=10.158.2.185 \
+  -e eva_app_backend_secure=true \
+  -e eva_app_sso_base_url=https://10.158.2.185/iam \
+  -e eva_app_sso_admin_client_secret='<위 eva-iam.yaml의 credential 값>'
+```
+
+## 5. EVA Vision Secret 생성
+
+네임스페이스가 없는 경우 아래 명령어 실행
+```bash
+kubectl create namespace eva-visionkubectl create namespace eva-vision
+```
+
+```bash
+ECR_PASSWORD=$(aws ecr get-login-password --region ap-northeast-2)
+
+kubectl create secret docker-registry eva-vision-regcred \
+  -n eva-vision \
+  --docker-server=339713051385.dkr.ecr.ap-northeast-2.amazonaws.com \
+  --docker-username=AWS \
+  --docker-password="$ECR_PASSWORD"
+```
+
+## 6. EVA Agent Secret 생성
+
+네임스페이스가 없는 경우 아래 명령어 실행
+```bash
+kubectl create namespace eva-visionkubectl create namespace eva-agent
+```
+```bash
+ECR_PASSWORD=$(aws ecr get-login-password --region ap-northeast-2)
+
+kubectl create secret docker-registry eva-agent-dockerconfig \
+  -n eva-agent \
+  --docker-server=339713051385.dkr.ecr.ap-northeast-2.amazonaws.com \
+  --docker-username=AWS \
+  --docker-password="$ECR_PASSWORD"
+```
+
+## 8. EVA Agent AWS Secret 생성
+
+```bash
+AWS_ACCESS_KEY_ID=$(aws configure get aws_access_key_id)
+AWS_SECRET_ACCESS_KEY=$(aws configure get aws_secret_access_key)
+AWS_REGION=$(aws configure get region)
+
+kubectl create secret generic aws-credentials \
+  -n eva-agent \
+  --from-literal=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+  --from-literal=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+  --from-literal=AWS_REGION="${AWS_REGION:-ap-northeast-2}"
+```
+
+## 9. EVA-Vision, EVA-Agent 설치
+
 ```bash
 mkdir -p logs_eva
 
@@ -941,6 +1080,8 @@ ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
   -e repository_mode=cloud_repository \
   -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
 ```
+kustomize 패키지 설치 시 에러 발생하는 경우, 수동 설치 후 명령어 실행 sudo ln -s /snap/bin/kustomize /usr/local/bin/kustomize 다음 재설치
+
 
 ### [remote_repository]
 

@@ -25,6 +25,12 @@
     eva_app_offline_chart_tgz: "{{ eva_app_offline_chart_tgz | default((eva_app_offline_dir | default(playbook_dir ~ '/install/eva-app')) ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}"
     eva_app_backend_host: "{{ eva_app_backend_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
     eva_app_backend_secure: "{{ eva_app_backend_secure | default(false) }}"
+    eva_app_tls_host_path: >-
+      {{
+        eva_app_tls_host_path
+        | default(ingress.tls.hostPath)
+        | default('/home/eva/certs')
+      }}
     # app.backendSecurePort (차트 3.1.8+) → configmap 의 BACKEND_SECURE_PORT.
     # 프론트가 백엔드 주소를 만들 때 쓰는 외부 포트입니다. ingress 가 443 이 아닌 포트로
     # 노출될 때만 바꾸세요. 빈 값이면 렌더에서 생략하고 차트 기본값(443)을 씁니다.

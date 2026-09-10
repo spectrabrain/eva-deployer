@@ -40,7 +40,7 @@
 
 - name: Resolve AWS CLI target user
   ansible.builtin.set_fact:
-    awscli_target_user: "{{ ansible_user | default(ansible_ssh_user) }}"
+    awscli_target_user: "{{ ansible_user | default(ansible_user_id) }}"
   changed_when: false
 
 - name: Lookup home directory for AWS CLI target user

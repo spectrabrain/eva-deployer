@@ -6,21 +6,12 @@
   become: "{{ eva_iam_become | default(true) | bool }}"
   any_errors_fatal: true
   serial: 1
-  vars:
-    eva_repo_root: "{{ playbook_dir }}/../../.."
-    eva_versions_file: "{{ playbook_dir }}/../version.yaml"
-    eva_workspace_root: "{{ playbook_dir }}/../../../workspace"
-    eva_site_values_root: "{{ playbook_dir }}/../../../workspace/site-values"
-    eva_template_values_root: "{{ playbook_dir }}/../values"
-    eva_generated_config_root: "{{ playbook_dir }}/../../../out/work/config"
-    eva_deploy_root: "{{ playbook_dir }}/../../../out/work/rendered"
-    eva_cache_root: "{{ playbook_dir }}/../../../out/cache"
+  vars_files:
+    - ../../playbook-vars.yaml
 
   pre_tasks:
-    - name: Load deployment version catalogue
-      ansible.builtin.include_vars:
-        file: "{{ eva_versions_file }}"
-        name: deploy_versions
+    - name: Load shared EVA playbook context
+      ansible.builtin.import_tasks: ../../playbook-preflight.yaml
 
     - name: Resolve repository mode
       ansible.builtin.set_fact:

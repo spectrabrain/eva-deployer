@@ -1,0 +1,34 @@
+---
+- name: Load deployment version catalogue
+  ansible.builtin.include_vars:
+    file: "{{ eva_versions_file }}"
+
+- name: Validate EVA repository path contract
+  ansible.builtin.assert:
+    that:
+      - eva_repo_root | regex_search('^/') is not none
+      - eva_infra_root == eva_repo_root ~ '/src/infra'
+      - eva_solution_root == eva_repo_root ~ '/src/solution'
+      - eva_default_workspace_root == eva_repo_root ~ '/workspace'
+      - eva_template_values_root == eva_solution_root ~ '/values'
+      - eva_generated_config_root == eva_repo_root ~ '/out/work/config'
+      - eva_deploy_root == eva_repo_root ~ '/out/work/rendered'
+      - eva_cache_root == eva_repo_root ~ '/out/cache'
+    fail_msg: >-
+      EVA Deployer 저장소 경로 계약을 확인하지 못했습니다.
+      playbook은 src/<family>/playbooks 아래에서 실행되어야 하며,
+      내부 경로는 eva_repo_root={{ eva_repo_root }} 에서 파생되어야 합니다.
+
+- name: Validate EVA workspace path contract
+  ansible.builtin.assert:
+    that:
+      - eva_workspace_root | regex_search('^/') is not none
+      - eva_site_values_root == ((eva_workspace_root | regex_replace('/+$', '')) ~ '/site-values')
+    fail_msg: >-
+      eva_workspace_root 는 절대 경로여야 하며 site-values 는 같은 Workspace에서만 파생됩니다.
+      선택된 Workspace: {{ eva_workspace_root }}
+      계산된 site-values: {{ eva_site_values_root }}
+      기대 경로: {{ (eva_workspace_root | regex_replace('/+$', '')) ~ '/site-values' }}
+      예시 1) 기본값 사용: {{ eva_default_workspace_root }}
+      예시 2) 환경변수: EVA_WORKSPACE_ROOT=/data/eva-sites/customer-a
+      예시 3) extra var: -e eva_workspace_root=/data/eva-sites/customer-a

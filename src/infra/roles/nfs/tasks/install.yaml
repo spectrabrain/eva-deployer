@@ -20,7 +20,7 @@
 
 - name: Copy NFS CSI chart from offline bundle
   ansible.builtin.copy:
-    src: "{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/nfs/csi-driver-nfs-4.11.0.tgz' }}"
+    src: "{{ eva_cache_root }}/nfs/csi-driver-nfs-4.11.0.tgz"
     dest: /tmp/csi-driver-nfs-4.11.0.tgz
     mode: '0644'
   when:

@@ -12,6 +12,7 @@ REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY:-${HARBOR_REGISTRY:-}}"
 REPOSITORY_PROJECT="${REPOSITORY_PROJECT:-eva}"
 REPOSITORY_USERNAME="${REPOSITORY_USERNAME:-${HARBOR_ADMIN_USER:-admin}}"
 REPOSITORY_PASSWORD="${REPOSITORY_PASSWORD:-${HARBOR_ADMIN_PASSWORD:-}}"
+LOCAL_HARBOR_YML="${LOCAL_HARBOR_YML:-$HOME/.local/share/eva-harbor/harbor/harbor.yml}"
 EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-values-k3s.harbor.yaml}"
 ORAS_CMD="${ORAS_CMD:-$EVA_CACHE_ROOT/tools/oras}"
 
@@ -34,27 +35,34 @@ REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY#http://}"
 REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY#https://}"
 REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY%/}"
 
-if [[ -z "$REPOSITORY_PASSWORD" && "$REPOSITORY_REGISTRY" == "localhost:32080" ]]; then
-  HARBOR_YML="${LOCAL_HARBOR_YML:-$HOME/.local/share/eva-harbor/harbor/harbor.yml}"
-  if [[ -f "$HARBOR_YML" ]]; then
-    # harbor.yml commonly quotes the password.  Do not pass those YAML quotes
-    # to ORAS as part of the password (which turns a valid credential into 401).
-    REPOSITORY_PASSWORD="$(python3 - "$HARBOR_YML" <<'PY'
+if [[ -z "$REPOSITORY_PASSWORD" ]]; then
+  # Only use the local installation's password for the endpoint configured in
+  # its harbor.yml. This preserves automatic Local Harbor seeding without
+  # sending that password to an unrelated remote registry.
+  REPOSITORY_PASSWORD="$(python3 - "$LOCAL_HARBOR_YML" "$REPOSITORY_REGISTRY" <<'PY'
+import re
 import sys
+from pathlib import Path
 
-path = sys.argv[1]
-for line in open(path, encoding="utf-8"):
-    if line.lstrip().startswith("harbor_admin_password:"):
-        value = line.split(":", 1)[1].strip()
-        if len(value) >= 2 and value[0] in "\"'" and value[-1] == value[0]:
-            value = value[1:-1]
-        else:
-            value = value.split(" #", 1)[0].rstrip()
-        print(value)
-        break
+path = Path(sys.argv[1])
+registry = sys.argv[2]
+if not path.is_file():
+    raise SystemExit(0)
+
+hostname = None
+password = None
+for line in path.read_text().splitlines():
+    hostname_match = re.match(r'^hostname:\s*(.+?)\s*$', line)
+    password_match = re.match(r'^harbor_admin_password:\s*(.+?)\s*$', line)
+    if hostname_match:
+        hostname = hostname_match.group(1).split(' #', 1)[0].strip().strip('"\'')
+    if password_match:
+        password = password_match.group(1).split(' #', 1)[0].strip().strip('"\'')
+
+if hostname and password and registry == f'{hostname}:32080':
+    print(password)
 PY
 )"
-  fi
 fi
 [[ -n "$REPOSITORY_PASSWORD" ]] || { echo "[ERROR] REPOSITORY_PASSWORD or HARBOR_ADMIN_PASSWORD is required" >&2; exit 1; }
 

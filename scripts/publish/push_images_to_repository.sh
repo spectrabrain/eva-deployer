@@ -40,22 +40,31 @@ REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY%/}"
 TARGET_PREFIX="${REPOSITORY_REGISTRY}/${REPOSITORY_PROJECT}"
 MAPPING_FILE="$IMAGE_DIR/repository-mapping.txt"
 
-read_local_harbor_password() {
-  python3 - "$LOCAL_HARBOR_YML" <<'PY'
+read_matching_local_harbor_password() {
+  python3 - "$LOCAL_HARBOR_YML" "$REPOSITORY_REGISTRY" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-for filename in sys.argv[1:]:
-    path = Path(filename)
-    if not path.is_file():
-        continue
+path = Path(sys.argv[1])
+registry = sys.argv[2]
+if not path.is_file():
+    raise SystemExit(0)
 
-    for line in path.read_text().splitlines():
-        match = re.match(r'^harbor_admin_password:\s*(.+?)\s*$', line)
-        if match:
-            print(match.group(1).strip().strip('"\''))
-            raise SystemExit(0)
+hostname = None
+password = None
+for line in path.read_text().splitlines():
+    hostname_match = re.match(r'^hostname:\s*(.+?)\s*$', line)
+    password_match = re.match(r'^harbor_admin_password:\s*(.+?)\s*$', line)
+    if hostname_match:
+        hostname = hostname_match.group(1).split(' #', 1)[0].strip().strip('"\'')
+    if password_match:
+        password = password_match.group(1).split(' #', 1)[0].strip().strip('"\'')
+
+# Do not offer a local Harbor password to an unrelated registry. setup_harbor.sh
+# fixes Harbor's HTTP port at 32080, so this is the endpoint it configures.
+if hostname and password and registry == f'{hostname}:32080':
+    print(password)
 PY
 }
 
@@ -80,14 +89,13 @@ login_repository() {
     return
   fi
 
-  if [[ "$REPOSITORY_REGISTRY" == "localhost:32080" && -z "$REPOSITORY_PASSWORD" ]] \
-    && has_docker_credential; then
+  if [[ -z "$REPOSITORY_PASSWORD" ]] && has_docker_credential; then
     echo "[login] using existing Docker credential for $REPOSITORY_REGISTRY"
     return
   fi
 
-  if [[ -z "$REPOSITORY_PASSWORD" && "$REPOSITORY_REGISTRY" == "localhost:32080" ]]; then
-    REPOSITORY_PASSWORD="$(read_local_harbor_password)"
+  if [[ -z "$REPOSITORY_PASSWORD" ]]; then
+    REPOSITORY_PASSWORD="$(read_matching_local_harbor_password)"
   fi
 
   if [[ -z "$REPOSITORY_PASSWORD" ]]; then
@@ -189,8 +197,8 @@ ensure_harbor_project() {
   # login_repository() 는 기존 docker 자격증명이 있으면 harbor.yml 을 읽지 않고 끝냅니다.
   # 그 경로로 왔으면 여기서 비밀번호를 채워야 API 호출이 됩니다 — 없으면 project 를 못 만들고
   # push 가 401 로 실패합니다.
-  if [[ -z "${REPOSITORY_PASSWORD:-}" && "$REPOSITORY_REGISTRY" == "localhost:32080" ]]; then
-    REPOSITORY_PASSWORD="$(read_local_harbor_password)"
+  if [[ -z "${REPOSITORY_PASSWORD:-}" ]]; then
+    REPOSITORY_PASSWORD="$(read_matching_local_harbor_password)"
   fi
   if [[ -z "${REPOSITORY_PASSWORD:-}" ]]; then
     echo "[warn] Harbor 비밀번호를 몰라 project 확인을 건너뜁니다: $project"

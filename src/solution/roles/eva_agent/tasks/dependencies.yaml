@@ -1104,7 +1104,7 @@
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_registry == 'localhost:32080'
+    - repository_mode == 'local_repository'
     - harbor_admin_password is not defined
 
 - name: Read Local Harbor admin password for Qdrant snapshot credentials
@@ -1115,7 +1115,7 @@
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_registry == 'localhost:32080'
+    - repository_mode == 'local_repository'
     - harbor_admin_password is not defined
     - eva_agent_local_harbor_config.stat.exists
 
@@ -1127,7 +1127,7 @@
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_registry == 'localhost:32080'
+    - repository_mode == 'local_repository'
     - harbor_admin_password is not defined
     - eva_agent_local_harbor_config.stat.exists
 
@@ -1141,7 +1141,7 @@
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_registry == 'localhost:32080'
+    - repository_mode == 'local_repository'
     - harbor_admin_password is not defined
 
 - name: Create or update Harbor snapshot credentials for Qdrant

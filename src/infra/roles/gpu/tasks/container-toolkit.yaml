@@ -98,9 +98,10 @@
     - airgap_mode | default(false) | bool
 
 - name: Install NVIDIA container toolkit package from offline apt bundle
-  ansible.builtin.shell: >-
-    dpkg --unpack {{ (gpu_nvidia_ctk_offline_packages.files | map(attribute='path') | sort | list) | join(' ') }}
-    && dpkg --configure $(for package in {{ (gpu_nvidia_ctk_offline_packages.files | map(attribute='path') | sort | list) | join(' ') }}; do dpkg-deb -f "$package" Package; done)
+  ansible.builtin.shell:
+    cmd: >-
+      dpkg --unpack {{ (gpu_nvidia_ctk_offline_packages.files | map(attribute='path') | sort | list) | join(' ') }}
+      && dpkg --configure $(for package in {{ (gpu_nvidia_ctk_offline_packages.files | map(attribute='path') | sort | list) | join(' ') }}; do dpkg-deb -f "$package" Package; done)
   args:
     executable: /bin/bash
   register: gpu_nvidia_ctk_install

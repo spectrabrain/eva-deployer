@@ -5,12 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
 
+	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/release"
+	"eva-deployer/tools/eva/internal/runtime"
 	"eva-deployer/tools/eva/internal/workspace"
 )
 
@@ -26,12 +29,15 @@ func usage() {
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
 	fmt.Println("  release validate [--release PATH]")
 	fmt.Println("  release show     [--release PATH]")
-	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--output PATH]")
+	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--output PATH | --save]")
+	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
+	fmt.Println("  runtime <install|validate|show> [--runtime-root PATH]")
+	fmt.Println("  exec [--runtime-root PATH] <ansible-playbook|helm|kubectl|kustomize|oras> [args...]")
 	fmt.Println("  version")
 	fmt.Println("  help")
 	fmt.Println("")
 	fmt.Println("Without --workspace, --site resolves /etc/eva/sites/<site-id>.")
-	fmt.Println("The install orchestration commands are added after this workspace contract.")
+	fmt.Println("Install orchestration and Runtime bootstrap are added incrementally.")
 }
 
 func main() {
@@ -60,6 +66,12 @@ func run(args []string) error {
 		return runRelease(args[1:])
 	case "plan":
 		return runPlan(args[1:])
+	case "status":
+		return runStatus(args[1:])
+	case "runtime":
+		return runRuntime(args[1:])
+	case "exec":
+		return runExec(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -172,8 +184,13 @@ func runPlan(args []string) error {
 	root := flags.String("workspace", "", "workspace path")
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	output := flags.String("output", "", "write the plan to this path")
+	save := flags.Bool("save", false, "save the plan as an operation")
+	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *save && *output != "" {
+		return errors.New("use either --output or --save, not both")
 	}
 	if flags.NArg() > 1 {
 		return fmt.Errorf("unexpected plan arguments: %s", strings.Join(flags.Args(), " "))
@@ -193,7 +210,18 @@ func runPlan(args []string) error {
 	if err != nil {
 		return err
 	}
-	document := plan.Build(workspaceResolved, releaseResolved, time.Now())
+	now := time.Now()
+	document := plan.Build(workspaceResolved, releaseResolved, now)
+	if *save {
+		record, err := operation.Create(*stateRoot, document, now)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("operation created: %s\n", record.ID)
+		fmt.Printf("status: %s\n", record.Status)
+		fmt.Printf("plan: %s\n", record.PlanPath)
+		return nil
+	}
 	contents, err := plan.Marshal(document)
 	if err != nil {
 		return err
@@ -207,6 +235,140 @@ func runPlan(args []string) error {
 	}
 	fmt.Printf("plan written: %s\n", *output)
 	return nil
+}
+
+func runStatus(args []string) error {
+	flags := flag.NewFlagSet("status", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected status arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	var (
+		record operation.Record
+		err    error
+	)
+	if flags.NArg() == 0 {
+		record, err = operation.Latest(*stateRoot)
+	} else {
+		record, err = operation.Load(*stateRoot, flags.Arg(0))
+	}
+	if err != nil {
+		return err
+	}
+	printOperation(record)
+	return nil
+}
+
+func runRuntime(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		runtimeUsage()
+		return nil
+	}
+
+	command := args[0]
+	flags := flag.NewFlagSet("runtime "+command, flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	root := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	source := flags.String("source", "", "extracted runtime payload directory")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected runtime arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	switch command {
+	case "install":
+		if *source == "" {
+			return errors.New("runtime install requires --source PATH")
+		}
+		resolved, err := runtime.Install(*source, *root)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("runtime installed: %s (version=%s)\n", resolved.Root, resolved.Descriptor.Version)
+	case "validate":
+		if *source != "" {
+			return errors.New("--source is only supported by runtime install")
+		}
+		resolved, err := runtime.Resolve(*root)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("runtime is valid: %s (version=%s)\n", resolved.Root, resolved.Descriptor.Version)
+	case "show":
+		if *source != "" {
+			return errors.New("--source is only supported by runtime install")
+		}
+		resolved, err := runtime.Resolve(*root)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("runtime: %s\n", resolved.Root)
+		fmt.Printf("descriptor: %s\n", resolved.DescriptorPath)
+		fmt.Printf("version: %s\n", resolved.Descriptor.Version)
+		for _, name := range resolved.ToolNames() {
+			path, err := resolved.ToolPath(name)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("tool: %s (%s)\n", name, path)
+		}
+	default:
+		return fmt.Errorf("unknown runtime command %q", command)
+	}
+	return nil
+}
+
+func runtimeUsage() {
+	fmt.Println("Usage: eva runtime <install|validate|show> [--runtime-root PATH]")
+	fmt.Println("")
+	fmt.Printf("runtime install requires --source PATH; the managed Runtime defaults to %s.\n", runtime.DefaultRoot)
+}
+
+func runExec(args []string) error {
+	flags := flag.NewFlagSet("exec", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	root := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() == 0 {
+		return errors.New("an EVA managed runtime command is required")
+	}
+
+	resolved, err := runtime.Resolve(*root)
+	if err != nil {
+		return err
+	}
+	path, err := resolved.ToolPath(flags.Arg(0))
+	if err != nil {
+		return err
+	}
+	command := exec.Command(path, flags.Args()[1:]...)
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	command.Env = append(os.Environ(), "EVA_RUNTIME_ROOT="+resolved.Root)
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("run EVA managed runtime command %q: %w", flags.Arg(0), err)
+	}
+	return nil
+}
+
+func printOperation(record operation.Record) {
+	fmt.Printf("operation: %s\n", record.ID)
+	fmt.Printf("status: %s\n", record.Status)
+	fmt.Printf("site: %s\n", record.SiteID)
+	fmt.Printf("release: %s\n", record.ReleaseVersion)
+	fmt.Printf("created: %s\n", record.CreatedAt.UTC().Format(time.RFC3339))
+	fmt.Printf("updated: %s\n", record.UpdatedAt.UTC().Format(time.RFC3339))
+	fmt.Printf("plan: %s\n", record.PlanPath)
 }
 
 func printWorkspace(resolved workspace.Resolved) {

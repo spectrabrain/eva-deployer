@@ -34,7 +34,7 @@ func usage() {
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
-	fmt.Println("  runtime <install|validate|show> [--runtime-root PATH]")
+	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
 	fmt.Println("  exec [--runtime-root PATH] <ansible-playbook|helm|kubectl|kustomize|oras> [args...]")
 	fmt.Println("  version")
 	fmt.Println("  help")
@@ -259,16 +259,15 @@ func runInstall(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := runtime.Resolve(*runtimeRoot); err != nil {
-		return err
-	}
-
 	draft := plan.Build(workspaceResolved, releaseResolved, time.Now())
 	printInstallSummary(draft)
 	if !*yes {
 		if err := confirmInstall(draft); err != nil {
 			return err
 		}
+	}
+	if err := ensureInstallRuntime(*runtimeRoot, releaseResolved, workspaceResolved.Config.Repository.Mode); err != nil {
+		return err
 	}
 	if !releaseResolved.Prepared {
 		prepared, err := release.Prepare(releaseResolved, *installRoot)
@@ -293,6 +292,27 @@ func runInstall(args []string) error {
 	}, record)
 	printOperation(completed)
 	return err
+}
+
+func ensureInstallRuntime(root string, releaseResolved release.Resolved, repositoryMode string) error {
+	if _, err := runtime.Resolve(root); err == nil {
+		return nil
+	} else if !strings.EqualFold(repositoryMode, "local") {
+		return err
+	}
+	if releaseResolved.Prepared {
+		return errors.New("local install needs eva-offline from the original Release or Airgap Bundle when the managed Runtime is absent")
+	}
+	offlinePayload, err := releaseResolved.ArtifactPath("eva-offline")
+	if err != nil {
+		return fmt.Errorf("local install requires an eva-offline artifact: %w", err)
+	}
+	installed, err := runtime.BootstrapOffline(offlinePayload, root)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("runtime bootstrapped: %s (version=%s)\n", installed.Root, installed.Descriptor.Version)
+	return nil
 }
 
 func normalizeInstallArgs(args []string) ([]string, error) {
@@ -510,6 +530,7 @@ func runRuntime(args []string) error {
 	flags.SetOutput(os.Stderr)
 	root := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	source := flags.String("source", "", "extracted runtime payload directory")
+	offline := flags.String("offline", "", "eva-offline archive path")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -519,7 +540,7 @@ func runRuntime(args []string) error {
 
 	switch command {
 	case "install":
-		if *source == "" {
+		if *source == "" || *offline != "" {
 			return errors.New("runtime install requires --source PATH")
 		}
 		resolved, err := runtime.Install(*source, *root)
@@ -527,9 +548,18 @@ func runRuntime(args []string) error {
 			return err
 		}
 		fmt.Printf("runtime installed: %s (version=%s)\n", resolved.Root, resolved.Descriptor.Version)
+	case "bootstrap":
+		if *offline == "" || *source != "" {
+			return errors.New("runtime bootstrap requires --offline PATH")
+		}
+		resolved, err := runtime.BootstrapOffline(*offline, *root)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("runtime bootstrapped: %s (version=%s)\n", resolved.Root, resolved.Descriptor.Version)
 	case "validate":
-		if *source != "" {
-			return errors.New("--source is only supported by runtime install")
+		if *source != "" || *offline != "" {
+			return errors.New("--source and --offline are only supported by runtime install or bootstrap")
 		}
 		resolved, err := runtime.Resolve(*root)
 		if err != nil {
@@ -537,8 +567,8 @@ func runRuntime(args []string) error {
 		}
 		fmt.Printf("runtime is valid: %s (version=%s)\n", resolved.Root, resolved.Descriptor.Version)
 	case "show":
-		if *source != "" {
-			return errors.New("--source is only supported by runtime install")
+		if *source != "" || *offline != "" {
+			return errors.New("--source and --offline are only supported by runtime install or bootstrap")
 		}
 		resolved, err := runtime.Resolve(*root)
 		if err != nil {
@@ -561,9 +591,11 @@ func runRuntime(args []string) error {
 }
 
 func runtimeUsage() {
-	fmt.Println("Usage: eva runtime <install|validate|show> [--runtime-root PATH]")
+	fmt.Println("Usage: eva runtime install --source PATH [--runtime-root PATH]")
+	fmt.Println("       eva runtime bootstrap --offline PATH [--runtime-root PATH]")
+	fmt.Println("       eva runtime <validate|show> [--runtime-root PATH]")
 	fmt.Println("")
-	fmt.Printf("runtime install requires --source PATH; the managed Runtime defaults to %s.\n", runtime.DefaultRoot)
+	fmt.Printf("The managed Runtime defaults to %s.\n", runtime.DefaultRoot)
 }
 
 func runExec(args []string) error {

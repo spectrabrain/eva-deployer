@@ -1,10 +1,13 @@
 package runtime
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -126,6 +129,43 @@ func Install(source, root string) (Resolved, error) {
 		}
 	}
 	return Resolve(destination)
+}
+
+// BootstrapOffline extracts the runtime/ subtree from an EVA Offline payload
+// and publishes it through the same validation and atomic replacement path as
+// a directly supplied Runtime payload.
+func BootstrapOffline(payload, root string) (Resolved, error) {
+	payloadPath, err := filepath.Abs(payload)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("resolve Offline payload: %w", err)
+	}
+	info, err := os.Stat(payloadPath)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("read Offline payload %s: %w", payloadPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return Resolved{}, fmt.Errorf("Offline payload is not a regular file: %s", payloadPath)
+	}
+	if root == "" {
+		root = DefaultRoot
+	}
+	destination, err := filepath.Abs(root)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("resolve runtime destination: %w", err)
+	}
+	parent := filepath.Dir(destination)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return Resolved{}, fmt.Errorf("create runtime parent: %w", err)
+	}
+	staging, err := os.MkdirTemp(parent, ".eva-offline-")
+	if err != nil {
+		return Resolved{}, fmt.Errorf("create Offline Runtime staging directory: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	if err := extractOfflineRuntime(payloadPath, staging); err != nil {
+		return Resolved{}, err
+	}
+	return Install(staging, destination)
 }
 
 func (resolved Resolved) ToolPath(name string) (string, error) {
@@ -294,4 +334,96 @@ func copyFile(source, destination string, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+func extractOfflineRuntime(payload, destination string) error {
+	file, err := os.Open(payload)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("open Offline payload gzip stream: %w", err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read Offline payload archive: %w", err)
+		}
+		name, err := offlineArchiveName(header.Name)
+		if err != nil {
+			return err
+		}
+		if header.Typeflag != tar.TypeDir && header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			return fmt.Errorf("Offline payload archive entry type is not allowed: %s", header.Name)
+		}
+		if name != "runtime" && !strings.HasPrefix(name, "runtime/") {
+			if header.Typeflag != tar.TypeDir {
+				if _, err := io.Copy(io.Discard, tarReader); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		relative := strings.TrimPrefix(name, "runtime")
+		relative = strings.TrimPrefix(relative, "/")
+		if relative == "" {
+			if header.Typeflag != tar.TypeDir {
+				return fmt.Errorf("Offline payload runtime root is not a directory")
+			}
+			if err := os.MkdirAll(destination, 0o750); err != nil {
+				return err
+			}
+			continue
+		}
+		target := filepath.Join(destination, filepath.FromSlash(relative))
+		if !isWithin(destination, target) {
+			return fmt.Errorf("Offline Runtime path escapes staging directory: %s", header.Name)
+		}
+		if header.Typeflag == tar.TypeDir {
+			if err := os.MkdirAll(target, header.FileInfo().Mode().Perm()); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := copyArchiveFile(tarReader, target, header.FileInfo().Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	if _, err := Resolve(destination); err != nil {
+		return fmt.Errorf("validate Offline Runtime payload: %w", err)
+	}
+	return nil
+}
+
+func offlineArchiveName(name string) (string, error) {
+	if name == "" || strings.HasPrefix(name, "/") {
+		return "", fmt.Errorf("Offline payload has invalid path %q", name)
+	}
+	clean := pathpkg.Clean(name)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("Offline payload path escapes archive root: %q", name)
+	}
+	return clean, nil
+}
+
+func copyArchiveFile(source io.Reader, destination string, mode os.FileMode) error {
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, source); err != nil {
+		output.Close()
+		return err
+	}
+	return output.Close()
 }

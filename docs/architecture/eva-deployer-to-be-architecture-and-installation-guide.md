@@ -2,9 +2,9 @@
 
 > 아키텍처 구조, 릴리스 빌드, S3 배포, 설치자 입력 및 Values 운영 계약
 
-- 문서 버전: 1.0
-- 기준일: 2026-09-10
-- 상태: 구현 전 TO-BE 설계 기준
+- 문서 버전: 1.1
+- 기준일: 2026-09-12
+- 상태: Phase 0 계약 반영, CLI orchestration 구현 진행
 - 근거: EVA Deployer 전체 소스 번들, AS-IS 조사 문서, TO-BE 설계 논의
 
 ## 1. 문서 목적과 핵심 결론
@@ -164,6 +164,7 @@ workspace/
 ├── inventory/
 │  ├── inventory.ini
 ├── site-values/
+│  ├── site.yaml
 │  ├── app.yaml
 │  └── iam.yaml
 └── credentials/
@@ -173,15 +174,16 @@ workspace/
 `workspace/`는 운영자가 작성하는 배포 입력 전용 공간이다.
 
 - `inventory/inventory.ini`: 대상 호스트, 접속 사용자, SSH 방식 등 Ansible inventory 입력
+- `site-values/site.yaml`: site ID, repository mode, Harbor endpoint, 설치 component 등 CLI 공통 입력
 - `site-values/app.yaml`: EVA App Chart에 적용할 고객 변경분. App 커스텀이 있을 때만 생성
 - `site-values/iam.yaml`: EVA IAM Chart에 적용할 고객 변경분. IAM 커스텀이 있을 때만 생성
 - `credentials/aws_key.ini`: AWS ECR, S3, release asset 접근이 필요한 설치 단계에서 사용하는 AWS credential 입력
 
 생성된 `eva.yaml`, 최종 values, 로그와 상태는 `workspace/`에 두지 않는다.
 
-기본 workspace는 저장소 내부 `workspace/`이지만, 실제 고객 운영에서는 저장소 외부 경로도 동일하게 지원해야 한다.
-선택 우선순위는 `-e eva_workspace_root=/abs/path` → `EVA_WORKSPACE_ROOT=/abs/path` → `<repo>/workspace` 이다.
-한 번 선택한 workspace에서 `site-values/`가 파생되며, 같은 workspace에서 `credentials/aws_key.ini`도 함께 결정한다. 실행 중 다른 workspace와 섞어 쓰지 않는다.
+EVA CLI의 기본 workspace는 `/etc/eva/sites/<site-id>`다. `eva install --workspace /abs/path`으로 외부 workspace를 명시할 수 있으며, 같은 실행 안에서 workspace를 섞지 않는다. CLI는 선택한 workspace를 `eva_workspace_root`로 Ansible에 전달한다.
+
+직접 Ansible 실행은 CLI 도입 전 호환 경로로 유지한다. 이 경로의 선택 우선순위는 `-e eva_workspace_root=/abs/path` → `EVA_WORKSPACE_ROOT=/abs/path` → `<repo>/workspace`다. repo-local `workspace/`는 sample과 개발용 입력 공간이며, system-wide CLI의 운영 기본 경로가 아니다.
 
 현재 구현 정렬 상태:
 
@@ -190,13 +192,31 @@ workspace/
 - 기존 `<repo>/aws_key.ini` 직접 참조는 제거되었다.
 
 ```text
-eva-deployer/
-eva-sites/
+/etc/eva/sites/
 └── customer-a/
     ├── inventory/
     ├── site-values/
     └── credentials/
 ```
+
+`site-values/site.yaml`의 최소 schema는 다음과 같다. `mode=remote`와 `mode=local`은 `registry`를 요구하고, `project` 기본값은 `eva`다. Secret 원문은 이 파일에 두지 않는다.
+
+```yaml
+site:
+  id: customer-a
+repository:
+  mode: cloud # cloud | remote | local
+  project: eva
+components:
+  infra: true
+  iam: true
+  agent: true
+  vision: true
+  app: true
+  n8n: false
+```
+
+현재 repository의 직접 Ansible playbook은 이 파일을 자동 로드하지 않는다. CLI orchestration이 이 schema를 검증하고 기존 Ansible extra vars로 변환하는 것이 다음 구현 단계다.
 
 ### 2.3 `scripts/`, `prompts/`, `tools/eva/`의 경계
 
@@ -245,6 +265,24 @@ tools/eva/
 
 장기적으로 설치자에게 노출되는 공식 진입점은 EVA CLI 하나로 제한한다. 초기에는 CLI가 기존 검증된 Shell과 Ansible을 호출할 수 있다. CLI로 완전히 이관된 스크립트는 삭제하고, CLI 실행 이전에 필요한 bootstrap helper만 남긴다.
 
+CLI와 Runtime은 user home에 의존하지 않는 system-wide 경로를 사용한다.
+
+```text
+/usr/local/bin/eva
+/opt/eva/
+├── tool/
+├── runtime/
+└── releases/
+/var/lib/eva/
+├── artifacts/
+├── operations/
+└── state/
+/var/log/eva/
+└── operations/
+```
+
+`eva-operators` 그룹은 `/etc/eva/sites/`의 site 입력을 읽고 `/var/lib/eva/operations/`, `/var/log/eva/operations/`의 일반 operation 기록을 생성할 수 있다. Secret 및 credential 파일은 site owner 또는 root만 읽을 수 있게 `0600`으로 관리한다.
+
 ### 2.4 `out/`: 생성 결과와 보존 정책
 
 | 경로 | 내용 | 보존 정책 |
@@ -278,7 +316,7 @@ Airgap
 S3 Airgap Bundle → USB 반입 → 대상 서버 검증 → bootstrap → Harbor seed → install
 ```
 
-Git tag는 소스 기준점이다. 실제 설치 기준점은 S3의 `release-manifest.yaml`과 Artifact digest다. 파일명이나 `v3.2.0` 문자열만으로 동일성을 판단하지 않는다.
+Git tag는 소스 기준점이다. 실제 설치 기준점은 S3의 `release.yaml`과 Artifact digest다. 파일명이나 `v3.2.0` 문자열만으로 동일성을 판단하지 않는다.
 
 ### 3.1 Infra와 Solution 의존 규칙
 
@@ -344,7 +382,7 @@ compatibility:
 5. Infra/Solution base Artifact staging
 6. Airgap Offline payload 또는 Bundle 조립
 7. 재현 가능한 `.tar.gz` 생성
-8. `release-manifest.yaml`과 `checksums.sha256` 생성
+8. `release.yaml`과 `checksums.sha256` 생성
 9. Artifact 추출 및 install dry-run 검증
 10. S3 immutable 경로 게시
 
@@ -355,13 +393,13 @@ out/dist/
 ├── eva-tool_v3.2.0_linux_amd64.tar.gz   # 설치 실행용 EVA CLI
 ├── eva-infra_v3.2.0.tar.gz              # Infra 설치 정의
 ├── eva-solution_v3.2.0.tar.gz           # Solution 설치 정의
-├── eva-offline_v3.2.0.tar.gz            # Airgap 환경에 필요한 패키지, 이미지, 모델 등의 오프라인 자산
-├── eva-airgap-bundle_v3.2.0.tar.gz      # Tool + Infra + Solution + Offline payload / Manifest Bundle
-├── release-manifest.yaml                # Artifact 조합과 digest
-└── checksums.sha256                     # 다운로드 및 반입 무결성 검증
+├── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz  # Airgap Runtime, 패키지, 이미지, 모델
+├── eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz
+├── release.yaml                                      # Artifact 조합과 digest
+└── checksums.sha256                                  # 다운로드 및 반입 무결성 검증
 ```
 
-Airgap 설치자에게는 `eva-airgap-bundle_v3.2.0.tar.gz` 한 개와 외부 checksum 파일만 제공할 수 있다. Bundle 내부에는 Tool, Infra, Solution, Offline payload 및 release manifest가 그대로 포함된다.
+Airgap 설치자에게는 `eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz` 한 개와 외부 checksum 파일만 제공할 수 있다. Bundle 내부 `artifacts/`에는 이미 생성된 Tool, Infra, Solution, Offline archive를 byte-identical하게 넣고, 최상단에는 `release.yaml`, `checksums.sha256`, README만 둔다.
 
 ### 4.4 S3 권장 배치
 
@@ -372,10 +410,10 @@ s3://<release-bucket>/eva-deployer/
 │       ├── eva-tool_v3.2.0_linux_amd64.tar.gz
 │       ├── eva-infra_v3.2.0.tar.gz
 │       ├── eva-solution_v3.2.0.tar.gz
-│       ├── eva-offline_v3.2.0.tar.gz
-│       ├── eva-airgap-bundle_v3.2.0.tar.gz
+│       ├── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz
+│       ├── eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz
 │       ├── checksums.sha256
-│       └── release-manifest.yaml
+│       └── release.yaml
 └── channels/
     ├── dev.yaml
     ├── candidate.yaml
@@ -397,7 +435,7 @@ s3://<release-bucket>/eva-deployer/
 S3에서 받는 파일:
 
 ```text
-release-manifest.yaml
+release.yaml
 checksums.sha256
 eva-tool_v3.2.0_linux_amd64.tar.gz
 eva-infra_v3.2.0.tar.gz
@@ -408,6 +446,7 @@ eva-solution_v3.2.0.tar.gz
 
 ```text
 workspace/inventory/inventory.ini
+workspace/site-values/site.yaml
 workspace/site-values/app.yaml  # 필요한 경우
 workspace/site-values/iam.yaml  # 필요한 경우
 workspace/credentials/aws_key.ini  # AWS 직접 접근이 필요한 경우
@@ -420,7 +459,7 @@ workspace/credentials/aws_key.ini  # AWS 직접 접근이 필요한 경우
 Cloud 공통 파일에 Main Harbor를 채우기 위한 Offline payload가 추가된다.
 
 ```text
-eva-offline_v3.2.0.tar.gz
+eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz
 ```
 
 설치자는 Main Harbor endpoint, project 및 인증정보를 준비한다. AWS credential은 인터넷 가능한 Main 서버 또는 준비 서버에서 download/publish 스크립트를 실행할 때만 필요할 수 있으며, 대상 EVA 서버 입력으로 배포하는 것이 기본 계약은 아니다.
@@ -430,8 +469,8 @@ eva-offline_v3.2.0.tar.gz
 가장 단순한 권장 제공 형태:
 
 ```text
-eva-airgap-bundle_v3.2.0.tar.gz
-eva-airgap-bundle_v3.2.0.tar.gz.sha256
+eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz
+eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz.sha256
 ```
 
 완전 Airgap 전달물에는 실제 `credentials/aws_key.ini`나 AWS access key material이 포함되면 안 된다. AWS credential은 bundle 생성 전 인터넷 가능한 준비 서버에서만 사용하고, 반입 artifact에는 남기지 않는다.
@@ -440,11 +479,12 @@ Bundle 내부:
 
 ```text
 eva-airgap-bundle_v3.2.0/
-├── eva-tool_v3.2.0_linux_amd64.tar.gz
-├── eva-infra_v3.2.0.tar.gz
-├── eva-solution_v3.2.0.tar.gz
-├── eva-offline_v3.2.0.tar.gz
-├── release-manifest.yaml
+├── artifacts/
+│   ├── eva-tool_v3.2.0_linux_amd64.tar.gz
+│   ├── eva-infra_v3.2.0.tar.gz
+│   ├── eva-solution_v3.2.0.tar.gz
+│   └── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz
+├── release.yaml
 ├── checksums.sha256
 └── README.md
 ```
@@ -691,14 +731,7 @@ Chart template이 사용하지 않는 키는 Helm이 조용히 무시할 수 있
 5. Base digest에 결합된 Patch overlay
 6. IAM 결과 등 설치 중 생성된 허용된 runtime handoff
 
-다음 값은 일반 고객 override로 허용하지 않는다.
-
-- Chart version
-- Product image tag 또는 digest
-- Artifact 내부 plugin binary 경로
-- Release identity를 변경하는 값
-
-이러한 변경은 새로운 Solution Artifact 또는 Patch Artifact로 처리한다.
+일반 설치 흐름은 Release가 고정한 Chart와 image를 사용한다. 다만 현장 복구나 검증을 위해 CLI의 명시적 `--chart`, `--values`, `--set` override는 허용한다. Release 기본값과 다른 Chart 또는 image 관련 값은 차단하지 않고 `[WARN] field override detected`로 Plan과 operation 결과에 기록한다. Artifact 내부 plugin binary 경로와 release metadata 자체는 override 대상이 아니다.
 
 ### 7.6 IAM handoff
 
@@ -770,39 +803,39 @@ Airgap Bundle 다운로드
 - App이 IAM을 사용하면 IAM handoff가 App 배포보다 먼저 완료되어야 한다.
 - 현재 aggregate Solution 순서는 Agent → Vision → App이다. IAM은 별도 선행 단계로 취급한다.
 
-## 9. 설치자용 목표 CLI 계약
+## 9. 설치자용 CLI 계약
 
-아래 명령은 구현 대상인 목표 인터페이스 예시다. 첫 구현에서는 내부적으로 검증된 Shell과 Ansible을 호출할 수 있으나, 설치자에게 노출되는 공식 진입점은 EVA Tool 하나로 제한한다.
+설치자에게 노출되는 공식 진입점은 EVA Tool 하나다. 대화형과 비대화형은 같은 use case를 사용하며, 일반 설치는 artifact metadata나 playbook 경로를 직접 지정하지 않는다.
 
 ```bash
-eva verify --manifest ./release-manifest.yaml
+eva install
+eva install 3.2.0
+eva install ./eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz
+eva install app --chart ./eva-app-fix.tgz --values ./app-fix.yaml --set replicaCount=2
 
-eva values show app \
-  --manifest ./release-manifest.yaml
-
-eva inspect \
-  --manifest ./release-manifest.yaml \
-  --workspace ./workspace
-
-eva plan \
-  --manifest ./release-manifest.yaml \
-  --workspace ./workspace
-
-eva apply \
-  --plan ./out/work/plan/<operation-id>/plan.yaml
-
-eva status --operation <operation-id>
-eva audit --operation <operation-id>
+eva plan
+eva apply
+eva status
+eva verify
+eva shell
+eva exec ansible-playbook --version
 ```
 
-| 명령 | 시스템 변경 | 주요 결과 |
+| 명령 | 시스템 변경 | 기본 동작 |
 | --- | --- | --- |
-| `verify` | 없음 | Artifact, manifest, checksum, compatibility 검증 |
-| `values show` | 없음 | Chart 기본 values 조회 |
-| `inspect` | 대상 시스템 변경 없음 | `precondition.yaml`, `eva.yaml` |
-| `plan` | 설치 변경 없음 | Resolved values, diff, `plan.yaml` |
-| `apply` | 있음 | Infra/Solution 설치 및 state 기록 |
-| `status`, `audit` | 없음 | Operation 상태와 감사 결과 |
+| `install [release-or-component]` | 있음 | release/workspace를 자동 탐지하고 plan 요약 후 apply |
+| `plan [release-or-component]` | 없음 | 최신 입력으로 Plan과 effective values 생성 |
+| `apply [operation-id]` | 있음 | 최신 Plan 또는 지정 Plan 적용 |
+| `status [operation-id]` | 없음 | 최신 또는 지정 operation 상태 출력 |
+| `verify [release]` | 없음 | `release.yaml`, artifact, checksum 검증 |
+| `shell` | 없음 | 관리 Runtime PATH와 선택된 Release/Workspace 환경으로 shell 시작 |
+| `exec <command> [args...]` | 명령에 따름 | 관리 Runtime command를 그대로 실행 |
+
+Component alias는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`이다. CLI의 `cloud`, `remote`, `local`은 각각 Ansible의 `cloud_repository`, `remote_repository`, `local_repository`로 변환한다.
+
+TTY에서는 Plan 요약 뒤 실행 승인을 묻는다. 비대화형 실행은 `--yes`를 명시해야 하며, TTY가 아닌 환경에서는 질문하지 않고 `--yes` 누락을 오류로 처리한다. privilege escalation은 필요한 Runtime bootstrap 및 Ansible 단계에서만 CLI가 요청하며, CLI 전체를 항상 root로 실행하지 않는다.
+
+Remote Runtime은 online bootstrap을 먼저 시도한다. online bootstrap이 실패했거나 Offline payload가 명시된 경우에만 검증된 Offline payload로 fallback한다. `eva exec`와 `eva shell`은 실행 사용자, 명령 시작/종료 시각, 종료 코드를 operation log에 남기되 argument 값과 stdout/stderr는 1차에서 수집하지 않는다.
 
 ## 10. 기존 README 설치 순서와 마이그레이션
 
@@ -862,21 +895,21 @@ eva audit --operation <operation-id>
 | Airgap | 단일 Bundle 제공 가능. 내부 base Artifact digest 보존 |
 | 상태 | `work/`와 분리된 `state/`에 보존 |
 
-### 11.1 추가로 결정할 정책
+### 11.1 후속 결정 항목
 
-- `release-manifest`와 state 저장 형식의 YAML/JSON 선택
+- operation/state의 YAML 또는 JSON 저장 형식
 - Artifact 서명 기술과 Offline trust root 배포 방식
-- Workspace를 저장소 내부 기본값으로 둘지 외부 경로만 강제할지
 - App values 미인식 키를 경고로 볼지 strict mode 오류로 볼지
-- Airgap Bundle만 게시할지 구성 Artifact도 개별 게시할지
-- 운영 state 기본 경로를 `~/.local/state/eva` 또는 `/var/lib/eva`로 둘지
+- `--set`의 문자열 강제 syntax와 type 처리 세부 규칙
+- `release.yaml`이 없는 개발용 directory의 명시적 허용 option
 
 ## 12. 설치자 체크리스트
 
-- [ ] 올바른 `release-manifest.yaml`과 환경별 Artifact를 확보했다.
+- [ ] 올바른 `release.yaml`과 환경별 Artifact를 확보했다.
 - [ ] 외부 `checksums.sha256`으로 다운로드 파일을 검증했다.
-- [ ] 기본 `workspace/` 또는 외부 `eva_workspace_root`를 확정했다.
+- [ ] `/etc/eva/sites/<site-id>` 또는 `--workspace`로 사용할 workspace를 확정했다.
 - [ ] `workspace/inventory/inventory.ini`를 작성했다.
+- [ ] `workspace/site-values/site.yaml`에 site ID, mode, component를 작성했다.
 - [ ] App Chart 기본 values를 확인했다.
 - [ ] 필요한 경우 `workspace/site-values/app.yaml`에 변경분만 작성했다.
 - [ ] 필요한 경우 `workspace/site-values/iam.yaml`에 변경분만 작성했다.

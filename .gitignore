@@ -14,6 +14,18 @@ env/
 
 config/
 deploy/
+out/cache/*
+!out/cache/.gitkeep
+out/work/*
+!out/work/.gitkeep
+out/state/*
+!out/state/.gitkeep
+out/dist/*
+!out/dist/.gitkeep
+workspace/inventory/*
+!workspace/inventory/.gitkeep
+workspace/site-values/*
+!workspace/site-values/.gitkeep
 
 logs/
 logs_*/
@@ -35,9 +47,11 @@ install/manifest.txt
 
 # Deployment-specific EVA App host values (contains license credentials)
 values/app.yaml
+workspace/site-values/app.yaml
 
 # EVA IAM host settings (contains secrets / client credentials)
 values/eva-iam.yaml
+workspace/site-values/iam.yaml
 
 # Keycloak realm exports contain client secrets + signing keys — never commit
 eva-iam-realm-*.json

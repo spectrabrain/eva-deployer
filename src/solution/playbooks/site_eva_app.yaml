@@ -2,7 +2,9 @@
   vars:
     eva_repo_root: "{{ playbook_dir }}/../../.."
     eva_versions_file: "{{ playbook_dir }}/../../../versions.json"
+    eva_workspace_root: "{{ playbook_dir }}/../../../workspace"
+    eva_site_values_root: "{{ playbook_dir }}/../../../workspace/site-values"
     eva_install_root: "{{ playbook_dir }}/../../../install"
-    eva_values_root: "{{ playbook_dir }}/../values"
-    eva_generated_config_root: "{{ playbook_dir }}/../../../config"
-    eva_deploy_root: "{{ playbook_dir }}/../../../deploy"
+    eva_template_values_root: "{{ playbook_dir }}/../values"
+    eva_generated_config_root: "{{ playbook_dir }}/../../../out/work/config/{{ eva_site_name | default('default') }}"
+    eva_deploy_root: "{{ playbook_dir }}/../../../out/work/rendered/{{ eva_site_name | default('default') }}"

@@ -165,7 +165,7 @@
 - name: Render EVA Vision k3s override values on control node
   no_log: true
   ansible.builtin.template:
-    src: "{{ (eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/vision-k3s-override.yaml.j2' }}"
+    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/vision-k3s-override.yaml.j2' }}"
     dest: "{{ eva_vision_deploy_values_dir }}/vision-k3s-override.yaml"
     mode: "0644"
   delegate_to: localhost

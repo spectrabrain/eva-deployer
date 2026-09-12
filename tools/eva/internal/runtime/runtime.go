@@ -185,6 +185,21 @@ func (resolved Resolved) ToolNames() []string {
 	return names
 }
 
+// ToolDirectories returns unique directories containing validated Runtime
+// tools. They can be prepended to PATH for an interactive EVA shell.
+func (resolved Resolved) ToolDirectories() []string {
+	directories := make(map[string]struct{}, len(resolved.toolPaths))
+	for _, path := range resolved.toolPaths {
+		directories[filepath.Dir(path)] = struct{}{}
+	}
+	paths := make([]string, 0, len(directories))
+	for directory := range directories {
+		paths = append(paths, directory)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
 func loadDescriptor(path string) (Descriptor, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {

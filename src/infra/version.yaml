@@ -1,0 +1,8 @@
+schemaVersion: v1alpha1
+status: transitional
+sourceVersionFile: versions.json
+components:
+  k3s:
+    defaultVersion: v1.36.2+k3s1
+  kustomize:
+    version: 5.4.3

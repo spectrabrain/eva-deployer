@@ -20,6 +20,7 @@ type Step struct {
 
 type Document struct {
 	SchemaVersion     string            `yaml:"schema_version"`
+	OperationID       string            `yaml:"operation_id,omitempty"`
 	GeneratedAt       time.Time         `yaml:"generated_at"`
 	SiteID            string            `yaml:"site_id"`
 	Workspace         string            `yaml:"workspace"`

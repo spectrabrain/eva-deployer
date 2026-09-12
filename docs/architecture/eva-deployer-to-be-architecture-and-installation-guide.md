@@ -41,7 +41,8 @@ eva-deployer/
 │       └── version.yaml
 ├── workspace/
 │   ├── inventory/
-│   └── site-values/
+│   ├── site-values/
+│   └── credentials/
 ├── scripts/
 │   ├── download/
 │   ├── install/
@@ -150,29 +151,40 @@ src/solution/
 ```text
 workspace/
 ├── inventory/
-└── site-values/
-  ├── app.yaml
-  └── iam.yaml
+│  ├── inventory.ini
+├── site-values/
+│  ├── app.yaml
+│  └── iam.yaml
+└── credentials/
+  ├── aws_key.ini
 ```
 
 `workspace/`는 운영자가 작성하는 배포 입력 전용 공간이다.
 
-- `inventory/`: 대상 호스트, 접속 사용자, SSH 방식 등 Ansible inventory 입력
+- `inventory/inventory.ini`: 대상 호스트, 접속 사용자, SSH 방식 등 Ansible inventory 입력
 - `site-values/app.yaml`: EVA App Chart에 적용할 고객 변경분. App 커스텀이 있을 때만 생성
 - `site-values/iam.yaml`: EVA IAM Chart에 적용할 고객 변경분. IAM 커스텀이 있을 때만 생성
+- `credentials/aws_key.ini`: AWS ECR, S3, release asset 접근이 필요한 설치 단계에서 사용하는 AWS credential 입력
 
 생성된 `eva.yaml`, 최종 values, 로그와 상태는 `workspace/`에 두지 않는다.
 
 기본 workspace는 저장소 내부 `workspace/`이지만, 실제 고객 운영에서는 저장소 외부 경로도 동일하게 지원해야 한다.
 선택 우선순위는 `-e eva_workspace_root=/abs/path` → `EVA_WORKSPACE_ROOT=/abs/path` → `<repo>/workspace` 이다.
-한 번 선택한 workspace에서 `site-values/`가 파생되며, 실행 중 다른 workspace와 섞어 쓰지 않는다.
+한 번 선택한 workspace에서 `site-values/`가 파생되며, 같은 workspace에서 `credentials/aws_key.ini`도 함께 결정한다. 실행 중 다른 workspace와 섞어 쓰지 않는다.
+
+현재 구현 정렬 상태:
+
+- `src/infra/roles/awscli/tasks/main.yaml`은 기본값으로 `<selected-workspace>/credentials/aws_key.ini`를 읽는다.
+- `aws_key_file` extra var로 control node의 절대 경로를 명시적 override할 수 있다.
+- 기존 `<repo>/aws_key.ini` 직접 참조는 제거되었다.
 
 ```text
 eva-deployer/
 eva-sites/
 └── customer-a/
     ├── inventory/
-    └── site-values/
+    ├── site-values/
+    └── credentials/
 ```
 
 ### 2.3 `scripts/`와 `tools/eva/`의 경계
@@ -360,10 +372,13 @@ eva-solution_v3.2.0.tar.gz
 설치자가 작성하는 파일:
 
 ```text
-workspace/inventory/<inventory-file>
+workspace/inventory/inventory.ini
 workspace/site-values/app.yaml  # 필요한 경우
 workspace/site-values/iam.yaml  # 필요한 경우
+workspace/credentials/aws_key.ini  # AWS 직접 접근이 필요한 경우
 ```
+
+현재 구현 기준으로 선택된 workspace의 `credentials/aws_key.ini`가 Cloud 설치 입력에 포함된다. `site_eva_config.yaml`의 `awscli` role은 이 경로를 기본값으로 사용하고, 필요 시 `aws_key_file` override를 사용해 target user의 `~/.aws`를 구성한다.
 
 ### 5.2 Remote Repository 설치
 
@@ -373,7 +388,7 @@ Cloud 공통 파일에 Main Harbor를 채우기 위한 Offline payload가 추가
 eva-offline_v3.2.0.tar.gz
 ```
 
-설치자는 Main Harbor endpoint, project 및 인증정보를 준비한다.
+설치자는 Main Harbor endpoint, project 및 인증정보를 준비한다. AWS credential은 인터넷 가능한 Main 서버 또는 준비 서버에서 download/publish 스크립트를 실행할 때만 필요할 수 있으며, 대상 EVA 서버 입력으로 배포하는 것이 기본 계약은 아니다.
 
 ### 5.3 완전 Airgap 설치
 
@@ -383,6 +398,8 @@ eva-offline_v3.2.0.tar.gz
 eva-airgap-bundle_v3.2.0.tar.gz
 eva-airgap-bundle_v3.2.0.tar.gz.sha256
 ```
+
+완전 Airgap 전달물에는 실제 `credentials/aws_key.ini`나 AWS access key material이 포함되면 안 된다. AWS credential은 bundle 생성 전 인터넷 가능한 준비 서버에서만 사용하고, 반입 artifact에는 남기지 않는다.
 
 Bundle 내부:
 
@@ -399,30 +416,26 @@ eva-airgap-bundle_v3.2.0/
 
 ### 5.4 설치자가 작성하는 파일
 
-#### `workspace/inventory/<inventory-file>`
+#### `workspace/inventory/inventory.ini`
 
-```yaml
-all:
-  hosts:
-    eva-node-01:
-      ansible_host: 10.10.10.21
-      ansible_user: eva
-      ansible_ssh_private_key_file: ~/.ssh/eva_install
+```ini
+[eva]
+site-a-eva-node-01 ansible_host=<TARGET_IP_OR_DNS> ansible_user=<SSH_USER> ansible_ssh_private_key_file=<PATH_TO_SSH_KEY>
 ```
 
 단일 서버 로컬 설치:
 
-```yaml
-all:
-  hosts:
-    localhost:
-      ansible_connection: local
+```ini
+[local]
+site-a-localhost ansible_connection=local
 ```
+
+inventory hostname은 IP가 아니라 사이트를 식별하는 고유한 이름을 사용하고, 실제 접속 주소는 `ansible_host`에 넣는다. 기본 sample은 `workspace/inventory/inventory.ini.sample`이다.
 
 #### `workspace/site-values/app.yaml`
 
 ```yaml
-eva-node-01:
+site-a-eva-node-01:
   app:
     browserTitleName: EVA Customer A
     license:
@@ -441,6 +454,16 @@ config:
   host: eva.customer.example
 ```
 
+#### `workspace/credentials/aws_key.ini`
+
+```ini
+aws_access_key_id = <YOUR_ACCESS_KEY>
+aws_secret_access_key = <YOUR_SECRET_KEY>
+region = ap-northeast-2
+```
+
+`region`은 권장 입력값이며, 현재 구현 기준으로는 누락 시 `ap-northeast-2`가 기본값으로 사용된다. 문서와 sample에는 실제 Key 값을 넣지 않는다.
+
 ### 5.5 별도 보안 준비물
 
 - SSH private key. Inventory에는 key 본문이 아니라 경로만 기록한다.
@@ -448,8 +471,45 @@ config:
 - App license API key와 shared key
 - Harbor 또는 외부 Registry 인증정보
 - IAM/SSO 관련 Secret
+- AWS access key / secret access key
 
 Secret은 YAML에 평문으로 직접 기록하기보다 Environment 또는 Secret reference를 사용한다.
+
+### 5.6 AWS Credential 입력 계약
+
+AWS credential은 설치 단계 전체에서 필요한 위치가 서로 다르므로, control node profile과 target server credential 설치를 같은 입력으로 취급하지 않는다.
+
+AS-IS:
+
+- 현재 `awscli` role은 `src/solution/playbooks/site_eva_config.yaml`에서만 호출된다.
+- 현재 role은 `repository_mode=cloud_repository` 이고 `airgap_mode=false` 일 때만 실행된다.
+- 현재 role은 control node의 `<selected-workspace>/credentials/aws_key.ini`를 기본값으로 읽는다.
+- 현재 role은 `aws_key_file` extra var로 절대 경로 override를 받을 수 있다.
+- 현재 role은 `ansible_user | default(ansible_ssh_user)` 사용자의 home 아래 `~/.aws`를 target server에 구성한다.
+- 현재 role의 필수 필드는 `aws_access_key_id`, `aws_secret_access_key`이고 `region`은 없으면 `ap-northeast-2`를 사용한다.
+- 현재 role의 credential 처리 block에는 `no_log: true`가 적용된다.
+- 현재 README의 `aws configure set ... --profile default`는 준비 서버 로컬 profile 설정용이며, role 입력 파일을 대체하지 않는다.
+
+TO-BE:
+
+- 기본 경로는 `<selected-workspace>/credentials/aws_key.ini`로 단순화한다.
+- 명시적 override로 `-e aws_key_file=/absolute/path/aws_key.ini`를 허용한다.
+- 선택 우선순위는 `aws_key_file` → `<selected-workspace>/credentials/aws_key.ini`로 제한한다.
+- 실제 Secret 파일은 Git source, release artifact, Airgap Bundle에 포함하지 않는다.
+- AWS가 필요하지 않은 target에는 credential을 설치하지 않는다.
+
+Repository mode별 목표 운영 원칙:
+
+- `cloud_repository`: target이 AWS ECR, S3를 직접 사용해야 하는 경우에만 target credential 설치를 허용한다.
+- `remote_repository`: 인터넷 가능한 Main 서버나 준비 서버의 profile이 필요할 수 있으나, Main Harbor만 사용하는 target에는 target credential을 배포하지 않는다.
+- `local_repository`: bundle 생성 전 준비 서버에서만 AWS를 사용할 수 있으며, 완전 Airgap target에는 credential을 반입하지 않는다.
+
+후속 구현 TODO:
+
+- `remote_repository`/`local_repository` target에 불필요한 AWS credential이 배포되지 않도록 조건 정리
+- 파일 존재 여부, 필수 필드, 권한 검증 추가
+- targeted regression과 문서/구현 parity 검증 추가
+- 기존 루트 `aws_key.ini` fallback 유지 여부 별도 결정
 
 ## 6. 설치 과정과 생성 YAML의 생명주기
 
@@ -717,6 +777,7 @@ eva audit --operation <operation-id>
 - Infra와 Solution role 탐색 경로 분리
 - `playbook_dir` 기준의 암묵적 `../../..` 계산을 공통 root 계약으로 치환
 - 버전 카탈로그를 `src/infra/version.yaml`, `src/solution/version.yaml`으로 분리
+- AWS credential 입력 계약을 workspace 선택 계약과 `credentials/aws_key.ini` 경로로 정렬
 - 기존 `install/` 자산 경로를 `out/cache/` 또는 Artifact 내부 경로로 변경
 - 생성 config의 producer와 consumer 경로 정렬
 - Airgap 전달물을 `out/dist/`에서 완결된 Bundle로 조립
@@ -729,10 +790,11 @@ eva audit --operation <operation-id>
 4. `playbook_dir` 기반 version/config 참조를 명시적 root 변수로 교체한다.
 5. 다운로드 결과를 `out/cache/`로 전환한다.
 6. 고객 values를 `workspace/site-values/`로 전환한다.
-7. 생성 config와 rendered values를 `out/work/`로 전환한다.
-8. Airgap delivery bundle을 `out/dist/`에서 조립한다.
-9. Cloud/Remote/Airgap parity 후 README 기본 명령을 EVA CLI로 전환한다.
-10. 모든 회귀 검증 이후 기존 루트 경로와 `install/` 혼합 구조를 제거한다.
+7. AWS credential의 mode별 설치 조건, 존재 여부, 권한 검증을 보강한다.
+8. 생성 config와 rendered values를 `out/work/`로 전환한다.
+9. Airgap delivery bundle을 `out/dist/`에서 조립한다.
+10. Cloud/Remote/Airgap parity 후 README 기본 명령을 EVA CLI로 전환한다.
+11. 모든 회귀 검증 이후 기존 루트 경로와 `install/` 혼합 구조를 제거한다.
 
 ### 10.2 반드시 검증할 회귀 범위
 
@@ -742,6 +804,7 @@ eva audit --operation <operation-id>
 - 생성 `eva.yaml`의 producer/consumer 경로
 - App/IAM 고객 values 병합
 - Cloud/Remote/Local repository mode
+- AWS credential 경로 선택, target 설치 조건, Airgap 제외 정책
 - Airgap Deb/Wheel/Harbor bootstrap
 - Qdrant OCI snapshot seed 및 restore
 - Chart 기본값, 고객 override, 최종 resolved values
@@ -776,10 +839,12 @@ eva audit --operation <operation-id>
 - [ ] 올바른 `release-manifest.yaml`과 환경별 Artifact를 확보했다.
 - [ ] 외부 `checksums.sha256`으로 다운로드 파일을 검증했다.
 - [ ] 기본 `workspace/` 또는 외부 `eva_workspace_root`를 확정했다.
-- [ ] `workspace/inventory/` 아래 inventory 파일을 작성했다.
+- [ ] `workspace/inventory/inventory.ini`를 작성했다.
 - [ ] App Chart 기본 values를 확인했다.
 - [ ] 필요한 경우 `workspace/site-values/app.yaml`에 변경분만 작성했다.
 - [ ] 필요한 경우 `workspace/site-values/iam.yaml`에 변경분만 작성했다.
+- [ ] AWS가 필요한 모드라면 준비 서버 profile 또는 `aws_key.ini` 입력 위치를 현재 계약에 맞게 준비했다.
+- [ ] 실제 `aws_key.ini`가 Git, release artifact, Airgap Bundle에 포함되지 않음을 확인했다.
 - [ ] SSH key, TLS 인증서 및 Secret을 준비했다.
 - [ ] `precondition.yaml`과 `eva.yaml`을 검토했다.
 - [ ] 대상, 릴리스, 설치 순서, resolved values와 diff를 검토했다.

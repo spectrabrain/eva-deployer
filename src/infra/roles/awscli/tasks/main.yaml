@@ -63,9 +63,20 @@
 - name: Configure AWS CLI credentials from aws_key.ini
   no_log: true
   block:
+    - name: Resolve aws_key.ini source path
+      ansible.builtin.set_fact:
+        awscli_key_file_effective: "{{ aws_key_file | default(eva_workspace_credentials_root ~ '/aws_key.ini', true) }}"
+      changed_when: false
+
+    - name: Validate aws_key.ini source path
+      ansible.builtin.assert:
+        that:
+          - awscli_key_file_effective | regex_search('^/') is not none
+        fail_msg: "aws_key_file must be an absolute path. Resolved path: {{ awscli_key_file_effective }}"
+
     - name: Read aws_key.ini content
       ansible.builtin.set_fact:
-        awscli_key_raw: "{{ lookup('ansible.builtin.file', eva_repo_root ~ '/aws_key.ini') }}"
+        awscli_key_raw: "{{ lookup('ansible.builtin.file', awscli_key_file_effective) }}"
       changed_when: false
 
     - name: Extract AWS credentials from aws_key.ini

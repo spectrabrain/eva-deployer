@@ -65,7 +65,7 @@
   block:
     - name: Read aws_key.ini content
       ansible.builtin.set_fact:
-        awscli_key_raw: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/aws_key.ini') }}"
+        awscli_key_raw: "{{ lookup('ansible.builtin.file', (eva_repo_root | default(playbook_dir)) ~ '/aws_key.ini') }}"
       changed_when: false
 
     - name: Extract AWS credentials from aws_key.ini

@@ -14,15 +14,15 @@
     eva_app_name: "{{ eva_app_name | default('eva-app') }}"
     eva_app_deploy_version: "{{ eva_app_deploy_version | mandatory }}"
     eva_app_workdir: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}"
-    eva_app_deploy_values_dir: "{{ eva_app_deploy_values_dir | default((eva_deploy_root | default(playbook_dir ~ '/deploy')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/app') }}"
-    eva_app_values_file: "{{ eva_app_values_file | default(playbook_dir ~ '/values/app.yaml') }}"
+    eva_app_deploy_values_dir: "{{ eva_app_deploy_values_dir | default((eva_deploy_root | default((eva_repo_root | default(playbook_dir)) ~ '/deploy')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/app') }}"
+    eva_app_values_file: "{{ eva_app_values_file | default((eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/app.yaml') }}"
     eva_app_values_host: "{{ ansible_host | default(inventory_hostname) }}"
     eva_app_values_dest: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}/app-host-override.yaml"
     eva_app_kubeconfig: "{{ eva_app_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_app_chart_ref: "{{ eva_app_chart_ref | default('eva-app/eva-app') }}"
     eva_app_chart_version: "{{ eva_app_chart_version | mandatory }}"
-    eva_app_offline_dir: "{{ eva_app_offline_dir | default(playbook_dir ~ '/install/eva-app') }}"
-    eva_app_offline_chart_tgz: "{{ eva_app_offline_chart_tgz | default((eva_app_offline_dir | default(playbook_dir ~ '/install/eva-app')) ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}"
+    eva_app_offline_dir: "{{ eva_app_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-app') }}"
+    eva_app_offline_chart_tgz: "{{ eva_app_offline_chart_tgz | default((eva_app_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-app')) ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}"
     eva_app_backend_host: "{{ eva_app_backend_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
     eva_app_backend_secure: "{{ eva_app_backend_secure | default(false) }}"
     eva_app_tls_host_path: >-
@@ -188,7 +188,7 @@
 - name: Render EVA App k3s override values on control node
   no_log: true
   ansible.builtin.template:
-    src: "{{ playbook_dir }}/values/app-k3s-override.yaml.j2"
+    src: "{{ (eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/app-k3s-override.yaml.j2' }}"
     dest: "{{ eva_app_deploy_values_dir }}/app-k3s-override.yaml"
     mode: "0644"
   delegate_to: localhost

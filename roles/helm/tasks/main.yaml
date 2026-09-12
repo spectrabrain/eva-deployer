@@ -1,7 +1,7 @@
 - name: Resolve Helm install architecture and paths
   ansible.builtin.set_fact:
     helm_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
-    helm_offline_dir: "{{ playbook_dir }}/install/helm"
+    helm_offline_dir: "{{ (eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/helm' }}"
   changed_when: false
 
 - name: Download Helm install script from internet

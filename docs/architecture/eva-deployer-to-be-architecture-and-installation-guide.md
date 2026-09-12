@@ -22,6 +22,7 @@
 | `src/` | Infra 및 Solution의 불변 배포 정의 | 제품 개발자 |
 | `workspace/` | 고객 및 사이트별 가변 배포 입력 | 설치자/운영자 |
 | `scripts/` | 다운로드, bootstrap, publish 보조 자동화 | 개발자/운영 도구 |
+| `prompts/` | 반복 운영 작업을 위한 AI Agent 지침 | 개발자/운영 도구 |
 | `tools/eva/` | 공식 EVA Tool CLI 제품 코드 | 도구 개발자 |
 | `out/` | 캐시, 렌더링, 상태, 최종 배포물 | 도구/CI |
 
@@ -46,7 +47,8 @@ eva-deployer/
 ├── scripts/
 │   ├── download/
 │   ├── install/
-│   └── publish/
+│   ├── publish/
+│   └── sync/
 ├── tools/
 │   └── eva/
 │       ├── cmd/
@@ -65,7 +67,10 @@ eva-deployer/
 │   └── dist/
 ├── docs/
 │   ├── architecture/
-│   └── runbooks/
+│   └── operations/
+├── prompts/
+│   └── codex/
+│       └── infra-ansible.md
 ├── README.md
 └── .gitignore
 ```
@@ -187,7 +192,7 @@ eva-sites/
     └── credentials/
 ```
 
-### 2.3 `scripts/`와 `tools/eva/`의 경계
+### 2.3 `scripts/`, `prompts/`, `tools/eva/`의 경계
 
 #### `scripts/`
 
@@ -197,7 +202,8 @@ eva-sites/
 scripts/
 ├── download/    # 인터넷 환경의 자산 다운로드
 ├── install/     # 대상 서버 bootstrap
-└── publish/     # Harbor image 및 OCI Artifact 게시
+├── publish/     # Harbor image 및 OCI Artifact 게시
+└── sync/        # 개발/운영 파일 동기화 보조 자동화
 ```
 
 주요 대상:
@@ -206,6 +212,18 @@ scripts/
 - Python/Ansible wheel 및 Deb 준비
 - Docker, Ansible, Harbor bootstrap
 - Image 및 Qdrant snapshot의 Harbor publish
+
+#### `prompts/`
+
+반복적인 개발·운영 작업에서 AI Agent가 따라야 할 버전 관리된 지침이다.
+
+```text
+prompts/
+└── codex/
+    └── infra-ansible.md    # Infra Ansible 실행·검증·이력 기록 지침
+```
+
+Prompt는 실행 결과나 고객별 입력을 저장하지 않으며, Secret·credential·inventory 원문을 포함하지 않는다.
 
 #### `tools/eva/`
 
@@ -814,7 +832,7 @@ eva audit --operation <operation-id>
 
 | 항목 | 권고 |
 | --- | --- |
-| 최상위 구조 | `src`, `workspace`, `scripts`, `tools`, `out`, `docs` |
+| 최상위 구조 | `src`, `workspace`, `scripts`, `prompts`, `tools`, `out`, `docs` |
 | `scripts`와 `tools` | 최상위에서 분리. `tools`에는 EVA CLI 제품 코드만 배치 |
 | `deploy/` 폴더 | 현재는 만들지 않음. Deployer 자체 CI/Helm 책임이 실제로 생길 때 추가 |
 | 고객 입력 | `workspace/` 또는 외부 site workspace |

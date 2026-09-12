@@ -17,3 +17,4 @@ eva_workspace_root: >-
     | regex_replace('/+$', '')
   }}
 eva_site_values_root: "{{ (eva_workspace_root | regex_replace('/+$', '')) ~ '/site-values' }}"
+eva_workspace_credentials_root: "{{ (eva_workspace_root | regex_replace('/+$', '')) ~ '/credentials' }}"

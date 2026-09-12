@@ -91,7 +91,7 @@ B 에서 추가로 필요한 것
    `ANSIBLE_AIRGAP_REQUIREMENTS="ansible-core==..."` 단축로는 쓸 수 없습니다
 2. **NVIDIA 드라이버 offline 리포** — gpu role 이 `lspci` 로 GPU 를 감지하면 드라이버부터 설치합니다 (03번 참고).
    GPU 가 없거나 건너뛰려면 `-e gpu_skip_driver_update=true`
-3. **Ubuntu 릴리스 일치** — `base` role 이 `install/apt/debs` 의 `.deb` 를 dpkg 로 설치합니다.
+3. **Ubuntu 릴리스 일치** — `base` role 이 `out/cache/apt/debs` 의 `.deb` 를 dpkg 로 설치합니다.
    준비 서버와 대상 서버의 릴리스·패치 레벨이 다르면 `libc6` 같은 버전 의존성에서 깨집니다
 
 ```bash
@@ -310,42 +310,42 @@ docker image inspect "$REPO:<태그>" --format '{{.Architecture}}/{{.Os}}'
 ### 06. tar 로 묶어 전송 · **[준비]**
 
 ```bash
-docker save -o install/images/repository-images.tar \
-  $(cat install/images/images-pulled.txt)
-ls -lh install/images/repository-images.tar     # 수 GB — 10K 면 01번 문제
+docker save -o out/cache/images/repository-images.tar \
+  $(cat out/cache/images/images-pulled.txt)
+ls -lh out/cache/images/repository-images.tar     # 수 GB — 10K 면 01번 문제
 
 # Qdrant Harbor artifact seed의 입력도 같은 bundle에 포함되어야 합니다.
-test -s install/qdrant-snapshots/eva_manual_qwen3vl_20260824.snapshot
+test -s out/cache/qdrant-snapshots/eva_manual_qwen3vl_20260824.snapshot
 
 rsync -a --info=progress2 --partial \
-  --exclude '.venv' --exclude '.git' --exclude 'install/images/rendered' \
+  --exclude '.venv' --exclude '.git' --exclude 'out/cache/images/rendered' \
   ./ eva@10.158.200.113:/home/eva/eva-deployer-jj/
 
-du -sh install/*
-ssh eva@10.158.200.113 'du -sh ~/eva-deployer-jj/install/*'
+du -sh out/cache/*
+ssh eva@10.158.200.113 'du -sh ~/eva-deployer-jj/out/cache/*'
 ```
 
 대용량 단일 `docker save`가 멈추거나 USB/rsync 재개 단위를 작게 해야 하면 image별 tar를 대신 씁니다.
 완성된 파일은 `[skip]`하므로 중단 후 같은 블록을 다시 실행할 수 있습니다.
 
 ```bash
-mkdir -p install/images/tars
+mkdir -p out/cache/images/tars
 n=0
 while IFS= read -r image; do
   n=$((n + 1))
-  archive=$(printf 'install/images/tars/%02d-%s.tar' "$n" "$(basename "${image%%:*}")")
+  archive=$(printf 'out/cache/images/tars/%02d-%s.tar' "$n" "$(basename "${image%%:*}")")
   if [ -s "$archive" ]; then echo "[skip] $archive"; continue; fi
   echo "[save] $image"
   docker save "$image" > "$archive"
   ls -lh "$archive"
-done < install/images/images-pulled.txt
+done < out/cache/images/images-pulled.txt
 
-find install/images/tars -name '*.tar*' -size -10M -print
+find out/cache/images/tars -name '*.tar*' -size -10M -print
 ```
 
 마지막 `find`는 아무것도 출력하지 않아야 합니다. 수동으로 USB bundle을 구성한다면 `images-pulled.txt`,
-image tar(또는 `repository-images.tar`), `install/qdrant-snapshots/`, `install/qdrant/`,
-`install/eva-agent/`, `install/tools/oras`, Agent 모델과 deployer의 role/playbook 전체를 함께 복사합니다.
+image tar(또는 `repository-images.tar`), `out/cache/qdrant-snapshots/`, `out/cache/qdrant/`,
+`out/cache/eva-agent/`, `out/cache/tools/oras`, Agent 모델과 deployer의 role/playbook 전체를 함께 복사합니다.
 
 ---
 
@@ -355,18 +355,18 @@ image tar(또는 `repository-images.tar`), `install/qdrant-snapshots/`, `install
 
 ```bash
 cd ~/eva-deployer-jj
-docker load -i install/images/repository-images.tar
+docker load -i out/cache/images/repository-images.tar
 
 while read -r i; do
   printf '%-72s %s\n' "$i" \
     "$(docker image inspect "$i" --format '{{.Architecture}}/{{.Os}}' 2>/dev/null)"
-done < install/images/images-pulled.txt
+done < out/cache/images/images-pulled.txt
 ```
 
 image별 tar를 만든 경우에는 위 첫 줄 대신 다음을 실행합니다.
 
 ```bash
-for archive in install/images/tars/*.tar*; do
+for archive in out/cache/images/tars/*.tar*; do
   echo "[load] $archive"
   docker load -i "$archive"
 done

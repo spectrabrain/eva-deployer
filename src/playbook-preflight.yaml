@@ -24,11 +24,14 @@
     that:
       - eva_workspace_root | regex_search('^/') is not none
       - eva_site_values_root == ((eva_workspace_root | regex_replace('/+$', '')) ~ '/site-values')
+      - eva_workspace_credentials_root == ((eva_workspace_root | regex_replace('/+$', '')) ~ '/credentials')
     fail_msg: >-
-      eva_workspace_root 는 절대 경로여야 하며 site-values 는 같은 Workspace에서만 파생됩니다.
+      eva_workspace_root 는 절대 경로여야 하며 site-values 와 credentials 는 같은 Workspace에서만 파생됩니다.
       선택된 Workspace: {{ eva_workspace_root }}
       계산된 site-values: {{ eva_site_values_root }}
       기대 경로: {{ (eva_workspace_root | regex_replace('/+$', '')) ~ '/site-values' }}
+      계산된 credentials: {{ eva_workspace_credentials_root }}
+      기대 credentials: {{ (eva_workspace_root | regex_replace('/+$', '')) ~ '/credentials' }}
       예시 1) 기본값 사용: {{ eva_default_workspace_root }}
       예시 2) 환경변수: EVA_WORKSPACE_ROOT=/data/eva-sites/customer-a
       예시 3) extra var: -e eva_workspace_root=/data/eva-sites/customer-a

@@ -1,0 +1,15 @@
+# Copy this file to workspace/inventory/inventory.ini and uncomment the example you want to use.
+# Use a stable inventory hostname as the site identifier on the left side.
+# Do not use the target IP address as the inventory hostname.
+
+# Remote install example: SSH key authentication
+# [eva]
+# site-a-eva-node-01 ansible_host=<TARGET_IP_OR_DNS> ansible_user=<SSH_USER> ansible_ssh_private_key_file=<PATH_TO_SSH_KEY>
+
+# Remote install example: SSH password authentication
+# [eva]
+# site-a-eva-node-01 ansible_host=<TARGET_IP_OR_DNS> ansible_user=<SSH_USER> ansible_password=<SSH_PASSWORD> ansible_become=true ansible_become_password=<SUDO_PASSWORD>
+
+# Local install example
+# [local]
+# site-a-localhost ansible_connection=local

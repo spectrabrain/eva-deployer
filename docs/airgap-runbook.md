@@ -18,7 +18,7 @@ vision은 같은 bundle·Harbor 준비 절차를 사용합니다.
 |---|---|
 | 대상 노드 | evashee / 10.158.200.113 |
 | 서비스 host | magok.eva.lge.com |
-| Registry | localhost:32080 / project `eva` |
+| Registry | `<NODE_IP_OR_DNS>:32080` / project `eva` |
 | eva-app | chart 3.1.4 · app 3.1.2 · 경로 `/` |
 | eva-iam | chart 3.1.0 · 경로 `/iam` |
 | eva-agent | chart / deploy 3.1.0 · agent · agent-init · vllm · qdrant |
@@ -53,15 +53,15 @@ Harbor profile의 `SNAPSHOT_SPECS`는 아래 형식이며, values 파일이 arti
 eva_manual_qwen3vl_collections|eva_manual_qwen3vl_20260824.snapshot|eva_manual_qwen3vl
 ```
 
-단일 노드 Local Harbor(`repository_registry=localhost:32080`, `repository_project=eva`)에는 다음 네 항목이
-있어야 합니다.
+Local Harbor(`repository_registry=<NODE_IP_OR_DNS>:32080`, `repository_project=eva`)에는 다음 네 항목이
+있어야 합니다. 이 주소는 Harbor 노드와 Pod에서 모두 도달 가능해야 하며 `localhost`를 사용하지 않습니다.
 
 | 항목 | Harbor 주소 |
 |---|---|
-| Qdrant 본체 이미지 | `localhost:32080/eva/qdrant:v1.18.2` |
-| snapshot-sync sidecar 이미지 | `localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0` |
-| chart test 이미지 | `localhost:32080/eva/bci-base:latest` |
-| snapshot OCI artifact | `localhost:32080/eva/qdrant-snapshots:<artifact-tag>` |
+| Qdrant 본체 이미지 | `<NODE_IP_OR_DNS>:32080/eva/qdrant:v1.18.2` |
+| snapshot-sync sidecar 이미지 | `<NODE_IP_OR_DNS>:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0` |
+| chart test 이미지 | `<NODE_IP_OR_DNS>:32080/eva/bci-base:latest` |
+| snapshot OCI artifact | `<NODE_IP_OR_DNS>:32080/eva/qdrant-snapshots:<artifact-tag>` |
 
 `bci-base`는 일반 Pod가 아니라 `helm test`에 쓰입니다. Airgap test에서도 외부 registry를 찾지 않게
 image 목록과 Harbor에 함께 준비합니다.
@@ -381,25 +381,32 @@ docker · Harbor 가 없을 때만 앞 두 줄을 실행합니다.
 
 ```bash
 sudo ./scripts/install/install_docker.sh --airgap        # 후 SSH 재접속
-./scripts/install/setup_harbor.sh --hostname localhost \
+export HARBOR_HOST=<NODE_IP_OR_DNS>
+export HARBOR_REGISTRY="${HARBOR_HOST}:32080"
+./scripts/install/setup_harbor.sh \
+  --hostname "$HARBOR_HOST" \
+  --registry-endpoint "$HARBOR_REGISTRY" \
   --install-root ~/.local/share/eva-harbor
 
 PULL_SOURCE_IMAGES=false IMAGE_LIST=out/cache/images/images-pulled.txt \
-  REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
+  REPOSITORY_REGISTRY="$HARBOR_REGISTRY" REPOSITORY_PROJECT=eva \
   ./scripts/publish/push_images_to_repository.sh
 
 PULL_SOURCE_IMAGES=false IMAGE_LIST=out/cache/images/infra-images-pulled.txt \
-  REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
+  REPOSITORY_REGISTRY="$HARBOR_REGISTRY" REPOSITORY_PROJECT=eva \
 ./scripts/publish/push_images_to_repository.sh
 ```
 
-Harbor 설치가 `out/work/config/harbor-endpoint.yaml`을 생성합니다. 단일 서버에서는 agent playbook이 이
-파일의 Pod 접근 endpoint를 자동으로 Qdrant snapshot sidecar에 적용합니다. Harbor와 k3s 서버가
-다르면 이 파일도 배포 controller로 옮기고, `site_infra.yaml` 및 `site_eva_agent.yaml` 실행에
-`-e @out/work/config/harbor-endpoint.yaml`을 추가합니다. 별도 Harbor 설치에서는 `--hostname`과
-`--registry-endpoint <내부 DNS/IP:32080>`을 실제 접근 주소로 지정합니다. metadata에는 비밀번호를
-넣지 않으므로 별도 Harbor 서버의 agent 배포에는 `-e harbor_admin_password='<Harbor 비밀번호>'`도
-지정합니다.
+Harbor 설치가 `out/work/config/harbor-endpoint.yaml`을 생성합니다. 이 파일에는 `harbor_registry`,
+`repository_registry`, `repository_project`가 기록됩니다. 이후 `site_infra.yaml`과 모든 Solution playbook에
+`-e @out/work/config/harbor-endpoint.yaml`을 추가해 k3s image pull과 Qdrant snapshot sidecar가 동일한
+Pod 접근 endpoint를 사용하게 하세요. Harbor와 k3s 서버가 다르면 이 파일도 배포 controller로 옮깁니다.
+metadata에는 비밀번호를 넣지 않으므로 별도 Harbor 서버의 agent 배포에는
+`-e harbor_admin_password='<Harbor 비밀번호>'`도 지정합니다.
+
+Harbor 서버에서 image/snapshot seed를 실행할 때는 `harbor.yml`의 hostname과 registry endpoint가
+일치하면 스크립트가 관리자 비밀번호를 자동으로 읽습니다. 다른 Harbor endpoint 또는 Harbor 설정 파일이
+없는 controller에서는 `REPOSITORY_PASSWORD` 또는 `HARBOR_ADMIN_PASSWORD`를 명시하세요.
 
 스크립트가 `eva/<이름>` 으로 올리면서, **레지스트리 주소가 없는 이미지는 Docker Hub 원본 경로로도**
 한 벌 더 올립니다 (`library/busybox`, `library/mysql`, `bitnami/kubectl` …). 다음 단계의 mirror 가 그 경로를 찾습니다.
@@ -426,7 +433,7 @@ Qdrant를 배포하기 전에 한 번 수행하는 별도 준비 단계입니다
 
 ```bash
 EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
-  REPOSITORY_REGISTRY=localhost:32080 REPOSITORY_PROJECT=eva \
+  REPOSITORY_REGISTRY="$HARBOR_REGISTRY" REPOSITORY_PROJECT=eva \
   ./scripts/publish/push_qdrant_snapshots_to_harbor.sh
 
 cat out/cache/qdrant-snapshots/harbor-artifacts.txt
@@ -448,7 +455,7 @@ artifact가 이미 있으면 `[skip]`으로 끝나므로, 이전 Local Harbor/bu
 `SNAPSHOT_SPECS` 첫 필드와 일치해야 하며, 현재는 다음 주소입니다.
 
 ```text
-localhost:32080/eva/qdrant-snapshots:eva_manual_qwen3vl_collections
+<NODE_IP_OR_DNS>:32080/eva/qdrant-snapshots:eva_manual_qwen3vl_collections
 ```
 
 이 단계를 통과해야 이후 Qdrant sidecar의 `oras pull`이 외부가 아닌 Harbor의
@@ -468,25 +475,26 @@ mirror 는 차트를 건드리지 않고 그 요청을 Harbor 로 돌립니다.
 
 ```bash
 ansible-playbook -i 'localhost,' -c local src/infra/playbooks/site_infra.yaml -K \
-  -e repository_mode=local_repository -e repository_registry=localhost:32080
+  -e repository_mode=local_repository \
+  -e @out/work/config/harbor-endpoint.yaml
 ```
 
 **k3s 가 이미 있을 때** — 직접 씁니다.
 
 ```bash
-sudo tee /etc/rancher/k3s/registries.yaml >/dev/null <<'EOF'
+sudo tee /etc/rancher/k3s/registries.yaml >/dev/null <<EOF
 mirrors:
-  "localhost:32080":
+  "${HARBOR_REGISTRY}":
     endpoint:
-      - "http://localhost:32080"
+      - "http://${HARBOR_REGISTRY}"
   "docker.io":
     endpoint:
-      - "http://localhost:32080"
+      - "http://${HARBOR_REGISTRY}"
 configs:
-  "localhost:32080":
+  "${HARBOR_REGISTRY}":
     auth:
       username: "admin"
-      password: "EVA123@"
+      password: "${HARBOR_ADMIN_PASSWORD:-EVA123@}"
     tls:
       insecure_skip_verify: true
 EOF
@@ -496,9 +504,9 @@ sleep 25
 sudo k3s crictl pull docker.io/library/busybox:latest        && echo "busybox OK"
 sudo k3s crictl pull docker.io/bitnami/kubectl:latest        && echo "kubectl OK"
 sudo k3s crictl pull docker.io/library/mysql:8.0.42-bookworm && echo "mysql OK"
-sudo k3s crictl pull localhost:32080/eva/eva-app:3.1.2       && echo "eva-app OK"
-sudo k3s crictl pull localhost:32080/eva/qdrant:v1.18.2      && echo "qdrant OK"
-sudo k3s crictl pull localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0 \
+sudo k3s crictl pull "${HARBOR_REGISTRY}/eva/eva-app:3.1.2" && echo "eva-app OK"
+sudo k3s crictl pull "${HARBOR_REGISTRY}/eva/qdrant:v1.18.2" && echo "qdrant OK"
+sudo k3s crictl pull "${HARBOR_REGISTRY}/eva/eva-agent-qdrant-snapshot-sync:0.1.0" \
   && echo "qdrant snapshot-sync OK"
 ```
 
@@ -597,7 +605,7 @@ eva-app 이 루트를 쓰므로 eva-iam 은 `/iam` 서브패스로 둡니다.
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_iam.yaml -K \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
+  -e @out/work/config/harbor-endpoint.yaml \
   -e eva_iam_host=magok.eva.lge.com \
   -e eva_iam_node_user=eva \
   -e eva_iam_ingress_path=/iam \
@@ -635,7 +643,7 @@ $kc get clients/$id/client-secret --config "$cfg" -r eva-iam \
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_app.yaml -K \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
+  -e @out/work/config/harbor-endpoint.yaml \
   -e eva_app_backend_host=magok.eva.lge.com \
   -e eva_app_backend_secure=true \
   -e eva_app_sso_base_url=https://magok.eva.lge.com/iam \
@@ -654,7 +662,8 @@ GPU 개수와 MIG 상태를 `nvidia-smi` 로 자동 감지해 만들어지므로
 
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_config.yaml -K \
-  -e repository_mode=local_repository -e repository_registry=localhost:32080
+  -e repository_mode=local_repository \
+  -e @out/work/config/harbor-endpoint.yaml
 
 cat out/work/config/localhost/eva.yaml
 ```
@@ -669,8 +678,7 @@ agent · agent-init · vllm · qdrant 네 릴리스가 함께 올라갑니다.
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.yaml -K \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -e eva_agent_vllm_profile=PRO6000-MIGx4 \
   -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
   -e eva_agent_qdrant_snapshot_source=harbor
@@ -682,11 +690,9 @@ ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.
   `<harbor_base_url>`/`<harbor_registry>`/`<harbor_project>` placeholder를
   `repository_registry`/`repository_project`로 치환해 Qdrant·chart test image를 Harbor로 고정합니다.
 - Qdrant Harbor snapshot profile에서는 `repository_registry`와 `repository_project`가 Qdrant 본체,
-  snapshot-sync sidecar, OCI snapshot artifact의 registry/repository가 됩니다. 단일 노드 Local Harbor는
-  `localhost:32080`을 씁니다. 이때 role은 Pod 안의 ORAS가 host loopback을 보지 않도록 node
-  InternalIP:32080을 snapshot endpoint로 자동 변환하며, `harbor-endpoint.yaml`이 있으면 그 파일의
-  endpoint를 우선 적용합니다. 여러 노드/별도 Harbor는 실제 접근 가능한 Harbor hostname/IP:port를
-  `harbor-endpoint.yaml`로 전달해 `repository_registry`에 적용합니다.
+  snapshot-sync sidecar, OCI snapshot artifact의 registry/repository가 됩니다. Local Harbor도
+  `<NODE_IP_OR_DNS>:32080`을 사용하며, `harbor-endpoint.yaml`을 전달하면 이 endpoint가 image와
+  ORAS artifact pull에 함께 적용됩니다.
 - `qdrant-snapshot-harbor`는 Harbor 설치 과정에서 생기는 값이 아니라, Qdrant Harbor snapshot
   mode에서 role이 Helm 설치 직전에 만드는 Qdrant 전용 Kubernetes Secret입니다. 이름은 고정이고
   사용자/비밀번호는 `harbor_admin_user`/`harbor_admin_password`를 사용합니다. 표준 Local Harbor
@@ -696,8 +702,8 @@ ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.
 - Harbor snapshot OCI artifact는 08a의 별도 준비 단계에서 seed합니다. 이 playbook은 기존 artifact를
   `oras pull`하는 Kubernetes Secret과 Qdrant workload만 구성하며 Harbor에 artifact를 push하지 않습니다.
 
-여러 k3s node 또는 별도 Harbor에서는 `localhost:32080` 대신 **Pod와 모든 node에서 도달 가능한**
-DNS/IP:port를 씁니다. Harbor endpoint metadata가 있는 deployment controller에서는 다음처럼 실행합니다.
+단일/다중 k3s node와 별도 Harbor 모두 **Pod와 모든 node에서 도달 가능한** DNS/IP:port를 사용합니다.
+Harbor endpoint metadata가 있는 deployment controller에서는 다음처럼 실행합니다.
 
 ```bash
 ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_agent.yaml \
@@ -708,8 +714,8 @@ ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_agent.yaml \
   -e eva_agent_qdrant_snapshot_source=harbor
 ```
 
-Pod 내부의 `localhost`는 Harbor host가 아니라 그 Pod 자신입니다. 따라서 snapshot sidecar의
-`HARBOR_REGISTRY`를 `localhost:32080`으로 수동 고정하지 않습니다.
+Pod 내부의 `localhost`는 Harbor host가 아니라 그 Pod 자신입니다. snapshot sidecar에는 metadata에 기록된
+`<NODE_IP_OR_DNS>:32080` endpoint를 사용합니다.
 
 배포가 끝나기 전에 Qdrant snapshot sidecar가 artifact를 pull하고 collection을 restore합니다. 다음 검증에서
 `pulling`, `restoring`, Ready와 collection 응답을 모두 확인합니다.
@@ -753,9 +759,9 @@ Qdrant만 재배포하더라도 `images-pulled.txt` 또는 `SNAPSHOT_SPECS`가 �
 ### 17. eva-vision 배포 · **[대상]**
 
 ```bash
-ansible-playbook -i 'localhost,' -c local site_eva_vision.yaml -K \
+ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_vision.yaml -K \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080
+  -e @out/work/config/harbor-endpoint.yaml
 ```
 
 MIG 설정은 `eva.yaml` 에서 읽습니다.

@@ -43,6 +43,7 @@ Ansible playbook은 저장소 내부의 제품 소스(`src/`)와 설치자 입�
 - 기본 workspace: `<repo>/workspace`
 - 외부 workspace 지정: `-e eva_workspace_root=/abs/path` 또는 `EVA_WORKSPACE_ROOT=/abs/path`
 - site values 경로: 항상 `<선택된 workspace>/site-values`
+- AWS credential 기본 경로: 항상 `<선택된 workspace>/credentials/aws_key.ini`
 - 생성 결과 경로: `out/work/config`, `out/work/rendered`
 
 하나의 실행에서는 하나의 workspace만 사용합니다. repo-local `workspace/`와 외부 workspace를 fallback으로 섞지 않습니다.
@@ -51,7 +52,7 @@ Ansible playbook은 저장소 내부의 제품 소스(`src/`)와 설치자 입�
 
 ## 1. 사전 준비 및 Repository 준비
 
-이 섹션에서는 설치 전에 필요한 패키지·asset·이미지·Harbor를 준비합니다. 먼저 아래에서 하나의 Repository 모드를 선택하고, 해당 모드의 절차만 진행하세요. 실제 Ansible 설치 명령은 이후 `인프라 설치`, `EVA 배포`, `n8n 설치` 섹션에서 같은 모드로 실행합니다.
+이 섹션에서는 설치 전에 필요한 패키지·asset·이미지·Harbor를 준비합니다. 먼저 아래에서 하나의 Repository 모드를 선택하고, 해당 모드의 절차만 진행하세요. 실제 Ansible 설치 명령은 이후 `인프라 설치`, `EVA IAM 설치`, `EVA 배포`, `n8n 설치` 섹션에서 같은 모드로 실행합니다.
 
 > **설치 사용자 계정은 `eva` 사용을 권장합니다.**
 > 
@@ -143,13 +144,102 @@ sudo dpkg --audit
 
 ### 1-4. Cloud/Remote/Local 준비 서버: AWS 인증
 
-ECR 이미지, S3 모델, release asset을 인터넷 가능 환경에서 받을 때 필요합니다. `cloud_repository`는 대상 서버(또는 Ansible 실행 서버)에, `remote_repository`와 `local_repository`는 인터넷 가능 준비 서버에 설정하세요.
+현재 저장소에는 AWS 인증 입력이 두 흐름으로 나뉘어 있습니다. 이 둘은 목적이 다르며, 서로를 자동으로 대체하지 않습니다.
+
+#### A. AS-IS: Ansible `awscli` role 입력 계약
+
+현재 구현 기준으로 `awscli` role은 아래처럼 동작합니다.
+
+- 호출 playbook: `src/solution/playbooks/site_eva_config.yaml`
+- 실행 조건: `repository_mode=cloud_repository` 이고 `airgap_mode=false` 인 경우만 실행
+- 읽는 위치: control node의 `<selected-workspace>/credentials/aws_key.ini`
+- 명시적 override: `-e aws_key_file=/absolute/path/aws_key.ini`
+- 읽는 주체: Ansible control node의 `lookup('ansible.builtin.file', ...)`
+- 설정 대상: target server의 `ansible_user | default(ansible_ssh_user)` 사용자 홈 아래 `~/.aws`
+- 필수 필드: `aws_access_key_id`, `aws_secret_access_key`
+- region 처리: 파일에 없으면 `ap-northeast-2` 기본값 사용
+- 비노출 처리: credential parsing과 `aws configure set` block 전체에 `no_log: true` 적용
+
+현재 role이 기대하는 파일 형식은 아래와 같습니다.
+
+```ini
+aws_access_key_id = <YOUR_ACCESS_KEY>
+aws_secret_access_key = <YOUR_SECRET_KEY>
+region = ap-northeast-2
+```
+
+현재 구현을 그대로 사용할 때는 실제 Secret 파일을 선택된 workspace의 `credentials/aws_key.ini`에 두어야 합니다. 필요하면 `aws_key_file` extra var로 절대 경로를 명시적으로 지정할 수 있습니다.
+
+#### B. 현재 README의 `aws configure` 안내가 담당하는 역할
+
+아래 명령은 Ansible `awscli` role 입력 파일을 만드는 절차가 아닙니다. 인터넷이 가능한 준비 서버 또는 control node에서 다운로드 스크립트와 `AWS_PROFILE=default` 기반 명령을 실행하기 위한 로컬 AWS CLI profile 설정입니다.
 
 ```bash
 aws configure set aws_access_key_id <AK> --profile default
 aws configure set aws_secret_access_key <SK> --profile default
 aws configure set region ap-northeast-2 --profile default
 ```
+
+따라서 현재 README의 `aws configure` 안내는 `scripts/download/*`, 일부 publish flow, S3/ECR 접근이 필요한 준비 서버 작업에는 유효합니다. 다만 이것만으로 target server에 대한 Ansible `awscli` role 입력이 충족되지는 않습니다.
+
+#### C. 현재 기본 계약
+
+현재 구현과 문서 계약은 아래 경로로 맞춰져 있습니다.
+
+```text
+<selected-workspace>/
+├── inventory/
+│   └── inventory.ini
+├── site-values/
+│   ├── app.yaml
+│   └── iam.yaml
+└── credentials/
+    └── aws_key.ini
+```
+
+- 기본 경로: `<selected-workspace>/credentials/aws_key.ini`
+- 명시적 override: `-e aws_key_file=/absolute/path/aws_key.ini`
+- 선택 우선순위:
+  1. `aws_key_file`
+  2. `<selected-workspace>/credentials/aws_key.ini`
+
+현재 구현은 위 계약을 따릅니다. 기존 `<repo>/aws_key.ini` 직접 참조는 제거되었습니다.
+
+Migration note:
+
+- 이전: `site_eva_config.yaml`의 `awscli` role이 control node의 `<repo>/aws_key.ini`를 읽음
+- 현재: 선택된 workspace의 `credentials/aws_key.ini`를 기본값으로 사용하고, 필요 시 `aws_key_file`로 명시적 override
+- 후속 구현 필요: mode별 credential 설치 조건 세분화, 권한/존재 검증 보강, regression 확대
+
+#### D. Repository mode별 AWS credential 사용 위치
+
+`cloud_repository`
+
+- 대상 서버가 AWS ECR, S3 등에 직접 접근해야 할 수 있습니다.
+- 현재 구현에서는 `site_eva_config.yaml` 실행 시 control node의 `<selected-workspace>/credentials/aws_key.ini`를 기본값으로 읽어 target user의 `~/.aws`를 구성합니다.
+- AWS CLI binary 설치와 credential 설정은 같은 role 안에 있지만, 책임상으로는 별도 항목입니다.
+
+`remote_repository`
+
+- 인터넷 가능한 Main 서버 또는 준비 서버가 AWS에서 asset, image, model을 다운로드할 때는 준비 서버의 AWS CLI profile이 필요할 수 있습니다.
+- 대상 EVA 서버가 Main Harbor만 사용한다면 target server에 AWS credential을 배포할 필요는 없습니다.
+- 현재 구현도 `remote_repository`를 `airgap_mode=true`로 간주하므로 `awscli` role은 실행되지 않습니다.
+
+`local_repository`
+
+- 인터넷 가능한 준비 서버가 Airgap Bundle과 image/model cache를 준비할 때 AWS credential이 필요할 수 있습니다.
+- 완전 Airgap 대상 서버에는 AWS credential을 전달하지 않는 것을 원칙으로 합니다.
+- 실제 `aws_key.ini`는 Airgap Bundle, USB 반입 artifact, Harbor seed tar에 포함하면 안 됩니다.
+
+#### E. Secret 파일 운영 정책
+
+- 실제 Secret 파일은 Git에 커밋하지 않습니다.
+- 현재 `.gitignore`의 `*.ini` 규칙으로 repo 내부의 `<repo>/aws_key.ini`와 `<repo>/workspace/credentials/aws_key.ini`는 제외됩니다.
+- 외부 workspace는 repository `.gitignore`로 보호할 수 없으므로, 운영자가 별도 저장소 정책과 파일 권한을 관리해야 합니다.
+- 실제 Secret 파일 권한은 `0600`을 권장합니다.
+- Access Key와 Secret Key를 문서, shell history, CI log, Airgap manifest에 출력하지 않습니다.
+- 현재 Ansible `awscli` role은 credential block에 `no_log: true`를 사용합니다.
+- 형식 참고용 sample은 `workspace/credentials/aws_key.ini.sample`만 사용하고, sample에는 실제 Secret을 넣지 않습니다.
 
 ### 1-5. cloud_repository: 대상 서버가 외부 Registry를 직접 사용
 
@@ -278,7 +368,7 @@ harbor.main.local:32080/eva/mysql:8.0.42-bookworm
 harbor.main.local:32080/eva/k8s-device-plugin:v0.18.0
 harbor.main.local:32080/eva/cuda-sample:vectoradd-cuda12.5.0
 harbor.main.local:32080/eva/cuda:12.5.0-base-ubuntu22.04
-harbor.main.local:32080/eva/n8n:1.103.2
+harbor.main.local:32080/eva/n8n:2.32.7
 ```
 
 `harbor.main.local:32080`을 Docker 또는 k3s에서 HTTP registry로 사용할 경우, 해당 노드의 Docker/containerd에 insecure registry 또는 인증서 신뢰 설정이 필요할 수 있습니다.
@@ -453,13 +543,13 @@ Qdrant snapshot 변경만 확인할 때는 `values-k3s.harbor.yaml` profile을 �
 
 준비 서버에서 필요한 파일은 아래입니다. `values-k3s.harbor.yaml`은 EVA Agent release `3.1.0`의 `eva-agent-qdrant/`에 포함되어 있어야 합니다.
 
-- `install/qdrant/qdrant-<version>.tgz`
-- `install/eva-agent/release/<release>/eva-agent-qdrant/values-k3s.harbor.yaml`
-- `install/eva-agent/release/<release>/plugins/eva-agent-qdrant/{post-renderer.sh,plugin.yaml}`
-- `install/tools/oras` — Local Harbor에 snapshot OCI artifact를 push하는 CLI
-- `install/images/images-pulled.txt` 및 `repository-images.tar` — `qdrant`와 `eva-agent-qdrant-snapshot-sync:0.1.0` 포함
-- `install/qdrant-snapshots/*.snapshot` — `SNAPSHOT_SPECS`에 지정된 snapshot 파일
-- `install/push_qdrant_snapshots_to_harbor.sh`
+- `out/cache/qdrant/qdrant-<version>.tgz`
+- `out/cache/eva-agent/release/<release>/eva-agent-qdrant/values-k3s.harbor.yaml`
+- `out/cache/eva-agent/release/<release>/plugins/eva-agent-qdrant/{post-renderer.sh,plugin.yaml}`
+- `out/cache/tools/oras` — Local Harbor에 snapshot OCI artifact를 push하는 CLI
+- `out/cache/images/images-pulled.txt` 및 `out/cache/images/repository-images.tar` — `qdrant`와 `eva-agent-qdrant-snapshot-sync:0.1.0` 포함
+- `out/cache/qdrant-snapshots/*.snapshot` — `SNAPSHOT_SPECS`에 지정된 snapshot 파일
+- `scripts/publish/push_qdrant_snapshots_to_harbor.sh`
 
 `src/solution/version.yaml`을 대상 release/chart 버전으로 맞춘 뒤 준비 서버에서 실행합니다. `COMPONENTS`로 이미지 준비만 Qdrant로 제한할 수 있습니다.
 
@@ -543,11 +633,11 @@ extra vars로 적용합니다. 그러면 containerd image pull과 Qdrant ORAS pu
 사용합니다.
 
 ```bash
-ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml \
+ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=remote_repository \
   -e @out/work/config/harbor-endpoint.yaml
 
-ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_agent.yaml \
+ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_agent.yaml \
   -e repository_mode=remote_repository \
   -e @out/work/config/harbor-endpoint.yaml \
   -e harbor_admin_password='<Harbor admin password>' \
@@ -631,16 +721,18 @@ region = ap-northeast-2
 원격 서버 설치:
 
 ```ini
-{{IP}} ansible_user={{계정}} ansible_ssh_private_key_file=~/.ssh/id_rsa ansible_become_password={{비밀번호}}
+site-a-eva-node-01 ansible_host=<TARGET_IP_OR_DNS> ansible_user=<SSH_USER> ansible_ssh_private_key_file=<PATH_TO_SSH_KEY>
 ```
 
 Airgap 서버에 SSH로 접속한 뒤, 해당 서버에서 직접 실행:
 
 ```ini
-localhost ansible_connection=local ansible_become_password={{현재 로그인 계정의 sudo 비밀번호}}
+site-a-localhost ansible_connection=local
 ```
 
 `ansible_connection=local`을 지정하면 Ansible은 localhost에 SSH로 다시 접속하지 않고 현재 로그인한 계정으로 실행합니다.
+
+권장 inventory 경로는 `workspace/inventory/inventory.ini`입니다. 예시는 `workspace/inventory/inventory.ini.sample`을 복사한 뒤 필요한 블록만 주석 해제해서 사용합니다. inventory hostname은 IP가 아니라 사이트를 식별하는 고유한 이름을 사용하고, 실제 접속 주소는 `ansible_host`에 넣습니다.
 
 SSH 키:
 
@@ -658,7 +750,7 @@ ssh-copy-id {{계정}}@{{IP}}
 로그 폴더는 playbook별로 먼저 생성합니다.
 
 ```bash
-mkdir -p logs_precondition logs_infra logs_gpu_mig logs_eva logs_n8n
+mkdir -p logs_precondition logs_infra logs_gpu_mig logs_eva logs_iam logs_n8n
 ```
 
 ---
@@ -696,10 +788,10 @@ nvidia-smi -q | grep -A5 "Display Mode"
 
 ```bash
 ANSIBLE_LOG_PATH=logs_precondition/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_precondition.yaml --check 2>&1 | tee logs_precondition/ansible-check.log
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_precondition.yaml --check 2>&1 | tee logs_precondition/ansible-check.log
 
 ANSIBLE_LOG_PATH=logs_precondition/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_precondition.yaml -vvv 2>&1 | tee logs_precondition/ansible-run.log
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_precondition.yaml -vvv 2>&1 | tee logs_precondition/ansible-run.log
 ```
 
 결과 확인:
@@ -722,12 +814,12 @@ ls -l ./out/work/config/<target-ip>/precondition.yaml
 mkdir -p logs_infra
 
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml --check \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
   -e repository_mode=cloud_repository \
   2>&1 | tee logs_infra/ansible-check.log
 
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=cloud_repository \
   -vvv 2>&1 | tee logs_infra/ansible-run.log
 ```
@@ -740,14 +832,14 @@ Main Harbor에서 infra 이미지를 pull하는 경우입니다.
 mkdir -p logs_infra
 
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml --check \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
   2>&1 | tee logs_infra/ansible-check.log
 
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
@@ -762,14 +854,14 @@ Airgap 서버 내부 Local Harbor에서 infra 이미지를 pull하는 경우입�
 mkdir -p logs_infra
 
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml --check \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \
   2>&1 | tee logs_infra/ansible-check.log
 
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \
@@ -779,7 +871,7 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 드라이버 패키지를 지정하려면 추가 변수로 넘깁니다.
 
 ```bash
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_infra.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \
@@ -813,7 +905,7 @@ AWS_PROFILE=default AWS_REGION=ap-northeast-2 ./scripts/download/download_displa
 mkdir -p logs_gpu_mig
 
 ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
   -e repository_mode=cloud_repository \
   -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
 ```
@@ -824,7 +916,7 @@ ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
 mkdir -p logs_gpu_mig
 
 ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
@@ -837,7 +929,7 @@ ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
 mkdir -p logs_gpu_mig
 
 ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \
@@ -862,7 +954,7 @@ nvidia-smi
 mkdir -p logs_eva
 
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_config.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
   -e repository_mode=cloud_repository \
   -vvv 2>&1 | tee logs_eva/ansible-config.log
 ```
@@ -873,7 +965,7 @@ ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
 mkdir -p logs_eva
 
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_config.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
@@ -886,7 +978,7 @@ ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
 mkdir -p logs_eva
 
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_config.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \
@@ -901,7 +993,115 @@ ls -l ./out/work/config/<target-ip>/eva.yaml
 
 ---
 
-## 8. EVA 배포
+## 8. EVA IAM 설치 (SSO, 선택)
+
+EVA IAM을 사용하는 경우 인프라 설치 후, EVA App을 포함한 Solution 배포 전에 실행합니다. IAM을 사용하지 않는 설치에서는 이 절을 건너뜁니다.
+
+IAM Chart의 고객 변경분은 선택된 workspace의 `site-values/iam.yaml`에서 관리합니다. sample을 복사한 뒤 실제 Secret은 Git에 커밋하지 마세요.
+
+```bash
+cp workspace/site-values/iam.yaml.sample workspace/site-values/iam.yaml
+```
+
+`iam.yaml`은 chart values를 그대로 사용합니다. 한 대상에 공통 적용할 값은 최상위에 쓰고, 대상별 값을 분리할 때는 `ansible_host`가 있으면 그 값, 없으면 inventory hostname을 최상위 키로 사용합니다. 운영 환경에서는 `keycloak.realmPatch.realmAdmin.password`와 database/Redis password를 반드시 실제 Secret으로 바꾸세요.
+
+```yaml
+# workspace/site-values/iam.yaml
+10.0.0.10:
+  config:
+    host: iam.customer.example
+  keycloak:
+    realmPatch:
+      realmAdmin:
+        password: "<STRONG_REALM_ADMIN_PASSWORD>"
+  ingress:
+    path: /iam
+    tls:
+      hostPath: /home/eva/certs
+```
+
+실행 전에 대상 서버의 `eva_iam_tls_host_path`(기본값 `/home/eva/certs`)에 `tls.crt`와 `tls.key`가 있어야 합니다. `eva_iam_host` 또는 `config.host`에는 포트를 붙이지 마세요. 기본 HTTPS 포트가 아닌 경우에는 현재 catalog의 IAM Chart가 `config.publicPort`/`config.publicUrl`을 지원하는지 먼저 확인해야 합니다.
+
+App과 같은 host를 사용할 때는 IAM ingress path를 `/iam`처럼 App의 path와 겹치지 않게 지정합니다. EVA App이 IAM Redis를 사용하도록 구성하는 경우에는 Redis external/TLS/NodePort도 함께 켜야 합니다.
+
+### [cloud_repository]
+
+```bash
+mkdir -p logs_iam
+
+ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
+  -e repository_mode=cloud_repository \
+  -e eva_iam_host=iam.customer.example \
+  -e eva_iam_ingress_path=/iam \
+  -e eva_iam_redis_external_enabled=true \
+  -e eva_iam_redis_tls_enabled=true \
+  -e eva_iam_redis_nodeport=32070 \
+  -e '{"eva_iam_app_redirect_uris": ["https://app.customer.example/*"]}' \
+  -vvv 2>&1 | tee logs_iam/ansible-run.log
+```
+
+### [remote_repository]
+
+```bash
+mkdir -p logs_iam
+
+ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
+  -e repository_mode=remote_repository \
+  -e repository_registry=harbor.main.local:32080 \
+  -e repository_project=eva \
+  -e eva_iam_host=iam.customer.example \
+  -e eva_iam_ingress_path=/iam \
+  -e eva_iam_redis_external_enabled=true \
+  -e eva_iam_redis_tls_enabled=true \
+  -e eva_iam_redis_nodeport=32070 \
+  -e '{"eva_iam_app_redirect_uris": ["https://app.customer.example/*"]}' \
+  -vvv 2>&1 | tee logs_iam/ansible-run.log
+```
+
+### [local_repository]
+
+`out/cache/eva-iam/` Chart와 IAM 이미지는 1-7의 offline asset/image 준비에 포함되어 있어야 합니다.
+
+```bash
+mkdir -p logs_iam
+
+ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
+  -e repository_mode=local_repository \
+  -e repository_registry=localhost:32080 \
+  -e repository_project=eva \
+  -e eva_iam_host=iam.customer.example \
+  -e eva_iam_ingress_path=/iam \
+  -e eva_iam_redis_external_enabled=true \
+  -e eva_iam_redis_tls_enabled=true \
+  -e eva_iam_redis_nodeport=32070 \
+  -e '{"eva_iam_app_redirect_uris": ["https://app.customer.example/*"]}' \
+  -vvv 2>&1 | tee logs_iam/ansible-run.log
+```
+
+배포 후 Keycloak rollout과 IAM endpoint를 확인합니다.
+
+```bash
+kubectl rollout status deployment/eva-iam-keycloak -n eva-iam --timeout=600s
+curl -fsS https://iam.customer.example/iam/realms/eva-iam/.well-known/openid-configuration
+```
+
+IAM role은 control node의 `out/work/config/<target>/eva-iam.yaml`에 App SSO handoff를 권한 `0600`으로 기록합니다. 현재 `site_eva.yaml`은 이 파일을 자동 병합하지 않으므로, 파일의 `sso.baseUrl`과 `sso.adminClientSecret`을 해당 대상의 `workspace/site-values/app.yaml` `app.sso` 아래에 넣거나 EVA App 실행 시 `eva_app_sso_base_url`과 `eva_app_sso_admin_client_secret` extra var로 전달해야 합니다. Secret을 shell history나 로그에 남기지 않도록 values 파일 또는 Secret 관리 수단을 사용하세요.
+
+```yaml
+# workspace/site-values/app.yaml
+10.0.0.10:
+  app:
+    sso:
+      baseUrl: "https://iam.customer.example/iam"
+      adminClientSecret: "<VALUE_FROM_eva-iam.yaml>"
+```
+
+---
+
+## 9. EVA 배포
 
 `src/solution/playbooks/site_eva.yaml`은 EVA Agent, EVA Vision, EVA App을 배포합니다.
 
@@ -922,10 +1122,10 @@ EVA App의 호스트별 설정은 선택된 workspace의 `site-values/app.yaml` 
 cp workspace/site-values/app.yaml.sample workspace/site-values/app.yaml
 ```
 
-복사한 `workspace/site-values/app.yaml`의 최상위 키를 배포 대상의 `ansible_host` 또는 inventory hostname으로 지정합니다. license credential은 배포 환경별로 다르므로, `workspace/site-values/app.yaml.sample`에서 대상 환경의 블록을 선택해 주석을 해제하고 해당 환경에 발급된 키를 사용합니다. prod와 dev의 credential을 섞어 사용하면 안 됩니다.
+현재 구현에서 `workspace/site-values/app.yaml`의 최상위 키는 inventory에 `ansible_host`를 지정했다면 그 값, 없으면 inventory hostname과 동일하게 맞춥니다. license credential은 배포 환경별로 다르므로, `workspace/site-values/app.yaml.sample`에서 대상 환경의 블록을 선택해 주석을 해제하고 해당 환경에 발급된 키를 사용합니다. prod와 dev의 credential을 섞어 사용하면 안 됩니다.
 
 ```yaml
-localhost:
+site-a-localhost:
   app:
     browserTitleName: "EVA SHEE (서초)"
     license:
@@ -940,7 +1140,7 @@ localhost:
 
 prod는 `activation_mode: "offline"`, `product_code: "eva-prod"`와 prod용 API/shared key를 사용합니다. dev는 `activation_mode: "online"`, `product_code: "eva-dev"`와 dev용 API/shared key를 사용합니다.
 
-예를 들어 dev inventory에 `10.186.0.75`가 있으면 `10.186.0.75:` 아래에 dev 설정을 작성합니다. 해당 호스트 키가 없으면 기존 공통 설정만 적용됩니다. `workspace/site-values/app.yaml`이 없으면 호스트별 override 없이 배포합니다.
+예를 들어 `ansible_host=10.0.0.10`인 dev inventory에는 `10.0.0.10:` 아래에 dev 설정을 작성합니다. `ansible_host`를 쓰지 않는 inventory라면 `site-a-eva-node-01:`처럼 inventory hostname을 사용합니다. 해당 호스트 키가 없으면 기존 공통 설정만 적용됩니다. `workspace/site-values/app.yaml`이 없으면 호스트별 override 없이 배포합니다.
 
 배포 중 렌더링된 최종 override values는 control node의 `out/work/rendered/<target>/` 아래에 component별로 남습니다.
 
@@ -1077,7 +1277,7 @@ kubectl create secret generic aws-credentials \
 mkdir -p logs_eva
 
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/solution/playbooks/site_eva.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=cloud_repository \
   -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
 ```
@@ -1090,7 +1290,7 @@ kustomize 패키지 설치 시 에러 발생하는 경우, 수동 설치 후 명
 mkdir -p logs_eva
 
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/solution/playbooks/site_eva.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
@@ -1103,7 +1303,7 @@ ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
 mkdir -p logs_eva
 
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini src/solution/playbooks/site_eva.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \
@@ -1113,7 +1313,7 @@ ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
 vLLM GPU 프로파일을 지정하려면 추가 변수로 넘깁니다.
 
 ```bash
-.venv/bin/ansible-playbook -i inventory.ini src/solution/playbooks/site_eva.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \
@@ -1139,7 +1339,7 @@ kubectl get svc -A
 
 ---
 
-## 9. n8n 설치 (Optional)
+## 10. n8n 설치 (Optional)
 
 n8n은 EVA 설치와 분리해서 별도 playbook으로 실행합니다.
 
@@ -1149,7 +1349,7 @@ n8n은 EVA 설치와 분리해서 별도 playbook으로 실행합니다.
 mkdir -p logs_n8n
 
 ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini site_n8n.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
   -e repository_mode=cloud_repository \
   -vvv 2>&1 | tee logs_n8n/ansible-run.log
 ```
@@ -1159,14 +1359,14 @@ ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
 Main Harbor에 아래 이미지가 준비되어 있어야 합니다.
 
 ```text
-harbor.main.local:32080/eva/n8n:1.103.2
+harbor.main.local:32080/eva/n8n:2.32.7
 ```
 
 ```bash
 mkdir -p logs_n8n
 
 ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini site_n8n.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
@@ -1178,14 +1378,14 @@ ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
 Local Harbor에 아래 이미지가 준비되어 있어야 합니다.
 
 ```text
-localhost:32080/eva/n8n:1.103.2
+localhost:32080/eva/n8n:2.32.7
 ```
 
 ```bash
 mkdir -p logs_n8n
 
 ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini site_n8n.yaml \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
   -e repository_mode=local_repository \
   -e repository_registry=localhost:32080 \
   -e repository_project=eva \

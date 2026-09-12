@@ -169,20 +169,29 @@ func IsArchiveInput(input string) bool {
 	return strings.HasSuffix(strings.ToLower(input), ".tar.gz") || strings.HasSuffix(strings.ToLower(input), ".tgz")
 }
 
+// VerifyAirgapBundle validates an Airgap Bundle without importing it into the
+// artifact cache. It is safe to use as a pre-transfer or pre-install check.
+func VerifyAirgapBundle(input string) (Metadata, error) {
+	bundlePath, err := airgapBundlePath(input)
+	if err != nil {
+		return Metadata{}, err
+	}
+	staging, err := os.MkdirTemp("", ".eva-airgap-verify-")
+	if err != nil {
+		return Metadata{}, fmt.Errorf("create Airgap Bundle verification directory: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	resolved, err := extractAndValidateAirgapBundle(bundlePath, staging)
+	if err != nil {
+		return Metadata{}, err
+	}
+	return resolved.Metadata, nil
+}
+
 func ImportAirgapBundle(input, artifactRoot string) (Resolved, error) {
-	if input == "" {
-		return Resolved{}, errors.New("Airgap Bundle path is required")
-	}
-	bundlePath, err := filepath.Abs(input)
+	bundlePath, err := airgapBundlePath(input)
 	if err != nil {
-		return Resolved{}, fmt.Errorf("resolve Airgap Bundle path: %w", err)
-	}
-	info, err := os.Stat(bundlePath)
-	if err != nil {
-		return Resolved{}, fmt.Errorf("read Airgap Bundle %s: %w", bundlePath, err)
-	}
-	if !info.Mode().IsRegular() {
-		return Resolved{}, fmt.Errorf("Airgap Bundle is not a regular file: %s", bundlePath)
+		return Resolved{}, err
 	}
 	digest, err := fileChecksum(bundlePath)
 	if err != nil {
@@ -216,14 +225,7 @@ func ImportAirgapBundle(input, artifactRoot string) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("create Airgap Bundle staging directory: %w", err)
 	}
 	defer os.RemoveAll(staging)
-	if err := extractArchive(bundlePath, staging); err != nil {
-		return Resolved{}, fmt.Errorf("extract Airgap Bundle: %w", err)
-	}
-	resolved, err := Resolve(staging)
-	if err != nil {
-		return Resolved{}, fmt.Errorf("validate Airgap Bundle release: %w", err)
-	}
-	if err := validateBundleLayout(staging, resolved.Metadata); err != nil {
+	if _, err := extractAndValidateAirgapBundle(bundlePath, staging); err != nil {
 		return Resolved{}, err
 	}
 	if err := os.WriteFile(filepath.Join(staging, airgapMarkerName), []byte("bundle_sha256: "+digest+"\n"), 0o600); err != nil {
@@ -236,6 +238,38 @@ func ImportAirgapBundle(input, artifactRoot string) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("publish Airgap Bundle cache entry: %w", err)
 	}
 	return Resolve(destination)
+}
+
+func airgapBundlePath(input string) (string, error) {
+	if input == "" {
+		return "", errors.New("Airgap Bundle path is required")
+	}
+	bundlePath, err := filepath.Abs(input)
+	if err != nil {
+		return "", fmt.Errorf("resolve Airgap Bundle path: %w", err)
+	}
+	info, err := os.Stat(bundlePath)
+	if err != nil {
+		return "", fmt.Errorf("read Airgap Bundle %s: %w", bundlePath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("Airgap Bundle is not a regular file: %s", bundlePath)
+	}
+	return bundlePath, nil
+}
+
+func extractAndValidateAirgapBundle(bundlePath, destination string) (Resolved, error) {
+	if err := extractArchive(bundlePath, destination); err != nil {
+		return Resolved{}, fmt.Errorf("extract Airgap Bundle: %w", err)
+	}
+	resolved, err := Resolve(destination)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("validate Airgap Bundle release: %w", err)
+	}
+	if err := validateBundleLayout(destination, resolved.Metadata); err != nil {
+		return Resolved{}, err
+	}
+	return resolved, nil
 }
 
 func (resolved Resolved) ArtifactPath(name string) (string, error) {

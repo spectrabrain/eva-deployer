@@ -36,6 +36,7 @@ func usage() {
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
+	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
 	fmt.Println("  shell [--runtime-root PATH] [--site ID|--workspace PATH] [--release PATH] [--command CMD]")
 	fmt.Println("  exec [--runtime-root PATH] <ansible-playbook|helm|kubectl|kustomize|oras> [args...]")
@@ -78,6 +79,8 @@ func run(args []string) error {
 		return runApply(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "verify":
+		return runVerify(args[1:])
 	case "runtime":
 		return runRuntime(args[1:])
 	case "shell":
@@ -219,7 +222,7 @@ func releaseUsage() {
 	fmt.Println("       eva release import-airgap --bundle PATH [--artifact-root PATH]")
 	fmt.Println("")
 	fmt.Println("release prepare extracts a verified local Release into /opt/eva/releases/<version>.")
-	fmt.Println("Release tag, S3, and Airgap Bundle resolution are not implemented yet.")
+	fmt.Println("Release tag and S3 resolution are not implemented yet.")
 }
 
 func runInstall(args []string) error {
@@ -515,6 +518,39 @@ func runStatus(args []string) error {
 		return err
 	}
 	printOperation(record)
+	return nil
+}
+
+func runVerify(args []string) error {
+	flags := flag.NewFlagSet("verify", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	input := flags.String("release", "", "release directory, release.yaml path, or Airgap Bundle path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected verify arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if flags.NArg() == 1 {
+		if *input != "" {
+			return errors.New("use either --release or one release path argument, not both")
+		}
+		*input = flags.Arg(0)
+	}
+
+	if release.IsArchiveInput(*input) {
+		metadata, err := release.VerifyAirgapBundle(*input)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Airgap Bundle is valid: %s (version=%s, platform=%s/%s)\n", *input, metadata.Version, metadata.Platform.OS, metadata.Platform.Arch)
+		return nil
+	}
+	resolved, err := release.Resolve(*input)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("release is valid: %s (version=%s, platform=%s/%s)\n", resolved.Root, resolved.Metadata.Version, resolved.Metadata.Platform.OS, resolved.Metadata.Platform.Arch)
 	return nil
 }
 

@@ -1,7 +1,7 @@
 - name: Resolve eva-iam values file
   ansible.builtin.set_fact:
     eva_iam_values_host: "{{ ansible_host | default(inventory_hostname) }}"
-    eva_iam_values_file: "{{ eva_iam_values_file | default((eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/eva-iam.yaml') }}"
+    eva_iam_values_file: "{{ eva_iam_values_file | default(((eva_site_values_root ~ '/iam.yaml') if (eva_site_values_root is defined) else ((eva_repo_root | default(playbook_dir)) ~ '/values/eva-iam.yaml'))) }}"
 
 - name: Check for eva-iam values file on control node
   ansible.builtin.stat:
@@ -386,7 +386,7 @@
 - name: Render eva-iam k3s override values on control node
   no_log: true
   ansible.builtin.template:
-    src: "{{ (eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/eva-iam-k3s-override.yaml.j2' }}"
+    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/eva-iam-k3s-override.yaml.j2' }}"
     dest: "{{ eva_iam_deploy_values_dir }}/eva-iam-k3s-override.yaml"
     mode: "0600"
   delegate_to: localhost

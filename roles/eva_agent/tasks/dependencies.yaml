@@ -771,7 +771,7 @@
 
 - name: Render Qdrant snapshot bootstrap PV manifest on control node
   ansible.builtin.template:
-    src: "{{ (eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/qdrant-snapshot-pv.yaml.j2' }}"
+    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/qdrant-snapshot-pv.yaml.j2' }}"
     dest: "{{ eva_agent_qdrant_deploy_values_dir }}/qdrant-snapshot-pv.yaml"
     mode: "0644"
   delegate_to: localhost
@@ -989,7 +989,7 @@
 
 - name: Render vLLM k3s override values on control node
   ansible.builtin.template:
-    src: "{{ (eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/vllm-k3s-override.yaml.j2' }}"
+    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/vllm-k3s-override.yaml.j2' }}"
     dest: "{{ eva_agent_vllm_deploy_values_dir }}/vllm-k3s-override.yaml"
     mode: "0644"
   delegate_to: localhost
@@ -1005,7 +1005,7 @@
 
 - name: Render Qdrant k3s override values on control node
   ansible.builtin.template:
-    src: "{{ (eva_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/qdrant-k3s-override.yaml.j2' }}"
+    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/qdrant-k3s-override.yaml.j2' }}"
     dest: "{{ eva_agent_qdrant_deploy_values_dir }}/qdrant-k3s-override.yaml"
     mode: "0644"
   delegate_to: localhost

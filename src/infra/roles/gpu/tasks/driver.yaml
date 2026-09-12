@@ -64,7 +64,7 @@
 - name: Set offline NVIDIA driver parameters
   ansible.builtin.set_fact:
     gpu_driver_package: "{{ gpu_driver_package | default('nvidia-driver-580') }}"
-    gpu_driver_repo_tar_path: "{{ gpu_driver_repo_tar_path | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/nvidia/nvidia-driver-repo.tar.gz') }}"
+    gpu_driver_repo_tar_path: "{{ gpu_driver_repo_tar_path | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/nvidia/nvidia-driver-repo.tar.gz') }}"
     gpu_driver_repo_remote_dir: "{{ gpu_driver_repo_remote_dir | default('/opt/eva-offline/nvidia-driver-repo') }}"
   changed_when: false
   when:

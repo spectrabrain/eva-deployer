@@ -15,7 +15,7 @@
     eva_agent_workdir: "{{ eva_agent_workdir | default('/opt/eva-agent/' ~ eva_agent_deploy_version) }}"
     eva_agent_deploy_values_dir: "{{ eva_agent_deploy_values_dir | default((eva_deploy_root | default((eva_repo_root | default(playbook_dir)) ~ '/deploy')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/agent') }}"
     eva_agent_kubeconfig: "{{ eva_agent_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
-    eva_agent_install_root: "{{ eva_agent_install_root | default(eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) }}"
+    eva_agent_cache_root: "{{ eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) }}"
     eva_agent_nfs_share_path: "{{ eva_agent_nfs_share_path | default('/data001/share/eva-agent') }}"
     eva_agent_chart_version: "{{ eva_agent_chart_version | default(eva_agent_deploy_version) }}"
     eva_agent_chart: "{{ eva_agent_chart | default('eva-agent/eva-agent') }}"
@@ -24,9 +24,9 @@
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/' ~ eva_agent_deploy_version) }}
     eva_agent_image_tag: "{{ eva_agent_image_tag | default('') }}"
-    eva_agent_offline_dir: "{{ eva_agent_offline_dir | default((eva_agent_install_root | default(eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install'))) ~ '/eva-agent') }}"
-    eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default((eva_agent_offline_dir | default((eva_agent_install_root | default(eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install'))) ~ '/eva-agent')) ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"
-    eva_agent_offline_images_pulled_list: "{{ eva_agent_offline_images_pulled_list | default((eva_agent_install_root | default(eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install'))) ~ '/images/images-pulled.txt') }}"
+    eva_agent_offline_dir: "{{ eva_agent_offline_dir | default((eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache'))) ~ '/eva-agent') }}"
+    eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default((eva_agent_offline_dir | default((eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache'))) ~ '/eva-agent')) ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"
+    eva_agent_offline_images_pulled_list: "{{ eva_agent_offline_images_pulled_list | default((eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache'))) ~ '/images/images-pulled.txt') }}"
 
 - name: Validate repository mode for EVA Agent
   ansible.builtin.assert:
@@ -122,7 +122,7 @@
       - eva_agent_offline_chart.stat.exists
     fail_msg: >-
       airgap_mode=true 인 경우 {{ eva_agent_offline_chart_tgz }} 파일이 필요합니다.
-      install/download_offline_assets.sh 를 먼저 실행하세요.
+      scripts/download/download_offline_assets.sh 를 먼저 실행하세요.
   when: airgap_mode | default(false) | bool
 
 - name: Export EVA Agent default values

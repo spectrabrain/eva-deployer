@@ -14,10 +14,16 @@
       - eva_generated_config_root == eva_repo_root ~ '/out/work/config'
       - eva_deploy_root == eva_repo_root ~ '/out/work/rendered'
       - eva_cache_root == eva_repo_root ~ '/out/cache'
+      - eva_site_id | length > 0
+      - eva_site_id | regex_search('^[A-Za-z0-9][A-Za-z0-9._-]*$') is not none
+      - eva_site_config_root == eva_generated_config_root ~ '/' ~ eva_site_id
+      - eva_site_deploy_root == eva_deploy_root ~ '/' ~ eva_site_id
     fail_msg: >-
       EVA Deployer 저장소 경로 계약을 확인하지 못했습니다.
       playbook은 src/<family>/playbooks 아래에서 실행되어야 하며,
       내부 경로는 eva_repo_root={{ eva_repo_root }} 에서 파생되어야 합니다.
+      EVA_SITE_ID 는 운영 실행 전에 반드시 지정해야 하며, 영문자/숫자로 시작하고
+      영문자, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다.
 
 - name: Validate EVA workspace path contract
   ansible.builtin.assert:

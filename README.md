@@ -44,9 +44,17 @@ Ansible playbook은 저장소 내부의 제품 소스(`src/`)와 설치자 입�
 - 외부 workspace 지정: `-e eva_workspace_root=/abs/path` 또는 `EVA_WORKSPACE_ROOT=/abs/path`
 - site values 경로: 항상 `<선택된 workspace>/site-values`
 - AWS credential 기본 경로: 항상 `<선택된 workspace>/credentials/aws_key.ini`
-- 생성 결과 경로: `out/work/config`, `out/work/rendered`
+- site 식별자: 모든 Harbor 및 Ansible 실행 전에 `EVA_SITE_ID` 환경변수로 반드시 지정
+- 생성 config 경로: `out/work/config/<site>/<host>/...`
+- 렌더링 values 경로: `out/work/rendered/<site>/<host>/<component>/...`
+- 실행 로그 경로: `out/work/logs/<operation-or-component>/...`
 
-하나의 실행에서는 하나의 workspace만 사용합니다. repo-local `workspace/`와 외부 workspace를 fallback으로 섞지 않습니다.
+하나의 실행에서는 하나의 workspace와 site 식별자만 사용합니다. repo-local `workspace/`와 외부 workspace를 fallback으로 섞지 않습니다. `EVA_SITE_ID`가 비어 있으면 playbook과 Harbor 설치가 실패합니다. 테스트를 포함해 `default`를 사용하려면 `export EVA_SITE_ID=default`로 명시해야 합니다. 이전 구조에서 생성된 `out/work/config/<host>/...`와 `out/work/rendered/<host>/...`는 더 이상 읽지 않으므로, 전환 후 `site_eva_config.yaml`과 Harbor metadata 생성을 다시 실행해야 합니다.
+
+```bash
+# 모든 Harbor 및 Ansible 명령을 실행할 같은 shell에서 한 번만 설정
+export EVA_SITE_ID=customer-a
+```
 
 ---
 
@@ -75,7 +83,7 @@ repository_registry=<Harbor host:port>
 repository_project=eva
 ```
 
-`repository_registry`에는 `https://`를 제외한 **k3s 노드와 Pod에서 실제 접근 가능한 주소**를 지정합니다. Local Harbor도 `localhost:32080`을 사용하지 않고, Harbor가 실행되는 노드의 DNS 또는 IP와 `32080` 포트를 사용합니다. `setup_harbor.sh`가 생성한 `out/work/config/harbor-endpoint.yaml`을 Ansible extra vars로 전달하면 이 주소와 project를 함께 적용할 수 있습니다.
+`repository_registry`에는 `https://`를 제외한 **k3s 노드와 Pod에서 실제 접근 가능한 주소**를 지정합니다. Local Harbor도 `localhost:32080`을 사용하지 않고, Harbor가 실행되는 노드의 DNS 또는 IP와 `32080` 포트를 사용합니다. `setup_harbor.sh`가 생성한 `out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`을 Ansible extra vars로 전달하면 이 주소와 project를 함께 적용할 수 있습니다.
 
 ### 1-2. 모든 모드 공통: 버전 단일 관리
 
@@ -380,7 +388,7 @@ harbor.main.local:32080/eva/n8n:2.32.7
 1. **인터넷 가능 준비 서버**에서 Ansible wheel, Docker/apt bundle, asset, 모델, 이미지, Harbor installer를 모두 받습니다.
 2. `repository-images.tar`와 `eva-deployer` 전체를 USB 등으로 **Airgap 서버**에 복사합니다.
 3. **Airgap 서버**에서 Python/Ansible, Docker, Local Harbor를 설치하고 archive 이미지를 Harbor에 push합니다.
-4. `setup_harbor.sh`가 만든 `out/work/config/harbor-endpoint.yaml`을 모든 Airgap Ansible 실행에 extra vars로 전달합니다. 이 파일의 registry 주소는 Local Harbor 노드의 실제 DNS/IP와 `32080` 포트입니다.
+4. `setup_harbor.sh`가 만든 `out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`을 모든 Airgap Ansible 실행에 extra vars로 전달합니다. 이 파일의 registry 주소는 Local Harbor 노드의 실제 DNS/IP와 `32080` 포트입니다.
 
 #### A. 인터넷 가능 준비 서버: 설치 파일과 이미지 준비
 
@@ -469,9 +477,9 @@ export HARBOR_REGISTRY="${HARBOR_HOST}:32080"
   --install-root ~/.local/share/eva-harbor
 ```
 
-설치가 끝나면 `out/work/config/harbor-endpoint.yaml`이 생성됩니다. 이 파일에는 비밀번호 없이
+설치가 끝나면 `out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`이 생성됩니다. 이 파일에는 비밀번호 없이
 Harbor의 k3s/Pod 접근 주소, `repository_registry`, project가 들어 있습니다. 이후 이 문서의 Ansible 실행에는
-`-e @out/work/config/harbor-endpoint.yaml`을 추가합니다. Harbor와 k3s 배포 서버가 다르면 이 파일도
+`-e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`을 추가합니다. Harbor와 k3s 배포 서버가 다르면 이 파일도
 USB bundle과 함께 배포 controller로 복사하세요.
 
 Harbor 서버에서 실행하는 image/snapshot seed 스크립트는 `harbor.yml`의 hostname과 일치하는
@@ -602,7 +610,7 @@ Qdrant만 배포하려면 (vLLM/EVA Agent 본체는 설치하지 않음) k3s와 
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.yaml -K \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e eva_agent_vllm_profile=PRO6000-MIGx4 \
   -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
   -e eva_agent_qdrant_snapshot_source=harbor
@@ -627,7 +635,7 @@ Harbor 설치의 `HARBOR_PROJECT`, image/snapshot push의 `REPOSITORY_PROJECT`, 
 `repository_project`를 **같은 값**으로 지정해야 합니다. 세 값은 서로 자동 전달되지 않습니다.
 
 Local Harbor도 k3s 노드와 Pod에서 도달 가능한 `<NODE_IP_OR_DNS>:32080`을 사용합니다.
-`scripts/install/setup_harbor.sh`가 생성한 `out/work/config/harbor-endpoint.yaml`은 이 주소를
+`scripts/install/setup_harbor.sh`가 생성한 `out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`은 이 주소를
 `repository_registry`와 Qdrant snapshot sidecar endpoint로 함께 기록합니다. 모든 Ansible 실행에 이 파일을
 extra vars로 전달해 image pull과 ORAS artifact pull이 같은 주소를 사용하게 하세요.
 
@@ -645,11 +653,11 @@ extra vars로 적용합니다. 그러면 containerd image pull과 Qdrant ORAS pu
 ```bash
 ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=remote_repository \
-  -e @out/work/config/harbor-endpoint.yaml
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml
 
 ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_agent.yaml \
   -e repository_mode=remote_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e harbor_admin_password='<Harbor admin password>' \
   -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
   -e eva_agent_qdrant_snapshot_source=harbor
@@ -755,17 +763,18 @@ ssh-copy-id {{계정}}@{{IP}}
 
 `check`는 변경 없이 시뮬레이션하는 `--check` 실행입니다. `run`은 실제 서버에 변경을 적용합니다.
 
-로그 폴더는 playbook별로 먼저 생성합니다.
+실행에 사용할 site 식별자를 먼저 고정하고, 로그 폴더는 site와 playbook별로 생성합니다. `EVA_SITE_ID`는 필수이며 영문자 또는 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 하이픈만 사용할 수 있습니다.
 
 ```bash
-mkdir -p logs_precondition logs_infra logs_gpu_mig logs_eva logs_iam logs_n8n
+export EVA_SITE_ID=customer-a
+mkdir -p out/work/logs/$EVA_SITE_ID/precondition out/work/logs/$EVA_SITE_ID/infra out/work/logs/$EVA_SITE_ID/gpu-mig out/work/logs/$EVA_SITE_ID/eva out/work/logs/$EVA_SITE_ID/iam out/work/logs/$EVA_SITE_ID/n8n
 ```
 
 ---
 
 ## 4. 사전 점검
 
-대상 서버가 EVA 설치를 진행할 수 있는 상태인지 먼저 확인합니다. 이 단계는 서버 설정을 변경하지 않고, 점검 결과를 control node의 `out/work/config/<target-ip>/precondition.yaml`에 저장합니다.
+대상 서버가 EVA 설치를 진행할 수 있는 상태인지 먼저 확인합니다. 이 단계는 서버 설정을 변경하지 않고, 점검 결과를 control node의 `out/work/config/<site>/<target-ip>/precondition.yaml`에 저장합니다.
 
 확인 항목:
 
@@ -795,17 +804,17 @@ nvidia-smi -q | grep -A5 "Display Mode"
 - `mig_activation.failed_reasons`: MIG 활성화가 어려운 경우 사유
 
 ```bash
-ANSIBLE_LOG_PATH=logs_precondition/ansible-internal.log \
-.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_precondition.yaml --check 2>&1 | tee logs_precondition/ansible-check.log
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/precondition/ansible-internal.log \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_precondition.yaml --check 2>&1 | tee out/work/logs/$EVA_SITE_ID/precondition/ansible-check.log
 
-ANSIBLE_LOG_PATH=logs_precondition/ansible-internal.log \
-.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_precondition.yaml -vvv 2>&1 | tee logs_precondition/ansible-run.log
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/precondition/ansible-internal.log \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_precondition.yaml -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/precondition/ansible-run.log
 ```
 
 결과 확인:
 
 ```bash
-ls -l ./out/work/config/<target-ip>/precondition.yaml
+ls -l ./out/work/config/<site>/<target-ip>/precondition.yaml
 ```
 
 ---
@@ -819,17 +828,17 @@ ls -l ./out/work/config/<target-ip>/precondition.yaml
 대상 서버가 인터넷/ECR/Docker Hub에 접근 가능한 경우입니다.
 
 ```bash
-mkdir -p logs_infra
+mkdir -p out/work/logs/$EVA_SITE_ID/infra
 
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
   -e repository_mode=cloud_repository \
-  2>&1 | tee logs_infra/ansible-check.log
+  2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-check.log
 
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=cloud_repository \
-  -vvv 2>&1 | tee logs_infra/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-run.log
 ```
 
 ### [remote_repository]
@@ -837,21 +846,21 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 Main Harbor에서 infra 이미지를 pull하는 경우입니다.
 
 ```bash
-mkdir -p logs_infra
+mkdir -p out/work/logs/$EVA_SITE_ID/infra
 
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
-  2>&1 | tee logs_infra/ansible-check.log
+  2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-check.log
 
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
-  -vvv 2>&1 | tee logs_infra/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-run.log
 ```
 
 ### [local_repository]
@@ -859,19 +868,19 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 Airgap 서버 내부 Local Harbor에서 infra 이미지를 pull하는 경우입니다.
 
 ```bash
-mkdir -p logs_infra
+mkdir -p out/work/logs/$EVA_SITE_ID/infra
 
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
-  2>&1 | tee logs_infra/ansible-check.log
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
+  2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-check.log
 
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
-  -vvv 2>&1 | tee logs_infra/ansible-run.log
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-run.log
 ```
 
 드라이버 패키지를 지정하려면 추가 변수로 넘깁니다.
@@ -879,7 +888,7 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 ```bash
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e gpu_driver_package=nvidia-driver-580 \
   -vvv
 ```
@@ -907,37 +916,37 @@ AWS_PROFILE=default AWS_REGION=ap-northeast-2 ./scripts/download/download_displa
 ### [cloud_repository]
 
 ```bash
-mkdir -p logs_gpu_mig
+mkdir -p out/work/logs/$EVA_SITE_ID/gpu-mig
 
-ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
   -e repository_mode=cloud_repository \
-  -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-run.log
 ```
 
 ### [remote_repository]
 
 ```bash
-mkdir -p logs_gpu_mig
+mkdir -p out/work/logs/$EVA_SITE_ID/gpu-mig
 
-ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
-  -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-run.log
 ```
 
 ### [local_repository]
 
 ```bash
-mkdir -p logs_gpu_mig
+mkdir -p out/work/logs/$EVA_SITE_ID/gpu-mig
 
-ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
-  -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-run.log
 ```
 
 결과 확인:
@@ -950,48 +959,48 @@ nvidia-smi
 
 ## 7. EVA 환경 설정
 
-`src/solution/playbooks/site_eva_config.yaml`은 EVA 배포에 필요한 설정 파일을 생성합니다. 생성된 값은 `out/work/config/<target>/eva.yaml`에 저장됩니다.
+`src/solution/playbooks/site_eva_config.yaml`은 EVA 배포에 필요한 설정 파일을 생성합니다. 생성된 값은 `out/work/config/<site>/<target>/eva.yaml`에 저장됩니다.
 
 ### [cloud_repository]
 
 ```bash
-mkdir -p logs_eva
+mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
-ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
   -e repository_mode=cloud_repository \
-  -vvv 2>&1 | tee logs_eva/ansible-config.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-config.log
 ```
 
 ### [remote_repository]
 
 ```bash
-mkdir -p logs_eva
+mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
-ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
-  -vvv 2>&1 | tee logs_eva/ansible-config.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-config.log
 ```
 
 ### [local_repository]
 
 ```bash
-mkdir -p logs_eva
+mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
-ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
-  -vvv 2>&1 | tee logs_eva/ansible-config.log
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-config.log
 ```
 
 결과 확인:
 
 ```bash
-ls -l ./out/work/config/<target-ip>/eva.yaml
+ls -l ./out/work/config/<site>/<target-ip>/eva.yaml
 ```
 
 ---
@@ -1030,9 +1039,9 @@ App과 같은 host를 사용할 때는 IAM ingress path를 `/iam`처럼 App의 p
 ### [cloud_repository]
 
 ```bash
-mkdir -p logs_iam
+mkdir -p out/work/logs/$EVA_SITE_ID/iam
 
-ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/iam/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
   -e repository_mode=cloud_repository \
   -e eva_iam_host=iam.customer.example \
@@ -1041,15 +1050,15 @@ ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
   -e eva_iam_redis_tls_enabled=true \
   -e eva_iam_redis_nodeport=32070 \
   -e '{"eva_iam_app_redirect_uris": ["https://app.customer.example/*"]}' \
-  -vvv 2>&1 | tee logs_iam/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/iam/ansible-run.log
 ```
 
 ### [remote_repository]
 
 ```bash
-mkdir -p logs_iam
+mkdir -p out/work/logs/$EVA_SITE_ID/iam
 
-ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/iam/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
@@ -1060,7 +1069,7 @@ ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
   -e eva_iam_redis_tls_enabled=true \
   -e eva_iam_redis_nodeport=32070 \
   -e '{"eva_iam_app_redirect_uris": ["https://app.customer.example/*"]}' \
-  -vvv 2>&1 | tee logs_iam/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/iam/ansible-run.log
 ```
 
 ### [local_repository]
@@ -1068,19 +1077,19 @@ ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
 `out/cache/eva-iam/` Chart와 IAM 이미지는 1-7의 offline asset/image 준비에 포함되어 있어야 합니다.
 
 ```bash
-mkdir -p logs_iam
+mkdir -p out/work/logs/$EVA_SITE_ID/iam
 
-ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/iam/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e eva_iam_host=iam.customer.example \
   -e eva_iam_ingress_path=/iam \
   -e eva_iam_redis_external_enabled=true \
   -e eva_iam_redis_tls_enabled=true \
   -e eva_iam_redis_nodeport=32070 \
   -e '{"eva_iam_app_redirect_uris": ["https://app.customer.example/*"]}' \
-  -vvv 2>&1 | tee logs_iam/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/iam/ansible-run.log
 ```
 
 배포 후 Keycloak rollout과 IAM endpoint를 확인합니다.
@@ -1090,7 +1099,7 @@ kubectl rollout status deployment/eva-iam-keycloak -n eva-iam --timeout=600s
 curl -fsS https://iam.customer.example/iam/realms/eva-iam/.well-known/openid-configuration
 ```
 
-IAM role은 control node의 `out/work/config/<target>/eva-iam.yaml`에 App SSO handoff를 권한 `0600`으로 기록합니다. 현재 `site_eva.yaml`은 이 파일을 자동 병합하지 않으므로, 파일의 `sso.baseUrl`과 `sso.adminClientSecret`을 해당 대상의 `workspace/site-values/app.yaml` `app.sso` 아래에 넣거나 EVA App 실행 시 `eva_app_sso_base_url`과 `eva_app_sso_admin_client_secret` extra var로 전달해야 합니다. Secret을 shell history나 로그에 남기지 않도록 values 파일 또는 Secret 관리 수단을 사용하세요.
+IAM role은 control node의 `out/work/config/<site>/<target>/eva-iam.yaml`에 App SSO handoff를 권한 `0600`으로 기록합니다. 현재 `site_eva.yaml`은 이 파일을 자동 병합하지 않으므로, 파일의 `sso.baseUrl`과 `sso.adminClientSecret`을 해당 대상의 `workspace/site-values/app.yaml` `app.sso` 아래에 넣거나 EVA App 실행 시 `eva_app_sso_base_url`과 `eva_app_sso_admin_client_secret` extra var로 전달해야 합니다. Secret을 shell history나 로그에 남기지 않도록 values 파일 또는 Secret 관리 수단을 사용하세요.
 
 ```yaml
 # workspace/site-values/app.yaml
@@ -1112,9 +1121,9 @@ IAM role은 control node의 `out/work/config/<target>/eva-iam.yaml`에 App SSO h
 - chart 기본 values
 - release에 포함된 k3s values 또는 secret values
 - 이 repository의 `src/solution/values/*-k3s-override.yaml.j2`
-- `7. EVA 환경 설정`에서 생성된 `out/work/config/<target>/eva.yaml` 기반 override
+- `7. EVA 환경 설정`에서 생성된 `out/work/config/<site>/<target>/eva.yaml` 기반 override
 
-`src/solution/values/` 폴더의 파일은 전체 values 사본이 아니라, EVA deployer가 책임지는 k3s/repository override만 담습니다. `repository_mode`, `repository_registry`, `repository_project`에 따른 image repository 변경과 k3s 실행에 필요한 값은 여기서 관리하고, 환경별 App/Agent 설정은 `site_eva_config.yaml`이 생성한 `out/work/config/<target>/eva.yaml` 값을 배포 단계에서 추가 override로 반영합니다.
+`src/solution/values/` 폴더의 파일은 전체 values 사본이 아니라, EVA deployer가 책임지는 k3s/repository override만 담습니다. `repository_mode`, `repository_registry`, `repository_project`에 따른 image repository 변경과 k3s 실행에 필요한 값은 여기서 관리하고, 환경별 App/Agent 설정은 `site_eva_config.yaml`이 생성한 `out/work/config/<site>/<target>/eva.yaml` 값을 배포 단계에서 추가 override로 반영합니다.
 
 EVA App의 호스트별 설정은 선택된 workspace의 `site-values/app.yaml` 하나에서 관리합니다. 이 파일에는 license credential이 포함될 수 있으므로 Git에 커밋하지 않습니다. 저장소에는 `workspace/site-values/app.yaml.sample`만 포함합니다.
 
@@ -1144,10 +1153,10 @@ prod는 `activation_mode: "offline"`, `product_code: "eva-prod"`와 prod용 API/
 
 예를 들어 `ansible_host=10.0.0.10`인 dev inventory에는 `10.0.0.10:` 아래에 dev 설정을 작성합니다. `ansible_host`를 쓰지 않는 inventory라면 `site-a-eva-node-01:`처럼 inventory hostname을 사용합니다. 해당 호스트 키가 없으면 기존 공통 설정만 적용됩니다. `workspace/site-values/app.yaml`이 없으면 호스트별 override 없이 배포합니다.
 
-배포 중 렌더링된 최종 override values는 control node의 `out/work/rendered/<target>/` 아래에 component별로 남습니다.
+배포 중 렌더링된 최종 override values는 control node의 `out/work/rendered/<site>/<target>/` 아래에 component별로 남습니다.
 
 ```text
-out/work/rendered/<target>/
+out/work/rendered/<site>/<target>/
   app/app-k3s-override.yaml
   vision/vision-k3s-override.yaml
   agent/agent-k3s-override.yaml
@@ -1156,7 +1165,7 @@ out/work/rendered/<target>/
   vllm/values-override-from-config.yaml
 ```
 
-`vllm/values-override-from-config.yaml`은 `out/work/config/<target>/eva.yaml`에 vLLM override 값이 있을 때만 생성됩니다.
+`vllm/values-override-from-config.yaml`은 `out/work/config/<site>/<target>/eva.yaml`에 vLLM override 값이 있을 때만 생성됩니다.
 
 ### [cloud_repository]
 
@@ -1276,12 +1285,12 @@ kubectl create secret generic aws-credentials \
 ## 9. EVA-Vision, EVA-Agent 설치
 
 ```bash
-mkdir -p logs_eva
+mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
-ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=cloud_repository \
-  -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-run-eva.log
 ```
 kustomize 패키지 설치 시 에러 발생하는 경우, 수동 설치 후 명령어 실행 sudo ln -s /snap/bin/kustomize /usr/local/bin/kustomize 다음 재설치
 
@@ -1289,26 +1298,26 @@ kustomize 패키지 설치 시 에러 발생하는 경우, 수동 설치 후 명
 ### [remote_repository]
 
 ```bash
-mkdir -p logs_eva
+mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
-ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
-  -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-run-eva.log
 ```
 
 ### [local_repository]
 
 ```bash
-mkdir -p logs_eva
+mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
-ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
-  -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-run-eva.log
 ```
 
 vLLM GPU 프로파일을 지정하려면 추가 변수로 넘깁니다.
@@ -1316,7 +1325,7 @@ vLLM GPU 프로파일을 지정하려면 추가 변수로 넘깁니다.
 ```bash
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e eva_agent_vllm_profile=A6000x1 \
   -vvv
 ```
@@ -1346,12 +1355,12 @@ n8n은 EVA 설치와 분리해서 별도 playbook으로 실행합니다.
 ### [cloud_repository]
 
 ```bash
-mkdir -p logs_n8n
+mkdir -p out/work/logs/$EVA_SITE_ID/n8n
 
-ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/n8n/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
   -e repository_mode=cloud_repository \
-  -vvv 2>&1 | tee logs_n8n/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/n8n/ansible-run.log
 ```
 
 ### [remote_repository]
@@ -1363,14 +1372,14 @@ harbor.main.local:32080/eva/n8n:2.32.7
 ```
 
 ```bash
-mkdir -p logs_n8n
+mkdir -p out/work/logs/$EVA_SITE_ID/n8n
 
-ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/n8n/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
   -e repository_mode=remote_repository \
   -e repository_registry=harbor.main.local:32080 \
   -e repository_project=eva \
-  -vvv 2>&1 | tee logs_n8n/ansible-run.log
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/n8n/ansible-run.log
 ```
 
 ### [local_repository]
@@ -1382,13 +1391,13 @@ Local Harbor에 아래 이미지가 준비되어 있어야 합니다.
 ```
 
 ```bash
-mkdir -p logs_n8n
+mkdir -p out/work/logs/$EVA_SITE_ID/n8n
 
-ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/n8n/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
-  -vvv 2>&1 | tee logs_n8n/ansible-run.log
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
+  -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/n8n/ansible-run.log
 ```
 
 결과 확인:

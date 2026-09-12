@@ -31,9 +31,13 @@
 ```text
 eva-deployer/
 ├── src/
+│   ├── playbook-preflight.yaml
+│   ├── playbook-vars.yaml
 │   ├── infra/
 │   │   ├── playbooks/
 │   │   ├── roles/
+│   │   │   └── gpu_mig/
+│   │   │       └── vars/gpu_mig.yaml
 │   │   └── version.yaml
 │   └── solution/
 │       ├── playbooks/
@@ -80,6 +84,8 @@ eva-deployer/
 ### 2.1 `src/`: 불변 제품 배포 소스
 
 `src/`에는 Git으로 관리되고 릴리스에 포함되는 제품 소스만 둔다.
+
+`src/playbook-vars.yaml`과 `src/playbook-preflight.yaml`은 Infra와 Solution playbook이 함께 import하는 경로·version·입력 검증 계약이다. playbook은 현재 각 family의 `playbooks/` 경로에서 이 파일을 상대 import하므로, 해당 파일을 이동하거나 복제하지 않는다.
 
 허용되는 내용:
 
@@ -247,6 +253,17 @@ tools/eva/
 | `out/work/` | 동적 config, 렌더링 values, 빌드 및 실행 로그 | 원칙적으로 재생성 가능 |
 | `out/state/` | Operation, Audit, Rollback, Resume 근거 | 운영 중 보존 필요 |
 | `out/dist/` | S3 게시 및 USB 반입용 최종 Artifact | 게시본과 digest 일치 필요 |
+
+`out/work/`의 생성 경로는 site namespace를 포함한다. `EVA_SITE_ID`는 운영 실행 전에 반드시 지정하며, 허용 값은 영문자 또는 숫자로 시작하는 영문자, 숫자, 점, 밑줄, 하이픈 조합이다.
+
+| 경로 | 용도 |
+| --- | --- |
+| `out/work/config/<site>/<host>/` | precondition, `eva.yaml`, Secret, IAM handoff 등 host별 생성 config |
+| `out/work/config/<site>/harbor-endpoint.yaml` | site별 portable Harbor endpoint metadata |
+| `out/work/rendered/<site>/<host>/<component>/` | component별 최종 Helm values와 rendering 결과 |
+| `out/work/logs/<site>/<operation-or-component>/` | 실행 및 검증 로그 |
+
+`EVA_REPO_ROOT`는 playbook이 저장소 기본 위치가 아닌 경로에서 실행될 때 사용할 명시적 저장소 root override다. 지정하지 않으면 playbook 경로에서 repository root를 계산한다.
 
 ## 3. 전체 아키텍처와 책임 분리
 
@@ -553,6 +570,8 @@ Repository mode별 목표 운영 원칙:
 | --- | --- | --- |
 | `precondition.yaml` | `out/work/config/<site>/<host>/` | OS, 네트워크, GPU, 디스크 사전 조사. 검토만 수행 |
 | `eva.yaml` | `out/work/config/<site>/<host>/` | GPU, MIG, NFS 등 파생 설정. 직접 수정 금지 |
+| `secret.yaml`, `eva-iam.yaml` | `out/work/config/<site>/<host>/` | 민감한 cluster Secret 및 IAM-to-App handoff. 권한 `0600`으로 생성 |
+| `harbor-endpoint.yaml` | `out/work/config/<site>/` | repository registry, project 등 site 공통 Harbor endpoint metadata |
 | `chart-defaults.yaml` | `out/work/rendered/<site>/<host>/<component>/` | 선택한 Chart 기본값 전체. 참고용 |
 | `resolved-values.yaml` | `out/work/rendered/<site>/<host>/<component>/` | Helm 최종 적용값. 검토만 수행 |
 | `plan.yaml` | `out/work/plan/<operation-id>/` | Release, 대상, 설치 순서 및 변경 계획 |
@@ -605,9 +624,9 @@ Chart 기본값 전체
 
 | 구분 | 위치 | 소유자 | 의미 |
 | --- | --- | --- | --- |
-| 기본값 전체 | `out/work/rendered/.../chart-defaults.yaml` | Tool | 선택한 Chart의 `helm show values` 결과 |
+| 기본값 전체 | `out/work/rendered/<site>/<host>/<component>/chart-defaults.yaml` | Tool | 선택한 Chart의 `helm show values` 결과 |
 | 고객 변경분 | `workspace/site-values/app.yaml` | 설치자 | 기본값과 다른 값 또는 추가 키만 |
-| 최종 전체값 | `out/work/rendered/.../resolved-values.yaml` | Tool | 모든 레이어의 병합 결과 |
+| 최종 전체값 | `out/work/rendered/<site>/<host>/<component>/resolved-values.yaml` | Tool | 모든 레이어의 병합 결과 |
 
 ### 7.2 설치자가 App 값을 작성하는 순서
 
@@ -837,7 +856,7 @@ eva audit --operation <operation-id>
 | `deploy/` 폴더 | 현재는 만들지 않음. Deployer 자체 CI/Helm 책임이 실제로 생길 때 추가 |
 | 고객 입력 | `workspace/` 또는 외부 site workspace |
 | 제품 values | `src/solution/values/`에 불변 템플릿만 배치 |
-| 생성 values | `out/work/rendered/`에 기록하고 직접 수정 금지 |
+| 생성 values | `out/work/rendered/<site>/<host>/<component>/`에 기록하고 직접 수정 금지 |
 | 공식 Artifact | CI가 build하여 S3 immutable 경로에 게시 |
 | 설치자 기본 경로 | S3 Artifact 소비. Git source build는 비기본 |
 | Airgap | 단일 Bundle 제공 가능. 내부 base Artifact digest 보존 |

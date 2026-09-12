@@ -14,7 +14,7 @@
     eva_app_name: "{{ eva_app_name | default('eva-app') }}"
     eva_app_deploy_version: "{{ eva_app_deploy_version | mandatory }}"
     eva_app_workdir: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}"
-    eva_app_deploy_values_dir: "{{ eva_app_deploy_values_dir | default(eva_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/app') }}"
+    eva_app_deploy_values_dir: "{{ eva_app_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/app') }}"
     eva_app_values_file: "{{ eva_app_values_file | default(eva_site_values_root ~ '/app.yaml') }}"
     eva_app_values_host: "{{ ansible_host | default(inventory_hostname) }}"
     eva_app_values_dest: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}/app-host-override.yaml"

@@ -33,7 +33,7 @@
     n8n_owner_first_name: "{{ n8n_owner_first_name | default('eva') }}"
     n8n_owner_last_name: "{{ n8n_owner_last_name | default('spectrabrain') }}"
     n8n_owner_password_plain: "{{ n8n_owner_password_plain | default('EVA!234qwer') }}"
-    n8n_config_output_dir: "{{ eva_generated_config_root ~ '/' ~ (ansible_host | default(inventory_hostname)) }}"
+    n8n_config_output_dir: "{{ eva_site_config_root ~ '/' ~ (ansible_host | default(inventory_hostname)) }}"
   no_log: true
 
 - name: Resolve n8n external base URL

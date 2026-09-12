@@ -13,7 +13,7 @@
     eva_agent_namespace: "{{ eva_agent_namespace | default('eva-agent') }}"
     eva_agent_deploy_version: "{{ eva_agent_deploy_version | mandatory }}"
     eva_agent_workdir: "{{ eva_agent_workdir | default('/opt/eva-agent/' ~ eva_agent_deploy_version) }}"
-    eva_agent_deploy_values_dir: "{{ eva_agent_deploy_values_dir | default(eva_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/agent') }}"
+    eva_agent_deploy_values_dir: "{{ eva_agent_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/agent') }}"
     eva_agent_kubeconfig: "{{ eva_agent_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_agent_cache_root: "{{ eva_agent_cache_root | default(eva_cache_root) }}"
     eva_agent_nfs_share_path: "{{ eva_agent_nfs_share_path | default('/data001/share/eva-agent') }}"

@@ -202,7 +202,7 @@ func overrideVars(record operation.Record, document plan.Document) (map[string]s
 	paths := make(map[string]string, len(document.Overrides))
 	operationDirectory := filepath.Dir(record.PlanPath)
 	for component, override := range document.Overrides {
-		if component != "app" {
+		if !overrideComponent(component) {
 			return nil, fmt.Errorf("operation plan has unsupported override component %q", component)
 		}
 		if override.AnsibleVarsPath == "" {
@@ -221,6 +221,15 @@ func overrideVars(record operation.Record, document plan.Document) (map[string]s
 		paths[component] = "@" + override.AnsibleVarsPath
 	}
 	return paths, nil
+}
+
+func overrideComponent(component string) bool {
+	switch component {
+	case "app", "agent", "vision":
+		return true
+	default:
+		return false
+	}
 }
 
 func requireOperationFile(directory, path string) error {

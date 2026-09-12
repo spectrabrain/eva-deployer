@@ -21,8 +21,8 @@
     eva_app_kubeconfig: "{{ eva_app_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_app_chart_ref: "{{ eva_app_chart_ref | default('eva-app/eva-app') }}"
     eva_app_chart_version: "{{ eva_app_chart_version | mandatory }}"
-    eva_app_offline_dir: "{{ eva_app_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-app') }}"
-    eva_app_offline_chart_tgz: "{{ eva_app_offline_chart_tgz | default((eva_app_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-app')) ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}"
+    eva_app_offline_dir: "{{ eva_app_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-app') }}"
+    eva_app_offline_chart_tgz: "{{ eva_app_offline_chart_tgz | default((eva_app_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-app')) ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}"
     eva_app_backend_host: "{{ eva_app_backend_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
     eva_app_backend_secure: "{{ eva_app_backend_secure | default(false) }}"
     eva_app_tls_host_path: >-
@@ -114,7 +114,7 @@
       }}
     eva_app_mysql_image_tag: "{{ eva_app_mysql_image_tag | default('8.0.42-bookworm') }}"
     # TLS Secret Job 과 ECR CronJob 이 쓰는 kubectl. 차트 3.1.5 에서 values 로 노출됐습니다.
-    # Harbor 이름은 install/push_images_to_repository.sh 의 평탄화 규칙을 따릅니다.
+    # Harbor 이름은 scripts/publish/push_images_to_repository.sh 의 평탄화 규칙을 따릅니다.
     eva_app_kubectl_image_repository: >-
       {{
         eva_app_kubectl_image_repository | default(
@@ -164,7 +164,7 @@
       - eva_app_offline_chart.stat.exists
     fail_msg: >-
       airgap_mode=true 인 경우 {{ eva_app_offline_chart_tgz }} 파일이 필요합니다.
-      install/download_offline_assets.sh 를 먼저 실행하세요.
+      scripts/download/download_offline_assets.sh 를 먼저 실행하세요.
   when: airgap_mode | default(false) | bool
 
 - name: Export default values.yaml from EVA App chart

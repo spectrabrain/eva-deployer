@@ -3,5 +3,229 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+EVA_CACHE_ROOT="${EVA_CACHE_ROOT:-$REPO_ROOT/out/cache}"
+IMAGE_DIR="$EVA_CACHE_ROOT/images"
+RENDER_DIR="$IMAGE_DIR/rendered"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+source "$REPO_ROOT/scripts/lib/load_versions.sh"
+load_deploy_versions
 
-exec "$REPO_ROOT/install/download_eva_images.sh" "$@"
+EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in src/solution/version.yaml)}"
+EVA_APP_CHART_VERSION="${EVA_APP_CHART_VERSION:?missing EVA_APP_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_VISION_CHART_VERSION="${EVA_VISION_CHART_VERSION:?missing EVA_VISION_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_AGENT_CHART_VERSION="${EVA_AGENT_CHART_VERSION:?missing EVA_AGENT_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_VLLM_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in src/solution/version.yaml)}"
+QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in src/solution/version.yaml)}"
+# 차트가 image.tag 를 생략하면 appVersion 을 쓰지만, roles/eva_app 은 eva_app_deploy_version
+# 을 태그로 박습니다. 렌더에도 같은 값을 넣어야 배포할 태그를 받습니다 — 안 그러면 Harbor 에
+# appVersion 태그만 올라가고 배포는 ImagePullBackOff 로 죽습니다.
+EVA_APP_DEPLOY_VERSION="${EVA_APP_DEPLOY_VERSION:?missing EVA_APP_DEPLOY_VERSION (set in src/solution/version.yaml)}"
+EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-values-k3s.PRO6000-MIGx4.yaml}"
+EVA_AGENT_QDRANT_SNAPSHOT_SOURCE="${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE:-local_pv}"
+case "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" in
+  local_pv) qdrant_default_values_file="values-k3s.yaml" ;;
+  harbor)   qdrant_default_values_file="values-k3s.harbor.yaml" ;;
+  *)
+    echo "[ERROR] EVA_AGENT_QDRANT_SNAPSHOT_SOURCE must be local_pv or harbor" >&2
+    exit 1
+    ;;
+esac
+EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-$qdrant_default_values_file}"
+echo "[info] Qdrant snapshot source=${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE}, values=${EVA_AGENT_QDRANT_VALUES_FILE}"
+# The Harbor values intentionally point at the target-side Local Harbor.  The
+# preparation host must instead pull the published source image before it is
+# re-tagged and pushed into that Harbor.
+EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE="${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE:-339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent-qdrant-snapshot-sync:0.1.0}"
+PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
+
+# 받을 컴포넌트. 기본은 전부. 일부만 설치할 때는 그 컴포넌트만 지정하면 required 검사·렌더·
+# pull 이 모두 좁혀집니다. vllm 이미지가 커서 app/iam 만 볼 때는 차이가 큽니다.
+#   COMPONENTS="eva-app eva-iam" ./scripts/download/download_eva_images.sh
+COMPONENTS="${COMPONENTS:-all}"
+ALL_COMPONENTS="eva-app eva-vision eva-agent eva-agent-init eva-agent-vllm eva-agent-qdrant eva-iam"
+
+# eva-agent는 agent-init·Qdrant·vLLM 릴리스를 함께 배포합니다. 선택 설치에서도
+# 해당 차트가 요구하는 이미지를 빠짐없이 받도록 의존성을 자동으로 포함합니다.
+#   COMPONENTS="eva-agent eva-vision" ./scripts/download/download_eva_images.sh
+if [[ "$COMPONENTS" != "all" && " $COMPONENTS " == *" eva-agent "* ]]; then
+  for dependency in eva-agent-init eva-agent-vllm eva-agent-qdrant; do
+    [[ " $COMPONENTS " == *" $dependency "* ]] || COMPONENTS+=" $dependency"
+  done
+fi
+
+want() {
+  [[ "$COMPONENTS" == "all" ]] && return 0
+  local c
+  for c in $COMPONENTS; do
+    [[ "$c" == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# 오타가 조용히 "아무것도 안 받음"으로 이어지지 않게 검증합니다.
+if [[ "$COMPONENTS" != "all" ]]; then
+  for c in $COMPONENTS; do
+    # shellcheck disable=SC2076
+    [[ " $ALL_COMPONENTS " == *" $c "* ]] || {
+      echo "[ERROR] 알 수 없는 컴포넌트: $c"
+      echo "        사용 가능: all | $ALL_COMPONENTS"
+      exit 1
+    }
+  done
+  echo "[info] COMPONENTS=$COMPONENTS (전체가 아닙니다)"
+fi
+
+for bin in helm docker; do
+  command -v "$bin" >/dev/null 2>&1 || { echo "[ERROR] $bin not found"; exit 1; }
+done
+DOCKER_CMD="${DOCKER_CMD:-docker}"
+
+mkdir -p "$IMAGE_DIR" "$RENDER_DIR"
+
+APP_CHART="$EVA_CACHE_ROOT/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
+VISION_CHART="$EVA_CACHE_ROOT/eva-vision/eva-vision-${EVA_VISION_CHART_VERSION}.tgz"
+AGENT_CHART="$EVA_CACHE_ROOT/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
+VLLM_CHART="$EVA_CACHE_ROOT/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
+INIT_CHART="$EVA_CACHE_ROOT/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
+QDRANT_CHART="$EVA_CACHE_ROOT/qdrant/qdrant-${QDRANT_CHART_VERSION}.tgz"
+IAM_CHART="$EVA_CACHE_ROOT/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
+RELEASE_DIR="$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}"
+
+required_files=()
+want eva-app          && required_files+=("$APP_CHART")
+want eva-vision       && required_files+=("$VISION_CHART")
+want eva-iam          && required_files+=("$IAM_CHART")
+want eva-agent-init   && required_files+=("$INIT_CHART" "$RELEASE_DIR/eva-agent-init/values-k3s.yaml")
+want eva-agent-qdrant && required_files+=("$QDRANT_CHART" "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}")
+want eva-agent-vllm   && required_files+=("$VLLM_CHART" "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}")
+want eva-agent        && required_files+=("$AGENT_CHART" "$RELEASE_DIR/eva-agent/values-k3s.yaml" "$RELEASE_DIR/eva-agent/values-secret.yaml")
+
+for f in "${required_files[@]}"; do
+  [[ -f "$f" ]] || { echo "[ERROR] missing file: $f"; echo "[hint] 먼저 ./scripts/download/download_offline_assets.sh 실행"; exit 1; }
+done
+
+echo "[info] Rendering charts to discover image list..."
+# 이전 실행이 남긴 렌더 결과가 섞이면 안 받은 컴포넌트의 이미지까지 목록에 들어옵니다.
+rm -f "$RENDER_DIR"/*.yaml
+want eva-app          && helm template eva-app "$APP_CHART" \
+  --set image.tag="$EVA_APP_DEPLOY_VERSION" \
+  --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-app.yaml"
+want eva-vision       && helm template eva-vision "$VISION_CHART" > "$RENDER_DIR/eva-vision.yaml"
+want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
+want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \
+  -f "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}" \
+  --set-string "image.repository=docker.io/qdrant/qdrant" \
+  --set-string "image.tag=v${QDRANT_CHART_VERSION}" \
+  --set-string "chartTests.dbInteraction.image=registry.suse.com/bci/bci-base:latest" \
+  --set-string "sidecarContainers[0].image=${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE}" \
+  > "$RENDER_DIR/eva-agent-qdrant.yaml"
+want eva-agent-vllm   && helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"
+want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/values-k3s.yaml" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" > "$RENDER_DIR/eva-agent.yaml"
+# imagePullSecrets off = airgap 렌더. 켜두면 ECR 로그인 cronjob 의 amazon/aws-cli 까지
+# 목록에 들어오는데, airgap 에서는 쓰이지 않습니다.
+want eva-iam          && helm template eva-iam "$IAM_CHART" \
+  --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-iam.yaml"
+
+awk '
+  /^[[:space:]]*image:[[:space:]]*/ {
+    val=$2
+    gsub(/"/,"",val)
+    gsub(/\047/,"",val)
+    if (val != "" && val !~ /\{\{/ && val !~ /^$/) print val
+  }
+' "$RENDER_DIR"/*.yaml | sort -u > "$IMAGE_DIR/images-all.txt"
+
+image_count="$(wc -l < "$IMAGE_DIR/images-all.txt" | tr -d ' ')"
+echo "[info] Found $image_count images"
+
+if command -v aws >/dev/null 2>&1; then
+  awk -F/ '/\.dkr\.ecr\..*\.amazonaws\.com\//{print $1}' "$IMAGE_DIR/images-all.txt" | sort -u > "$TMP_DIR/ecr-hosts.txt"
+  while IFS= read -r host; do
+    [[ -z "$host" ]] && continue
+    region="$(echo "$host" | sed -E 's#^[0-9]+\.dkr\.ecr\.([^.]+)\.amazonaws\.com$#\1#')"
+    echo "[auth] aws ecr login: $host ($region)"
+    aws ecr get-login-password --region "$region" --profile "${AWS_PROFILE:-default}" | $DOCKER_CMD login --username AWS --password-stdin "$host" || true
+  done < "$TMP_DIR/ecr-hosts.txt"
+fi
+
+: > "$IMAGE_DIR/images-pulled.txt"
+: > "$IMAGE_DIR/images-missing.txt"
+
+# 멀티플랫폼 이미지를 그냥 pull 하면, containerd 이미지 스토어를 쓰는 docker 에서는
+# 플랫폼이 정해지지 않은 index 만 로컬에 남을 수 있습니다. 그 상태로 docker save 하면
+# config blob 이 빠진 tar 가 만들어지고, 대상 서버에서 docker load 는 성공한 것처럼 보이지만
+# docker tag / push 가 "failed to read config content" 로 실패합니다.
+# 대상 노드의 아키텍처를 지정해 단일 플랫폼으로 받으면 그 문제가 생기지 않습니다.
+PULL_PLATFORM="${PULL_PLATFORM:-linux/amd64}"
+pull_args=()
+if [[ -n "$PULL_PLATFORM" ]]; then
+  echo "[info] PULL_PLATFORM=$PULL_PLATFORM (해제하려면 PULL_PLATFORM= 로 비우세요)"
+  pull_args+=(--platform "$PULL_PLATFORM")
+fi
+
+while IFS= read -r image; do
+  [[ -z "$image" ]] && continue
+  if [[ "$PULL_SOURCE_IMAGES" == "true" ]]; then
+    echo "[pull] $image"
+    image_available=false
+    if $DOCKER_CMD pull "${pull_args[@]}" "$image"; then
+      image_available=true
+    fi
+  else
+    echo "[local] $image"
+    image_available=false
+    if $DOCKER_CMD image inspect "$image" >/dev/null 2>&1; then
+      image_available=true
+    fi
+  fi
+  if [[ "$image_available" == "true" ]]; then
+    echo "$image" >> "$IMAGE_DIR/images-pulled.txt"
+  else
+    echo "$image" >> "$IMAGE_DIR/images-missing.txt"
+  fi
+done < "$IMAGE_DIR/images-all.txt"
+
+pulled_count="$(wc -l < "$IMAGE_DIR/images-pulled.txt" | tr -d ' ')"
+missing_count="$(wc -l < "$IMAGE_DIR/images-missing.txt" | tr -d ' ')"
+echo "[info] pulled=$pulled_count missing=$missing_count"
+
+# 받은 이미지가 실제로 쓸 수 있는 상태인지 확인합니다. Architecture 가 비어 있으면
+# 플랫폼이 해석되지 않은 index 만 있는 것이고, docker save 결과가 대상 서버에서 깨집니다.
+# 여기서 잡지 않으면 수 GB 를 옮긴 뒤에야 드러납니다.
+echo "[verify] 이미지 무결성 확인 (Architecture 가 비면 안 됩니다)"
+broken=0
+while IFS= read -r image; do
+  [[ -z "$image" ]] && continue
+  arch="$($DOCKER_CMD image inspect "$image" --format '{{.Architecture}}/{{.Os}}' 2>/dev/null || true)"
+  printf '  %-72s %s\n' "$image" "${arch:-<inspect 실패>}"
+  case "$arch" in
+    /*|"") broken=$((broken + 1)) ;;
+  esac
+done < "$IMAGE_DIR/images-pulled.txt"
+
+if (( broken > 0 )); then
+  cat >&2 <<MSG
+
+[ERROR] 플랫폼이 해석되지 않은 이미지가 ${broken}개 있습니다.
+
+이 상태로 docker save 하면 config blob 이 빠진 tar 가 만들어지고, 대상 서버에서
+docker load 는 성공한 것처럼 보이지만 push 단계에서 아래처럼 실패합니다.
+  Error response from daemon: failed to read config content: NotFound: content digest ...
+
+해당 이미지를 플랫폼 digest 로 다시 받으세요.
+  docker manifest inspect <image> | grep -A2 amd64      # digest 확인
+  docker rmi -f <image>
+  docker pull <repo>@<digest>
+  docker tag  <repo>@<digest> <image>
+MSG
+  exit 1
+fi
+echo "[verify] 이상 없음"
+
+echo "[done] image list: $IMAGE_DIR/images-all.txt"
+echo "[done] pulled list: $IMAGE_DIR/images-pulled.txt"
+echo "[done] missing list: $IMAGE_DIR/images-missing.txt"
+echo "[done] push pulled images with: REPOSITORY_REGISTRY=<harbor-host> ./scripts/publish/push_images_to_repository.sh"

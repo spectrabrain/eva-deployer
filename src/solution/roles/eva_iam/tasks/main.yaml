@@ -157,12 +157,12 @@
 # bundle is expected at the same path on the target (install/ is copied over with the repo).
 - name: Resolve eva-iam chart source and image repositories
   ansible.builtin.set_fact:
-    eva_iam_offline_dir: "{{ eva_iam_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-iam') }}"
+    eva_iam_offline_dir: "{{ eva_iam_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-iam') }}"
     eva_iam_offline_chart_tgz: >-
       {{ eva_iam_offline_chart_tgz
-         | default((eva_iam_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-iam'))
+         | default((eva_iam_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-iam'))
                    ~ '/eva-iam-' ~ eva_iam_chart_version ~ '.tgz') }}
-    # Harbor image names follow install/push_images_to_repository.sh, which flattens every
+    # Harbor image names follow scripts/publish/push_images_to_repository.sh, which flattens every
     # source image to <registry>/<project>/<last path element>:<tag>.
     eva_iam_keycloak_image_repository: >-
       {{ eva_iam_keycloak_image_repository
@@ -331,8 +331,8 @@
       - eva_iam_offline_chart.stat.exists
     fail_msg: >-
       airgap 모드에서는 {{ eva_iam_offline_chart_tgz }} 파일이 필요합니다.
-      인터넷이 가능한 준비 서버에서 install/download_offline_assets.sh 를 실행한 뒤
-      install/ 전체를 대상 서버로 복사하세요.
+      인터넷이 가능한 준비 서버에서 scripts/download/download_offline_assets.sh 를 실행한 뒤
+      out/cache/ 전체를 대상 서버로 복사하세요.
   when: airgap_mode | bool
 
 # Ask the chart what it accepts instead of keeping a list here — a hardcoded list is

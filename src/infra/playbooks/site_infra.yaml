@@ -10,7 +10,7 @@
     eva_workspace_root: "{{ playbook_dir }}/../../../workspace"
     eva_generated_config_root: "{{ playbook_dir }}/../../../out/work/config"
     eva_deploy_root: "{{ playbook_dir }}/../../../out/work/rendered"
-    eva_install_root: "{{ playbook_dir }}/../../../install"
+    eva_cache_root: "{{ playbook_dir }}/../../../out/cache"
 
   pre_tasks:
     - name: Resolve repository mode

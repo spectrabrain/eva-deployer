@@ -12,7 +12,7 @@
     eva_template_values_root: "{{ playbook_dir }}/../values"
     eva_generated_config_root: "{{ playbook_dir }}/../../../out/work/config"
     eva_deploy_root: "{{ playbook_dir }}/../../../out/work/rendered"
-    eva_install_root: "{{ playbook_dir }}/../../../install"
+    eva_cache_root: "{{ playbook_dir }}/../../../out/cache"
   vars_files:
     - "{{ eva_versions_file }}"
 
@@ -26,7 +26,7 @@
     - name: Resolve Harbor endpoint metadata path
       ansible.builtin.set_fact:
         eva_agent_harbor_endpoint_file: >-
-          {{ eva_agent_harbor_endpoint_file | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/harbor-endpoint.yaml') }}
+          {{ eva_agent_harbor_endpoint_file | default((eva_generated_config_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/work/config')) ~ '/harbor-endpoint.yaml') }}
       when: repository_mode in ['remote_repository', 'local_repository']
       changed_when: false
 
@@ -91,30 +91,30 @@
         eva_agent_vllm_values_override_from_config: "{{ eva_agent_generated_config.vllm | default({}) }}"
       changed_when: false
 
-    - name: Build airgap install root candidates on target
+    - name: Build airgap cache root candidates on target
       ansible.builtin.set_fact:
-        eva_agent_airgap_install_root_candidates:
-          - "{{ eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install') }}"
+        eva_agent_airgap_cache_root_candidates:
+          - "{{ eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache') }}"
       when:
         - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
-        - eva_agent_install_root is not defined
+        - eva_agent_cache_root is not defined
       changed_when: false
 
-    - name: Check airgap install root candidates
+    - name: Check airgap cache root candidates
       ansible.builtin.stat:
         path: "{{ item }}"
-      loop: "{{ eva_agent_airgap_install_root_candidates }}"
-      register: eva_agent_airgap_install_root_stats
+      loop: "{{ eva_agent_airgap_cache_root_candidates }}"
+      register: eva_agent_airgap_cache_root_stats
       when:
         - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
-        - eva_agent_install_root is not defined
+        - eva_agent_cache_root is not defined
 
-    - name: Resolve detected airgap install root
+    - name: Resolve detected airgap cache root
       ansible.builtin.set_fact:
-        eva_agent_install_root: >-
+        eva_agent_cache_root: >-
           {{
             (
-              eva_agent_airgap_install_root_stats.results
+              eva_agent_airgap_cache_root_stats.results
               | selectattr('stat.exists', 'equalto', true)
               | map(attribute='item')
               | list
@@ -123,17 +123,17 @@
           }}
       when:
         - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
-        - eva_agent_install_root is not defined
+        - eva_agent_cache_root is not defined
       changed_when: false
 
-    - name: Assert airgap install root exists when auto-detect is used
+    - name: Assert airgap cache root exists when auto-detect is used
       ansible.builtin.assert:
         that:
-          - eva_agent_install_root is defined
+          - eva_agent_cache_root is defined
         fail_msg: >-
-          airgap install 경로를 자동 탐지하지 못했습니다.
-          {{ eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install') }} 경로를 준비하거나
-          -e eva_agent_install_root=<install 경로> 를 지정하세요.
+          airgap cache 경로를 자동 탐지하지 못했습니다.
+          {{ eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache') }} 경로를 준비하거나
+          -e eva_agent_cache_root=<cache 경로> 를 지정하세요.
       when:
         - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
 

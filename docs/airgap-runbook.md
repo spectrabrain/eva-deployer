@@ -28,6 +28,18 @@ vision은 같은 bundle·Harbor 준비 절차를 사용합니다.
 
 ---
 
+## Site 산출물 namespace
+
+이 runbook의 명령은 대상 또는 배포 controller에서 동일한 `EVA_SITE_ID`를 사용한다는 전제입니다. 이 값은 필수이며, 테스트를 포함해 `default`를 사용하려면 명시적으로 지정해야 합니다. 고객 또는 설치 환경별로 실행 전 한 번 지정하세요.
+
+```bash
+export EVA_SITE_ID=customer-a
+```
+
+생성 config는 `out/work/config/$EVA_SITE_ID/<host>/`, 렌더링 values는 `out/work/rendered/$EVA_SITE_ID/<host>/<component>/`, 실행 로그는 `out/work/logs/$EVA_SITE_ID/` 아래에 저장됩니다. 이전 `out/work/config/<host>/` 경로의 결과물은 사용하지 않으므로, 전환 후 Harbor metadata와 `site_eva_config.yaml`을 다시 생성합니다. 이 재실행은 이전 `scret.yaml`을 해당 host의 pre-site 경로와 현재 site 경로에서 모두 제거합니다.
+
+---
+
 ## Qdrant snapshot 방식
 
 Agent 3.1.0의 Qdrant snapshot은 기존 `local_pv`와 Harbor OCI artifact 방식 중 하나를 선택합니다.
@@ -397,9 +409,9 @@ PULL_SOURCE_IMAGES=false IMAGE_LIST=out/cache/images/infra-images-pulled.txt \
 ./scripts/publish/push_images_to_repository.sh
 ```
 
-Harbor 설치가 `out/work/config/harbor-endpoint.yaml`을 생성합니다. 이 파일에는 `harbor_registry`,
+Harbor 설치가 `out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`을 생성합니다. 이 파일에는 `harbor_registry`,
 `repository_registry`, `repository_project`가 기록됩니다. 이후 `site_infra.yaml`과 모든 Solution playbook에
-`-e @out/work/config/harbor-endpoint.yaml`을 추가해 k3s image pull과 Qdrant snapshot sidecar가 동일한
+`-e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`을 추가해 k3s image pull과 Qdrant snapshot sidecar가 동일한
 Pod 접근 endpoint를 사용하게 하세요. Harbor와 k3s 서버가 다르면 이 파일도 배포 controller로 옮깁니다.
 metadata에는 비밀번호를 넣지 않으므로 별도 Harbor 서버의 agent 배포에는
 `-e harbor_admin_password='<Harbor 비밀번호>'`도 지정합니다.
@@ -476,7 +488,7 @@ mirror 는 차트를 건드리지 않고 그 요청을 Harbor 로 돌립니다.
 ```bash
 ansible-playbook -i 'localhost,' -c local src/infra/playbooks/site_infra.yaml -K \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml
 ```
 
 **k3s 가 이미 있을 때** — 직접 씁니다.
@@ -605,7 +617,7 @@ eva-app 이 루트를 쓰므로 eva-iam 은 `/iam` 서브패스로 둡니다.
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_iam.yaml -K \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e eva_iam_host=magok.eva.lge.com \
   -e eva_iam_node_user=eva \
   -e eva_iam_ingress_path=/iam \
@@ -614,7 +626,7 @@ ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_iam.ya
   -e eva_iam_redis_nodeport=32070 \
   -e '{"eva_iam_app_redirect_uris": ["https://magok.eva.lge.com/*"]}'
 
-cat out/work/config/localhost/eva-iam.yaml     # ssoBaseUrl / adminClientSecret
+cat out/work/config/$EVA_SITE_ID/localhost/eva-iam.yaml     # ssoBaseUrl / adminClientSecret
 ```
 
 - 같은 host 에서 eva-iam 과 eva-app 이 모두 `/` 를 쓰면 Keycloak 요청이 eva-app 으로 가서
@@ -643,7 +655,7 @@ $kc get clients/$id/client-secret --config "$cfg" -r eva-iam \
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_app.yaml -K \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e eva_app_backend_host=magok.eva.lge.com \
   -e eva_app_backend_secure=true \
   -e eva_app_sso_base_url=https://magok.eva.lge.com/iam \
@@ -657,15 +669,15 @@ ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_app.ya
 
 ### 15. eva.yaml 생성 · **[대상]**
 
-agent · vision role 은 `out/work/config/<host>/eva.yaml` 이 없으면 assert 로 멈춥니다.
+agent · vision role 은 `out/work/config/<site>/<host>/eva.yaml` 이 없으면 assert 로 멈춥니다.
 GPU 개수와 MIG 상태를 `nvidia-smi` 로 자동 감지해 만들어지므로 별도 값은 필요 없습니다.
 
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_config.yaml -K \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml
 
-cat out/work/config/localhost/eva.yaml
+cat out/work/config/$EVA_SITE_ID/localhost/eva.yaml
 ```
 
 airgap 이면 `awscli` role 은 자동으로 건너뜁니다. `nfs_share_path` 기본값은 `/share/eva-agent` 입니다.
@@ -678,7 +690,7 @@ agent · agent-init · vllm · qdrant 네 릴리스가 함께 올라갑니다.
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.yaml -K \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e eva_agent_vllm_profile=PRO6000-MIGx4 \
   -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
   -e eva_agent_qdrant_snapshot_source=harbor
@@ -708,7 +720,7 @@ Harbor endpoint metadata가 있는 deployment controller에서는 다음처럼 �
 ```bash
 ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_agent.yaml \
   -e repository_mode=remote_repository \
-  -e @out/work/config/harbor-endpoint.yaml \
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e harbor_admin_password='<Harbor 관리자 비밀번호>' \
   -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
   -e eva_agent_qdrant_snapshot_source=harbor
@@ -761,7 +773,7 @@ Qdrant만 재배포하더라도 `images-pulled.txt` 또는 `SNAPSHOT_SPECS`가 �
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_vision.yaml -K \
   -e repository_mode=local_repository \
-  -e @out/work/config/harbor-endpoint.yaml
+  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml
 ```
 
 MIG 설정은 `eva.yaml` 에서 읽습니다.
@@ -852,18 +864,15 @@ Harbor 이미지 · registries.yaml mirror · 인증서 · `.venv` · values 파
 
 ---
 
-## 보류 이슈
+## 보안 조치
 
-### `site_eva_config.yaml`이 `scret.yaml`을 다른 사용자도 읽을 수 있는 권한으로 생성함
+### `site_eva_config.yaml` cluster Secret 생성물 권한 및 파일명 정정
 
-- **확인:** 2026-08-27, Airgap Agent/Vision 설치 테스트
-- **위치:** `roles/config/tasks/scret.yaml`
-- **현재 동작:** `out/work/config/<host>/scret.yaml`을 권한 `0644`로 생성합니다.
-- **영향:** 이 파일에는 cluster-admin 권한의 `argocd-manager` ServiceAccount bearer token이 들어 있어,
-  같은 서버의 다른 로컬 사용자가 읽고 재사용할 수 있습니다.
-- **기능 영향:** 현재 Agent/Vision 배포 기능에는 영향이 없습니다.
-- **후속 조치:** 해당 task의 출력 권한을 `0600`으로 바꾸고, 수정된 role을 대상 서버에 전달한 뒤
-  `src/solution/playbooks/site_eva_config.yaml`을 재실행합니다. 파일 내용은 출력하지 않고 생성된 파일의 권한만 검증합니다.
+- **위치:** `src/solution/roles/config/tasks/secret.yaml`
+- **현재 동작:** `out/work/config/<site>/<host>/secret.yaml`을 권한 `0600`으로 생성합니다.
+- **보호 대상:** 이 파일에는 cluster-admin 권한의 `argocd-manager` ServiceAccount bearer token이 들어 있습니다.
+- **마이그레이션:** 실행 시 이전 오타 파일 `scret.yaml`을 제거한 뒤 올바른 이름의 `secret.yaml`을 생성합니다.
+- **확인:** `stat -c '%a %n' out/work/config/$EVA_SITE_ID/<host>/secret.yaml` 결과가 `600`인지 확인합니다. 파일 내용은 출력하지 않습니다.
 
 ---
 

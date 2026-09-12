@@ -1,5 +1,10 @@
 ---
-eva_repo_root: "{{ playbook_dir | dirname | dirname | dirname }}"
+eva_repo_root: >-
+  {{
+    lookup('ansible.builtin.env', 'EVA_REPO_ROOT')
+    | default((playbook_dir | dirname | dirname | dirname), true)
+    | regex_replace('/+$', '')
+  }}
 eva_src_root: "{{ eva_repo_root ~ '/src' }}"
 eva_infra_root: "{{ eva_src_root ~ '/infra' }}"
 eva_solution_root: "{{ eva_src_root ~ '/solution' }}"
@@ -10,6 +15,14 @@ eva_template_values_root: "{{ eva_solution_root ~ '/values' }}"
 eva_generated_config_root: "{{ eva_repo_root ~ '/out/work/config' }}"
 eva_deploy_root: "{{ eva_repo_root ~ '/out/work/rendered' }}"
 eva_cache_root: "{{ eva_repo_root ~ '/out/cache' }}"
+eva_site_id: >-
+  {{
+    lookup('ansible.builtin.env', 'EVA_SITE_ID')
+    | default('', true)
+    | regex_replace('/+$', '')
+  }}
+eva_site_config_root: "{{ eva_generated_config_root ~ '/' ~ eva_site_id }}"
+eva_site_deploy_root: "{{ eva_deploy_root ~ '/' ~ eva_site_id }}"
 eva_workspace_root: >-
   {{
     lookup('ansible.builtin.env', 'EVA_WORKSPACE_ROOT')

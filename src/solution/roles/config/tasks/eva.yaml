@@ -81,7 +81,7 @@
     config_eva_auto_update_status: "{{ config_auto_update_status | default('disabled') }}"
     config_eva_auto_login_status: "{{ config_auto_login_status | default('enabled') }}"
     config_eva_gpu_cdi_status: "{{ config_gpu_cdi_status | default('enabled') }}"
-    config_eva_output_dir: "{{ eva_generated_config_root ~ '/' ~ (ansible_host | default(inventory_hostname)) }}"
+    config_eva_output_dir: "{{ eva_site_config_root ~ '/' ~ (ansible_host | default(inventory_hostname)) }}"
   changed_when: false
 
 - name: Ensure local eva.yaml output directory exists on control node

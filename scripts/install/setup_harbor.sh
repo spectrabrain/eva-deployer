@@ -22,7 +22,8 @@ HARBOR_PROJECT="${HARBOR_PROJECT:-eva}"
 HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT:-}"
 HARBOR_ASSET_DIR="${HARBOR_ASSET_DIR:-$EVA_CACHE_ROOT/harbor}"
 HARBOR_INSTALL_ROOT="${HARBOR_INSTALL_ROOT:-$HOME/.local/share/eva-harbor}"
-HARBOR_ENDPOINT_FILE="${HARBOR_ENDPOINT_FILE:-$REPO_ROOT/out/work/config/harbor-endpoint.yaml}"
+EVA_SITE_ID="${EVA_SITE_ID:-}"
+HARBOR_ENDPOINT_FILE="${HARBOR_ENDPOINT_FILE:-$REPO_ROOT/out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml}"
 DOWNLOAD_ONLY="false"
 SKIP_INSTALL="false"
 SKIP_PROJECT="false"
@@ -60,6 +61,7 @@ Environment:
   HARBOR_PROJECT             Same as --project
   HARBOR_REGISTRY_ENDPOINT   Same as --registry-endpoint
   HARBOR_ENDPOINT_FILE       Same as --endpoint-file
+  EVA_SITE_ID                Required generated config namespace
 
 Notes:
   - Harbor HTTP port is fixed to ${HARBOR_PORT}.
@@ -134,6 +136,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+[[ "$EVA_SITE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+  echo "[ERROR] EVA_SITE_ID is required and must start with an alphanumeric character and contain only letters, numbers, dots, underscores, or hyphens: $EVA_SITE_ID" >&2
+  exit 1
+}
 
 if [[ "$HARBOR_VERSION" != v* ]]; then
   echo "[ERROR] HARBOR_VERSION must include the leading 'v'. Example: v2.15.2" >&2

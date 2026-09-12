@@ -11,4 +11,4 @@
   ansible.builtin.import_tasks: eva.yaml
 
 - name: Write cluster secret file
-  ansible.builtin.import_tasks: scret.yaml
+  ansible.builtin.import_tasks: secret.yaml

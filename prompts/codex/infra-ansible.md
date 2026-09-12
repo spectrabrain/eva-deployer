@@ -50,17 +50,19 @@ Environment:
   .venv/bin/python
   .venv/bin/pip
   .venv/bin/ansible-playbook
+- Set `EVA_SITE_ID` before every Harbor or Ansible command. It is required;
+  `default` is valid only when explicitly set.
 
 Logging Rules:
 - Ensure logs directory exists
 - Use tee to both display and persist logs
 - Always capture both stdout and stderr (2>&1)
 - Log files:
-  - logs_infra/ansible-lint.log
-  - logs_infra/ansible-check.log
-  - logs_infra/ansible-run.log
+  - out/work/logs/$EVA_SITE_ID/infra/ansible-lint.log
+  - out/work/logs/$EVA_SITE_ID/infra/ansible-check.log
+  - out/work/logs/$EVA_SITE_ID/infra/ansible-run.log
 - Enable Ansible internal logging:
-  ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log
+  ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log
 
 Execution Steps:
 
@@ -70,13 +72,14 @@ Execution Steps:
 - Ensure logs directory exists
 
 Command:
-mkdir -p logs_infra
+: "${EVA_SITE_ID:?Set EVA_SITE_ID for this deployment}"
+mkdir -p out/work/logs/$EVA_SITE_ID/infra
 
 1. Run ansible-lint
 
 Command:
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-lint src/infra/playbooks/site_infra.yaml 2>&1 | tee logs_infra/ansible-lint.log
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
+.venv/bin/ansible-lint src/infra/playbooks/site_infra.yaml 2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-lint.log
 
 - If lint errors occur:
   - STOP
@@ -88,8 +91,8 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 2. Run ansible-playbook (check mode)
 
 Command:
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check 2>&1 | tee logs_infra/ansible-check.log
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check 2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-check.log
 
 - If error occurs:
   - STOP immediately
@@ -102,12 +105,12 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 3. Run ansible-playbook (actual execution)
 
 Command:
-ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml -vvv 2>&1 | tee logs_infra/ansible-run.log
+ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-run.log
 
 - If error occurs:
   - STOP immediately
-  - Analyze logs_infra/ansible-run.log
+  - Analyze out/work/logs/$EVA_SITE_ID/infra/ansible-run.log
   - Identify root cause
   - Cross-check with docs/operations/infra-task-history.yaml
   - Fix issue before retrying

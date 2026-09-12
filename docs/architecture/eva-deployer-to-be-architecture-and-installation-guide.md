@@ -401,6 +401,8 @@ out/dist/
 
 Airgap 설치자에게는 `eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz` 한 개와 외부 checksum 파일만 제공할 수 있다. Bundle 내부 `artifacts/`에는 이미 생성된 Tool, Infra, Solution, Offline archive를 byte-identical하게 넣고, 최상단에는 `release.yaml`, `checksums.sha256`, README만 둔다.
 
+`eva release import-airgap --bundle <path>`는 Bundle 전체 SHA-256별 cache (`/var/lib/eva/artifacts/releases/<bundle-sha256>/`)에 nested archive를 추출한다. `release.yaml`의 각 artifact는 `artifacts/<filename>`을 가리켜야 하며, `checksums.sha256`의 같은 항목과 checksum이 일치해야 한다. Bundle 최상단에는 `release.yaml`, `checksums.sha256`, 선택 `README.md`, 그리고 metadata에 선언된 `artifacts/<filename>`만 허용한다. `eva install <bundle-path>`는 이 import를 자동 수행한 후 같은 local Release install 흐름으로 진행한다.
+
 `release.yaml`은 build가 생성하는 최소 metadata이며, CLI가 local Release directory를 검증할 때 사용한다. 각 artifact의 `file`은 Release directory 기준 상대 경로이고 `sha256`은 해당 파일의 SHA-256이다.
 
 ```yaml
@@ -863,11 +865,13 @@ eva exec ansible-playbook --version
 
 Component alias는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`이다. CLI의 `cloud`, `remote`, `local`은 각각 Ansible의 `cloud_repository`, `remote_repository`, `local_repository`로 변환한다.
 
-현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show`, `eva plan`, `eva apply`, `eva status`, `eva runtime install|validate|show`, `eva exec`다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
+현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show|prepare`, `eva install`, `eva plan`, `eva apply`, `eva status`, `eva runtime install|validate|show`, `eva exec`다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
 
 `eva plan --workspace <path> --release <path> [--output <path> | --save]`은 선택 component와 기존 playbook 순서, Ansible extra vars, 환경변수를 YAML로 생성한다. `agent` 또는 `vision`을 선택하면 `site_eva_config.yaml`을 자동 선행 단계로 넣는다. stdout 출력이 기본이며 `--output`을 지정한 plan 파일은 `0600` 권한으로 생성한다. `--save`는 `/var/lib/eva/operations/<operation-id>/`에 `planned` operation record와 Plan을 `0600` 권한으로 저장한다. 개발과 테스트에서는 `--state-root <path>`로 해당 기본 경로를 바꿀 수 있고, `eva status [operation-id]`는 최신 또는 지정 record를 읽는다.
 
 `eva apply [operation-id]`는 최신 또는 지정 `planned` operation만 실행한다. TTY에서는 site와 operation ID를 표시하고 확인을 받고, 비대화형 실행은 `--yes`가 필수다. Runtime의 `ansible-playbook` 절대 경로만 사용하며, workspace inventory와 Plan에 기록된 allowlist playbook을 검증한 뒤 순차 실행한다. 첫 실패 뒤의 단계는 실행하지 않으며 `result.yaml`, `/var/log/eva/operations/<operation-id>/ansible.log`, Ansible internal log 및 terminal status를 갱신한다. Apply는 `eva release prepare`가 생성한 `ansible.cfg`와 `src/`를 가진 local Release source를 사용한다. S3 resolver, Helm effective values와 override 적용은 다음 단계다.
+
+`eva install [release-path] --workspace <path>`는 local Release source를 검증하고, 필요하면 `release prepare`, Workspace 검증, Plan 요약, 확인, operation 생성, Apply를 차례로 수행하는 편의 명령이다. 이미 준비된 `/opt/eva/releases/<version>`을 입력하면 재추출하지 않는다. Airgap Bundle 경로는 nested artifact cache import를 먼저 수행한다. TTY가 아닌 자동화에서는 `--yes`가 필수이며, 사용자가 취소하거나 Runtime/Workspace 검증에 실패하면 Release prepare와 operation 생성은 실행하지 않는다. Release tag, Component shortcut과 Chart/Values override는 아직 지원하지 않는다.
 
 EVA managed Runtime은 `/opt/eva/runtime/runtime.yaml` descriptor로 version과 도구 경로를 고정한다. `ansible-playbook`, `helm`, `kubectl`, `kustomize`, `oras`는 모두 Runtime root 내부의 실행 가능한 regular file이어야 하며, descriptor의 절대 경로, 상위 경로 탈출 및 Runtime 밖 symlink는 거부한다. `eva exec`는 이 allowlist의 절대 경로만 실행하므로 시스템 PATH의 동명 도구를 사용하지 않는다. `eva runtime install --source <validated-runtime-payload>`는 source를 먼저 검증하고 sibling staging directory에 완전 복사·재검증한 뒤 `/opt/eva/runtime`을 교체한다. 새 Runtime publish 실패 시 이전 Runtime은 복원하며, source payload 검증 실패는 기존 Runtime을 변경하지 않는다. Online/Offline payload의 artifact 추출과 `eva shell`은 다음 단계다.
 

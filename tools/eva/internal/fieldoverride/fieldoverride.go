@@ -1,6 +1,8 @@
 package fieldoverride
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -8,14 +10,25 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // File identifies a user-supplied file and, once an operation is created, its
 // immutable private snapshot.
 type File struct {
-	SourcePath string `yaml:"source_path"`
-	SHA256     string `yaml:"sha256"`
-	StagedPath string `yaml:"staged_path,omitempty"`
+	SourcePath    string         `yaml:"source_path"`
+	SHA256        string         `yaml:"sha256"`
+	StagedPath    string         `yaml:"staged_path,omitempty"`
+	ChartMetadata *ChartMetadata `yaml:"chart_metadata,omitempty"`
+}
+
+type ChartMetadata struct {
+	Name         string `yaml:"name"`
+	Version      string `yaml:"version"`
+	AppVersion   string `yaml:"app_version,omitempty"`
+	ExpectedName string `yaml:"expected_name"`
+	NameMatches  bool   `yaml:"name_matches_expected"`
 }
 
 // Component holds the public override metadata plus private set expressions.
@@ -68,6 +81,11 @@ func Parse(charts, values, sets []string, selected map[string]bool) (Request, er
 		if err != nil {
 			return Request{}, fmt.Errorf("inspect --chart for component %q: %w", component, err)
 		}
+		metadata, err := inspectChartMetadata(file.SourcePath, component)
+		if err != nil {
+			return Request{}, fmt.Errorf("inspect --chart for component %q: %w", component, err)
+		}
+		file.ChartMetadata = &metadata
 		entry.Chart = &file
 		request.Components[component] = entry
 	}
@@ -197,4 +215,69 @@ func inspectFile(path string) (File, error) {
 		return File{}, err
 	}
 	return File{SourcePath: absPath, SHA256: fmt.Sprintf("%x", hash.Sum(nil))}, nil
+}
+
+func inspectChartMetadata(chartPath, component string) (ChartMetadata, error) {
+	file, err := os.Open(chartPath)
+	if err != nil {
+		return ChartMetadata{}, err
+	}
+	defer file.Close()
+	reader, err := gzip.NewReader(file)
+	if err != nil {
+		return ChartMetadata{}, fmt.Errorf("open Helm chart archive: %w", err)
+	}
+	defer reader.Close()
+
+	archive := tar.NewReader(reader)
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return ChartMetadata{}, fmt.Errorf("read Helm chart archive: %w", err)
+		}
+		name := strings.TrimPrefix(header.Name, "./")
+		if header.Typeflag != tar.TypeReg || (name != "Chart.yaml" && !strings.HasSuffix(name, "/Chart.yaml")) {
+			continue
+		}
+		contents, err := io.ReadAll(io.LimitReader(archive, 1<<20))
+		if err != nil {
+			return ChartMetadata{}, fmt.Errorf("read Chart.yaml: %w", err)
+		}
+		var chart struct {
+			Name       string `yaml:"name"`
+			Version    string `yaml:"version"`
+			AppVersion string `yaml:"appVersion"`
+		}
+		if err := yaml.Unmarshal(contents, &chart); err != nil {
+			return ChartMetadata{}, fmt.Errorf("parse Chart.yaml: %w", err)
+		}
+		if chart.Name == "" || chart.Version == "" {
+			return ChartMetadata{}, errors.New("Chart.yaml requires name and version")
+		}
+		metadata := ChartMetadata{
+			Name:         chart.Name,
+			Version:      chart.Version,
+			AppVersion:   chart.AppVersion,
+			ExpectedName: expectedChartName(component),
+		}
+		metadata.NameMatches = metadata.Name == metadata.ExpectedName
+		return metadata, nil
+	}
+	return ChartMetadata{}, errors.New("Helm chart archive does not contain Chart.yaml")
+}
+
+func expectedChartName(component string) string {
+	switch component {
+	case "app":
+		return "eva-app"
+	case "agent":
+		return "eva-agent"
+	case "vision":
+		return "eva-vision"
+	default:
+		return ""
+	}
 }

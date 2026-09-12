@@ -17,7 +17,7 @@
 
 - name: Find base and NFS offline packages
   ansible.builtin.find:
-    paths: "{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/apt/debs' }}"
+    paths: "{{ eva_cache_root }}/apt/debs"
     patterns: "*.deb"
     file_type: file
   register: base_offline_packages
@@ -37,8 +37,8 @@
 - name: Install base and NFS packages from offline bundle
   ansible.builtin.command:
     cmd: >-
-      /bin/bash {{ (eva_repo_root | default(playbook_dir)) ~ '/scripts/install/validate_offline_debs.sh' }}
-      {{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/apt/debs' }}
+      /bin/bash {{ eva_repo_root }}/scripts/install/validate_offline_debs.sh
+      {{ eva_cache_root }}/apt/debs
   changed_when: false
   when:
     - airgap_mode | default(false) | bool
@@ -51,7 +51,7 @@
   ansible.builtin.shell:
     cmd: |
       set -uo pipefail
-      debs_dir="{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/apt/debs' }}"
+      debs_dir="{{ eva_cache_root }}/apt/debs"
 
       # 실행 중인 시스템을 깨뜨릴 수 있는 패키지는 번들에 있어도 건드리지 않습니다.
       mapfile -d '' base_offline_debs < <(

@@ -13,9 +13,9 @@
     eva_agent_namespace: "{{ eva_agent_namespace | default('eva-agent') }}"
     eva_agent_deploy_version: "{{ eva_agent_deploy_version | mandatory }}"
     eva_agent_workdir: "{{ eva_agent_workdir | default('/opt/eva-agent/' ~ eva_agent_deploy_version) }}"
-    eva_agent_deploy_values_dir: "{{ eva_agent_deploy_values_dir | default((eva_deploy_root | default((eva_repo_root | default(playbook_dir)) ~ '/deploy')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/agent') }}"
+    eva_agent_deploy_values_dir: "{{ eva_agent_deploy_values_dir | default(eva_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/agent') }}"
     eva_agent_kubeconfig: "{{ eva_agent_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
-    eva_agent_cache_root: "{{ eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) }}"
+    eva_agent_cache_root: "{{ eva_agent_cache_root | default(eva_cache_root) }}"
     eva_agent_nfs_share_path: "{{ eva_agent_nfs_share_path | default('/data001/share/eva-agent') }}"
     eva_agent_chart_version: "{{ eva_agent_chart_version | default(eva_agent_deploy_version) }}"
     eva_agent_chart: "{{ eva_agent_chart | default('eva-agent/eva-agent') }}"
@@ -24,9 +24,9 @@
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/' ~ eva_agent_deploy_version) }}
     eva_agent_image_tag: "{{ eva_agent_image_tag | default('') }}"
-    eva_agent_offline_dir: "{{ eva_agent_offline_dir | default((eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache'))) ~ '/eva-agent') }}"
-    eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default((eva_agent_offline_dir | default((eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache'))) ~ '/eva-agent')) ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"
-    eva_agent_offline_images_pulled_list: "{{ eva_agent_offline_images_pulled_list | default((eva_agent_cache_root | default(eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache'))) ~ '/images/images-pulled.txt') }}"
+    eva_agent_offline_dir: "{{ eva_agent_offline_dir | default(eva_agent_cache_root ~ '/eva-agent') }}"
+    eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"
+    eva_agent_offline_images_pulled_list: "{{ eva_agent_offline_images_pulled_list | default(eva_agent_cache_root ~ '/images/images-pulled.txt') }}"
 
 - name: Validate repository mode for EVA Agent
   ansible.builtin.assert:
@@ -188,7 +188,7 @@
 
 - name: Render EVA Agent k3s override values on control node
   ansible.builtin.template:
-    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/agent-k3s-override.yaml.j2' }}"
+    src: "{{ eva_template_values_root }}/agent-k3s-override.yaml.j2"
     dest: "{{ eva_agent_deploy_values_dir }}/agent-k3s-override.yaml"
     mode: "0644"
   delegate_to: localhost

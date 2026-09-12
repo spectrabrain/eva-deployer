@@ -14,12 +14,12 @@
     eva_vision_name: "{{ eva_vision_name | default(eva_vision_release | default('eva-vision')) }}"
     eva_vision_deploy_version: "{{ eva_vision_deploy_version | mandatory }}"
     eva_vision_workdir: "{{ eva_vision_workdir | default('/opt/eva-vision/' ~ eva_vision_deploy_version) }}"
-    eva_vision_deploy_values_dir: "{{ eva_vision_deploy_values_dir | default((eva_deploy_root | default((eva_repo_root | default(playbook_dir)) ~ '/deploy')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/vision') }}"
+    eva_vision_deploy_values_dir: "{{ eva_vision_deploy_values_dir | default(eva_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/vision') }}"
     eva_vision_kubeconfig: "{{ eva_vision_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_vision_chart_ref: "{{ eva_vision_chart_ref | default('eva-vision/eva-vision') }}"
     eva_vision_chart_version: "{{ eva_vision_chart_version | mandatory }}"
-    eva_vision_offline_dir: "{{ eva_vision_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-vision') }}"
-    eva_vision_offline_chart_tgz: "{{ eva_vision_offline_chart_tgz | default((eva_vision_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-vision')) ~ '/eva-vision-' ~ eva_vision_chart_version ~ '.tgz') }}"
+    eva_vision_offline_dir: "{{ eva_vision_offline_dir | default(eva_cache_root ~ '/eva-vision') }}"
+    eva_vision_offline_chart_tgz: "{{ eva_vision_offline_chart_tgz | default(eva_vision_offline_dir ~ '/eva-vision-' ~ eva_vision_chart_version ~ '.tgz') }}"
     eva_vision_gpu_count: "{{ eva_vision_gpu_count | default(1) }}"
     eva_vision_gpu_resource_name: "{{ eva_vision_gpu_resource_name | default('') }}"
     eva_vision_pvc_size: "{{ eva_vision_pvc_size | default('20Gi') }}"
@@ -165,7 +165,7 @@
 - name: Render EVA Vision k3s override values on control node
   no_log: true
   ansible.builtin.template:
-    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/vision-k3s-override.yaml.j2' }}"
+    src: "{{ eva_template_values_root }}/vision-k3s-override.yaml.j2"
     dest: "{{ eva_vision_deploy_values_dir }}/vision-k3s-override.yaml"
     mode: "0644"
   delegate_to: localhost

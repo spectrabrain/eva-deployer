@@ -1,6 +1,6 @@
 - name: Ensure local output directory variable for scret.yaml
   ansible.builtin.set_fact:
-    config_eva_output_dir: "{{ config_eva_output_dir | default((eva_generated_config_root | default((eva_repo_root | default(playbook_dir)) ~ '/config')) ~ '/' ~ (ansible_host | default(inventory_hostname))) }}"
+    config_eva_output_dir: "{{ config_eva_output_dir | default(eva_generated_config_root ~ '/' ~ (ansible_host | default(inventory_hostname))) }}"
   changed_when: false
 
 - name: Check argocd-manager service account exists

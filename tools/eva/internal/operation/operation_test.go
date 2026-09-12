@@ -56,16 +56,12 @@ func TestCreateAndLoad(t *testing.T) {
 func TestCreateStagesPrivateOverrideInputs(t *testing.T) {
 	root := t.TempDir()
 	inputRoot := t.TempDir()
-	chartPath := filepath.Join(inputRoot, "app.tgz")
 	valuesPath := filepath.Join(inputRoot, "app.yaml")
-	if err := os.WriteFile(chartPath, []byte("chart"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(valuesPath, []byte("token: very-secret-value\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	overrides, err := fieldoverride.Parse(
-		[]string{"app=" + chartPath}, []string{"app=" + valuesPath}, []string{"app:replicaCount=2", "app:api.token=very-secret-value"}, map[string]bool{"app": true},
+		nil, []string{"app=" + valuesPath}, []string{"app:replicaCount=2", "app:api.token=very-secret-value"}, map[string]bool{"app": true},
 	)
 	if err != nil {
 		t.Fatal(err)

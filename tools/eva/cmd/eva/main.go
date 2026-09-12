@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ func usage() {
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
+	fmt.Println("  shell [--runtime-root PATH] [--site ID|--workspace PATH] [--release PATH] [--command CMD]")
 	fmt.Println("  exec [--runtime-root PATH] <ansible-playbook|helm|kubectl|kustomize|oras> [args...]")
 	fmt.Println("  version")
 	fmt.Println("  help")
@@ -78,6 +80,8 @@ func run(args []string) error {
 		return runStatus(args[1:])
 	case "runtime":
 		return runRuntime(args[1:])
+	case "shell":
+		return runShell(args[1:])
 	case "exec":
 		return runExec(args[1:])
 	default:
@@ -380,8 +384,8 @@ func printInstallSummary(document plan.Document) {
 		components = append(components, step.Component)
 	}
 	fmt.Printf("install plan: site=%s release=%s components=%s\n", document.SiteID, document.ReleaseVersion, strings.Join(components, ","))
-	if len(document.Overrides) > 0 {
-		fmt.Printf("[WARN] field override detected: components=%s\n", overrideComponents(document))
+	for _, message := range overrideMessages(document) {
+		fmt.Println(message)
 	}
 }
 
@@ -458,7 +462,9 @@ func runPlan(args []string) error {
 	now := time.Now()
 	document := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, now)
 	if len(document.Overrides) > 0 && !*save {
-		fmt.Fprintf(os.Stderr, "[WARN] field override detected: components=%s\n", overrideComponents(document))
+		for _, message := range overrideMessages(document) {
+			fmt.Fprintln(os.Stderr, message)
+		}
 	}
 	if *save {
 		record, err := operation.Create(*stateRoot, document, now)
@@ -649,6 +655,116 @@ func runtimeUsage() {
 	fmt.Printf("The managed Runtime defaults to %s.\n", runtime.DefaultRoot)
 }
 
+func runShell(args []string) error {
+	flags := flag.NewFlagSet("shell", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	siteID := flags.String("site", "", "site identifier")
+	workspaceRoot := flags.String("workspace", "", "workspace path")
+	releasePath := flags.String("release", "", "prepared Release directory or release.yaml path")
+	shellPath := flags.String("shell", "", "shell executable path")
+	commandText := flags.String("command", "", "run a shell command instead of starting an interactive shell")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected shell arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	resolvedRuntime, err := runtime.Resolve(*runtimeRoot)
+	if err != nil {
+		return err
+	}
+	environment, err := shellEnvironment(os.Environ(), resolvedRuntime, *siteID, *workspaceRoot, *releasePath)
+	if err != nil {
+		return err
+	}
+	executable, err := resolveShellExecutable(*shellPath)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(os.Stderr, "[WARN] eva shell commands are not recorded in operation state and can diverge from CLI-managed state")
+	command := exec.Command(executable)
+	if *commandText != "" {
+		command = exec.Command(executable, "-lc", *commandText)
+	}
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	command.Env = environment
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("run EVA shell: %w", err)
+	}
+	return nil
+}
+
+func shellEnvironment(base []string, resolvedRuntime runtime.Resolved, siteID, workspaceRoot, releasePath string) ([]string, error) {
+	values := make(map[string]string, len(base)+6)
+	for _, entry := range base {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[name] = value
+		}
+	}
+	values["EVA_RUNTIME_ROOT"] = resolvedRuntime.Root
+	pathEntries := resolvedRuntime.ToolDirectories()
+	if values["PATH"] != "" {
+		pathEntries = append(pathEntries, values["PATH"])
+	}
+	values["PATH"] = strings.Join(pathEntries, string(os.PathListSeparator))
+
+	if siteID != "" || workspaceRoot != "" {
+		resolvedWorkspace, err := workspace.Resolve(workspace.Options{SiteID: siteID, Workspace: workspaceRoot})
+		if err != nil {
+			return nil, err
+		}
+		for name, value := range resolvedWorkspace.Environment() {
+			values[name] = value
+		}
+	}
+	if releasePath != "" {
+		resolvedRelease, err := release.Resolve(releasePath)
+		if err != nil {
+			return nil, err
+		}
+		values["EVA_RELEASE_ROOT"] = resolvedRelease.Root
+		values["EVA_RELEASE_VERSION"] = resolvedRelease.Metadata.Version
+		values["EVA_REPO_ROOT"] = resolvedRelease.Root
+	}
+
+	environment := make([]string, 0, len(values))
+	for name, value := range values {
+		environment = append(environment, name+"="+value)
+	}
+	sort.Strings(environment)
+	return environment, nil
+}
+
+func resolveShellExecutable(requested string) (string, error) {
+	if requested == "" {
+		requested = os.Getenv("SHELL")
+	}
+	if requested == "" {
+		requested = "/bin/bash"
+	}
+	if !filepath.IsAbs(requested) {
+		return "", errors.New("--shell must be an absolute executable path")
+	}
+	path, err := filepath.EvalSymlinks(requested)
+	if err != nil {
+		return "", fmt.Errorf("resolve shell executable: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("read shell executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("shell executable is not executable: %s", path)
+	}
+	return path, nil
+}
+
 func runExec(args []string) error {
 	flags := flag.NewFlagSet("exec", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -711,6 +827,31 @@ func overrideComponents(document plan.Document) string {
 	}
 	sort.Strings(components)
 	return strings.Join(components, ",")
+}
+
+func overrideMessages(document plan.Document) []string {
+	if len(document.Overrides) == 0 {
+		return nil
+	}
+	messages := []string{"[WARN] field override detected: components=" + overrideComponents(document)}
+	components := make([]string, 0, len(document.Overrides))
+	for component := range document.Overrides {
+		components = append(components, component)
+	}
+	sort.Strings(components)
+	for _, component := range components {
+		override := document.Overrides[component]
+		messages = append(messages, "[INFO] component="+component)
+		if override.Chart == nil || override.Chart.ChartMetadata == nil {
+			continue
+		}
+		metadata := override.Chart.ChartMetadata
+		messages = append(messages, "[INFO] chart_source=local_override chart="+metadata.Name+" version="+metadata.Version)
+		if !metadata.NameMatches {
+			messages = append(messages, "[WARN] chart name differs: component="+component+" expected="+metadata.ExpectedName+" actual="+metadata.Name)
+		}
+	}
+	return messages
 }
 
 func printWorkspace(resolved workspace.Resolved) {

@@ -27,11 +27,6 @@ workspace/site-values/*
 !workspace/site-values/.gitkeep
 !workspace/site-values/*.sample
 
-logs/
-logs_*/
-logs_infra/
-logs_eva/
-
 *.ini
 
 # Deployment-specific EVA App host values (contains license credentials)

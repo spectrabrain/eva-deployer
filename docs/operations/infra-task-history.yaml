@@ -31,8 +31,8 @@
   related_files:
     - src/infra/playbooks/site_infra.yaml
     - src/infra/roles/gpu/tasks/cuda.yaml
-    - logs_infra/ansible-run.log
-    - logs_infra/ansible-internal.log
+    - out/work/logs/<site>/infra/ansible-run.log
+    - out/work/logs/<site>/infra/ansible-internal.log
 
   retry_count: 1
   status: "resolved"
@@ -70,7 +70,7 @@
   related_files:
     - src/infra/playbooks/site_gpu_mig.yaml
     - src/infra/roles/gpu_mig/tasks/enable_mig.yaml
-    - logs_infra/ansible-run.log
+    - out/work/logs/<site>/infra/ansible-run.log
     - docs/operations/infra-task-history.yaml
 
   retry_count: 1

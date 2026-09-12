@@ -148,7 +148,7 @@
     eva_iam_workdir: "{{ eva_iam_workdir | default(eva_iam_base_dir) }}"
     eva_iam_deploy_values_dir: >-
       {{ eva_iam_deploy_values_dir
-         | default(eva_deploy_root ~ '/'
+         | default(eva_site_deploy_root ~ '/'
                    ~ (ansible_host | default(inventory_hostname)) ~ '/iam') }}
     eva_iam_values_dest: "{{ (eva_iam_workdir | default(eva_iam_base_dir)) ~ '/eva-iam-host-override.yaml' }}"
 
@@ -219,7 +219,7 @@
       {{ 'CLIENT_SECRET_' ~ (eva_iam_admin_api_client_id | upper | replace('-', '_')) }}
     eva_iam_app_config_dir: >-
       {{ eva_iam_app_config_dir
-         | default(eva_generated_config_root ~ '/' ~ (ansible_host | default(inventory_hostname))) }}
+         | default(eva_site_config_root ~ '/' ~ (ansible_host | default(inventory_hostname))) }}
     # app.sso.baseUrl — keycloak 이 서비스되는 주소. ingress.path 가 '/' 면 호스트만.
     # 차트 3.1.4+ 의 eva-iam.baseUrl 헬퍼와 우선순위를 맞춰야 합니다. 어긋나면 eva-app 이
     # 토큰 issuer 와 다른 주소로 discovery 를 호출해 invalid_grant 로 실패합니다.

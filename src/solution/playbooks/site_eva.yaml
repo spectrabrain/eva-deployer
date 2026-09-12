@@ -18,7 +18,7 @@
 
     - name: Check generated eva.yaml exists on control node
       ansible.builtin.stat:
-        path: "{{ eva_generated_config_root }}/{{ eva_generated_config_host }}/eva.yaml"
+        path: "{{ eva_site_config_root }}/{{ eva_generated_config_host }}/eva.yaml"
       register: eva_generated_config_stat
       delegate_to: localhost
       become: false
@@ -28,12 +28,12 @@
         that:
           - eva_generated_config_stat.stat.exists
         fail_msg: >-
-          {{ eva_generated_config_root }}/{{ eva_generated_config_host }}/eva.yaml 파일이 없습니다.
+          {{ eva_site_config_root }}/{{ eva_generated_config_host }}/eva.yaml 파일이 없습니다.
           먼저 site_eva_config.yaml을 실행해 eva.yaml을 생성하세요.
 
     - name: Load generated EVA configuration
       ansible.builtin.include_vars:
-        file: "{{ eva_generated_config_root }}/{{ eva_generated_config_host }}/eva.yaml"
+        file: "{{ eva_site_config_root }}/{{ eva_generated_config_host }}/eva.yaml"
         name: eva_generated_config
 
     - name: Apply generated EVA configuration defaults

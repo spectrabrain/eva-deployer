@@ -53,10 +53,11 @@ func TestPrepareExtractsAndReusesImmutableRelease(t *testing.T) {
 	root := writeRelease(t, map[string]string{
 		"eva-tool.tar.gz": "tool",
 		"eva-infra.tar.gz": gzipTar(t, map[string]string{
-			"ansible.cfg":                         "[defaults]\n",
-			"src/playbook-preflight.yaml":         "---\n",
-			"src/playbook-vars.yaml":              "---\n",
-			"src/infra/playbooks/site_infra.yaml": "---\n",
+			"ansible.cfg":                                "[defaults]\n",
+			"src/playbook-preflight.yaml":                "---\n",
+			"src/playbook-vars.yaml":                     "---\n",
+			"src/infra/playbooks/site_precondition.yaml": "---\n",
+			"src/infra/playbooks/site_infra.yaml":        "---\n",
 		}),
 		"eva-solution.tar.gz": gzipTar(t, map[string]string{
 			"src/solution/playbooks/site_eva_app.yaml": "---\n",
@@ -70,7 +71,7 @@ func TestPrepareExtractsAndReusesImmutableRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare() error = %v", err)
 	}
-	for _, path := range []string{"ansible.cfg", "src/playbook-preflight.yaml", "src/infra/playbooks/site_infra.yaml", "src/solution/playbooks/site_eva_app.yaml", preparedMarkerName} {
+	for _, path := range []string{"ansible.cfg", "src/playbook-preflight.yaml", "src/infra/playbooks/site_precondition.yaml", "src/infra/playbooks/site_infra.yaml", "src/solution/playbooks/site_eva_app.yaml", preparedMarkerName} {
 		if _, err := os.Stat(filepath.Join(prepared.Root, path)); err != nil {
 			t.Fatalf("prepared Release is missing %s: %v", path, err)
 		}
@@ -106,7 +107,7 @@ func TestPrepareRejectsArchivePathTraversal(t *testing.T) {
 func TestImportAirgapBundleValidatesNestedArtifacts(t *testing.T) {
 	tool := "tool"
 	infra := gzipTar(t, map[string]string{
-		"ansible.cfg": "[defaults]\n", "src/playbook-preflight.yaml": "---\n", "src/playbook-vars.yaml": "---\n", "src/infra/playbooks/site_infra.yaml": "---\n",
+		"ansible.cfg": "[defaults]\n", "src/playbook-preflight.yaml": "---\n", "src/playbook-vars.yaml": "---\n", "src/infra/playbooks/site_precondition.yaml": "---\n", "src/infra/playbooks/site_infra.yaml": "---\n",
 	})
 	solution := gzipTar(t, map[string]string{"src/solution/playbooks/site_eva_app.yaml": "---\n"})
 	metadata := fmt.Sprintf(`version: 3.2.0
@@ -159,7 +160,7 @@ artifacts:
 func TestImportAirgapBundleRejectsUnexpectedFiles(t *testing.T) {
 	tool := "tool"
 	infra := gzipTar(t, map[string]string{
-		"ansible.cfg": "[defaults]\n", "src/playbook-preflight.yaml": "---\n", "src/playbook-vars.yaml": "---\n", "src/infra/playbooks/site_infra.yaml": "---\n",
+		"ansible.cfg": "[defaults]\n", "src/playbook-preflight.yaml": "---\n", "src/playbook-vars.yaml": "---\n", "src/infra/playbooks/site_precondition.yaml": "---\n", "src/infra/playbooks/site_infra.yaml": "---\n",
 	})
 	solution := gzipTar(t, map[string]string{"src/solution/placeholder": "ok"})
 	metadata := fmt.Sprintf(`version: 3.2.0

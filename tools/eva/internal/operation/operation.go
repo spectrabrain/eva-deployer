@@ -2,6 +2,7 @@ package operation
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/plan"
 	"gopkg.in/yaml.v3"
 )
@@ -34,6 +36,7 @@ type Record struct {
 	CompletedAt    time.Time `yaml:"completed_at,omitempty"`
 	SiteID         string    `yaml:"site_id"`
 	ReleaseVersion string    `yaml:"release_version"`
+	HasOverrides   bool      `yaml:"has_field_overrides,omitempty"`
 	PlanPath       string    `yaml:"plan_path"`
 	ResultPath     string    `yaml:"result_path,omitempty"`
 	LogDirectory   string    `yaml:"log_directory,omitempty"`
@@ -69,8 +72,17 @@ func Create(root string, document plan.Document, now time.Time) (Record, error) 
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return Record{}, fmt.Errorf("create operation directory: %w", err)
 	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(directory)
+		}
+	}()
 
 	document.OperationID = id
+	if err := stageOverrideInputs(directory, &document); err != nil {
+		return Record{}, err
+	}
 	planContents, err := plan.Marshal(document)
 	if err != nil {
 		return Record{}, err
@@ -87,6 +99,7 @@ func Create(root string, document plan.Document, now time.Time) (Record, error) 
 		UpdatedAt:      now.UTC(),
 		SiteID:         document.SiteID,
 		ReleaseVersion: document.ReleaseVersion,
+		HasOverrides:   len(document.Overrides) > 0,
 		PlanPath:       planPath,
 	}
 	contents, err := yaml.Marshal(record)
@@ -96,7 +109,97 @@ func Create(root string, document plan.Document, now time.Time) (Record, error) 
 	if err := writePrivateFile(filepath.Join(directory, "operation.yaml"), contents); err != nil {
 		return Record{}, err
 	}
+	published = true
 	return record, nil
+}
+
+func stageOverrideInputs(operationDirectory string, document *plan.Document) error {
+	if document.OverrideInputs.Empty() {
+		return nil
+	}
+	if document.Overrides == nil {
+		document.Overrides = make(map[string]fieldoverride.Component, len(document.OverrideInputs.Components))
+	}
+	for componentName, input := range document.OverrideInputs.Components {
+		inputDirectory := filepath.Join(operationDirectory, "inputs", componentName)
+		if err := os.MkdirAll(inputDirectory, 0o700); err != nil {
+			return fmt.Errorf("create override input directory: %w", err)
+		}
+		staged := input
+		if input.Chart != nil {
+			chart := *input.Chart
+			chart.StagedPath = filepath.Join(inputDirectory, "chart"+filepath.Ext(chart.SourcePath))
+			if err := copyVerifiedInput(chart.SourcePath, chart.StagedPath, chart.SHA256); err != nil {
+				return fmt.Errorf("stage %s chart override: %w", componentName, err)
+			}
+			staged.Chart = &chart
+		}
+		if input.Values != nil {
+			values := *input.Values
+			values.StagedPath = filepath.Join(inputDirectory, "values"+filepath.Ext(values.SourcePath))
+			if err := copyVerifiedInput(values.SourcePath, values.StagedPath, values.SHA256); err != nil {
+				return fmt.Errorf("stage %s values override: %w", componentName, err)
+			}
+			staged.Values = &values
+		}
+		staged.AnsibleVarsPath = filepath.Join(inputDirectory, "ansible-overrides.yaml")
+		if err := writeOverrideVars(staged); err != nil {
+			return fmt.Errorf("write %s override variables: %w", componentName, err)
+		}
+		staged.SetValues = nil
+		document.Overrides[componentName] = staged
+	}
+	return nil
+}
+
+func copyVerifiedInput(source, destination, expectedSHA256 string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("must be a regular non-symlink file: %s", source)
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(io.MultiWriter(output, hash), input)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if actual := fmt.Sprintf("%x", hash.Sum(nil)); actual != expectedSHA256 {
+		return fmt.Errorf("file changed while staging (sha256=%s, expected=%s)", actual, expectedSHA256)
+	}
+	return nil
+}
+
+func writeOverrideVars(component fieldoverride.Component) error {
+	variables := make(map[string]any)
+	if component.Chart != nil {
+		variables["eva_cli_chart_path"] = component.Chart.StagedPath
+	}
+	if component.Values != nil {
+		variables["eva_cli_values_path"] = component.Values.StagedPath
+	}
+	if len(component.SetValues) > 0 {
+		variables["eva_cli_helm_set"] = component.SetValues
+	}
+	contents, err := yaml.Marshal(variables)
+	if err != nil {
+		return err
+	}
+	return writePrivateFile(component.AnsibleVarsPath, contents)
 }
 
 func Load(root, id string) (Record, error) {

@@ -93,6 +93,46 @@ components:
 	}
 }
 
+func TestSelectComponentsScopesToEnabledComponent(t *testing.T) {
+	resolved := Resolved{Config: Config{Components: map[string]bool{
+		"infra": true,
+		"app":   true,
+		"n8n":   false,
+	}}}
+
+	selected, err := resolved.SelectComponents([]string{"app"})
+	if err != nil {
+		t.Fatalf("SelectComponents() error = %v", err)
+	}
+	want := map[string]bool{"infra": false, "app": true, "n8n": false}
+	if !reflect.DeepEqual(selected.Config.Components, want) {
+		t.Fatalf("selected components = %#v, want %#v", selected.Config.Components, want)
+	}
+	if !resolved.Config.Components["infra"] {
+		t.Fatal("SelectComponents() mutated the original workspace")
+	}
+}
+
+func TestSelectComponentsRejectsDisabledAndInvalidSelections(t *testing.T) {
+	resolved := Resolved{Config: Config{Components: map[string]bool{"app": true, "n8n": false}}}
+	for _, requested := range [][]string{{"n8n"}, {"unknown"}, {"all", "app"}, {"app", "app"}} {
+		if _, err := resolved.SelectComponents(requested); err == nil {
+			t.Fatalf("SelectComponents(%v) succeeded", requested)
+		}
+	}
+}
+
+func TestSelectComponentsAllKeepsEnabledComponents(t *testing.T) {
+	resolved := Resolved{Config: Config{Components: map[string]bool{"infra": true, "app": true, "n8n": false}}}
+	selected, err := resolved.SelectComponents([]string{"all"})
+	if err != nil {
+		t.Fatalf("SelectComponents() error = %v", err)
+	}
+	if !reflect.DeepEqual(selected.Config.Components, resolved.Config.Components) {
+		t.Fatalf("selected components = %#v, want %#v", selected.Config.Components, resolved.Config.Components)
+	}
+}
+
 func writeWorkspace(t *testing.T, content string) string {
 	t.Helper()
 	root := t.TempDir()

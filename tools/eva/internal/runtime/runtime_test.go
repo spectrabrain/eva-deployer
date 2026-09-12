@@ -1,6 +1,9 @@
 package runtime
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +101,43 @@ func TestInstallRejectsIdenticalSourceAndDestination(t *testing.T) {
 	}
 }
 
+func TestBootstrapOfflineInstallsRuntimeSubtree(t *testing.T) {
+	payload := writeOfflinePayload(t, createRuntime(t))
+	destination := filepath.Join(t.TempDir(), "runtime")
+	installed, err := BootstrapOffline(payload, destination)
+	if err != nil {
+		t.Fatalf("BootstrapOffline() error = %v", err)
+	}
+	if installed.Root != destination || installed.Descriptor.Version != "3.2.0" {
+		t.Fatalf("installed runtime = %#v", installed)
+	}
+}
+
+func TestBootstrapOfflineRejectsPathTraversal(t *testing.T) {
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	archive := tar.NewWriter(gzipWriter)
+	if err := archive.WriteHeader(&tar.Header{Name: "../runtime/runtime.yaml", Mode: 0o600, Size: 3, Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := archive.Write([]byte("bad")); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(t.TempDir(), "eva-offline.tar.gz")
+	if err := os.WriteFile(payload, buffer.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BootstrapOffline(payload, filepath.Join(t.TempDir(), "runtime")); err == nil || !strings.Contains(err.Error(), "escapes archive root") {
+		t.Fatalf("BootstrapOffline() error = %v, want path traversal error", err)
+	}
+}
+
 func createRuntime(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -125,4 +165,50 @@ func createRuntime(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+func writeOfflinePayload(t *testing.T, runtimeRoot string) string {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	archive := tar.NewWriter(gzipWriter)
+	if err := filepath.WalkDir(runtimeRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(runtimeRoot, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." || entry.IsDir() {
+			return nil
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		header := &tar.Header{Name: "runtime/" + filepath.ToSlash(relative), Mode: int64(info.Mode().Perm()), Size: int64(len(contents)), Typeflag: tar.TypeReg}
+		if err := archive.WriteHeader(header); err != nil {
+			return err
+		}
+		_, err = archive.Write(contents)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(t.TempDir(), "eva-offline.tar.gz")
+	if err := os.WriteFile(payload, buffer.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }

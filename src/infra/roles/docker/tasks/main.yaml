@@ -13,8 +13,8 @@
       ansible.builtin.set_fact:
         docker_repo_url: "{{ docker_repo_url | default('https://download.docker.com/linux/ubuntu') }}"
         docker_gpg_url: "{{ docker_gpg_url | default('https://download.docker.com/linux/ubuntu/gpg') }}"
-        docker_offline_gpg_path: "{{ docker_offline_gpg_path | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/docker/docker.gpg') }}"
-        docker_offline_package_dir: "{{ docker_offline_package_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/docker/debs') }}"
+        docker_offline_gpg_path: "{{ docker_offline_gpg_path | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/docker/docker.gpg') }}"
+        docker_offline_package_dir: "{{ docker_offline_package_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/docker/debs') }}"
       changed_when: false
 
     - name: Install Docker Engine on Ubuntu
@@ -45,7 +45,7 @@
         fail_msg: >-
           Docker가 없는 airgap 서버에는 {{ docker_offline_package_dir }} 아래
           Docker .deb bundle이 필요합니다. 준비 서버에서
-          install/download_offline_assets.sh를 먼저 실행하세요.
+          scripts/download/download_offline_assets.sh를 먼저 실행하세요.
       when:
         - airgap_mode | default(false) | bool
         - not ansible_check_mode

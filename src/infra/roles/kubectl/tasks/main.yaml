@@ -1,7 +1,7 @@
 - name: Resolve kubectl install architecture and paths
   ansible.builtin.set_fact:
     kubectl_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
-    kubectl_offline_dir: "{{ (eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/k8s' }}"
+    kubectl_offline_dir: "{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/k8s' }}"
   changed_when: false
 
 - name: Get stable kubectl version from internet

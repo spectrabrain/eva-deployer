@@ -7,7 +7,7 @@
     gpu_mig_mig_instance_count: "{{ gpu_mig_mig_instance_count | default(7) | int }}"
     gpu_mig_mig_output_path: "{{ gpu_mig_mig_output_path | default('/etc/nvidia-mig-manager/partition.yaml') }}"
     gpu_mig_mig_selector_remote_dir: "{{ gpu_mig_mig_selector_remote_dir | default('/opt/mode_selector_1.72.0/linux') }}"
-    gpu_mig_mig_selector_local_base_dir: "{{ gpu_mig_mig_selector_local_base_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/display_mode_selector/mode_selector_1.72.0') }}"
+    gpu_mig_mig_selector_local_base_dir: "{{ gpu_mig_mig_selector_local_base_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/display_mode_selector/mode_selector_1.72.0') }}"
     gpu_mig_k8s_device_plugin_image: >-
       {{ gpu_mig_k8s_device_plugin_image | default(
         ((repository_mode | default('cloud_repository')) == 'cloud_repository')

@@ -8,7 +8,7 @@
   pre_tasks:
     - name: Load deployment version catalogue
       ansible.builtin.include_vars:
-        file: "{{ playbook_dir }}/versions.json"
+        file: "{{ eva_versions_file | default((eva_repo_root | default(playbook_dir)) ~ '/versions.json') }}"
         name: deploy_versions
 
     - name: Validate pinned n8n image version

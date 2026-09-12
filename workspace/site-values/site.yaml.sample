@@ -1,0 +1,25 @@
+# EVA CLI site input. Copy to site.yaml and replace every placeholder.
+# This is the input contract for the system-wide EVA CLI. Direct Ansible
+# execution continues to use EVA_SITE_ID and explicit repository extra vars
+# until the CLI orchestration layer is enabled.
+site:
+  id: customer-a
+
+repository:
+  # cloud, remote, or local. The CLI maps these to Ansible repository modes.
+  mode: cloud
+  # Required for remote and local modes. Do not use localhost for a registry
+  # accessed by multiple k3s nodes or Pods.
+  # registry: harbor.customer.example:32080
+  project: eva
+
+components:
+  infra: true
+  iam: true
+  agent: true
+  vision: true
+  app: true
+  n8n: false
+
+# Optional deployment knobs. Omit values that can be detected at install time.
+# gpu_profile: PRO6000-MIGx4

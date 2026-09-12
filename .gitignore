@@ -12,6 +12,9 @@ env/
 .vscode/
 .idea/
 
+# Local design notes and implementation planning are not release artifacts.
+docs/todo/
+
 out/cache/*
 !out/cache/.gitkeep
 out/work/*

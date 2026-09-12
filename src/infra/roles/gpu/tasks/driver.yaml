@@ -64,7 +64,7 @@
 - name: Set offline NVIDIA driver parameters
   ansible.builtin.set_fact:
     gpu_driver_package: "{{ gpu_driver_package | default('nvidia-driver-580') }}"
-    gpu_driver_repo_tar_path: "{{ gpu_driver_repo_tar_path | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/nvidia/nvidia-driver-repo.tar.gz') }}"
+    gpu_driver_repo_tar_path: "{{ gpu_driver_repo_tar_path | default(eva_cache_root ~ '/nvidia/nvidia-driver-repo.tar.gz') }}"
     gpu_driver_repo_remote_dir: "{{ gpu_driver_repo_remote_dir | default('/opt/eva-offline/nvidia-driver-repo') }}"
   changed_when: false
   when:
@@ -90,7 +90,7 @@
     fail_msg: >-
       오프라인 NVIDIA 드라이버 저장소 파일을 찾지 못했습니다:
       {{ gpu_driver_repo_tar_path }}
-      먼저 install/build_nvidia_driver_repo.sh 를 실행하세요.
+      먼저 scripts/download/build_nvidia_driver_repo.sh 를 실행하세요.
   when:
     - not ansible_check_mode
     - gpu_nvidia_smi_check.rc != 0

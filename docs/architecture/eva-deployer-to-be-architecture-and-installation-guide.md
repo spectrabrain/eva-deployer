@@ -150,21 +150,22 @@ src/solution/
 ```text
 workspace/
 ├── inventory/
-│   └── hosts.yaml
 └── site-values/
-    ├── site.yaml
-    └── app.yaml
+  ├── app.yaml
+  └── iam.yaml
 ```
 
 `workspace/`는 운영자가 작성하는 배포 입력 전용 공간이다.
 
-- `hosts.yaml`: 대상 호스트, 접속 사용자, SSH 방식
-- `site.yaml`: Repository mode, 설치 컴포넌트, 도메인, TLS 경로, 설치 정책
-- `app.yaml`: EVA App Chart에 적용할 고객 변경분. App 커스텀이 있을 때만 생성
+- `inventory/`: 대상 호스트, 접속 사용자, SSH 방식 등 Ansible inventory 입력
+- `site-values/app.yaml`: EVA App Chart에 적용할 고객 변경분. App 커스텀이 있을 때만 생성
+- `site-values/iam.yaml`: EVA IAM Chart에 적용할 고객 변경분. IAM 커스텀이 있을 때만 생성
 
 생성된 `eva.yaml`, 최종 values, 로그와 상태는 `workspace/`에 두지 않는다.
 
-실제 고객 운영에서는 저장소 외부 경로도 동일하게 지원해야 한다.
+기본 workspace는 저장소 내부 `workspace/`이지만, 실제 고객 운영에서는 저장소 외부 경로도 동일하게 지원해야 한다.
+선택 우선순위는 `-e eva_workspace_root=/abs/path` → `EVA_WORKSPACE_ROOT=/abs/path` → `<repo>/workspace` 이다.
+한 번 선택한 workspace에서 `site-values/`가 파생되며, 실행 중 다른 workspace와 섞어 쓰지 않는다.
 
 ```text
 eva-deployer/
@@ -359,9 +360,9 @@ eva-solution_v3.2.0.tar.gz
 설치자가 작성하는 파일:
 
 ```text
-workspace/inventory/hosts.yaml
-workspace/site-values/site.yaml
+workspace/inventory/<inventory-file>
 workspace/site-values/app.yaml  # 필요한 경우
+workspace/site-values/iam.yaml  # 필요한 경우
 ```
 
 ### 5.2 Remote Repository 설치
@@ -398,7 +399,7 @@ eva-airgap-bundle_v3.2.0/
 
 ### 5.4 설치자가 작성하는 파일
 
-#### `workspace/inventory/hosts.yaml`
+#### `workspace/inventory/<inventory-file>`
 
 ```yaml
 all:
@@ -418,41 +419,26 @@ all:
       ansible_connection: local
 ```
 
-#### `workspace/site-values/site.yaml`
+#### `workspace/site-values/app.yaml`
 
 ```yaml
-site:
-  name: customer-a
-
-repository:
-  mode: local_repository
-  registry: localhost:32080
-  project: eva
-
-components:
-  infra:
-    enabled: true
-  iam:
-    enabled: true
+eva-node-01:
   app:
-    enabled: true
-  agent:
-    enabled: true
-  vision:
-    enabled: true
-  n8n:
-    enabled: false
+    browserTitleName: EVA Customer A
+    license:
+      activation_mode: offline
+      product_code: eva-prod
+      api_key: <LICENSE_API_KEY>
+      shared_key: <LICENSE_SHARED_KEY>
+```
 
-network:
+#### `workspace/site-values/iam.yaml`
+
+```yaml
+ingress:
+  ingressClassName: traefik
+config:
   host: eva.customer.example
-  tls:
-    certificateFile: /home/eva/certs/tls.crt
-    privateKeyFile: /home/eva/certs/tls.key
-
-agent:
-  vllmProfile: auto
-  qdrant:
-    snapshotSource: harbor
 ```
 
 ### 5.5 별도 보안 준비물
@@ -471,9 +457,9 @@ Secret은 YAML에 평문으로 직접 기록하기보다 Environment 또는 Secr
 
 ```text
 1. Artifact 검증
-2. hosts.yaml, site.yaml 작성
+2. inventory 와 site-values 작성
 3. Chart 기본 values 조회
-4. 필요 시 app.yaml 변경분 작성
+4. 필요 시 app.yaml, iam.yaml 변경분 작성
 5. eva inspect: 대상 서버 조사
 6. precondition.yaml, eva.yaml 생성
 7. eva plan: 입력 병합 및 최종 values/plan 생성
@@ -496,7 +482,7 @@ Secret은 YAML에 평문으로 직접 기록하기보다 Environment 또는 Secr
 
 > **수정 원칙**
 >
-> 생성 YAML에서 문제가 발견되면 생성 파일을 직접 수정하지 않는다. `workspace/site-values/`의 원본 입력을 수정하고 `inspect` 또는 `plan`을 다시 실행한다.
+> 생성 YAML에서 문제가 발견되면 생성 파일을 직접 수정하지 않는다. 선택된 workspace의 `site-values/` 원본 입력을 수정하고 `inspect` 또는 `plan`을 다시 실행한다.
 
 ### 6.2 자동 감지와 사용자 결정의 구분
 
@@ -729,7 +715,8 @@ eva audit --operation <operation-id>
 
 - 루트 playbook 경로가 `src/*/playbooks/`로 이동
 - Infra와 Solution role 탐색 경로 분리
-- `playbook_dir` 기준 `versions.json`, `config/`, `values/` 참조 변경
+- `playbook_dir` 기준의 암묵적 `../../..` 계산을 공통 root 계약으로 치환
+- 버전 카탈로그를 `src/infra/version.yaml`, `src/solution/version.yaml`으로 분리
 - 기존 `install/` 자산 경로를 `out/cache/` 또는 Artifact 내부 경로로 변경
 - 생성 config의 producer와 consumer 경로 정렬
 - Airgap 전달물을 `out/dist/`에서 완결된 Bundle로 조립
@@ -788,10 +775,11 @@ eva audit --operation <operation-id>
 
 - [ ] 올바른 `release-manifest.yaml`과 환경별 Artifact를 확보했다.
 - [ ] 외부 `checksums.sha256`으로 다운로드 파일을 검증했다.
-- [ ] `workspace/inventory/hosts.yaml`을 작성했다.
-- [ ] `workspace/site-values/site.yaml`을 작성했다.
+- [ ] 기본 `workspace/` 또는 외부 `eva_workspace_root`를 확정했다.
+- [ ] `workspace/inventory/` 아래 inventory 파일을 작성했다.
 - [ ] App Chart 기본 values를 확인했다.
 - [ ] 필요한 경우 `workspace/site-values/app.yaml`에 변경분만 작성했다.
+- [ ] 필요한 경우 `workspace/site-values/iam.yaml`에 변경분만 작성했다.
 - [ ] SSH key, TLS 인증서 및 Secret을 준비했다.
 - [ ] `precondition.yaml`과 `eva.yaml`을 검토했다.
 - [ ] 대상, 릴리스, 설치 순서, resolved values와 diff를 검토했다.

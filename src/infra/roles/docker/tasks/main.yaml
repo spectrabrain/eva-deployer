@@ -13,8 +13,8 @@
       ansible.builtin.set_fact:
         docker_repo_url: "{{ docker_repo_url | default('https://download.docker.com/linux/ubuntu') }}"
         docker_gpg_url: "{{ docker_gpg_url | default('https://download.docker.com/linux/ubuntu/gpg') }}"
-        docker_offline_gpg_path: "{{ docker_offline_gpg_path | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/docker/docker.gpg') }}"
-        docker_offline_package_dir: "{{ docker_offline_package_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/docker/debs') }}"
+        docker_offline_gpg_path: "{{ docker_offline_gpg_path | default(eva_cache_root ~ '/docker/docker.gpg') }}"
+        docker_offline_package_dir: "{{ docker_offline_package_dir | default(eva_cache_root ~ '/docker/debs') }}"
       changed_when: false
 
     - name: Install Docker Engine on Ubuntu

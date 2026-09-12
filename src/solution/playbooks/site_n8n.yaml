@@ -4,27 +4,18 @@
   become: true
   any_errors_fatal: true
   serial: 1
-  vars:
-    eva_repo_root: "{{ playbook_dir }}/../../.."
-    eva_versions_file: "{{ playbook_dir }}/../version.yaml"
-    eva_workspace_root: "{{ playbook_dir }}/../../../workspace"
-    eva_site_values_root: "{{ playbook_dir }}/../../../workspace/site-values"
-    eva_template_values_root: "{{ playbook_dir }}/../values"
-    eva_generated_config_root: "{{ playbook_dir }}/../../../out/work/config"
-    eva_deploy_root: "{{ playbook_dir }}/../../../out/work/rendered"
-    eva_cache_root: "{{ playbook_dir }}/../../../out/cache"
+  vars_files:
+    - ../../playbook-vars.yaml
 
   pre_tasks:
-    - name: Load deployment version catalogue
-      ansible.builtin.include_vars:
-        file: "{{ eva_versions_file }}"
-        name: deploy_versions
+    - name: Load shared EVA playbook context
+      ansible.builtin.import_tasks: ../../playbook-preflight.yaml
 
     - name: Validate pinned n8n image version
       ansible.builtin.assert:
         that:
-          - deploy_versions.n8n_image is defined
-          - deploy_versions.n8n_image | string | length > 0
+          - n8n_image is defined
+          - n8n_image | string | length > 0
         fail_msg: >-
           src/solution/version.yaml에 n8n_image을 설정하세요. 이 값은 n8n 이미지 다운로드와 기본 배포 버전에 함께 사용됩니다.
 

@@ -7,7 +7,7 @@
     gpu_mig_mig_instance_count: "{{ gpu_mig_mig_instance_count | default(7) | int }}"
     gpu_mig_mig_output_path: "{{ gpu_mig_mig_output_path | default('/etc/nvidia-mig-manager/partition.yaml') }}"
     gpu_mig_mig_selector_remote_dir: "{{ gpu_mig_mig_selector_remote_dir | default('/opt/mode_selector_1.72.0/linux') }}"
-    gpu_mig_mig_selector_local_base_dir: "{{ gpu_mig_mig_selector_local_base_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/display_mode_selector/mode_selector_1.72.0') }}"
+    gpu_mig_mig_selector_local_base_dir: "{{ gpu_mig_mig_selector_local_base_dir | default(eva_cache_root ~ '/display_mode_selector/mode_selector_1.72.0') }}"
     gpu_mig_k8s_device_plugin_image: >-
       {{ gpu_mig_k8s_device_plugin_image | default(
         ((repository_mode | default('cloud_repository')) == 'cloud_repository')
@@ -51,7 +51,7 @@
 
 - name: Load GPU MIG model map from gpu_mig.yaml
   ansible.builtin.include_vars:
-    file: "{{ (eva_repo_root | default(playbook_dir)) ~ '/gpu_mig.yaml' }}"
+    file: "{{ eva_repo_root }}/gpu_mig.yaml"
     name: gpu_mig_model_map
   failed_when: false
 

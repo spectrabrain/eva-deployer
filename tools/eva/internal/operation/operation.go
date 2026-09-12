@@ -129,7 +129,7 @@ func stageOverrideInputs(operationDirectory string, document *plan.Document) err
 		if input.Chart != nil {
 			chart := *input.Chart
 			chart.StagedPath = filepath.Join(inputDirectory, "chart"+filepath.Ext(chart.SourcePath))
-			if err := copyVerifiedInput(chart.SourcePath, chart.StagedPath, chart.SHA256); err != nil {
+			if err := copyVerifiedInput(chart.SourcePath, chart.StagedPath, chart.SHA256, 0o644); err != nil {
 				return fmt.Errorf("stage %s chart override: %w", componentName, err)
 			}
 			staged.Chart = &chart
@@ -137,7 +137,7 @@ func stageOverrideInputs(operationDirectory string, document *plan.Document) err
 		if input.Values != nil {
 			values := *input.Values
 			values.StagedPath = filepath.Join(inputDirectory, "values"+filepath.Ext(values.SourcePath))
-			if err := copyVerifiedInput(values.SourcePath, values.StagedPath, values.SHA256); err != nil {
+			if err := copyVerifiedInput(values.SourcePath, values.StagedPath, values.SHA256, 0o644); err != nil {
 				return fmt.Errorf("stage %s values override: %w", componentName, err)
 			}
 			staged.Values = &values
@@ -152,7 +152,7 @@ func stageOverrideInputs(operationDirectory string, document *plan.Document) err
 	return nil
 }
 
-func copyVerifiedInput(source, destination, expectedSHA256 string) error {
+func copyVerifiedInput(source, destination, expectedSHA256 string, mode os.FileMode) error {
 	info, err := os.Lstat(source)
 	if err != nil {
 		return err
@@ -165,8 +165,12 @@ func copyVerifiedInput(source, destination, expectedSHA256 string) error {
 		return err
 	}
 	defer input.Close()
-	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
+		return err
+	}
+	if err := output.Chmod(mode); err != nil {
+		output.Close()
 		return err
 	}
 	hash := sha256.New()

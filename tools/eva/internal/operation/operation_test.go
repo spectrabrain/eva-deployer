@@ -96,13 +96,16 @@ func TestCreateStagesPrivateOverrideInputs(t *testing.T) {
 	if err != nil || string(contents) != "token: very-secret-value\n" {
 		t.Fatalf("staged values = %q, %v", contents, err)
 	}
-	for _, path := range []string{stagedValues, loaded.Overrides["app"].AnsibleVarsPath} {
+	for path, wantMode := range map[string]os.FileMode{
+		stagedValues:                            0o644,
+		loaded.Overrides["app"].AnsibleVarsPath: 0o600,
+	} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != 0o600 {
-			t.Fatalf("permissions for %s = %o, want 600", path, got)
+		if got := info.Mode().Perm(); got != wantMode {
+			t.Fatalf("permissions for %s = %o, want %o", path, got, wantMode)
 		}
 	}
 	variables, err := os.ReadFile(loaded.Overrides["app"].AnsibleVarsPath)

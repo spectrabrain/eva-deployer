@@ -29,8 +29,8 @@
     - apply-retry
 
   related_files:
-    - site_infra.yaml
-    - roles/gpu/tasks/cuda.yaml
+    - src/infra/playbooks/site_infra.yaml
+    - src/infra/roles/gpu/tasks/cuda.yaml
     - logs_infra/ansible-run.log
     - logs_infra/ansible-internal.log
 
@@ -68,10 +68,10 @@
     - reboot
 
   related_files:
-    - site_gpu_mig.yaml
-    - roles/gpu_mig/tasks/enable_mig.yaml
+    - src/infra/playbooks/site_gpu_mig.yaml
+    - src/infra/roles/gpu_mig/tasks/enable_mig.yaml
     - logs_infra/ansible-run.log
-    - task_history_infra.txt
+    - docs/operations/infra-task-history.yaml
 
   retry_count: 1
   status: "resolved"

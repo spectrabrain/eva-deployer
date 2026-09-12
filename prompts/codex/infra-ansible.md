@@ -7,11 +7,11 @@ Response:
 - 모든 응답은 한국어로 작성한다.
 
 Context:
-- task_history_infra.txt contains records of previous execution errors and how they were resolved.
+- docs/operations/infra-task-history.yaml contains records of previous execution errors and how they were resolved.
 - You MUST refer to this file before taking action to avoid repeating known issues.
-- task_history_infra.txt is written in YAML format.
+- docs/operations/infra-task-history.yaml is written in YAML format.
 
-task_history_infra.txt Format (YAML):
+docs/operations/infra-task-history.yaml Format (YAML):
 
 ```yaml
 - timestamp: "YYYY-MM-DD HH:MM:SS"
@@ -65,7 +65,7 @@ Logging Rules:
 Execution Steps:
 
 0. Review History + Prepare Logging
-- Read task_history_infra.txt before starting
+- Read docs/operations/infra-task-history.yaml before starting
 - Identify known issues and apply preventive fixes
 - Ensure logs directory exists
 
@@ -76,12 +76,12 @@ mkdir -p logs_infra
 
 Command:
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-lint site_infra.yaml 2>&1 | tee logs_infra/ansible-lint.log
+.venv/bin/ansible-lint src/infra/playbooks/site_infra.yaml 2>&1 | tee logs_infra/ansible-lint.log
 
 - If lint errors occur:
   - STOP
   - Analyze error using logs
-  - Check task_history_infra.txt for similar issues
+  - Check docs/operations/infra-task-history.yaml for similar issues
   - Fix before proceeding
   - Record new issue if not already documented
 
@@ -89,13 +89,13 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 
 Command:
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml --check 2>&1 | tee logs_infra/ansible-check.log
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check 2>&1 | tee logs_infra/ansible-check.log
 
 - If error occurs:
   - STOP immediately
   - Analyze log file
   - Extract key error
-  - Cross-check with task_history_infra.txt
+  - Cross-check with docs/operations/infra-task-history.yaml
   - Apply fix
   - Record if new pattern
 
@@ -103,19 +103,19 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 
 Command:
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
-.venv/bin/ansible-playbook -i inventory.ini site_infra.yaml -vvv 2>&1 | tee logs_infra/ansible-run.log
+.venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml -vvv 2>&1 | tee logs_infra/ansible-run.log
 
 - If error occurs:
   - STOP immediately
   - Analyze logs_infra/ansible-run.log
   - Identify root cause
-  - Cross-check with task_history_infra.txt
+  - Cross-check with docs/operations/infra-task-history.yaml
   - Fix issue before retrying
 
 4. Post-Execution Documentation (ONLY for Step 3)
 
 - ONLY if an error occurred during Step 3 (actual execution) and was resolved:
-  - Append new entry to task_history.txt
+  - Append new entry to docs/operations/infra-task-history.yaml
   - step must be set to: "apply"
   - Include:
     - error_summary
@@ -145,7 +145,7 @@ Global Rules:
 
 - Do NOT skip steps
 - Always stop on error and fix before continuing
-- Always consult task_history_infra.txt before and after execution
+- Always consult docs/operations/infra-task-history.yaml before and after execution
 - Do NOT repeat previously recorded mistakes
 - Prefer deterministic fixes over trial-and-error
 - Logs must be human-readable and traceable per step

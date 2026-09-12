@@ -49,9 +49,9 @@
       - "GPU specs:"
       - "{{ gpu_mig_gpu_inventory.stdout_lines }}"
 
-- name: Load GPU MIG model map from gpu_mig.yaml
+- name: Load GPU MIG model map
   ansible.builtin.include_vars:
-    file: "{{ eva_repo_root }}/gpu_mig.yaml"
+    file: "{{ role_path }}/vars/gpu_mig.yaml"
     name: gpu_mig_model_map
   failed_when: false
 
@@ -81,7 +81,7 @@
         ) | default('')
       }}
 
-- name: Override MIG profile settings from gpu_mig.yaml
+- name: Override MIG profile settings from the model map
   ansible.builtin.set_fact:
     gpu_mig_mig_profile_id: "{{ gpu_mig_model_map[gpu_mig_matched_model_key].gpu_mig_mig_profile_id | string }}"
     gpu_mig_mig_instance_count: "{{ gpu_mig_model_map[gpu_mig_matched_model_key].gpu_mig_mig_instance_count | int }}"

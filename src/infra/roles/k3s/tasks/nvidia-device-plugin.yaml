@@ -50,7 +50,7 @@
 
 - name: Set NVIDIA device plugin manifest paths
   ansible.builtin.set_fact:
-    nvidia_device_plugin_offline_src: "{{ (eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/k8s/nvidia-device-plugin-v0.18.0.yml' }}"
+    nvidia_device_plugin_offline_src: "{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/k8s/nvidia-device-plugin-v0.18.0.yml' }}"
     nvidia_device_plugin_offline_dst: /tmp/nvidia-device-plugin.yml
   changed_when: false
 

@@ -23,7 +23,7 @@
 
 - name: Copy CUDA keyring package (offline bundle)
   ansible.builtin.copy:
-    src: "{{ gpu_cuda_keyring_offline_path | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/cuda/cuda-keyring_1.1-1_all.deb') }}"
+    src: "{{ gpu_cuda_keyring_offline_path | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/cuda/cuda-keyring_1.1-1_all.deb') }}"
     dest: /tmp/cuda-keyring_1.1-1_all.deb
     mode: '0644'
   register: gpu_cuda_keyring_download

@@ -18,8 +18,8 @@
     eva_vision_kubeconfig: "{{ eva_vision_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_vision_chart_ref: "{{ eva_vision_chart_ref | default('eva-vision/eva-vision') }}"
     eva_vision_chart_version: "{{ eva_vision_chart_version | mandatory }}"
-    eva_vision_offline_dir: "{{ eva_vision_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-vision') }}"
-    eva_vision_offline_chart_tgz: "{{ eva_vision_offline_chart_tgz | default((eva_vision_offline_dir | default((eva_install_root | default((eva_repo_root | default(playbook_dir)) ~ '/install')) ~ '/eva-vision')) ~ '/eva-vision-' ~ eva_vision_chart_version ~ '.tgz') }}"
+    eva_vision_offline_dir: "{{ eva_vision_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-vision') }}"
+    eva_vision_offline_chart_tgz: "{{ eva_vision_offline_chart_tgz | default((eva_vision_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-vision')) ~ '/eva-vision-' ~ eva_vision_chart_version ~ '.tgz') }}"
     eva_vision_gpu_count: "{{ eva_vision_gpu_count | default(1) }}"
     eva_vision_gpu_resource_name: "{{ eva_vision_gpu_resource_name | default('') }}"
     eva_vision_pvc_size: "{{ eva_vision_pvc_size | default('20Gi') }}"
@@ -141,7 +141,7 @@
       - eva_vision_offline_chart.stat.exists
     fail_msg: >-
       airgap_mode=true 인 경우 {{ eva_vision_offline_chart_tgz }} 파일이 필요합니다.
-      install/download_offline_assets.sh 를 먼저 실행하세요.
+      scripts/download/download_offline_assets.sh 를 먼저 실행하세요.
   when: airgap_mode | default(false) | bool
 
 - name: Export default values.yaml from EVA Vision chart

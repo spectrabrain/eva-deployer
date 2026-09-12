@@ -80,7 +80,7 @@
       eva_app_chart_version={{ eva_app_chart_version }} 은 지원하지 않습니다.
       values/app-k3s-override.yaml.j2 는 database.internal.image 를 repository/tag 맵으로 넘기는데,
       3.1.4 이하 차트는 mysql 주소를 템플릿에 하드코딩하거나 문자열로 받습니다.
-      versions.json 의 eva_app_chart_version 을 3.1.5 이상으로 올리세요.
+      src/solution/version.yaml 의 eva_app_chart_version 을 3.1.5 이상으로 올리세요.
 
 - name: Validate EVA App chart version supports backendSecurePort
   ansible.builtin.assert:
@@ -90,7 +90,7 @@
       eva_app_backend_secure_port={{ eva_app_backend_secure_port }} 는 차트 3.1.8 이상에서만
       동작합니다 (app.backendSecurePort → BACKEND_SECURE_PORT). 지금 차트는
       {{ eva_app_chart_version }} 이라 이 값이 조용히 무시되고 프론트가 잘못된 포트를 씁니다.
-      versions.json 의 eva_app_chart_version 을 올리거나 이 값을 지우세요.
+      src/solution/version.yaml 의 eva_app_chart_version 을 올리거나 이 값을 지우세요.
   when: eva_app_backend_secure_port | length > 0
 
 - name: Resolve EVA App image repositories

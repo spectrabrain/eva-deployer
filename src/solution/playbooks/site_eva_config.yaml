@@ -1,10 +1,37 @@
-- import_playbook: ../../../site_eva_config.yaml
+# site.yaml
+- name: Configure hosts
+  hosts: all
+  become: true
+  any_errors_fatal: true
+  serial: 1
   vars:
     eva_repo_root: "{{ playbook_dir }}/../../.."
-    eva_versions_file: "{{ playbook_dir }}/../../../versions.json"
+    eva_versions_file: "{{ playbook_dir }}/../version.yaml"
     eva_workspace_root: "{{ playbook_dir }}/../../../workspace"
     eva_site_values_root: "{{ playbook_dir }}/../../../workspace/site-values"
-    eva_install_root: "{{ playbook_dir }}/../../../install"
     eva_template_values_root: "{{ playbook_dir }}/../values"
-    eva_generated_config_root: "{{ playbook_dir }}/../../../out/work/config/{{ eva_site_name | default('default') }}"
-    eva_deploy_root: "{{ playbook_dir }}/../../../out/work/rendered/{{ eva_site_name | default('default') }}"
+    eva_generated_config_root: "{{ playbook_dir }}/../../../out/work/config"
+    eva_deploy_root: "{{ playbook_dir }}/../../../out/work/rendered"
+    eva_install_root: "{{ playbook_dir }}/../../../install"
+
+  pre_tasks:
+    - name: Resolve repository mode
+      ansible.builtin.set_fact:
+        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+        airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+      changed_when: false
+
+  tasks:
+    - name: STEP 1 - awscli
+      ansible.builtin.import_role:
+        name: awscli
+      when: not (airgap_mode | default(false) | bool)
+
+    - name: STEP 1.1 - skip awscli in airgap mode
+      ansible.builtin.debug:
+        msg: "airgap_mode=true 이므로 awscli role을 건너뜁니다."
+      when: airgap_mode | default(false) | bool
+
+    - name: STEP 2 - config
+      ansible.builtin.import_role:
+        name: config

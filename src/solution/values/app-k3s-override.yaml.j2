@@ -1,1 +1,103 @@
-../../../values/app-k3s-override.yaml.j2
+image:
+  repository: "{{ eva_app_image_repository }}"
+  tag: "{{ eva_app_deploy_version }}"
+  pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
+
+app:
+  # IP 를 넣어도 됩니다 — 차트 3.1.8+ 는 IP 일 때 Ingress 규칙에서 host 를 생략합니다.
+  backendHost: "{{ eva_app_backend_host }}"
+  backendSecure: {{ eva_app_backend_secure | bool | lower }}
+{% if eva_app_backend_secure_port | length > 0 %}
+  # 차트 3.1.8+ — 프론트가 쓰는 외부 HTTPS 포트 (BACKEND_SECURE_PORT)
+  backendSecurePort: {{ eva_app_backend_secure_port }}
+{% endif %}
+  infraProvider: onprem
+  jwtSecret: "{{ eva_app_jwt_secret }}"
+{% if (eva_app_sso_base_url | length > 0) or (eva_app_sso_admin_client_secret | length > 0) %}
+
+  # app.sso.* — eva-app chart 3.1.0 이상에서만 존재합니다.
+  # 지정하지 않은 키는 차트 기본값(realm/clientId/adminClientId/brokerMode 등)을 씁니다.
+  sso:
+{% if eva_app_sso_base_url | length > 0 %}
+    baseUrl: "{{ eva_app_sso_base_url }}"
+{% endif %}
+{% if eva_app_sso_admin_client_secret | length > 0 %}
+    adminClientSecret: "{{ eva_app_sso_admin_client_secret }}"
+{% endif %}
+{% endif %}
+  vision:
+    ml: "{{ eva_app_vision_ml }}"
+
+  agent:
+    llm: "{{ eva_app_agent_llm }}"
+    vlm: "{{ eva_app_agent_vlm }}"
+    requestTimeoutSeconds: {{ eva_app_agent_request_timeout_seconds }}
+
+  pipeline:
+    detector:
+      workerNum: {{ eva_app_pipeline_detector_worker_num }}
+    perceptor:
+      workerNum: {{ eva_app_pipeline_perceptor_worker_num }}
+
+  license:
+    activation_mode: "{{ eva_app_license_activation_mode }}"
+    product_code: "{{ eva_app_license_product_code }}"
+    api_key: "{{ eva_app_license_api_key }}"
+    shared_key: "{{ eva_app_license_shared_key }}"
+
+database:
+  name: "{{ eva_app_db_name }}"
+  type: internal
+  internal:
+    # 차트 3.1.5 부터 repository/tag 맵입니다. 그 전에는 "repo:tag" 문자열이었고,
+    # 3.1.4 까지는 템플릿에 mysql:8.0.42-bookworm 이 박혀 있어 values 로 못 바꿨습니다.
+    image:
+      repository: "{{ eva_app_mysql_image_repository }}"
+      tag: "{{ eva_app_mysql_image_tag }}"
+    service:
+      nodePort: {{ eva_app_db_nodeport }}
+    user: "{{ eva_app_db_user }}"
+    password: "{{ eva_app_db_password }}"
+
+imagePullSecrets:
+  enabled: {{ (repository_mode == 'cloud_repository') | lower }}
+  create: {{ (repository_mode == 'cloud_repository') | lower }}
+  nameOverride: "ecr-registry"
+  account: "339713051385"
+  region: "ap-northeast-2"
+  authType: "{{ eva_app_image_pull_auth_type }}"
+  hostPath: "{{ eva_app_image_pull_host_path }}"
+  secretName: "{{ eva_app_image_pull_secret_name }}"
+  cronjob:
+    schedule: "{{ eva_app_image_pull_cron_schedule }}"
+    runMode: "{{ eva_app_image_pull_cron_run_mode }}"
+    runImmediately: {{ eva_app_image_pull_cron_run_immediately | bool | lower }}
+{% if airgap_mode | bool %}
+    # cronjob 은 imagePullSecrets.enabled=false 인 airgap 에서 렌더되지 않지만,
+    # 켜서 쓰는 경우를 위해 주소를 맞춰 둡니다 (차트 3.1.5+ 에서 노출됨).
+    image:
+      repository: "{{ eva_app_kubectl_image_repository }}"
+{% endif %}
+{% if airgap_mode | bool %}
+
+ingress:
+  tls:
+    # TLS Secret 을 만드는 Job 의 kubectl 이미지 (차트 3.1.5+ 에서 노출됨).
+    # 그 전에는 bitnami/kubectl 이 주소 없이 들어가 docker.io mirror 가 필요했습니다.
+    job:
+      kubectlImage:
+        repository: "{{ eva_app_kubectl_image_repository }}"
+{% endif %}
+
+persistence:
+  type: hostPath
+  hostPath:
+    path: "{{ eva_app_host_path }}"
+
+pv:
+  create: false
+
+serviceAccount:
+  create: true
+
+replicaCount: 1

@@ -19,6 +19,9 @@ import (
 
 const DefaultRoot = "/var/lib/eva/operations"
 const Planned = "planned"
+const Running = "running"
+const Succeeded = "succeeded"
+const Failed = "failed"
 
 var operationIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9][A-Za-z0-9._-]*-[a-f0-9]{8}$`)
 
@@ -27,9 +30,28 @@ type Record struct {
 	Status         string    `yaml:"status"`
 	CreatedAt      time.Time `yaml:"created_at"`
 	UpdatedAt      time.Time `yaml:"updated_at"`
+	StartedAt      time.Time `yaml:"started_at,omitempty"`
+	CompletedAt    time.Time `yaml:"completed_at,omitempty"`
 	SiteID         string    `yaml:"site_id"`
 	ReleaseVersion string    `yaml:"release_version"`
 	PlanPath       string    `yaml:"plan_path"`
+	ResultPath     string    `yaml:"result_path,omitempty"`
+	LogDirectory   string    `yaml:"log_directory,omitempty"`
+}
+
+type StepResult struct {
+	Component   string    `yaml:"component"`
+	Playbook    string    `yaml:"playbook"`
+	StartedAt   time.Time `yaml:"started_at"`
+	CompletedAt time.Time `yaml:"completed_at"`
+	ExitCode    int       `yaml:"exit_code"`
+}
+
+type Result struct {
+	Status      string       `yaml:"status"`
+	StartedAt   time.Time    `yaml:"started_at"`
+	CompletedAt time.Time    `yaml:"completed_at"`
+	Steps       []StepResult `yaml:"steps"`
 }
 
 func Create(root string, document plan.Document, now time.Time) (Record, error) {
@@ -101,6 +123,59 @@ func Load(root, id string) (Record, error) {
 	return record, nil
 }
 
+func LoadPlan(root string, record Record) (plan.Document, error) {
+	if root == "" {
+		root = DefaultRoot
+	}
+	path := filepath.Join(root, record.ID, "plan.yaml")
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return plan.Document{}, fmt.Errorf("read operation plan %s: %w", record.ID, err)
+	}
+	decoder := yaml.NewDecoder(strings.NewReader(string(contents)))
+	decoder.KnownFields(true)
+	var document plan.Document
+	if err := decoder.Decode(&document); err != nil {
+		return plan.Document{}, fmt.Errorf("parse operation plan %s: %w", record.ID, err)
+	}
+	if document.SchemaVersion != plan.SchemaVersion || document.OperationID != record.ID {
+		return plan.Document{}, fmt.Errorf("operation plan is invalid: %s", path)
+	}
+	return document, nil
+}
+
+func Update(root string, record Record) error {
+	if root == "" {
+		root = DefaultRoot
+	}
+	if !operationIDPattern.MatchString(record.ID) {
+		return fmt.Errorf("invalid operation ID %q", record.ID)
+	}
+	contents, err := yaml.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal operation metadata: %w", err)
+	}
+	return writePrivateAtomically(filepath.Join(root, record.ID, "operation.yaml"), contents)
+}
+
+func WriteResult(root string, record Record, result Result) (string, error) {
+	if root == "" {
+		root = DefaultRoot
+	}
+	if !operationIDPattern.MatchString(record.ID) {
+		return "", fmt.Errorf("invalid operation ID %q", record.ID)
+	}
+	contents, err := yaml.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("marshal operation result: %w", err)
+	}
+	path := filepath.Join(root, record.ID, "result.yaml")
+	if err := writePrivateAtomically(path, contents); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func Latest(root string) (Record, error) {
 	if root == "" {
 		root = DefaultRoot
@@ -151,6 +226,31 @@ func writePrivateFile(path string, contents []byte) error {
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close private file %s: %w", path, err)
+	}
+	return nil
+}
+
+func writePrivateAtomically(path string, contents []byte) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".operation-*")
+	if err != nil {
+		return fmt.Errorf("create private temporary file %s: %w", path, err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return fmt.Errorf("set private file permissions %s: %w", path, err)
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		temporary.Close()
+		return fmt.Errorf("write private file %s: %w", path, err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close private file %s: %w", path, err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("publish private file %s: %w", path, err)
 	}
 	return nil
 }

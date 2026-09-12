@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/release"
@@ -27,9 +29,9 @@ func usage() {
 	fmt.Println("  workspace show     [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
-	fmt.Println("  release validate [--release PATH]")
-	fmt.Println("  release show     [--release PATH]")
+	fmt.Println("  release <validate|show|prepare> [--release PATH]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--output PATH | --save]")
+	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
 	fmt.Println("  runtime <install|validate|show> [--runtime-root PATH]")
 	fmt.Println("  exec [--runtime-root PATH] <ansible-playbook|helm|kubectl|kustomize|oras> [args...]")
@@ -66,6 +68,8 @@ func run(args []string) error {
 		return runRelease(args[1:])
 	case "plan":
 		return runPlan(args[1:])
+	case "apply":
+		return runApply(args[1:])
 	case "status":
 		return runStatus(args[1:])
 	case "runtime":
@@ -136,6 +140,7 @@ func runRelease(args []string) error {
 	flags := flag.NewFlagSet("release "+command, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	input := flags.String("release", "", "release directory or release.yaml path")
+	installRoot := flags.String("install-root", "", "prepared Release installation directory")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -147,6 +152,9 @@ func runRelease(args []string) error {
 			return errors.New("use either --release or one release path argument, not both")
 		}
 		*input = flags.Arg(0)
+	}
+	if command != "prepare" && *installRoot != "" {
+		return errors.New("--install-root is only supported by release prepare")
 	}
 
 	resolved, err := release.Resolve(*input)
@@ -164,6 +172,15 @@ func runRelease(args []string) error {
 		for _, artifact := range resolved.Metadata.Artifacts {
 			fmt.Printf("artifact: %s (%s)\n", artifact.Name, artifact.File)
 		}
+		if resolved.Prepared {
+			fmt.Println("prepared: true")
+		}
+	case "prepare":
+		prepared, err := release.Prepare(resolved, *installRoot)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("release prepared: %s (version=%s)\n", prepared.Root, prepared.Metadata.Version)
 	default:
 		return fmt.Errorf("unknown release command %q", command)
 	}
@@ -171,9 +188,9 @@ func runRelease(args []string) error {
 }
 
 func releaseUsage() {
-	fmt.Println("Usage: eva release <validate|show> [--release PATH | PATH]")
+	fmt.Println("Usage: eva release <validate|show|prepare> [--release PATH | PATH]")
 	fmt.Println("")
-	fmt.Println("PATH must be a local release directory or release.yaml file.")
+	fmt.Println("release prepare extracts a verified local Release into /opt/eva/releases/<version>.")
 	fmt.Println("Release tag, S3, and Airgap Bundle resolution are not implemented yet.")
 }
 
@@ -262,6 +279,64 @@ func runStatus(args []string) error {
 	}
 	printOperation(record)
 	return nil
+}
+
+func runApply(args []string) error {
+	flags := flag.NewFlagSet("apply", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	yes := flags.Bool("yes", false, "confirm target changes without a prompt")
+	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected apply arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	var (
+		record operation.Record
+		err    error
+	)
+	if flags.NArg() == 0 {
+		record, err = operation.Latest(*stateRoot)
+	} else {
+		record, err = operation.Load(*stateRoot, flags.Arg(0))
+	}
+	if err != nil {
+		return err
+	}
+	if !*yes {
+		if err := confirmApply(record); err != nil {
+			return err
+		}
+	}
+	completed, err := apply.Execute(apply.Options{
+		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
+		Stdout: os.Stdout, Stderr: os.Stderr,
+	}, record)
+	printOperation(completed)
+	return err
+}
+
+func confirmApply(record operation.Record) error {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect terminal for apply confirmation: %w", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return errors.New("eva apply requires --yes when standard input is not a terminal")
+	}
+	fmt.Fprintf(os.Stderr, "Apply operation %s for site %s? [y/N]: ", record.ID, record.SiteID)
+	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && len(answer) == 0 {
+		return fmt.Errorf("read apply confirmation: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes") {
+		return nil
+	}
+	return errors.New("apply cancelled")
 }
 
 func runRuntime(args []string) error {
@@ -368,7 +443,19 @@ func printOperation(record operation.Record) {
 	fmt.Printf("release: %s\n", record.ReleaseVersion)
 	fmt.Printf("created: %s\n", record.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("updated: %s\n", record.UpdatedAt.UTC().Format(time.RFC3339))
+	if !record.StartedAt.IsZero() {
+		fmt.Printf("started: %s\n", record.StartedAt.UTC().Format(time.RFC3339))
+	}
+	if !record.CompletedAt.IsZero() {
+		fmt.Printf("completed: %s\n", record.CompletedAt.UTC().Format(time.RFC3339))
+	}
 	fmt.Printf("plan: %s\n", record.PlanPath)
+	if record.ResultPath != "" {
+		fmt.Printf("result: %s\n", record.ResultPath)
+	}
+	if record.LogDirectory != "" {
+		fmt.Printf("logs: %s\n", record.LogDirectory)
+	}
 }
 
 func printWorkspace(resolved workspace.Resolved) {

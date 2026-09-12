@@ -854,13 +854,15 @@ eva exec ansible-playbook --version
 
 Component alias는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`이다. CLI의 `cloud`, `remote`, `local`은 각각 Ansible의 `cloud_repository`, `remote_repository`, `local_repository`로 변환한다.
 
-현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show`, `eva plan`이다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
+현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show`, `eva plan`, `eva status`, `eva runtime validate|show`, `eva exec`다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
 
-`eva plan --workspace <path> --release <path> [--output <path>]`은 선택 component와 기존 playbook 순서, Ansible extra vars, 환경변수를 YAML로 생성한다. `agent` 또는 `vision`을 선택하면 `site_eva_config.yaml`을 자동 선행 단계로 넣는다. stdout 출력이 기본이며 `--output`을 지정한 plan 파일은 `0600` 권한으로 생성한다. 이 단계에서는 Helm effective values를 렌더링하거나 대상 서버를 변경하지 않는다. `apply` orchestration과 operation-id/state 기록은 다음 단계다.
+`eva plan --workspace <path> --release <path> [--output <path> | --save]`은 선택 component와 기존 playbook 순서, Ansible extra vars, 환경변수를 YAML로 생성한다. `agent` 또는 `vision`을 선택하면 `site_eva_config.yaml`을 자동 선행 단계로 넣는다. stdout 출력이 기본이며 `--output`을 지정한 plan 파일은 `0600` 권한으로 생성한다. `--save`는 `/var/lib/eva/operations/<operation-id>/`에 `planned` operation record와 Plan을 `0600` 권한으로 저장한다. 개발과 테스트에서는 `--state-root <path>`로 해당 기본 경로를 바꿀 수 있고, `eva status [operation-id]`는 최신 또는 지정 record를 읽는다. 이 단계에서는 Helm effective values를 렌더링하거나 대상 서버를 변경하지 않으며, `apply` orchestration 및 실행 결과·로그 갱신은 다음 단계다.
+
+EVA managed Runtime은 `/opt/eva/runtime/runtime.yaml` descriptor로 version과 도구 경로를 고정한다. `ansible-playbook`, `helm`, `kubectl`, `kustomize`, `oras`는 모두 Runtime root 내부의 실행 가능한 regular file이어야 하며, descriptor의 절대 경로, 상위 경로 탈출 및 Runtime 밖 symlink는 거부한다. `eva exec`는 이 allowlist의 절대 경로만 실행하므로 시스템 PATH의 동명 도구를 사용하지 않는다. `eva runtime install --source <validated-runtime-payload>`는 source를 먼저 검증하고 sibling staging directory에 완전 복사·재검증한 뒤 `/opt/eva/runtime`을 교체한다. 새 Runtime publish 실패 시 이전 Runtime은 복원하며, source payload 검증 실패는 기존 Runtime을 변경하지 않는다. Online/Offline payload의 artifact 추출과 `eva shell`은 다음 단계다.
 
 TTY에서는 Plan 요약 뒤 실행 승인을 묻는다. 비대화형 실행은 `--yes`를 명시해야 하며, TTY가 아닌 환경에서는 질문하지 않고 `--yes` 누락을 오류로 처리한다. privilege escalation은 필요한 Runtime bootstrap 및 Ansible 단계에서만 CLI가 요청하며, CLI 전체를 항상 root로 실행하지 않는다.
 
-Remote Runtime은 online bootstrap을 먼저 시도한다. online bootstrap이 실패했거나 Offline payload가 명시된 경우에만 검증된 Offline payload로 fallback한다. `eva exec`와 `eva shell`은 실행 사용자, 명령 시작/종료 시각, 종료 코드를 operation log에 남기되 argument 값과 stdout/stderr는 1차에서 수집하지 않는다.
+Remote Runtime은 online bootstrap을 먼저 시도한다. online bootstrap이 실패했거나 Offline payload가 명시된 경우에만 검증된 Offline payload로 fallback한다. 현재 `eva exec`는 검증된 Runtime descriptor의 allowlist 도구만 직접 실행하며 Raw 실행의 operation log 기록은 아직 추가하지 않는다. `eva shell`과 함께 구현할 후속 단계에서는 실행 사용자, 명령 시작/종료 시각, 종료 코드를 operation log에 남기되 argument 값과 stdout/stderr는 1차에서 수집하지 않는다.
 
 ## 10. 기존 README 설치 순서와 마이그레이션
 

@@ -401,6 +401,27 @@ out/dist/
 
 Airgap 설치자에게는 `eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz` 한 개와 외부 checksum 파일만 제공할 수 있다. Bundle 내부 `artifacts/`에는 이미 생성된 Tool, Infra, Solution, Offline archive를 byte-identical하게 넣고, 최상단에는 `release.yaml`, `checksums.sha256`, README만 둔다.
 
+`release.yaml`은 build가 생성하는 최소 metadata이며, CLI가 local Release directory를 검증할 때 사용한다. 각 artifact의 `file`은 Release directory 기준 상대 경로이고 `sha256`은 해당 파일의 SHA-256이다.
+
+```yaml
+version: 3.2.0
+platform:
+  os: linux
+  arch: amd64
+artifacts:
+  - name: eva-tool
+    file: eva-tool_v3.2.0_linux_amd64.tar.gz
+    sha256: <SHA256>
+  - name: eva-infra
+    file: eva-infra_v3.2.0.tar.gz
+    sha256: <SHA256>
+  - name: eva-solution
+    file: eva-solution_v3.2.0.tar.gz
+    sha256: <SHA256>
+```
+
+`eva-tool`, `eva-infra`, `eva-solution`은 모든 local Release에 필수다. CLI는 실행 host와 platform이 다르거나 metadata 밖으로 나가는 artifact 경로, 누락된 파일, checksum 불일치를 거부한다. S3 tag와 Airgap Bundle input resolver는 다음 단계에서 추가한다.
+
 ### 4.4 S3 권장 배치
 
 ```text
@@ -832,6 +853,10 @@ eva exec ansible-playbook --version
 | `exec <command> [args...]` | 명령에 따름 | 관리 Runtime command를 그대로 실행 |
 
 Component alias는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`이다. CLI의 `cloud`, `remote`, `local`은 각각 Ansible의 `cloud_repository`, `remote_repository`, `local_repository`로 변환한다.
+
+현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show`, `eva plan`이다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
+
+`eva plan --workspace <path> --release <path> [--output <path>]`은 선택 component와 기존 playbook 순서, Ansible extra vars, 환경변수를 YAML로 생성한다. `agent` 또는 `vision`을 선택하면 `site_eva_config.yaml`을 자동 선행 단계로 넣는다. stdout 출력이 기본이며 `--output`을 지정한 plan 파일은 `0600` 권한으로 생성한다. 이 단계에서는 Helm effective values를 렌더링하거나 대상 서버를 변경하지 않는다. `apply` orchestration과 operation-id/state 기록은 다음 단계다.
 
 TTY에서는 Plan 요약 뒤 실행 승인을 묻는다. 비대화형 실행은 `--yes`를 명시해야 하며, TTY가 아닌 환경에서는 질문하지 않고 `--yes` 누락을 오류로 처리한다. privilege escalation은 필요한 Runtime bootstrap 및 Ansible 단계에서만 CLI가 요청하며, CLI 전체를 항상 root로 실행하지 않는다.
 

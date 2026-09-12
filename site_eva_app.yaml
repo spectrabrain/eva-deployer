@@ -21,7 +21,7 @@
   any_errors_fatal: true
   serial: 1
   vars_files:
-    - "{{ playbook_dir }}/versions.json"
+    - "{{ eva_versions_file | default((eva_repo_root | default(playbook_dir)) ~ '/versions.json') }}"
 
   pre_tasks:
     - name: Resolve repository mode

@@ -1,1 +1,8 @@
 - import_playbook: ../../../site_eva.yaml
+  vars:
+    eva_repo_root: "{{ playbook_dir }}/../../.."
+    eva_versions_file: "{{ playbook_dir }}/../../../versions.json"
+    eva_install_root: "{{ playbook_dir }}/../../../install"
+    eva_values_root: "{{ playbook_dir }}/../values"
+    eva_generated_config_root: "{{ playbook_dir }}/../../../config"
+    eva_deploy_root: "{{ playbook_dir }}/../../../deploy"

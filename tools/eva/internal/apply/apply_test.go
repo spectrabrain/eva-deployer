@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 )
@@ -68,6 +69,48 @@ func TestExecuteStopsAfterFailedStep(t *testing.T) {
 	}
 	if strings.Count(string(contents), "component:") != 1 {
 		t.Fatalf("failed result should contain one step: %s", contents)
+	}
+}
+
+func TestExecutePassesOnlyStagedAppOverrideVars(t *testing.T) {
+	stateRoot := t.TempDir()
+	workspace := createWorkspace(t)
+	releaseRoot := createReleaseSource(t, "")
+	runtimeRoot := createRuntime(t)
+	valuesPath := filepath.Join(t.TempDir(), "app.yaml")
+	if err := os.WriteFile(valuesPath, []byte("token: secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overrides, err := fieldoverride.Parse(nil, []string{"app=" + valuesPath}, []string{"app:replicaCount=2"}, map[string]bool{"app": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := plan.Document{
+		SchemaVersion: plan.SchemaVersion, SiteID: "customer-a", Workspace: workspace,
+		ReleaseVersion: "3.2.0", ReleaseRoot: releaseRoot,
+		Steps:     []plan.Step{{Component: "app", Playbook: expectedPlaybooks["app"]}},
+		Overrides: overrides.Public(), OverrideInputs: overrides,
+		AnsibleExtraVars: []string{"eva_site_id=customer-a"},
+		Environment:      map[string]string{"EVA_SITE_ID": "customer-a", "EVA_WORKSPACE_ROOT": workspace},
+	}
+	record, err := operation.Create(stateRoot, document, fixedClock()())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if _, err := Execute(Options{StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: runtimeRoot, Stdout: &output, Stderr: &output, Now: fixedClock()}, record); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := operation.LoadPlan(stateRoot, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	varsPath := loaded.Overrides["app"].AnsibleVarsPath
+	if !strings.Contains(output.String(), "@"+varsPath) {
+		t.Fatalf("managed Ansible arguments = %q, want staged vars %q", output.String(), varsPath)
+	}
+	if strings.Contains(output.String(), valuesPath) {
+		t.Fatalf("managed Ansible arguments leaked source path: %q", output.String())
 	}
 }
 
@@ -132,7 +175,7 @@ func createRuntime(t *testing.T) string {
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		contents := "#!/bin/sh\nprintf 'EVA_REPO_ROOT=%s\\n' \"$EVA_REPO_ROOT\"\n"
+		contents := "#!/bin/sh\nprintf 'EVA_REPO_ROOT=%s\\n' \"$EVA_REPO_ROOT\"\nprintf 'ARGS=%s\\n' \"$*\"\n"
 		if name == "ansible-playbook" {
 			contents += "if [ -f \"$EVA_REPO_ROOT/fail\" ]; then exit 7; fi\n"
 		}

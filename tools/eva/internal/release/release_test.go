@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +100,98 @@ func TestPrepareRejectsArchivePathTraversal(t *testing.T) {
 	}
 	if _, err := Prepare(resolved, t.TempDir()); err == nil {
 		t.Fatal("Prepare() accepted path traversal archive")
+	}
+}
+
+func TestImportAirgapBundleValidatesNestedArtifacts(t *testing.T) {
+	tool := "tool"
+	infra := gzipTar(t, map[string]string{
+		"ansible.cfg": "[defaults]\n", "src/playbook-preflight.yaml": "---\n", "src/playbook-vars.yaml": "---\n", "src/infra/playbooks/site_infra.yaml": "---\n",
+	})
+	solution := gzipTar(t, map[string]string{"src/solution/playbooks/site_eva_app.yaml": "---\n"})
+	metadata := fmt.Sprintf(`version: 3.2.0
+platform:
+  os: %s
+  arch: %s
+artifacts:
+  - name: eva-tool
+    file: artifacts/eva-tool.tar.gz
+    sha256: %s
+  - name: eva-infra
+    file: artifacts/eva-infra.tar.gz
+    sha256: %s
+  - name: eva-solution
+    file: artifacts/eva-solution.tar.gz
+    sha256: %s
+`, runtime.GOOS, runtime.GOARCH, checksum(tool), checksum(infra), checksum(solution))
+	manifest := fmt.Sprintf("%s  artifacts/eva-tool.tar.gz\n%s  artifacts/eva-infra.tar.gz\n%s  artifacts/eva-solution.tar.gz\n", checksum(tool), checksum(infra), checksum(solution))
+	bundle := gzipTar(t, map[string]string{
+		"release.yaml":                  metadata,
+		"checksums.sha256":              manifest,
+		"README.md":                     "bundle\n",
+		"artifacts/eva-tool.tar.gz":     tool,
+		"artifacts/eva-infra.tar.gz":    infra,
+		"artifacts/eva-solution.tar.gz": solution,
+	})
+	bundlePath := filepath.Join(t.TempDir(), "eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz")
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := ImportAirgapBundle(bundlePath, filepath.Join(t.TempDir(), "artifacts"))
+	if err != nil {
+		t.Fatalf("ImportAirgapBundle() error = %v", err)
+	}
+	if resolved.Metadata.Version != "3.2.0" {
+		t.Fatalf("imported version = %q", resolved.Metadata.Version)
+	}
+	if _, err := os.Stat(filepath.Join(resolved.Root, airgapMarkerName)); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := Prepare(resolved, filepath.Join(t.TempDir(), "releases"))
+	if err != nil {
+		t.Fatalf("Prepare(imported) error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(prepared.Root, "src", "solution", "playbooks", "site_eva_app.yaml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportAirgapBundleRejectsUnexpectedFiles(t *testing.T) {
+	tool := "tool"
+	infra := gzipTar(t, map[string]string{
+		"ansible.cfg": "[defaults]\n", "src/playbook-preflight.yaml": "---\n", "src/playbook-vars.yaml": "---\n", "src/infra/playbooks/site_infra.yaml": "---\n",
+	})
+	solution := gzipTar(t, map[string]string{"src/solution/placeholder": "ok"})
+	metadata := fmt.Sprintf(`version: 3.2.0
+platform:
+  os: %s
+  arch: %s
+artifacts:
+  - name: eva-tool
+    file: artifacts/eva-tool.tar.gz
+    sha256: %s
+  - name: eva-infra
+    file: artifacts/eva-infra.tar.gz
+    sha256: %s
+  - name: eva-solution
+    file: artifacts/eva-solution.tar.gz
+    sha256: %s
+`, runtime.GOOS, runtime.GOARCH, checksum(tool), checksum(infra), checksum(solution))
+	manifest := fmt.Sprintf("%s  artifacts/eva-tool.tar.gz\n%s  artifacts/eva-infra.tar.gz\n%s  artifacts/eva-solution.tar.gz\n", checksum(tool), checksum(infra), checksum(solution))
+	bundle := gzipTar(t, map[string]string{
+		"release.yaml":                  metadata,
+		"checksums.sha256":              manifest,
+		"artifacts/eva-tool.tar.gz":     tool,
+		"artifacts/eva-infra.tar.gz":    infra,
+		"artifacts/eva-solution.tar.gz": solution,
+		"credentials.txt":               "not allowed",
+	})
+	bundlePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportAirgapBundle(bundlePath, t.TempDir()); err == nil || !strings.Contains(err.Error(), "unexpected file") {
+		t.Fatalf("ImportAirgapBundle() error = %v, want unexpected file error", err)
 	}
 }
 

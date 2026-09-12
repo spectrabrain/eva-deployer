@@ -22,7 +22,9 @@ var checksumPattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 var tagPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$`)
 
 const DefaultInstallRoot = "/opt/eva/releases"
+const DefaultArtifactRoot = "/var/lib/eva/artifacts/releases"
 const preparedMarkerName = ".eva-prepared-release"
+const airgapMarkerName = ".eva-airgap-bundle"
 
 var requiredArtifacts = map[string]struct{}{
 	"eva-tool":     {},
@@ -161,6 +163,79 @@ func Prepare(resolved Resolved, installRoot string) (Prepared, error) {
 		return Prepared{}, fmt.Errorf("publish prepared Release: %w", err)
 	}
 	return Prepared{Root: destination, Metadata: resolved.Metadata}, nil
+}
+
+func IsArchiveInput(input string) bool {
+	return strings.HasSuffix(strings.ToLower(input), ".tar.gz") || strings.HasSuffix(strings.ToLower(input), ".tgz")
+}
+
+func ImportAirgapBundle(input, artifactRoot string) (Resolved, error) {
+	if input == "" {
+		return Resolved{}, errors.New("Airgap Bundle path is required")
+	}
+	bundlePath, err := filepath.Abs(input)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("resolve Airgap Bundle path: %w", err)
+	}
+	info, err := os.Stat(bundlePath)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("read Airgap Bundle %s: %w", bundlePath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return Resolved{}, fmt.Errorf("Airgap Bundle is not a regular file: %s", bundlePath)
+	}
+	digest, err := fileChecksum(bundlePath)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("checksum Airgap Bundle: %w", err)
+	}
+	if artifactRoot == "" {
+		artifactRoot = DefaultArtifactRoot
+	}
+	cacheRoot, err := filepath.Abs(artifactRoot)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("resolve artifact cache root: %w", err)
+	}
+	destination := filepath.Join(cacheRoot, digest)
+	if existing, err := existingBundle(destination); err != nil {
+		return Resolved{}, err
+	} else if existing {
+		resolved, err := Resolve(destination)
+		if err != nil {
+			return Resolved{}, err
+		}
+		if err := validateBundleLayout(destination, resolved.Metadata); err != nil {
+			return Resolved{}, err
+		}
+		return resolved, nil
+	}
+	if err := os.MkdirAll(cacheRoot, 0o750); err != nil {
+		return Resolved{}, fmt.Errorf("create artifact cache root: %w", err)
+	}
+	staging, err := os.MkdirTemp(cacheRoot, ".eva-airgap-")
+	if err != nil {
+		return Resolved{}, fmt.Errorf("create Airgap Bundle staging directory: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	if err := extractArchive(bundlePath, staging); err != nil {
+		return Resolved{}, fmt.Errorf("extract Airgap Bundle: %w", err)
+	}
+	resolved, err := Resolve(staging)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("validate Airgap Bundle release: %w", err)
+	}
+	if err := validateBundleLayout(staging, resolved.Metadata); err != nil {
+		return Resolved{}, err
+	}
+	if err := os.WriteFile(filepath.Join(staging, airgapMarkerName), []byte("bundle_sha256: "+digest+"\n"), 0o600); err != nil {
+		return Resolved{}, fmt.Errorf("write Airgap Bundle marker: %w", err)
+	}
+	if err := os.Rename(staging, destination); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return Resolved{}, fmt.Errorf("Airgap Bundle cache entry already exists: %s", destination)
+		}
+		return Resolved{}, fmt.Errorf("publish Airgap Bundle cache entry: %w", err)
+	}
+	return Resolve(destination)
 }
 
 func (resolved Resolved) ArtifactPath(name string) (string, error) {
@@ -391,6 +466,100 @@ func copyFile(source, destination string, mode os.FileMode) error {
 	return output.Close()
 }
 
+func existingBundle(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read Airgap Bundle cache entry: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return false, fmt.Errorf("Airgap Bundle cache entry is not a directory: %s", path)
+	}
+	marker, err := os.Stat(filepath.Join(path, airgapMarkerName))
+	if err != nil {
+		return false, fmt.Errorf("read Airgap Bundle cache marker: %w", err)
+	}
+	if !marker.Mode().IsRegular() {
+		return false, errors.New("Airgap Bundle cache marker is not a regular file")
+	}
+	return true, nil
+}
+
+func validateBundleLayout(root string, metadata Metadata) error {
+	manifestPath := filepath.Join(root, "checksums.sha256")
+	manifest, err := readChecksumManifest(manifestPath)
+	if err != nil {
+		return fmt.Errorf("validate Airgap Bundle checksum manifest: %w", err)
+	}
+	allowed := map[string]struct{}{
+		"release.yaml":     {},
+		"checksums.sha256": {},
+		"README.md":        {},
+		airgapMarkerName:   {},
+	}
+	for _, artifact := range metadata.Artifacts {
+		if !strings.HasPrefix(artifact.File, "artifacts/") || strings.TrimPrefix(artifact.File, "artifacts/") == "" || strings.Contains(strings.TrimPrefix(artifact.File, "artifacts/"), "/") {
+			return fmt.Errorf("Airgap Bundle artifact %q must be directly below artifacts/", artifact.File)
+		}
+		allowed[artifact.File] = struct{}{}
+		checksum, ok := manifest[artifact.File]
+		if !ok || !strings.EqualFold(checksum, artifact.SHA256) {
+			return fmt.Errorf("Airgap Bundle checksum manifest does not match artifact %q", artifact.File)
+		}
+	}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if relative == "artifacts" {
+				return nil
+			}
+			return fmt.Errorf("Airgap Bundle has unexpected directory %s", relative)
+		}
+		if _, ok := allowed[filepath.ToSlash(relative)]; !ok {
+			return fmt.Errorf("Airgap Bundle has unexpected file %s", relative)
+		}
+		return nil
+	})
+}
+
+func readChecksumManifest(path string) (map[string]string, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	entries := make(map[string]string)
+	for _, line := range strings.Split(string(contents), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !checksumPattern.MatchString(fields[0]) {
+			return nil, fmt.Errorf("invalid checksum entry %q", line)
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name == "" || filepath.IsAbs(name) || strings.Contains(name, "..") {
+			return nil, fmt.Errorf("invalid checksum file name %q", fields[1])
+		}
+		if _, exists := entries[name]; exists {
+			return nil, fmt.Errorf("duplicate checksum entry %q", name)
+		}
+		entries[name] = strings.ToLower(fields[0])
+	}
+	return entries, nil
+}
+
 func artifactPath(root, name string) (string, error) {
 	if filepath.IsAbs(name) {
 		return "", errors.New("artifact file must be relative to the release directory")
@@ -404,18 +573,26 @@ func artifactPath(root, name string) (string, error) {
 }
 
 func verifyChecksum(path, expected string) error {
-	file, err := os.Open(path)
+	actual, err := fileChecksum(path)
 	if err != nil {
 		return fmt.Errorf("read artifact file %s: %w", path, err)
+	}
+	if !strings.EqualFold(actual, expected) {
+		return fmt.Errorf("checksum mismatch for %s", path)
+	}
+	return nil
+}
+
+func fileChecksum(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
 	}
 	defer file.Close()
 
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return fmt.Errorf("checksum artifact file %s: %w", path, err)
+		return "", err
 	}
-	if actual := hex.EncodeToString(hash.Sum(nil)); !strings.EqualFold(actual, expected) {
-		return fmt.Errorf("checksum mismatch for %s", path)
-	}
-	return nil
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }

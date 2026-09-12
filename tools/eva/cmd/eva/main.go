@@ -29,7 +29,8 @@ func usage() {
 	fmt.Println("  workspace show     [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
-	fmt.Println("  release <validate|show|prepare> [--release PATH]")
+	fmt.Println("  release <validate|show|prepare|import-airgap> [--release PATH]")
+	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
@@ -66,6 +67,8 @@ func run(args []string) error {
 		return runWorkspace(args[1:])
 	case "release":
 		return runRelease(args[1:])
+	case "install":
+		return runInstall(args[1:])
 	case "plan":
 		return runPlan(args[1:])
 	case "apply":
@@ -141,8 +144,24 @@ func runRelease(args []string) error {
 	flags.SetOutput(os.Stderr)
 	input := flags.String("release", "", "release directory or release.yaml path")
 	installRoot := flags.String("install-root", "", "prepared Release installation directory")
+	bundle := flags.String("bundle", "", "Airgap Bundle path")
+	artifactRoot := flags.String("artifact-root", release.DefaultArtifactRoot, "Airgap artifact cache directory")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
+	}
+	if command == "import-airgap" {
+		if flags.NArg() != 0 || *input != "" || *installRoot != "" {
+			return errors.New("release import-airgap requires --bundle PATH and does not accept release positional arguments")
+		}
+		if *bundle == "" {
+			return errors.New("release import-airgap requires --bundle PATH")
+		}
+		resolved, err := release.ImportAirgapBundle(*bundle, *artifactRoot)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Airgap Bundle imported: %s (version=%s)\n", resolved.Root, resolved.Metadata.Version)
+		return nil
 	}
 	if flags.NArg() > 1 {
 		return fmt.Errorf("unexpected release arguments: %s", strings.Join(flags.Args(), " "))
@@ -155,6 +174,9 @@ func runRelease(args []string) error {
 	}
 	if command != "prepare" && *installRoot != "" {
 		return errors.New("--install-root is only supported by release prepare")
+	}
+	if *bundle != "" || *artifactRoot != release.DefaultArtifactRoot {
+		return errors.New("--bundle and --artifact-root are only supported by release import-airgap")
 	}
 
 	resolved, err := release.Resolve(*input)
@@ -189,9 +211,147 @@ func runRelease(args []string) error {
 
 func releaseUsage() {
 	fmt.Println("Usage: eva release <validate|show|prepare> [--release PATH | PATH]")
+	fmt.Println("       eva release import-airgap --bundle PATH [--artifact-root PATH]")
 	fmt.Println("")
 	fmt.Println("release prepare extracts a verified local Release into /opt/eva/releases/<version>.")
 	fmt.Println("Release tag, S3, and Airgap Bundle resolution are not implemented yet.")
+}
+
+func runInstall(args []string) error {
+	normalizedArgs, err := normalizeInstallArgs(args)
+	if err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("install", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	siteID := flags.String("site", "", "site identifier")
+	workspaceRoot := flags.String("workspace", "", "workspace path")
+	releaseInput := flags.String("release", "", "release directory or release.yaml path")
+	installRoot := flags.String("install-root", release.DefaultInstallRoot, "prepared Release installation directory")
+	artifactRoot := flags.String("artifact-root", release.DefaultArtifactRoot, "Airgap artifact cache directory")
+	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	yes := flags.Bool("yes", false, "confirm target changes without a prompt")
+	if err := flags.Parse(normalizedArgs); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected install arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if flags.NArg() == 1 {
+		if *releaseInput != "" {
+			return errors.New("use either --release or one release path argument, not both")
+		}
+		*releaseInput = flags.Arg(0)
+	}
+
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot})
+	if err != nil {
+		return err
+	}
+	var releaseResolved release.Resolved
+	if release.IsArchiveInput(*releaseInput) {
+		releaseResolved, err = release.ImportAirgapBundle(*releaseInput, *artifactRoot)
+	} else {
+		releaseResolved, err = release.Resolve(*releaseInput)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := runtime.Resolve(*runtimeRoot); err != nil {
+		return err
+	}
+
+	draft := plan.Build(workspaceResolved, releaseResolved, time.Now())
+	printInstallSummary(draft)
+	if !*yes {
+		if err := confirmInstall(draft); err != nil {
+			return err
+		}
+	}
+	if !releaseResolved.Prepared {
+		prepared, err := release.Prepare(releaseResolved, *installRoot)
+		if err != nil {
+			return err
+		}
+		releaseResolved, err = release.Resolve(prepared.Root)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("release prepared: %s\n", prepared.Root)
+	}
+	now := time.Now()
+	document := plan.Build(workspaceResolved, releaseResolved, now)
+	record, err := operation.Create(*stateRoot, document, now)
+	if err != nil {
+		return err
+	}
+	completed, err := apply.Execute(apply.Options{
+		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
+		Stdout: os.Stdout, Stderr: os.Stderr,
+	}, record)
+	printOperation(completed)
+	return err
+}
+
+func normalizeInstallArgs(args []string) ([]string, error) {
+	valueFlags := map[string]bool{
+		"--site": true, "--workspace": true, "--release": true, "--install-root": true,
+		"--artifact-root": true, "--state-root": true, "--log-root": true, "--runtime-root": true,
+	}
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, 1)
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			positionals = append(positionals, args[index+1:]...)
+			break
+		}
+		if !strings.HasPrefix(argument, "-") {
+			positionals = append(positionals, argument)
+			continue
+		}
+		flags = append(flags, argument)
+		if valueFlags[argument] {
+			if index+1 == len(args) {
+				return nil, fmt.Errorf("%s requires a value", argument)
+			}
+			index++
+			flags = append(flags, args[index])
+		}
+	}
+	if len(positionals) > 1 {
+		return nil, fmt.Errorf("unexpected install arguments: %s", strings.Join(positionals, " "))
+	}
+	return append(flags, positionals...), nil
+}
+
+func printInstallSummary(document plan.Document) {
+	components := make([]string, 0, len(document.Steps))
+	for _, step := range document.Steps {
+		components = append(components, step.Component)
+	}
+	fmt.Printf("install plan: site=%s release=%s components=%s\n", document.SiteID, document.ReleaseVersion, strings.Join(components, ","))
+}
+
+func confirmInstall(document plan.Document) error {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect terminal for install confirmation: %w", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return errors.New("eva install requires --yes when standard input is not a terminal")
+	}
+	fmt.Fprintf(os.Stderr, "Install release %s for site %s? [y/N]: ", document.ReleaseVersion, document.SiteID)
+	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && len(answer) == 0 {
+		return fmt.Errorf("read install confirmation: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes") {
+		return nil
+	}
+	return errors.New("install cancelled")
 }
 
 func runPlan(args []string) error {

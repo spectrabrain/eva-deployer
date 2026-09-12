@@ -138,7 +138,7 @@
   ansible.builtin.copy:
     src: "{{ eva_cli_chart_path }}"
     dest: "{{ eva_app_workdir }}/cli-chart.tgz"
-    mode: "0600"
+    mode: "0644"
   when: eva_cli_chart_path | default('') | length > 0
 
 - name: Copy CLI EVA App values override to target workspace
@@ -146,8 +146,21 @@
   ansible.builtin.copy:
     src: "{{ eva_cli_values_path }}"
     dest: "{{ eva_app_workdir }}/cli-override-values.yaml"
-    mode: "0600"
+    mode: "0644"
   when: eva_cli_values_path | default('') | length > 0
+
+- name: Resolve EVA App chart source
+  ansible.builtin.set_fact:
+    eva_app_chart_source: >-
+      {{
+        (eva_cli_chart_path | default('') | length > 0)
+        | ternary(
+          eva_app_workdir ~ '/cli-chart.tgz',
+          (airgap_mode | default(false) | bool)
+          | ternary(eva_app_offline_chart_tgz, eva_app_chart_ref)
+        )
+      }}
+  changed_when: false
 
 - name: Add Helm repository for EVA App
   ansible.builtin.command: helm repo add eva-app https://mellerikat.github.io/eva-app
@@ -192,7 +205,7 @@
 
 - name: Export default values.yaml from EVA App chart
   ansible.builtin.shell: >-
-    helm show values {{ (eva_app_workdir ~ '/cli-chart.tgz') if (eva_cli_chart_path | default('') | length > 0) else (eva_app_offline_chart_tgz if (airgap_mode | default(false) | bool) else eva_app_chart_ref) }} > {{ eva_app_workdir }}/values.yaml
+    helm show values {{ eva_app_chart_source }} > {{ eva_app_workdir }}/values.yaml
   args:
     executable: /bin/bash
   changed_when: false
@@ -204,6 +217,21 @@
     path: "{{ eva_app_deploy_values_dir }}"
     state: directory
     mode: "0755"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA App chart defaults on control node
+  ansible.builtin.fetch:
+    src: "{{ eva_app_workdir }}/values.yaml"
+    dest: "{{ eva_app_deploy_values_dir }}/chart-defaults.yaml"
+    flat: true
+  when: not ansible_check_mode
+
+- name: Publish EVA App chart defaults on control node
+  ansible.builtin.file:
+    path: "{{ eva_app_deploy_values_dir }}/chart-defaults.yaml"
+    mode: "0644"
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
@@ -294,7 +322,7 @@
 - name: Install EVA App from online Helm repo
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   ansible.builtin.command: >-
-    helm upgrade --install {{ eva_app_name }} {{ (eva_app_workdir ~ '/cli-chart.tgz') if (eva_cli_chart_path | default('') | length > 0) else eva_app_chart_ref }}
+    helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
     -n {{ eva_app_namespace }}
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
     --create-namespace
@@ -314,7 +342,7 @@
 - name: Install EVA App from offline chart
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   ansible.builtin.command: >-
-    helm upgrade --install {{ eva_app_name }} {{ (eva_app_workdir ~ '/cli-chart.tgz') if (eva_cli_chart_path | default('') | length > 0) else eva_app_offline_chart_tgz }}
+    helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
     -n {{ eva_app_namespace }}
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
     --create-namespace
@@ -330,6 +358,34 @@
   when: airgap_mode | default(false) | bool
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Capture effective EVA App Helm values
+  no_log: true
+  ansible.builtin.shell: >-
+    helm get values {{ eva_app_name }} --namespace {{ eva_app_namespace }} --all --output yaml
+    > {{ eva_app_workdir }}/resolved-values.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Record effective EVA App Helm values on control node
+  no_log: true
+  ansible.builtin.fetch:
+    src: "{{ eva_app_workdir }}/resolved-values.yaml"
+    dest: "{{ eva_app_deploy_values_dir }}/resolved-values.yaml"
+    flat: true
+  when: not ansible_check_mode
+
+- name: Publish effective EVA App Helm values on control node
+  ansible.builtin.file:
+    path: "{{ eva_app_deploy_values_dir }}/resolved-values.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
 
 - name: Ensure EVA App deployment uses ecr-registry imagePullSecret (online only)
   ansible.builtin.shell: >-

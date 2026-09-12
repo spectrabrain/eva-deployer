@@ -35,7 +35,7 @@ func TestParseRejectsUnselectedOrUnsupportedComponents(t *testing.T) {
 			return err
 		}},
 		{"unsupported", func() error {
-			_, err := Parse([]string{"vision=" + path}, nil, nil, map[string]bool{"vision": true})
+			_, err := Parse([]string{"n8n=" + path}, nil, nil, map[string]bool{"n8n": true})
 			return err
 		}},
 		{"ambiguous set", func() error {
@@ -48,6 +48,20 @@ func TestParseRejectsUnselectedOrUnsupportedComponents(t *testing.T) {
 				t.Fatal("Parse() succeeded")
 			}
 		})
+	}
+}
+
+func TestParseSupportsAgentAndVision(t *testing.T) {
+	path := writeInput(t, t.TempDir(), "override.yaml", "replicaCount: 2\n")
+	request, err := Parse(
+		[]string{"agent=" + path}, []string{"vision=" + path}, []string{"agent:replicaCount=2", "vision:replicaCount=3"},
+		map[string]bool{"agent": true, "vision": true},
+	)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(request.Components) != 2 || request.Components["agent"].Chart == nil || request.Components["vision"].Values == nil {
+		t.Fatalf("parsed components = %#v", request.Components)
 	}
 }
 

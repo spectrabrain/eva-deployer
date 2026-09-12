@@ -96,6 +96,34 @@
     state: directory
     mode: "0755"
 
+- name: Copy CLI EVA Vision chart override to target workspace
+  ansible.builtin.copy:
+    src: "{{ eva_cli_chart_path }}"
+    dest: "{{ eva_vision_workdir }}/cli-chart.tgz"
+    mode: "0644"
+  when: eva_cli_chart_path | default('') | length > 0
+
+- name: Copy CLI EVA Vision values override to target workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_cli_values_path }}"
+    dest: "{{ eva_vision_workdir }}/cli-override-values.yaml"
+    mode: "0644"
+  when: eva_cli_values_path | default('') | length > 0
+
+- name: Resolve EVA Vision chart source
+  ansible.builtin.set_fact:
+    eva_vision_chart_source: >-
+      {{
+        (eva_cli_chart_path | default('') | length > 0)
+        | ternary(
+          eva_vision_workdir ~ '/cli-chart.tgz',
+          (airgap_mode | default(false) | bool)
+          | ternary(eva_vision_offline_chart_tgz, eva_vision_chart_ref)
+        )
+      }}
+  changed_when: false
+
 - name: Check NVIDIA device plugin daemonset exists
   ansible.builtin.command: kubectl get daemonset -A -o name
   register: daemonsets_result
@@ -118,14 +146,18 @@
   failed_when:
     - helm_repo_eva_vision.rc != 0
     - "'already exists' not in (helm_repo_eva_vision.stdout + helm_repo_eva_vision.stderr)"
-  when: not (airgap_mode | default(false) | bool)
+  when:
+    - not (airgap_mode | default(false) | bool)
+    - eva_cli_chart_path | default('') | length == 0
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
 - name: Update Helm repositories
   ansible.builtin.command: helm repo update
   changed_when: true
-  when: not (airgap_mode | default(false) | bool)
+  when:
+    - not (airgap_mode | default(false) | bool)
+    - eva_cli_chart_path | default('') | length == 0
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
@@ -133,7 +165,9 @@
   ansible.builtin.stat:
     path: "{{ eva_vision_offline_chart_tgz }}"
   register: eva_vision_offline_chart
-  when: airgap_mode | default(false) | bool
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_cli_chart_path | default('') | length == 0
 
 - name: Assert offline EVA Vision chart is prepared
   ansible.builtin.assert:
@@ -142,11 +176,13 @@
     fail_msg: >-
       airgap_mode=true 인 경우 {{ eva_vision_offline_chart_tgz }} 파일이 필요합니다.
       scripts/download/download_offline_assets.sh 를 먼저 실행하세요.
-  when: airgap_mode | default(false) | bool
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_cli_chart_path | default('') | length == 0
 
 - name: Export default values.yaml from EVA Vision chart
   ansible.builtin.shell: >-
-    helm show values {{ (eva_vision_offline_chart_tgz if (airgap_mode | default(false) | bool) else eva_vision_chart_ref) }} > {{ eva_vision_workdir }}/values.yaml
+    helm show values {{ eva_vision_chart_source }} > {{ eva_vision_workdir }}/values.yaml
   args:
     executable: /bin/bash
   changed_when: false
@@ -158,6 +194,21 @@
     path: "{{ eva_vision_deploy_values_dir }}"
     state: directory
     mode: "0755"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA Vision chart defaults on control node
+  ansible.builtin.fetch:
+    src: "{{ eva_vision_workdir }}/values.yaml"
+    dest: "{{ eva_vision_deploy_values_dir }}/chart-defaults.yaml"
+    flat: true
+  when: not ansible_check_mode
+
+- name: Publish EVA Vision chart defaults on control node
+  ansible.builtin.file:
+    path: "{{ eva_vision_deploy_values_dir }}/chart-defaults.yaml"
+    mode: "0644"
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
@@ -234,13 +285,16 @@
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
 - name: Deploy EVA Vision from online Helm repo
+  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   ansible.builtin.command: >-
-    helm upgrade --install {{ eva_vision_name }} {{ eva_vision_chart_ref }}
+    helm upgrade --install {{ eva_vision_name }} {{ eva_vision_chart_source }}
     -n {{ eva_vision_namespace }}
-    --version {{ eva_vision_chart_version }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
     --create-namespace
     -f {{ eva_vision_workdir }}/values.yaml
     -f {{ eva_vision_workdir }}/vision-k3s-override.yaml
+    {% if eva_cli_values_path | default('') | length > 0 %}-f {{ eva_vision_workdir }}/cli-override-values.yaml{% endif %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   register: eva_vision_deploy_online
   changed_when: >-
     'has been upgraded' in eva_vision_deploy_online.stdout
@@ -250,12 +304,16 @@
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
 - name: Deploy EVA Vision from offline chart
+  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   ansible.builtin.command: >-
-    helm upgrade --install {{ eva_vision_name }} {{ eva_vision_offline_chart_tgz }}
+    helm upgrade --install {{ eva_vision_name }} {{ eva_vision_chart_source }}
     -n {{ eva_vision_namespace }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
     --create-namespace
     -f {{ eva_vision_workdir }}/values.yaml
     -f {{ eva_vision_workdir }}/vision-k3s-override.yaml
+    {% if eva_cli_values_path | default('') | length > 0 %}-f {{ eva_vision_workdir }}/cli-override-values.yaml{% endif %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   register: eva_vision_deploy_offline
   changed_when: >-
     'has been upgraded' in eva_vision_deploy_offline.stdout
@@ -263,6 +321,34 @@
   when: airgap_mode | default(false) | bool
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Capture effective EVA Vision Helm values
+  no_log: true
+  ansible.builtin.shell: >-
+    helm get values {{ eva_vision_name }} --namespace {{ eva_vision_namespace }} --all --output yaml
+    > {{ eva_vision_workdir }}/resolved-values.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Record effective EVA Vision Helm values on control node
+  no_log: true
+  ansible.builtin.fetch:
+    src: "{{ eva_vision_workdir }}/resolved-values.yaml"
+    dest: "{{ eva_vision_deploy_values_dir }}/resolved-values.yaml"
+    flat: true
+  when: not ansible_check_mode
+
+- name: Publish effective EVA Vision Helm values on control node
+  ansible.builtin.file:
+    path: "{{ eva_vision_deploy_values_dir }}/resolved-values.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
 
 - name: Extend EVA Vision deployment progress deadline
   ansible.builtin.command: >-

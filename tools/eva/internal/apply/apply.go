@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/runtime"
@@ -18,13 +19,14 @@ import (
 const DefaultLogRoot = "/var/log/eva/operations"
 
 var expectedPlaybooks = map[string]string{
-	"infra":  "src/infra/playbooks/site_infra.yaml",
-	"config": "src/solution/playbooks/site_eva_config.yaml",
-	"iam":    "src/solution/playbooks/site_eva_iam.yaml",
-	"agent":  "src/solution/playbooks/site_eva_agent.yaml",
-	"vision": "src/solution/playbooks/site_eva_vision.yaml",
-	"app":    "src/solution/playbooks/site_eva_app.yaml",
-	"n8n":    "src/solution/playbooks/site_n8n.yaml",
+	"precondition": "src/infra/playbooks/site_precondition.yaml",
+	"infra":        "src/infra/playbooks/site_infra.yaml",
+	"config":       "src/solution/playbooks/site_eva_config.yaml",
+	"iam":          "src/solution/playbooks/site_eva_iam.yaml",
+	"agent":        "src/solution/playbooks/site_eva_agent.yaml",
+	"vision":       "src/solution/playbooks/site_eva_vision.yaml",
+	"app":          "src/solution/playbooks/site_eva_app.yaml",
+	"n8n":          "src/solution/playbooks/site_n8n.yaml",
 }
 
 type Options struct {
@@ -64,6 +66,10 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 	if err != nil {
 		return record, err
 	}
+	overrideVars, err := overrideVars(record, document)
+	if err != nil {
+		return record, err
+	}
 	logDirectory, err := operationLogDirectory(options.LogRoot, record.ID)
 	if err != nil {
 		return record, err
@@ -94,7 +100,7 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 	result := operation.Result{Status: operation.Running, StartedAt: startedAt}
 	for _, step := range document.Steps {
 		stepStartedAt := options.Now().UTC()
-		command := exec.Command(ansiblePath, ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars)...)
+		command := exec.Command(ansiblePath, ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars, overrideVars[step.Component])...)
 		command.Dir = releaseRoot
 		command.Env = commandEnvironment(document, releaseRoot, internalLogPath)
 		output := io.MultiWriter(options.Stdout, combinedLog)
@@ -192,10 +198,46 @@ func openPrivate(path string) (*os.File, error) {
 	return file, nil
 }
 
-func ansibleArgs(inventory, playbook string, extraVars []string) []string {
+func overrideVars(record operation.Record, document plan.Document) (map[string]string, error) {
+	paths := make(map[string]string, len(document.Overrides))
+	operationDirectory := filepath.Dir(record.PlanPath)
+	for component, override := range document.Overrides {
+		if component != "app" {
+			return nil, fmt.Errorf("operation plan has unsupported override component %q", component)
+		}
+		if override.AnsibleVarsPath == "" {
+			return nil, fmt.Errorf("operation plan override for %q has no staged variables", component)
+		}
+		if err := requireOperationFile(operationDirectory, override.AnsibleVarsPath); err != nil {
+			return nil, fmt.Errorf("operation plan override for %q: %w", component, err)
+		}
+		for _, file := range []*fieldoverride.File{override.Chart, override.Values} {
+			if file != nil {
+				if err := requireOperationFile(operationDirectory, file.StagedPath); err != nil {
+					return nil, fmt.Errorf("operation plan override for %q: %w", component, err)
+				}
+			}
+		}
+		paths[component] = "@" + override.AnsibleVarsPath
+	}
+	return paths, nil
+}
+
+func requireOperationFile(directory, path string) error {
+	relative, err := filepath.Rel(directory, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("staged override path escapes the operation directory")
+	}
+	return requireRegular(path)
+}
+
+func ansibleArgs(inventory, playbook string, extraVars []string, overrideVars string) []string {
 	args := []string{"-i", inventory, playbook}
 	for _, value := range extraVars {
 		args = append(args, "-e", value)
+	}
+	if overrideVars != "" {
+		args = append(args, "-e", overrideVars)
 	}
 	return args
 }

@@ -75,7 +75,7 @@ repository_registry=<Harbor host:port>
 repository_project=eva
 ```
 
-`repository_registry`에는 `https://`를 제외한 **k3s 노드에서 실제 접근 가능한 주소**를 지정합니다. 단일 서버 Local Harbor의 기본값은 `localhost:32080`이지만, 여러 노드에서는 각 노드가 공통으로 접근 가능한 Harbor hostname 또는 IP를 사용해야 합니다.
+`repository_registry`에는 `https://`를 제외한 **k3s 노드와 Pod에서 실제 접근 가능한 주소**를 지정합니다. Local Harbor도 `localhost:32080`을 사용하지 않고, Harbor가 실행되는 노드의 DNS 또는 IP와 `32080` 포트를 사용합니다. `setup_harbor.sh`가 생성한 `out/work/config/harbor-endpoint.yaml`을 Ansible extra vars로 전달하면 이 주소와 project를 함께 적용할 수 있습니다.
 
 ### 1-2. 모든 모드 공통: 버전 단일 관리
 
@@ -307,7 +307,7 @@ Harbor 기본값:
 
 - `HARBOR_VERSION`: `v2.15.2`
 - `http.port`: `32080` 고정
-- `hostname`: `localhost`
+- `hostname`: 지정하지 않으면 Harbor 서버의 default-route IPv4 (k3s 노드와 Pod에서 도달 가능한 DNS/IP를 명시 권장)
 - `harbor_admin_password`: `EVA123@`
 - `data_volume`: Harbor template 기본값 유지
 - `project`: `eva`
@@ -380,7 +380,7 @@ harbor.main.local:32080/eva/n8n:2.32.7
 1. **인터넷 가능 준비 서버**에서 Ansible wheel, Docker/apt bundle, asset, 모델, 이미지, Harbor installer를 모두 받습니다.
 2. `repository-images.tar`와 `eva-deployer` 전체를 USB 등으로 **Airgap 서버**에 복사합니다.
 3. **Airgap 서버**에서 Python/Ansible, Docker, Local Harbor를 설치하고 archive 이미지를 Harbor에 push합니다.
-4. 이후 Airgap 서버에서 Ansible을 실행하며 `repository_registry=localhost:32080`을 지정합니다.
+4. `setup_harbor.sh`가 만든 `out/work/config/harbor-endpoint.yaml`을 모든 Airgap Ansible 실행에 extra vars로 전달합니다. 이 파일의 registry 주소는 Local Harbor 노드의 실제 DNS/IP와 `32080` 포트입니다.
 
 #### A. 인터넷 가능 준비 서버: 설치 파일과 이미지 준비
 
@@ -457,17 +457,26 @@ sudo ./scripts/install/install_docker.sh --airgap
 
 Local Harbor의 실행 설정은 `eva-deployer` 밖의 `~/.local/share/eva-harbor`에 저장합니다. 이후에는 Harbor를 중지하지 않고 `eva-deployer` 전체를 다시 동기화할 수 있습니다.
 
-새로 설치하는 경우 아래 명령을 실행합니다. Harbor는 `localhost:32080`으로 실행됩니다. 최초 설치의 관리자 계정은 `admin`, 기본 비밀번호는 `EVA123@`입니다. 운영 환경에서는 `--admin-password`로 변경하세요.
+새로 설치하는 경우 아래 명령을 실행합니다. `HARBOR_HOST`는 Local Harbor가 실행되는 노드의 DNS 또는 IP이며, `localhost`나 `127.0.0.1`을 사용하면 안 됩니다. 최초 설치의 관리자 계정은 `admin`, 기본 비밀번호는 `EVA123@`입니다. 운영 환경에서는 `--admin-password`로 변경하세요.
 
 ```bash
+export HARBOR_HOST=<NODE_IP_OR_DNS>
+export HARBOR_REGISTRY="${HARBOR_HOST}:32080"
+
 ./scripts/install/setup_harbor.sh \
-  --hostname localhost \
+  --hostname "$HARBOR_HOST" \
+  --registry-endpoint "$HARBOR_REGISTRY" \
   --install-root ~/.local/share/eva-harbor
 ```
 
 설치가 끝나면 `out/work/config/harbor-endpoint.yaml`이 생성됩니다. 이 파일에는 비밀번호 없이
-Harbor의 k3s/Pod 접근 주소와 project만 들어 있습니다. Harbor와 k3s 배포 서버가 다르면 이 파일도
+Harbor의 k3s/Pod 접근 주소, `repository_registry`, project가 들어 있습니다. 이후 이 문서의 Ansible 실행에는
+`-e @out/work/config/harbor-endpoint.yaml`을 추가합니다. Harbor와 k3s 배포 서버가 다르면 이 파일도
 USB bundle과 함께 배포 controller로 복사하세요.
+
+Harbor 서버에서 실행하는 image/snapshot seed 스크립트는 `harbor.yml`의 hostname과 일치하는
+registry endpoint에 한해 관리자 비밀번호를 자동으로 읽습니다. Harbor와 배포 controller가 분리되어
+Qdrant snapshot을 배포하는 경우에는 `-e harbor_admin_password='<Harbor 비밀번호>'`를 추가하세요.
 
 기존에 `eva-deployer/install/harbor/harbor`에 Harbor를 설치했다면, 위의 새 설치 대신 기존 Harbor를 중지한 뒤 외부 runtime 경로로 한 번 이전합니다.
 
@@ -476,8 +485,11 @@ cd ~/.local/share/eva-harbor/harbor
 sudo docker compose down
 
 cd /home/eva/eva-deployer
+export HARBOR_HOST=<NODE_IP_OR_DNS>
+export HARBOR_REGISTRY="${HARBOR_HOST}:32080"
 ./scripts/install/setup_harbor.sh \
-  --hostname localhost \
+  --hostname "$HARBOR_HOST" \
+  --registry-endpoint "$HARBOR_REGISTRY" \
   --install-root ~/.local/share/eva-harbor
 ```
 
@@ -485,7 +497,8 @@ cd /home/eva/eva-deployer
 
 ```bash
 ./scripts/install/setup_harbor.sh \
-  --hostname localhost \
+  --hostname "$HARBOR_HOST" \
+  --registry-endpoint "$HARBOR_REGISTRY" \
   --install-root ~/.local/share/eva-harbor \
   --data-volume /data001/harbor
 ```
@@ -494,29 +507,29 @@ cd /home/eva/eva-deployer
 
 #### C. Airgap 서버: Local Harbor에 이미지 seed
 
-Airgap 서버에서 이미지를 load한 뒤 Local Harbor로 push합니다.
-`push_images_to_repository.sh`는 `localhost:32080`의 `harbor.yml`에서 관리자 비밀번호를 읽어 자동으로 로그인합니다.
+Airgap 서버에서 이미지를 load한 뒤 `HARBOR_REGISTRY`로 Local Harbor에 push합니다.
+`push_images_to_repository.sh`는 표준 Local Harbor의 `harbor.yml`에서 관리자 비밀번호를 읽어 자동으로 로그인합니다.
 
 ```bash
 docker load -i ./out/cache/images/repository-images.tar
 
 # EVA 이미지 push
 PULL_SOURCE_IMAGES=false \
-REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_REGISTRY="$HARBOR_REGISTRY" \
 REPOSITORY_PROJECT=eva \
 ./scripts/publish/push_images_to_repository.sh
 
 # Infra 이미지 push
 PULL_SOURCE_IMAGES=false \
 IMAGE_LIST=./out/cache/images/infra-images-pulled.txt \
-REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_REGISTRY="$HARBOR_REGISTRY" \
 REPOSITORY_PROJECT=eva \
 ./scripts/publish/push_images_to_repository.sh
 
 # n8n 이미지 push
 PULL_SOURCE_IMAGES=false \
 IMAGE_LIST=./out/cache/images/n8n-images.txt \
-REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_REGISTRY="$HARBOR_REGISTRY" \
 REPOSITORY_PROJECT=eva \
 ./scripts/publish/push_images_to_repository.sh
 ```
@@ -525,7 +538,7 @@ Harbor에 저장된 repository를 확인합니다.
 
 ```bash
 curl -fsS -u "admin:${HARBOR_ADMIN_PASSWORD:-EVA123@}" \
-  'http://localhost:32080/api/v2.0/repositories?project_name=eva&page_size=100' \
+  "http://${HARBOR_REGISTRY}/api/v2.0/repositories?project_name=eva&page_size=100" \
   | python3 -c 'import json, sys; print("\n".join(item["name"] for item in json.load(sys.stdin)))'
 ```
 
@@ -533,7 +546,7 @@ Harbor 확인 후 Docker cache와 archive가 더 이상 필요 없으면 삭제�
 
 ```bash
 docker image rm $(cat ./out/cache/images/repository-images.txt)
-docker image rm $(docker images --format '{{.Repository}}:{{.Tag}}' | awk '$0 ~ /^localhost:32080\/eva\// { print }')
+docker image rm $(docker images --format '{{.Repository}}:{{.Tag}}' | awk -v prefix="${HARBOR_REGISTRY}/eva/" 'index($0, prefix) == 1 { print }')
 rm -f ./out/cache/images/repository-images.tar
 ```
 
@@ -572,12 +585,12 @@ docker load -i ./out/cache/images/repository-images.tar
 
 PULL_SOURCE_IMAGES=false \
 IMAGE_LIST=./out/cache/images/images-pulled.txt \
-REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_REGISTRY="$HARBOR_REGISTRY" \
 REPOSITORY_PROJECT=eva \
 ./scripts/publish/push_images_to_repository.sh
 
 EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
-REPOSITORY_REGISTRY=localhost:32080 \
+REPOSITORY_REGISTRY="$HARBOR_REGISTRY" \
 REPOSITORY_PROJECT=eva \
 ./scripts/publish/push_qdrant_snapshots_to_harbor.sh
 ```
@@ -589,17 +602,16 @@ Qdrant만 배포하려면 (vLLM/EVA Agent 본체는 설치하지 않음) k3s와 
 ```bash
 ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.yaml -K \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -e eva_agent_vllm_profile=PRO6000-MIGx4 \
   -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
   -e eva_agent_qdrant_snapshot_source=harbor
 ```
 
 `repository_registry`와 `repository_project`로 Qdrant 본체, snapshot-sync sidecar,
-snapshot OCI artifact repository와 Qdrant chart test 이미지 경로가 정해집니다. 즉 위 명령은 Qdrant 본체를
-`localhost:32080/eva/qdrant:v<chart-version>`으로, sidecar를
-`localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0`으로 배포합니다. 이 role은
+snapshot OCI artifact repository와 Qdrant chart test 이미지 경로가 정해집니다. 위 명령은 metadata의
+`repository_registry`를 사용해 Qdrant 본체를 `<NODE_IP_OR_DNS>:32080/eva/qdrant:v<chart-version>`으로, sidecar를
+`<NODE_IP_OR_DNS>:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0`으로 배포합니다. 이 role은
 `qdrant-snapshot-harbor` Secret도 자동으로 만듭니다. 이 Secret은 Harbor 설치 단계에서
 생기는 것이 아니라, Harbor snapshot 모드의 Qdrant role이 Helm 설치 직전에 만드는 Qdrant
 전용 Kubernetes Secret입니다. Secret 이름은 고정이며, 사용자/비밀번호는
@@ -614,12 +626,10 @@ Harbor를 기본 경로가 아닌 곳에 설치했다면 `-e eva_agent_harbor_co
 Harbor 설치의 `HARBOR_PROJECT`, image/snapshot push의 `REPOSITORY_PROJECT`, 배포의
 `repository_project`를 **같은 값**으로 지정해야 합니다. 세 값은 서로 자동 전달되지 않습니다.
 
-`localhost:32080`은 k3s가 이미지를 pull할 때는 노드의 Local Harbor를 뜻하지만, Pod 안의
-ORAS sidecar에서 `localhost`는 Pod 자신을 뜻합니다. 따라서 단일-node Local Harbor에서는 role이
-k3s node의 InternalIP:32080을 snapshot artifact endpoint로 자동 사용합니다. 이 endpoint는
-`scripts/install/setup_harbor.sh`가 생성한 `out/work/config/harbor-endpoint.yaml`에도 기록되며, agent playbook이
-자동으로 읽습니다. 다중 노드이거나 별도 Harbor를 쓴다면 Harbor 설치 시 실제 내부 DNS/IP를
-지정합니다.
+Local Harbor도 k3s 노드와 Pod에서 도달 가능한 `<NODE_IP_OR_DNS>:32080`을 사용합니다.
+`scripts/install/setup_harbor.sh`가 생성한 `out/work/config/harbor-endpoint.yaml`은 이 주소를
+`repository_registry`와 Qdrant snapshot sidecar endpoint로 함께 기록합니다. 모든 Ansible 실행에 이 파일을
+extra vars로 전달해 image pull과 ORAS artifact pull이 같은 주소를 사용하게 하세요.
 
 ```bash
 ./scripts/install/setup_harbor.sh \
@@ -645,9 +655,8 @@ ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/sit
   -e eva_agent_qdrant_snapshot_source=harbor
 ```
 
-여러 k3s 노드라면 `localhost:32080` 대신 **Pod에서 도달 가능한** Harbor hostname/IP와
-port를 `repository_registry`에 넣어야 합니다. `localhost`는 Qdrant Pod가 실행되는 노드의
-Harbor만 가리킵니다.
+단일/다중 k3s 노드와 별도 Harbor 모두 **Pod에서 도달 가능한** Harbor hostname/IP와 port를
+`repository_registry`에 사용해야 합니다. `localhost`는 Harbor canonical address나 Pod용 registry endpoint로 사용할 수 없습니다.
 
 배포 후에는 Qdrant Pod의 두 컨테이너 이미지가 모두 선택한 Harbor를 보는지와 snapshot 복구 상태를
 확인합니다.
@@ -666,10 +675,9 @@ archive를 다시 만든 뒤 `push_images_to_repository.sh`와
 `push_qdrant_snapshots_to_harbor.sh`를 다시 실행하세요.
 
 ```bash
-export REPOSITORY_REGISTRY=localhost:32080
+export REPOSITORY_REGISTRY="$HARBOR_REGISTRY"
 export REPOSITORY_PROJECT=eva
-NODE_INTERNAL_IP="$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
-export SNAPSHOT_HARBOR_REGISTRY="${NODE_INTERNAL_IP}:32080"
+export SNAPSHOT_HARBOR_REGISTRY="$HARBOR_REGISTRY"
 
 kubectl create namespace eva-agent --dry-run=client -o yaml | kubectl apply -f -
 kubectl create serviceaccount sa-eva-agent -n eva-agent --dry-run=client -o yaml | kubectl apply -f -
@@ -856,15 +864,13 @@ mkdir -p logs_infra
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   2>&1 | tee logs_infra/ansible-check.log
 
 ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -vvv 2>&1 | tee logs_infra/ansible-run.log
 ```
 
@@ -873,8 +879,7 @@ ANSIBLE_LOG_PATH=logs_infra/ansible-internal.log \
 ```bash
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -e gpu_driver_package=nvidia-driver-580 \
   -vvv
 ```
@@ -931,8 +936,7 @@ mkdir -p logs_gpu_mig
 ANSIBLE_LOG_PATH=logs_gpu_mig/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -vvv 2>&1 | tee logs_gpu_mig/ansible-run.log
 ```
 
@@ -980,8 +984,7 @@ mkdir -p logs_eva
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -vvv 2>&1 | tee logs_eva/ansible-config.log
 ```
 
@@ -1070,8 +1073,7 @@ mkdir -p logs_iam
 ANSIBLE_LOG_PATH=logs_iam/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -e eva_iam_host=iam.customer.example \
   -e eva_iam_ingress_path=/iam \
   -e eva_iam_redis_external_enabled=true \
@@ -1305,8 +1307,7 @@ mkdir -p logs_eva
 ANSIBLE_LOG_PATH=logs_eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -vvv 2>&1 | tee logs_eva/ansible-run-eva.log
 ```
 
@@ -1315,8 +1316,7 @@ vLLM GPU 프로파일을 지정하려면 추가 변수로 넘깁니다.
 ```bash
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -e eva_agent_vllm_profile=A6000x1 \
   -vvv
 ```
@@ -1378,7 +1378,7 @@ ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
 Local Harbor에 아래 이미지가 준비되어 있어야 합니다.
 
 ```text
-localhost:32080/eva/n8n:2.32.7
+<NODE_IP_OR_DNS>:32080/eva/n8n:2.32.7
 ```
 
 ```bash
@@ -1387,8 +1387,7 @@ mkdir -p logs_n8n
 ANSIBLE_LOG_PATH=logs_n8n/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
   -e repository_mode=local_repository \
-  -e repository_registry=localhost:32080 \
-  -e repository_project=eva \
+  -e @out/work/config/harbor-endpoint.yaml \
   -vvv 2>&1 | tee logs_n8n/ansible-run.log
 ```
 

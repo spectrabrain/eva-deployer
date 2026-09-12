@@ -34,12 +34,32 @@ func TestBuildOrdersSelectedComponentsAndConfig(t *testing.T) {
 	for _, step := range document.Steps {
 		got = append(got, step.Component)
 	}
-	want := []string{"infra", "config", "iam", "agent", "vision", "app"}
+	want := []string{"precondition", "infra", "config", "iam", "agent", "vision", "app"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("step order = %v, want %v", got, want)
 	}
 	if document.GeneratedAt.Location() != time.UTC {
 		t.Fatalf("GeneratedAt location = %s, want UTC", document.GeneratedAt.Location())
+	}
+}
+
+func TestBuildAddsConfigForScopedAgentPlan(t *testing.T) {
+	workspaceResolved := workspace.Resolved{
+		SiteID: "customer-a",
+		Root:   "/etc/eva/sites/customer-a",
+		Config: workspace.Config{Components: map[string]bool{"agent": true}},
+	}
+	releaseResolved := release.Resolved{Root: "/releases/3.2.0"}
+	releaseResolved.Metadata.Version = "3.2.0"
+
+	document := Build(workspaceResolved, releaseResolved, time.Now())
+	got := make([]string, 0, len(document.Steps))
+	for _, step := range document.Steps {
+		got = append(got, step.Component)
+	}
+	want := []string{"precondition", "config", "agent"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("step order = %v, want %v", got, want)
 	}
 }
 

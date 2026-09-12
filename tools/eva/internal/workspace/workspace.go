@@ -99,6 +99,48 @@ func (resolved Resolved) Environment() map[string]string {
 	}
 }
 
+// SelectComponents returns a copy of the workspace scoped to requested
+// components. Named components must already be enabled in site.yaml; "all"
+// explicitly selects every enabled component.
+func (resolved Resolved) SelectComponents(requested []string) (Resolved, error) {
+	components := make(map[string]bool, len(resolved.Config.Components))
+	for name, enabled := range resolved.Config.Components {
+		components[name] = enabled
+	}
+	if len(requested) == 0 {
+		resolved.Config.Components = components
+		return resolved, nil
+	}
+
+	selected := make(map[string]bool, len(requested))
+	for _, name := range requested {
+		if name == "all" {
+			if len(requested) != 1 {
+				return Resolved{}, errors.New("--component all cannot be combined with named components")
+			}
+			continue
+		}
+		if !validComponent(name) {
+			return Resolved{}, fmt.Errorf("unknown component %q", name)
+		}
+		if selected[name] {
+			return Resolved{}, fmt.Errorf("component %q was selected more than once", name)
+		}
+		if !components[name] {
+			return Resolved{}, fmt.Errorf("component %q is not enabled in site-values/site.yaml", name)
+		}
+		selected[name] = true
+	}
+
+	if requested[0] != "all" {
+		for name := range components {
+			components[name] = selected[name]
+		}
+	}
+	resolved.Config.Components = components
+	return resolved, nil
+}
+
 func validateRequestedSiteID(siteID string) error {
 	if siteID == "" {
 		return nil

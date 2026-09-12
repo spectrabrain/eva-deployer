@@ -843,9 +843,11 @@ Airgap Bundle 다운로드
 eva install
 eva install 3.2.0
 eva install ./eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz
-eva install app --chart ./eva-app-fix.tgz --values ./app-fix.yaml --set replicaCount=2
+eva install ./eva-release-3.2.0 --component app
+eva install ./eva-release-3.2.0 --component app --chart app=./eva-app-fix.tgz --values app=./app-fix.yaml --set replicaCount=2
 
 eva plan
+eva plan ./eva-release-3.2.0 --component agent
 eva apply
 eva status
 eva verify
@@ -855,8 +857,8 @@ eva exec ansible-playbook --version
 
 | 명령 | 시스템 변경 | 기본 동작 |
 | --- | --- | --- |
-| `install [release-or-component]` | 있음 | release/workspace를 자동 탐지하고 plan 요약 후 apply |
-| `plan [release-or-component]` | 없음 | 최신 입력으로 Plan과 effective values 생성 |
+| `install [release-path]` | 있음 | release/workspace를 검증하고 plan 요약 후 apply |
+| `plan [release-path]` | 없음 | 최신 입력으로 Plan 생성 |
 | `apply [operation-id]` | 있음 | 최신 Plan 또는 지정 Plan 적용 |
 | `status [operation-id]` | 없음 | 최신 또는 지정 operation 상태 출력 |
 | `verify [release]` | 없음 | `release.yaml`, artifact, checksum 검증 |
@@ -867,11 +869,13 @@ Component alias는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`이다.
 
 현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show|prepare`, `eva install`, `eva plan`, `eva apply`, `eva status`, `eva runtime install|validate|show`, `eva exec`다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
 
-`eva plan --workspace <path> --release <path> [--output <path> | --save]`은 선택 component와 기존 playbook 순서, Ansible extra vars, 환경변수를 YAML로 생성한다. `agent` 또는 `vision`을 선택하면 `site_eva_config.yaml`을 자동 선행 단계로 넣는다. stdout 출력이 기본이며 `--output`을 지정한 plan 파일은 `0600` 권한으로 생성한다. `--save`는 `/var/lib/eva/operations/<operation-id>/`에 `planned` operation record와 Plan을 `0600` 권한으로 저장한다. 개발과 테스트에서는 `--state-root <path>`로 해당 기본 경로를 바꿀 수 있고, `eva status [operation-id]`는 최신 또는 지정 record를 읽는다.
+`eva plan --workspace <path> --release <path> [--component <name>] [--chart app=<path>] [--values app=<path>] [--set [app:]key=value] [--output <path> | --save]`은 선택 component와 기존 playbook 순서, Ansible extra vars, 환경변수를 YAML로 생성한다. `--component`는 반복 지정할 수 있고 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`을 받는다. 명시한 component는 반드시 `site.yaml`에서 활성화되어야 하며, `all`은 다른 이름과 함께 지정할 수 없다. 생략하면 `site.yaml`의 모든 활성 component를 사용한다. `agent` 또는 `vision`을 선택하면 `site_eva_config.yaml`을 자동 선행 단계로 넣는다. 모든 Plan에는 `site_precondition.yaml`이 첫 단계로 포함된다. stdout 출력이 기본이며 `--output`을 지정한 plan 파일은 `0600` 권한으로 생성한다. `--save`는 `/var/lib/eva/operations/<operation-id>/`에 `planned` operation record와 Plan을 `0600` 권한으로 저장한다. 개발과 테스트에서는 `--state-root <path>`로 해당 기본 경로를 바꿀 수 있고, `eva status [operation-id]`는 최신 또는 지정 record를 읽는다.
 
-`eva apply [operation-id]`는 최신 또는 지정 `planned` operation만 실행한다. TTY에서는 site와 operation ID를 표시하고 확인을 받고, 비대화형 실행은 `--yes`가 필수다. Runtime의 `ansible-playbook` 절대 경로만 사용하며, workspace inventory와 Plan에 기록된 allowlist playbook을 검증한 뒤 순차 실행한다. 첫 실패 뒤의 단계는 실행하지 않으며 `result.yaml`, `/var/log/eva/operations/<operation-id>/ansible.log`, Ansible internal log 및 terminal status를 갱신한다. Apply는 `eva release prepare`가 생성한 `ansible.cfg`와 `src/`를 가진 local Release source를 사용한다. S3 resolver, Helm effective values와 override 적용은 다음 단계다.
+현장 Helm override의 1차 대상은 `app`이다. `--chart app=<path>`와 `--values app=<path>`는 regular file만 허용하며, `--component app`으로 App만 선택했을 때 `--set key=value`의 `app:` 접두사는 생략할 수 있다. 여러 component를 선택한 경우 `--set app:key=value`를 사용한다. `--set`은 Helm의 기본 type 추론을 그대로 사용한다. Chart와 Values는 operation 생성 시 SHA-256을 확인해 `/var/lib/eva/operations/<operation-id>/inputs/app/`에 `0600`으로 snapshot하며, Apply는 원본 경로 대신 이 snapshot만 사용한다. Plan과 일반 status에는 `--set`의 키만 남기고 값은 기록하지 않는다. App 이외 component의 Chart/Values/Set override와 `chart-defaults.yaml`, `resolved-values.yaml` 생성은 후속 단계다.
 
-`eva install [release-path] --workspace <path>`는 local Release source를 검증하고, 필요하면 `release prepare`, Workspace 검증, Plan 요약, 확인, operation 생성, Apply를 차례로 수행하는 편의 명령이다. 이미 준비된 `/opt/eva/releases/<version>`을 입력하면 재추출하지 않는다. Airgap Bundle 경로는 nested artifact cache import를 먼저 수행한다. TTY가 아닌 자동화에서는 `--yes`가 필수이며, 사용자가 취소하거나 Runtime/Workspace 검증에 실패하면 Release prepare와 operation 생성은 실행하지 않는다. Release tag, Component shortcut과 Chart/Values override는 아직 지원하지 않는다.
+`eva apply [operation-id]`는 최신 또는 지정 `planned` operation만 실행한다. TTY에서는 site와 operation ID를 표시하고 확인을 받고, 비대화형 실행은 `--yes`가 필수다. Runtime의 `ansible-playbook` 절대 경로만 사용하며, workspace inventory와 Plan에 기록된 allowlist playbook을 검증한 뒤 순차 실행한다. App field override가 있는 Plan은 operation 내부의 staged Ansible vars 파일도 검증해 해당 App playbook에만 전달한다. 모든 Plan은 `site_precondition.yaml`을 첫 단계로 넣어 사전 상태를 수집하고, 실패하면 Infra와 Solution 단계로 진행하지 않는다. 첫 실패 뒤의 단계는 실행하지 않으며 `result.yaml`, `/var/log/eva/operations/<operation-id>/ansible.log`, Ansible internal log 및 terminal status를 갱신한다. Apply는 `eva release prepare`가 생성한 `ansible.cfg`와 `src/`를 가진 local Release source를 사용한다. S3 resolver와 Helm 최종 values 산출물 생성은 다음 단계다.
+
+`eva install [release-path] --workspace <path> [--component <name>]`는 local Release source를 검증하고, 필요하면 `release prepare`, Workspace 검증, Plan 요약, 확인, operation 생성, Apply를 차례로 수행하는 편의 명령이다. `--component`의 선택 규칙은 `eva plan`과 같으며, 생성된 operation에 선택 범위가 고정된다. App override가 있으면 summary에 `[WARN] field override detected`를 표시하고 `eva status`에도 해당 operation의 override 여부를 표시한다. 이미 준비된 `/opt/eva/releases/<version>`을 입력하면 재추출하지 않는다. Airgap Bundle 경로는 nested artifact cache import를 먼저 수행한다. TTY가 아닌 자동화에서는 `--yes`가 필수이며, 사용자가 취소하거나 Runtime/Workspace 검증에 실패하면 Release prepare와 operation 생성은 실행하지 않는다. Release tag와 positional Component shortcut은 아직 지원하지 않는다.
 
 EVA managed Runtime은 `/opt/eva/runtime/runtime.yaml` descriptor로 version과 도구 경로를 고정한다. `ansible-playbook`, `helm`, `kubectl`, `kustomize`, `oras`는 모두 Runtime root 내부의 실행 가능한 regular file이어야 하며, descriptor의 절대 경로, 상위 경로 탈출 및 Runtime 밖 symlink는 거부한다. `eva exec`는 이 allowlist의 절대 경로만 실행하므로 시스템 PATH의 동명 도구를 사용하지 않는다. `eva runtime install --source <validated-runtime-payload>`는 source를 먼저 검증하고 sibling staging directory에 완전 복사·재검증한 뒤 `/opt/eva/runtime`을 교체한다. 새 Runtime publish 실패 시 이전 Runtime은 복원하며, source payload 검증 실패는 기존 Runtime을 변경하지 않는다.
 

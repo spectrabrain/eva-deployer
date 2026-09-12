@@ -335,6 +335,7 @@ func validatePrepared(root string, metadata Metadata) error {
 		"ansible.cfg",
 		"src/playbook-preflight.yaml",
 		"src/playbook-vars.yaml",
+		"src/infra/playbooks/site_precondition.yaml",
 		"src/infra/playbooks/site_infra.yaml",
 	} {
 		info, err := os.Stat(filepath.Join(root, path))

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/workspace"
 	"gopkg.in/yaml.v3"
@@ -19,22 +20,28 @@ type Step struct {
 }
 
 type Document struct {
-	SchemaVersion     string            `yaml:"schema_version"`
-	OperationID       string            `yaml:"operation_id,omitempty"`
-	GeneratedAt       time.Time         `yaml:"generated_at"`
-	SiteID            string            `yaml:"site_id"`
-	Workspace         string            `yaml:"workspace"`
-	ReleaseVersion    string            `yaml:"release_version"`
-	ReleaseRoot       string            `yaml:"release_root"`
-	RepositoryMode    string            `yaml:"repository_mode"`
-	Repository        string            `yaml:"repository_registry,omitempty"`
-	RepositoryProject string            `yaml:"repository_project"`
-	Steps             []Step            `yaml:"steps"`
-	AnsibleExtraVars  []string          `yaml:"ansible_extra_vars"`
-	Environment       map[string]string `yaml:"environment"`
+	SchemaVersion     string                             `yaml:"schema_version"`
+	OperationID       string                             `yaml:"operation_id,omitempty"`
+	GeneratedAt       time.Time                          `yaml:"generated_at"`
+	SiteID            string                             `yaml:"site_id"`
+	Workspace         string                             `yaml:"workspace"`
+	ReleaseVersion    string                             `yaml:"release_version"`
+	ReleaseRoot       string                             `yaml:"release_root"`
+	RepositoryMode    string                             `yaml:"repository_mode"`
+	Repository        string                             `yaml:"repository_registry,omitempty"`
+	RepositoryProject string                             `yaml:"repository_project"`
+	Steps             []Step                             `yaml:"steps"`
+	AnsibleExtraVars  []string                           `yaml:"ansible_extra_vars"`
+	Environment       map[string]string                  `yaml:"environment"`
+	Overrides         map[string]fieldoverride.Component `yaml:"overrides,omitempty"`
+	OverrideInputs    fieldoverride.Request              `yaml:"-"`
 }
 
 func Build(workspaceResolved workspace.Resolved, releaseResolved release.Resolved, now time.Time) Document {
+	return BuildWithOverrides(workspaceResolved, releaseResolved, fieldoverride.Request{}, now)
+}
+
+func BuildWithOverrides(workspaceResolved workspace.Resolved, releaseResolved release.Resolved, overrides fieldoverride.Request, now time.Time) Document {
 	config := workspaceResolved.Config
 	return Document{
 		SchemaVersion:     SchemaVersion,
@@ -49,6 +56,8 @@ func Build(workspaceResolved workspace.Resolved, releaseResolved release.Resolve
 		Steps:             steps(config.Components),
 		AnsibleExtraVars:  workspaceResolved.AnsibleExtraVars(),
 		Environment:       workspaceResolved.Environment(),
+		Overrides:         overrides.Public(),
+		OverrideInputs:    overrides,
 	}
 }
 
@@ -90,7 +99,10 @@ func Write(path string, contents []byte) error {
 }
 
 func steps(components map[string]bool) []Step {
-	steps := make([]Step, 0, 7)
+	steps := make([]Step, 0, 8)
+	if len(components) > 0 {
+		steps = append(steps, Step{Component: "precondition", Playbook: "src/infra/playbooks/site_precondition.yaml"})
+	}
 	if components["infra"] {
 		steps = append(steps, Step{Component: "infra", Playbook: "src/infra/playbooks/site_infra.yaml"})
 	}

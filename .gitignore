@@ -26,6 +26,7 @@ workspace/inventory/*
 !workspace/inventory/.gitkeep
 workspace/site-values/*
 !workspace/site-values/.gitkeep
+!workspace/site-values/*.sample
 
 logs/
 logs_*/

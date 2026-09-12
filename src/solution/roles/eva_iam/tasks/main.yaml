@@ -263,7 +263,7 @@
       eva_iam_public_port / eva_iam_public_url 은 차트 3.1.4 이상에서만 동작합니다
       (config.publicPort / config.publicUrl). 지금 차트는 {{ eva_iam_chart_version }} 이라
       이 값이 조용히 무시되고, eva-app 에 넘기는 ssoBaseUrl 만 포트가 붙어 토큰 issuer 와
-      어긋납니다. versions.json 의 eva_iam_chart_version 을 올리거나 이 값을 지우세요.
+      어긋납니다. src/solution/version.yaml 의 eva_iam_chart_version 을 올리거나 이 값을 지우세요.
   when: (eva_iam_public_port | length > 0) or (eva_iam_public_url | length > 0)
 
 - name: Validate eva-iam host is host-only

@@ -138,6 +138,13 @@ artifacts:
 	if err := os.WriteFile(bundlePath, []byte(bundle), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	verified, err := VerifyAirgapBundle(bundlePath)
+	if err != nil {
+		t.Fatalf("VerifyAirgapBundle() error = %v", err)
+	}
+	if verified.Version != "3.2.0" {
+		t.Fatalf("verified version = %q", verified.Version)
+	}
 	resolved, err := ImportAirgapBundle(bundlePath, filepath.Join(t.TempDir(), "artifacts"))
 	if err != nil {
 		t.Fatalf("ImportAirgapBundle() error = %v", err)

@@ -1,7 +1,7 @@
 - name: Resolve k3s install architecture and paths
   ansible.builtin.set_fact:
     k3s_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64', 'arm64'] else 'amd64' }}"
-    k3s_offline_dir: "{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/k3s' }}"
+    k3s_offline_dir: "{{ eva_cache_root }}/k3s"
   changed_when: false
 
 - name: Download k3s install script from internet
@@ -156,13 +156,13 @@
 
 - name: Find offline k3s container images archive
   ansible.builtin.stat:
-    path: "{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/images/k3s-images.tar' }}"
+    path: "{{ eva_cache_root }}/images/k3s-images.tar"
   register: k3s_images_archive
   when: airgap_mode | default(false) | bool
 
 - name: Copy offline k3s container images archive
   ansible.builtin.copy:
-    src: "{{ (eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/images/k3s-images.tar' }}"
+    src: "{{ eva_cache_root }}/images/k3s-images.tar"
     dest: /tmp/k3s-images.tar
     mode: '0644'
   when:

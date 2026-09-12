@@ -1,7 +1,7 @@
 - name: Set infra check parameters
   ansible.builtin.set_fact:
-    base_infra_output_dir: "{{ (eva_generated_config_root | default((eva_repo_root | default(playbook_dir)) ~ '/config')) ~ '/' ~ (ansible_host | default(inventory_hostname)) }}"
-    base_infra_output_file: "{{ (eva_generated_config_root | default((eva_repo_root | default(playbook_dir)) ~ '/config')) ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/precondition.yaml' }}"
+    base_infra_output_dir: "{{ eva_generated_config_root }}/{{ ansible_host | default(inventory_hostname) }}"
+    base_infra_output_file: "{{ eva_generated_config_root }}/{{ ansible_host | default(inventory_hostname) }}/precondition.yaml"
     infra_check_urls:
       - url: "https://github.com"
         domain: "github.com"

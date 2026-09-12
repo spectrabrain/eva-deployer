@@ -1,7 +1,7 @@
 - name: Resolve eva-iam values file
   ansible.builtin.set_fact:
     eva_iam_values_host: "{{ ansible_host | default(inventory_hostname) }}"
-    eva_iam_values_file: "{{ eva_iam_values_file | default(((eva_site_values_root ~ '/iam.yaml') if (eva_site_values_root is defined) else ((eva_repo_root | default(playbook_dir)) ~ '/values/eva-iam.yaml'))) }}"
+    eva_iam_values_file: "{{ eva_iam_values_file | default(eva_site_values_root ~ '/iam.yaml') }}"
 
 - name: Check for eva-iam values file on control node
   ansible.builtin.stat:
@@ -148,7 +148,7 @@
     eva_iam_workdir: "{{ eva_iam_workdir | default(eva_iam_base_dir) }}"
     eva_iam_deploy_values_dir: >-
       {{ eva_iam_deploy_values_dir
-         | default((eva_deploy_root | default((eva_repo_root | default(playbook_dir)) ~ '/deploy')) ~ '/'
+         | default(eva_deploy_root ~ '/'
                    ~ (ansible_host | default(inventory_hostname)) ~ '/iam') }}
     eva_iam_values_dest: "{{ (eva_iam_workdir | default(eva_iam_base_dir)) ~ '/eva-iam-host-override.yaml' }}"
 
@@ -157,11 +157,10 @@
 # bundle is expected at the same path on the target (install/ is copied over with the repo).
 - name: Resolve eva-iam chart source and image repositories
   ansible.builtin.set_fact:
-    eva_iam_offline_dir: "{{ eva_iam_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-iam') }}"
+    eva_iam_offline_dir: "{{ eva_iam_offline_dir | default(eva_cache_root ~ '/eva-iam') }}"
     eva_iam_offline_chart_tgz: >-
       {{ eva_iam_offline_chart_tgz
-         | default((eva_iam_offline_dir | default((eva_cache_root | default((eva_repo_root | default(playbook_dir)) ~ '/out/cache')) ~ '/eva-iam'))
-                   ~ '/eva-iam-' ~ eva_iam_chart_version ~ '.tgz') }}
+         | default(eva_iam_offline_dir ~ '/eva-iam-' ~ eva_iam_chart_version ~ '.tgz') }}
     # Harbor image names follow scripts/publish/push_images_to_repository.sh, which flattens every
     # source image to <registry>/<project>/<last path element>:<tag>.
     eva_iam_keycloak_image_repository: >-
@@ -220,7 +219,7 @@
       {{ 'CLIENT_SECRET_' ~ (eva_iam_admin_api_client_id | upper | replace('-', '_')) }}
     eva_iam_app_config_dir: >-
       {{ eva_iam_app_config_dir
-         | default((eva_generated_config_root | default((eva_repo_root | default(playbook_dir)) ~ '/config')) ~ '/' ~ (ansible_host | default(inventory_hostname))) }}
+         | default(eva_generated_config_root ~ '/' ~ (ansible_host | default(inventory_hostname))) }}
     # app.sso.baseUrl — keycloak 이 서비스되는 주소. ingress.path 가 '/' 면 호스트만.
     # 차트 3.1.4+ 의 eva-iam.baseUrl 헬퍼와 우선순위를 맞춰야 합니다. 어긋나면 eva-app 이
     # 토큰 issuer 와 다른 주소로 discovery 를 호출해 invalid_grant 로 실패합니다.
@@ -386,7 +385,7 @@
 - name: Render eva-iam k3s override values on control node
   no_log: true
   ansible.builtin.template:
-    src: "{{ (eva_template_values_root | default((eva_repo_root | default(playbook_dir)) ~ '/values')) ~ '/eva-iam-k3s-override.yaml.j2' }}"
+    src: "{{ eva_template_values_root }}/eva-iam-k3s-override.yaml.j2"
     dest: "{{ eva_iam_deploy_values_dir }}/eva-iam-k3s-override.yaml"
     mode: "0600"
   delegate_to: localhost

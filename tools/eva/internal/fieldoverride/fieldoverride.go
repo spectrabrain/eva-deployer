@@ -51,9 +51,8 @@ func (request Request) Public() map[string]Component {
 	return components
 }
 
-// Parse accepts component-scoped App overrides. The explicit component prefix
-// avoids positional-argument ambiguity and keeps future component support
-// backward compatible.
+// Parse accepts component-scoped Helm overrides. The explicit component prefix
+// avoids positional-argument ambiguity.
 func Parse(charts, values, sets []string, selected map[string]bool) (Request, error) {
 	request := Request{Components: map[string]Component{}}
 	for _, specification := range charts {
@@ -108,7 +107,7 @@ func Parse(charts, values, sets []string, selected map[string]bool) (Request, er
 func parseFileSpecification(flag, specification string, selected map[string]bool) (string, string, error) {
 	component, path, found := strings.Cut(specification, "=")
 	if !found || component == "" || path == "" {
-		return "", "", fmt.Errorf("%s requires app=PATH", flag)
+		return "", "", fmt.Errorf("%s requires COMPONENT=PATH", flag)
 	}
 	if err := validateComponent(component, selected); err != nil {
 		return "", "", err
@@ -122,25 +121,31 @@ func parseSetSpecification(specification string, selected map[string]bool) (stri
 	if prefix, remainder, found := strings.Cut(specification, ":"); found {
 		component, expression = prefix, remainder
 	} else {
-		if selected["app"] && selectedComponentCount(selected) == 1 {
-			component = "app"
+		if component, found := singleHelmComponent(selected); found {
+			expression, err := validateSetExpression(expression)
+			return component, expression, err
 		} else {
-			return "", "", errors.New("--set requires app:KEY=VALUE unless app is the only selected component")
+			return "", "", errors.New("--set requires COMPONENT:KEY=VALUE unless exactly one Helm component is selected")
 		}
 	}
 	if err := validateComponent(component, selected); err != nil {
 		return "", "", err
 	}
+	expression, err := validateSetExpression(expression)
+	return component, expression, err
+}
+
+func validateSetExpression(expression string) (string, error) {
 	key, value, found := strings.Cut(expression, "=")
 	if !found || key == "" || value == "" {
-		return "", "", errors.New("--set requires KEY=VALUE")
+		return "", errors.New("--set requires KEY=VALUE")
 	}
-	return component, expression, nil
+	return expression, nil
 }
 
 func validateComponent(component string, selected map[string]bool) error {
-	if component != "app" {
-		return fmt.Errorf("field overrides currently support only component %q; got %q", "app", component)
+	if !helmComponent(component) {
+		return fmt.Errorf("field overrides support app, agent, and vision; got %q", component)
 	}
 	if !selected[component] {
 		return fmt.Errorf("component %q must be enabled and selected before applying field overrides", component)
@@ -148,14 +153,26 @@ func validateComponent(component string, selected map[string]bool) error {
 	return nil
 }
 
-func selectedComponentCount(selected map[string]bool) int {
-	count := 0
-	for _, enabled := range selected {
-		if enabled {
-			count++
+func singleHelmComponent(selected map[string]bool) (string, bool) {
+	component := ""
+	for name, enabled := range selected {
+		if enabled && helmComponent(name) {
+			if component != "" {
+				return "", false
+			}
+			component = name
 		}
 	}
-	return count
+	return component, component != ""
+}
+
+func helmComponent(component string) bool {
+	switch component {
+	case "app", "agent", "vision":
+		return true
+	default:
+		return false
+	}
 }
 
 func inspectFile(path string) (File, error) {

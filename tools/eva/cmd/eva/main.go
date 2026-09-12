@@ -31,8 +31,8 @@ func usage() {
 	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|import-airgap> [--release PATH]")
-	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart app=PATH] [--values app=PATH] [--set app:KEY=VALUE] [--yes]")
-	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart app=PATH] [--values app=PATH] [--set app:KEY=VALUE] [--output PATH | --save]")
+	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
+	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
@@ -237,9 +237,9 @@ func runInstall(args []string) error {
 	var components stringList
 	flags.Var(&components, "component", "enabled component to install (repeatable; use all for every enabled component)")
 	var charts, values, sets stringList
-	flags.Var(&charts, "chart", "App chart override in app=PATH form")
-	flags.Var(&values, "values", "App values override in app=PATH form")
-	flags.Var(&sets, "set", "App Helm override in app:KEY=VALUE form")
+	flags.Var(&charts, "chart", "App, Agent, or Vision chart override in COMPONENT=PATH form")
+	flags.Var(&values, "values", "App, Agent, or Vision values override in COMPONENT=PATH form")
+	flags.Var(&sets, "set", "App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
 	if err := flags.Parse(normalizedArgs); err != nil {
 		return err
 	}
@@ -420,9 +420,9 @@ func runPlan(args []string) error {
 	var components stringList
 	flags.Var(&components, "component", "enabled component to plan (repeatable; use all for every enabled component)")
 	var charts, values, sets stringList
-	flags.Var(&charts, "chart", "App chart override in app=PATH form")
-	flags.Var(&values, "values", "App values override in app=PATH form")
-	flags.Var(&sets, "set", "App Helm override in app:KEY=VALUE form")
+	flags.Var(&charts, "chart", "App, Agent, or Vision chart override in COMPONENT=PATH form")
+	flags.Var(&values, "values", "App, Agent, or Vision values override in COMPONENT=PATH form")
+	flags.Var(&sets, "set", "App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
 	if err := flags.Parse(normalizedArgs); err != nil {
 		return err
 	}

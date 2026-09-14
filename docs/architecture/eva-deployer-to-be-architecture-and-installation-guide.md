@@ -285,6 +285,13 @@ CLI와 Runtime은 user home에 의존하지 않는 system-wide 경로를 사용�
 
 Release는 `eva-tool-installer_<version>.sh`를 함께 제공한다. 이 파일은 source tree의 `scripts/install/install_eva_tool.sh`에서 생성되며, Release의 `eva-tool_<version>_linux_amd64.tar.gz`를 system-wide EVA Tool로 설치한다. Tool archive는 `bin/eva` regular file 하나만 포함해야 하며, installer는 `--sha256`으로 외부 `checksums.sha256`의 digest를 검증한다. installer는 `eva-operators` group을 만들고 sudo 실행 사용자를 group에 추가한 뒤 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
 
+| 경로 | 소유자 | 권한 |
+| --- | --- | --- |
+| `/opt/eva/tool`, `/opt/eva/tool/bin`, `/opt/eva/tool/bin/eva` | `root:root` | `0755` |
+| `/opt/eva/runtime`, `/opt/eva/releases` | `root:eva-operators` | `2775` |
+| `/var/lib/eva`, `/var/lib/eva/{artifacts,operations,state}` | `root:eva-operators` | `2770` |
+| `/var/log/eva`, `/var/log/eva/operations` | `root:eva-operators` | `2770` |
+
 ```bash
 release_dir=out/dist
 artifact="$release_dir/eva-tool_v3.2.0_linux_amd64.tar.gz"

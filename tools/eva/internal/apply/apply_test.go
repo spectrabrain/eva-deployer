@@ -2,6 +2,7 @@ package apply
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,28 @@ func TestExecuteStopsAfterFailedStep(t *testing.T) {
 	}
 	if strings.Count(string(contents), "component:") != 1 {
 		t.Fatalf("failed result should contain one step: %s", contents)
+	}
+}
+
+func TestExecuteStopsBeforeRunningWhenPrerequisiteFails(t *testing.T) {
+	stateRoot := t.TempDir()
+	record := createOperation(t, stateRoot, createWorkspace(t), createReleaseSource(t, ""), []plan.Step{{Component: "infra", Playbook: expectedPlaybooks["infra"]}})
+	completed, err := Execute(Options{
+		StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: createRuntime(t),
+		Prerequisite: func(plan.Document) error { return errors.New("APT prerequisite failed") },
+	}, record)
+	if err == nil || !strings.Contains(err.Error(), "APT prerequisite failed") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if completed.Status != operation.Planned || !completed.StartedAt.IsZero() {
+		t.Fatalf("completed operation = %#v", completed)
+	}
+	loaded, err := operation.Load(stateRoot, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != operation.Planned || loaded.LogDirectory != "" {
+		t.Fatalf("stored operation = %#v", loaded)
 	}
 }
 

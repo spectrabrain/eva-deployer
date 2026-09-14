@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/runtime"
@@ -92,7 +94,7 @@ func TestRunRetryClonesLatestFailedOperationAndAppliesIt(t *testing.T) {
 	runtimeRoot := writeRetryRuntime(t)
 	source, err := operation.Create(stateRoot, plan.Document{
 		SchemaVersion: plan.SchemaVersion, SiteID: "customer-a", Workspace: workspaceRoot,
-		ReleaseVersion: "3.2.0", ReleaseRoot: releaseRoot,
+		ReleaseVersion: "3.2.0", ReleaseRoot: releaseRoot, RepositoryMode: "local_repository",
 		Steps: []plan.Step{{Component: "infra", Playbook: "src/infra/playbooks/site_infra.yaml"}},
 	}, time.Date(2026, 9, 12, 1, 2, 3, 0, time.UTC))
 	if err != nil {
@@ -120,6 +122,61 @@ func TestRunRetryClonesLatestFailedOperationAndAppliesIt(t *testing.T) {
 	}
 	if retry.Status != operation.Succeeded || retry.SourceOperationID != source.ID {
 		t.Fatalf("retry operation = %#v", retry)
+	}
+}
+
+func TestAPTPriorToInfraRequiresSeparateInteractiveApproval(t *testing.T) {
+	previousService := newAPTService
+	t.Cleanup(func() { newAPTService = previousService })
+	nonTerminalInput, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nonTerminalInput.Close()
+	nonTerminalInfo, err := nonTerminalInput.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousStdinStat := stdinStat
+	t.Cleanup(func() { stdinStat = previousStdinStat })
+	stdinStat = func() (os.FileInfo, error) { return nonTerminalInfo, nil }
+	newAPTService = func() apt.Service {
+		return apt.Service{Run: func(command apt.Command) (apt.Result, error) {
+			return apt.Result{
+				ExitCode: 100,
+				Output:   "Err: https://pkg.jenkins.io/debian-stable binary/ Release\nNO_PUBKEY 7198F4B714ABFC68\n",
+			}, nil
+		}}
+	}
+	err = aptPrerequisite(plan.Document{
+		RepositoryMode: "cloud_repository",
+		Steps:          []plan.Step{{Component: "infra"}},
+	})
+	var displayed *displayedError
+	if !errors.As(err, &displayed) {
+		t.Fatalf("aptPrerequisite() error = %v, want displayed approval error", err)
+	}
+	if !strings.Contains(displayed.message, "Interactive approval is required") || !strings.Contains(displayed.message, "troubleshoot apt --fix-known --yes") {
+		t.Fatalf("approval error = %q", displayed.message)
+	}
+}
+
+func TestAPTPriorToInfraSkipsLocalRepository(t *testing.T) {
+	called := false
+	previousService := newAPTService
+	t.Cleanup(func() { newAPTService = previousService })
+	newAPTService = func() apt.Service {
+		called = true
+		return apt.Service{}
+	}
+	if err := aptPrerequisite(plan.Document{
+		RepositoryMode: "local_repository",
+		Steps:          []plan.Step{{Component: "infra"}},
+	}); err != nil {
+		t.Fatalf("aptPrerequisite() error = %v", err)
+	}
+	if called {
+		t.Fatal("local repository unexpectedly ran APT diagnostic")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"eva-deployer/tools/eva/internal/apply"
+	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
@@ -22,10 +23,20 @@ import (
 )
 
 var (
-	version   = "0.1.0-migration"
-	commit    = "unknown"
-	buildDate = "unknown"
+	version       = "0.1.0-migration"
+	commit        = "unknown"
+	buildDate     = "unknown"
+	newAPTService = apt.NewService
+	stdinStat     = func() (os.FileInfo, error) { return os.Stdin.Stat() }
 )
+
+type displayedError struct {
+	message string
+}
+
+func (err *displayedError) Error() string {
+	return err.message
+}
 
 func usage() {
 	fmt.Println("EVA CLI")
@@ -41,6 +52,7 @@ func usage() {
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
+	fmt.Println("  troubleshoot apt [--fix-known --yes]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
 	fmt.Println("  shell [--runtime-root PATH] [--site ID|--workspace PATH] [--release PATH] [--command CMD]")
@@ -54,6 +66,11 @@ func usage() {
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		var displayed *displayedError
+		if errors.As(err, &displayed) {
+			fmt.Fprintln(os.Stderr, displayed.message)
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -86,6 +103,8 @@ func run(args []string) error {
 		return runRetry(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "troubleshoot":
+		return runTroubleshoot(args[1:])
 	case "verify":
 		return runVerify(args[1:])
 	case "runtime":
@@ -317,7 +336,7 @@ func runInstall(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Stdout: os.Stdout, Stderr: os.Stderr,
+		Prerequisite: aptPrerequisite, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
 	return err
@@ -400,7 +419,7 @@ func printInstallSummary(document plan.Document) {
 }
 
 func confirmInstall(document plan.Document) error {
-	info, err := os.Stdin.Stat()
+	info, err := stdinStat()
 	if err != nil {
 		return fmt.Errorf("inspect terminal for install confirmation: %w", err)
 	}
@@ -528,6 +547,132 @@ func runStatus(args []string) error {
 	return nil
 }
 
+func runTroubleshoot(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		troubleshootUsage()
+		return nil
+	}
+	if args[0] != "apt" {
+		return fmt.Errorf("unknown troubleshoot command %q", args[0])
+	}
+	flags := flag.NewFlagSet("troubleshoot apt", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	fixKnown := flags.Bool("fix-known", false, "apply an explicitly supported APT remediation")
+	yes := flags.Bool("yes", false, "confirm --fix-known without a prompt")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected troubleshoot apt arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *yes && !*fixKnown {
+		return errors.New("--yes requires --fix-known for troubleshoot apt")
+	}
+
+	service := newAPTService()
+	diagnosis, err := service.Check()
+	if err != nil {
+		return err
+	}
+	if diagnosis.Healthy {
+		fmt.Println("APT repository validation passed.")
+		return nil
+	}
+	fmt.Fprint(os.Stderr, diagnosis.KnownProblemReport())
+	if !*fixKnown {
+		return remediationCommandError()
+	}
+	if !*yes {
+		if err := confirmAPTRemediation(); err != nil {
+			return err
+		}
+	}
+	if err := service.RemediateKnownJenkins(); err != nil {
+		return err
+	}
+	fmt.Println("Jenkins APT repository remediation succeeded.")
+	return nil
+}
+
+func troubleshootUsage() {
+	fmt.Println("Usage: eva troubleshoot apt [--fix-known --yes]")
+	fmt.Println("")
+	fmt.Println("Diagnoses local APT repository validation without changing configuration.")
+	fmt.Println("--fix-known repairs an explicitly supported issue only after dedicated approval.")
+}
+
+func aptPrerequisite(document plan.Document) error {
+	if !requiresAPTPriorToInfra(document) {
+		return nil
+	}
+	service := newAPTService()
+	diagnosis, err := service.Check()
+	if err != nil {
+		return err
+	}
+	if diagnosis.Healthy {
+		return nil
+	}
+	fmt.Fprint(os.Stderr, diagnosis.KnownProblemReport())
+	if err := confirmAPTRemediation(); err != nil {
+		return err
+	}
+	if err := service.RemediateKnownJenkins(); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "Jenkins APT repository remediation succeeded.")
+	return nil
+}
+
+func requiresAPTPriorToInfra(document plan.Document) bool {
+	if document.RepositoryMode == "local_repository" {
+		return false
+	}
+	for _, step := range document.Steps {
+		if step.Component == "infra" {
+			return true
+		}
+	}
+	return false
+}
+
+func confirmAPTRemediation() error {
+	info, err := stdinStat()
+	if err != nil {
+		return fmt.Errorf("inspect terminal for APT remediation approval: %w", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return remediationApprovalError()
+	}
+	fmt.Fprint(os.Stderr, "Apply this remediation? [y/N]: ")
+	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && len(answer) == 0 {
+		return fmt.Errorf("read APT remediation approval: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes") {
+		return nil
+	}
+	return errors.New("APT remediation cancelled")
+}
+
+func remediationApprovalError() error {
+	return &displayedError{message: `[ERROR] Interactive approval is required for external APT remediation.
+
+Run one of:
+
+  eva troubleshoot apt
+
+  eva troubleshoot apt --fix-known --yes`}
+}
+
+func remediationCommandError() error {
+	return &displayedError{message: `Known APT remediation was not applied.
+
+Run one of:
+
+  eva troubleshoot apt --fix-known --yes`}
+}
+
 func runVerify(args []string) error {
 	flags := flag.NewFlagSet("verify", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -594,7 +739,7 @@ func runApply(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Stdout: os.Stdout, Stderr: os.Stderr,
+		Prerequisite: aptPrerequisite, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
 	return err
@@ -641,14 +786,14 @@ func runRetry(args []string) error {
 	fmt.Printf("retry source: %s\n", source.ID)
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Stdout: os.Stdout, Stderr: os.Stderr,
+		Prerequisite: aptPrerequisite, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, retry)
 	printOperation(completed)
 	return err
 }
 
 func confirmApply(record operation.Record) error {
-	info, err := os.Stdin.Stat()
+	info, err := stdinStat()
 	if err != nil {
 		return fmt.Errorf("inspect terminal for apply confirmation: %w", err)
 	}
@@ -667,7 +812,7 @@ func confirmApply(record operation.Record) error {
 }
 
 func confirmRetry(record operation.Record) error {
-	info, err := os.Stdin.Stat()
+	info, err := stdinStat()
 	if err != nil {
 		return fmt.Errorf("inspect terminal for retry confirmation: %w", err)
 	}

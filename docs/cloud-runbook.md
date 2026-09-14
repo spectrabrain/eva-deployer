@@ -178,6 +178,31 @@ eva apply --yes
 eva status
 ```
 
+Cloud Infra Apply는 Operation을 `running`으로 바꾸기 전에 control node의 `apt-get update`를 진단한다. Jenkins LTS 2026 signing key 누락처럼 EVA가 지원하는 오류가 발견되면, interactive session에서만 변경 대상과 위험을 표시하고 별도 승인을 요청한다. `eva apply --yes`는 설치 실행 동의일 뿐 APT repository 변경 동의가 아니다.
+
+비대화형 실행은 자동 수정 없이 중단한다. 진단과 명시적 복구는 아래 명령으로 수행한다.
+
+```bash
+eva troubleshoot apt
+eva troubleshoot apt --fix-known --yes
+```
+
+`eva troubleshoot apt`의 진단에도 아래의 동등한 수동 복구 절차가 표시된다. 수동으로 수행할 때는 Jenkins 공식 키와 source를 함께 갱신한다.
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL \
+  https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key \
+  | sudo tee /etc/apt/keyrings/jenkins-keyring.asc >/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" \
+  | sudo tee /etc/apt/sources.list.d/jenkins.list >/dev/null
+sudo chmod 0644 /etc/apt/keyrings/jenkins-keyring.asc
+sudo chmod 0644 /etc/apt/sources.list.d/jenkins.list
+sudo apt-get update
+```
+
+`eva troubleshoot apt --fix-known --yes`는 이 수동 절차에 더해 key fingerprint 검증, 기존 keyring/source 백업, 갱신 실패 시 복원을 수행한다.
+
 실패하면 operation ID와 log를 보존한 채 원인을 확인한다. 같은 문제가 해결되기 전에는 새 Plan을 만들지 않는다.
 
 ```bash

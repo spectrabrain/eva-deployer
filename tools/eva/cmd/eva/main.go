@@ -21,7 +21,11 @@ import (
 	"eva-deployer/tools/eva/internal/workspace"
 )
 
-const version = "0.1.0-migration"
+var (
+	version   = "0.1.0-migration"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
 
 func usage() {
 	fmt.Println("EVA CLI")
@@ -62,7 +66,7 @@ func run(args []string) error {
 
 	switch args[0] {
 	case "version":
-		fmt.Println(version)
+		fmt.Printf("%s (commit=%s build_date=%s)\n", version, commit, buildDate)
 		return nil
 	case "help", "--help", "-h":
 		usage()

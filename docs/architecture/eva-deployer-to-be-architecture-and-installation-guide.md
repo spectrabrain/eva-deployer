@@ -283,13 +283,16 @@ CLI와 Runtime은 user home에 의존하지 않는 system-wide 경로를 사용�
 
 `eva-operators` 그룹은 `/etc/eva/sites/`의 site 입력을 읽고 `/var/lib/eva/operations/`, `/var/log/eva/operations/`의 일반 operation 기록을 생성할 수 있다. Secret 및 credential 파일은 site owner 또는 root만 읽을 수 있게 `0600`으로 관리한다.
 
-`scripts/install/install_eva_tool.sh`는 Release의 `eva-tool_<version>_linux_amd64.tar.gz`를 system-wide EVA Tool로 설치한다. archive는 `bin/eva` regular file 하나만 포함해야 하며, 선택적으로 `--sha256`으로 외부 `checksums.sha256`의 digest를 검증한다. installer는 `eva-operators` group을 만들고 sudo 실행 사용자를 group에 추가한 뒤 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
+Release는 `eva-tool-installer_<version>.sh`를 함께 제공한다. 이 파일은 source tree의 `scripts/install/install_eva_tool.sh`에서 생성되며, Release의 `eva-tool_<version>_linux_amd64.tar.gz`를 system-wide EVA Tool로 설치한다. Tool archive는 `bin/eva` regular file 하나만 포함해야 하며, installer는 `--sha256`으로 외부 `checksums.sha256`의 digest를 검증한다. installer는 `eva-operators` group을 만들고 sudo 실행 사용자를 group에 추가한 뒤 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
 
 ```bash
-artifact=out/dist/eva-tool_v3.2.0_linux_amd64.tar.gz
-sudo scripts/install/install_eva_tool.sh \
+release_dir=out/dist
+artifact="$release_dir/eva-tool_v3.2.0_linux_amd64.tar.gz"
+installer="$release_dir/eva-tool-installer_v3.2.0.sh"
+expected_sha256="$(awk -v file="$(basename "$artifact")" '$2 == file { print $1; exit }' "$release_dir/checksums.sha256")"
+sudo bash "$installer" \
   --artifact "$artifact" \
-  --sha256 "$(sha256sum "$artifact" | awk '{print $1}')"
+  --sha256 "$expected_sha256"
 ```
 
 새 operator group membership은 다음 login session부터 적용된다. `--root`, `--bin-dir`, `--state-root`, `--log-root`, `--skip-group-management`은 automated test 전용 override이며 운영 설치에서는 기본 system-wide 경로와 group 관리를 사용한다.
@@ -397,7 +400,7 @@ compatibility:
 9. Artifact 추출 및 install dry-run 검증
 10. S3 immutable 경로 게시
 
-현재 `scripts/release/build_release.sh`는 위 과정의 local/CI packaging 기반을 제공한다. `--tag`는 현재 `HEAD`를 가리키는 실제 Git tag여야 하고, tracked 또는 untracked 변경이 있으면 build를 거부한다. script는 `go mod download`, `go test ./...`, `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` EVA Tool build를 수행하고 tag, commit, build date를 binary에 주입한다. 기본 Release는 Tool, Infra, Solution archive와 `release.yaml`, `checksums.sha256`을 생성한다. 완성된 Offline payload root를 `--offline-root`로 제공하면 `runtime/` descriptor와 관리 도구를 검증한 뒤 Offline artifact 및 byte-identical nested artifact를 가진 Airgap Bundle도 함께 생성한다.
+현재 `scripts/release/build_release.sh`는 위 과정의 local/CI packaging 기반을 제공한다. `--tag`는 현재 `HEAD`를 가리키는 실제 Git tag여야 하고, tracked 또는 untracked 변경이 있으면 build를 거부한다. script는 `go mod download`, `go test ./...`, `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` EVA Tool build를 수행하고 tag, commit, build date를 binary에 주입한다. 기본 Release는 Tool archive, system-wide Tool installer, Infra/Solution archive와 `release.yaml`, `checksums.sha256`을 생성한다. build는 installer artifact로 임시 경로 설치까지 수행해 archive checksum 검증과 `/usr/local/bin/eva` 대체 흐름을 검증한다. 완성된 Offline payload root를 `--offline-root`로 제공하면 `runtime/` descriptor와 관리 도구를 검증한 뒤 Offline artifact 및 byte-identical nested artifact를 가진 Airgap Bundle도 함께 생성한다.
 
 ```bash
 git checkout v3.2.0
@@ -407,13 +410,14 @@ scripts/release/build_release.sh --tag v3.2.0 \
 
 Offline payload root는 `runtime/`을 필수로 하며 `packages/`, `images/`, `charts/`, `models/`, `snapshots/`, `harbor/`를 포함할 수 있다. credentials, private key, `.env` 등 민감 경로와 symlink, 특수 파일은 packaging 전에 거부한다. 생성된 local Release는 `eva verify`와 `eva release prepare`로, Airgap Bundle은 `eva verify`로 build 중 재검증한다. 고정 digest Go builder image를 사용하는 CI workflow와 S3 immutable publish는 다음 단계에서 이 script를 호출한다.
 
-`.github/workflows/pr-ci.yaml`은 PR 및 `main` push에서 Go format/test/vet, shell syntax/ShellCheck, YAML lint, 모든 Ansible playbook syntax-check를 실행한다. 이어서 workflow 내부에서만 `v0.0.0-ci` temporary tag를 만들고 Base Release builder와 `eva verify` smoke test를 수행한다. S3 publish와 Offline payload build는 수행하지 않는다. `.github/workflows/tag-release.yaml`은 `v*.*.*` tag push에서 같은 검증을 다시 실행한 뒤 clean checkout과 tag-to-HEAD 일치를 확인하고 Base Release artifact를 생성해 workflow artifact로 업로드한다. 1차 tag release에는 Tool, Infra, Solution, `release.yaml`, `checksums.sha256`만 포함한다.
+`.github/workflows/pr-ci.yaml`은 PR 및 `main` push에서 Go format/test/vet, shell syntax/ShellCheck, YAML lint, 모든 Ansible playbook syntax-check를 실행한다. 이어서 workflow 내부에서만 `v0.0.0-ci` temporary tag를 만들고 Base Release builder와 `eva verify` smoke test를 수행한다. S3 publish와 Offline payload build는 수행하지 않는다. `.github/workflows/tag-release.yaml`은 `v*.*.*` tag push에서 같은 검증을 다시 실행한 뒤 clean checkout과 tag-to-HEAD 일치를 확인하고 Base Release artifact를 생성해 workflow artifact로 업로드한다. tag release에는 Tool, Tool installer, Infra, Solution, `release.yaml`, `checksums.sha256`이 포함된다.
 
 ### 4.3 `out/dist/` 결과
 
 ```text
 out/dist/
 ├── eva-tool_v3.2.0_linux_amd64.tar.gz   # 설치 실행용 EVA CLI
+├── eva-tool-installer_v3.2.0.sh          # system-wide EVA CLI installer
 ├── eva-infra_v3.2.0.tar.gz              # Infra 설치 정의
 ├── eva-solution_v3.2.0.tar.gz           # Solution 설치 정의
 ├── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz  # Airgap Runtime, 패키지, 이미지, 모델
@@ -422,7 +426,7 @@ out/dist/
 └── checksums.sha256                                  # 다운로드 및 반입 무결성 검증
 ```
 
-Airgap 설치자에게는 `eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz` 한 개와 외부 checksum 파일만 제공할 수 있다. Bundle 내부 `artifacts/`에는 이미 생성된 Tool, Infra, Solution, Offline archive를 byte-identical하게 넣고, 최상단에는 `release.yaml`, `checksums.sha256`, README만 둔다.
+Airgap 설치자에게는 `eva-airgap-bundle_v3.2.0_ubuntu24.04_amd64.tar.gz` 한 개와 외부 checksum 파일만 제공할 수 있다. Bundle 내부 `artifacts/`에는 이미 생성된 Tool, Tool installer, Infra, Solution, Offline artifact를 byte-identical하게 넣고, 최상단에는 `release.yaml`, `checksums.sha256`, README만 둔다.
 
 `eva release import-airgap --bundle <path>`는 Bundle 전체 SHA-256별 cache (`/var/lib/eva/artifacts/releases/<bundle-sha256>/`)에 nested archive를 추출한다. `release.yaml`의 각 artifact는 `artifacts/<filename>`을 가리켜야 하며, `checksums.sha256`의 같은 항목과 checksum이 일치해야 한다. Bundle 최상단에는 `release.yaml`, `checksums.sha256`, 선택 `README.md`, 그리고 metadata에 선언된 `artifacts/<filename>`만 허용한다. `eva install <bundle-path>`는 이 import를 자동 수행한 후 같은 local Release install 흐름으로 진행한다.
 
@@ -436,6 +440,9 @@ platform:
 artifacts:
   - name: eva-tool
     file: eva-tool_v3.2.0_linux_amd64.tar.gz
+    sha256: <SHA256>
+  - name: eva-tool-installer
+    file: eva-tool-installer_v3.2.0.sh
     sha256: <SHA256>
   - name: eva-infra
     file: eva-infra_v3.2.0.tar.gz
@@ -463,6 +470,7 @@ s3://<release-bucket>/eva-deployer/
 ├── releases/
 │   └── v3.2.0/
 │       ├── eva-tool_v3.2.0_linux_amd64.tar.gz
+│       ├── eva-tool-installer_v3.2.0.sh
 │       ├── eva-infra_v3.2.0.tar.gz
 │       ├── eva-solution_v3.2.0.tar.gz
 │       ├── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz
@@ -493,6 +501,7 @@ S3에서 받는 파일:
 release.yaml
 checksums.sha256
 eva-tool_v3.2.0_linux_amd64.tar.gz
+eva-tool-installer_v3.2.0.sh
 eva-infra_v3.2.0.tar.gz
 eva-solution_v3.2.0.tar.gz
 ```
@@ -536,6 +545,7 @@ Bundle 내부:
 eva-airgap-bundle_v3.2.0/
 ├── artifacts/
 │   ├── eva-tool_v3.2.0_linux_amd64.tar.gz
+│   ├── eva-tool-installer_v3.2.0.sh
 │   ├── eva-infra_v3.2.0.tar.gz
 │   ├── eva-solution_v3.2.0.tar.gz
 │   └── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz

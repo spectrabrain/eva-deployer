@@ -57,9 +57,17 @@ jobs:
 
       - name: Run ShellCheck
         run: |
-          while IFS= read -r -d '' script; do
-            shellcheck "$script"
-          done < <(find scripts -type f -name '*.sh' -print0)
+          mapfile -d '' scripts < <(
+            find scripts -type f -name '*.sh' -print0
+          )
+
+          if (( ${#scripts[@]} == 0 )); then
+            echo "[ERROR] No shell scripts found"
+            false
+          fi
+
+          shellcheck -x -P "$GITHUB_WORKSPACE" "${scripts[@]}"
+          echo "[OK] ShellCheck passed: scripts=${#scripts[@]}"
 
       - name: Lint YAML
         run: |

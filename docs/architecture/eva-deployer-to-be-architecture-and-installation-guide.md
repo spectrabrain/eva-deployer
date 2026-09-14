@@ -283,7 +283,7 @@ CLI와 Runtime은 user home에 의존하지 않는 system-wide 경로를 사용�
 
 `eva-operators` 그룹은 `/etc/eva/sites/`의 site 입력을 읽고 `/var/lib/eva/operations/`, `/var/log/eva/operations/`의 일반 operation 기록을 생성할 수 있다. Secret 및 credential 파일은 site owner 또는 root만 읽을 수 있게 `0600`으로 관리한다.
 
-Release는 `eva-tool-installer_<version>.sh`를 함께 제공한다. 이 파일은 source tree의 `scripts/install/install_eva_tool.sh`에서 생성되며, Release의 `eva-tool_<version>_linux_amd64.tar.gz`를 system-wide EVA Tool로 설치한다. Tool archive는 `bin/eva` regular file 하나만 포함해야 하며, installer는 `--sha256`으로 외부 `checksums.sha256`의 digest를 검증한다. installer는 `eva-operators` group을 만들고 sudo 실행 사용자를 group에 추가한 뒤 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
+Release는 `eva-tool-installer.sh`를 함께 제공한다. 이 파일은 source tree의 `scripts/install/install_eva_tool.sh`에서 생성되며, 실행된 release directory의 단일 `eva-tool_*_linux_amd64.tar.gz`와 `checksums.sha256` matching digest를 자동으로 찾아 system-wide EVA Tool을 설치한다. Tool archive는 `bin/eva` regular file 하나만 포함해야 하며, archive가 없거나 여러 개이거나 checksum entry가 없으면 installer는 중단한다. `--artifact`와 `--sha256`은 자동 탐색을 사용할 수 없는 경우의 명시적 override다. installer는 `eva-operators` group을 만들고 sudo 실행 사용자를 group에 추가한 뒤 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
 
 | 경로 | 소유자 | 권한 |
 | --- | --- | --- |
@@ -293,13 +293,10 @@ Release는 `eva-tool-installer_<version>.sh`를 함께 제공한다. 이 파일�
 | `/var/log/eva`, `/var/log/eva/operations` | `root:eva-operators` | `2770` |
 
 ```bash
-release_dir=out/dist
-artifact="$release_dir/eva-tool_v3.2.0_linux_amd64.tar.gz"
-installer="$release_dir/eva-tool-installer_v3.2.0.sh"
-expected_sha256="$(awk -v file="$(basename "$artifact")" '$2 == file { print $1; exit }' "$release_dir/checksums.sha256")"
-sudo bash "$installer" \
-  --artifact "$artifact" \
-  --sha256 "$expected_sha256"
+cd out/dist
+sudo bash ./eva-tool-installer.sh
+command -v eva
+eva version
 ```
 
 새 operator group membership은 다음 login session부터 적용된다. `--root`, `--bin-dir`, `--state-root`, `--log-root`, `--skip-group-management`은 automated test 전용 override이며 운영 설치에서는 기본 system-wide 경로와 group 관리를 사용한다.
@@ -424,7 +421,7 @@ Offline payload root는 `runtime/`을 필수로 하며 `packages/`, `images/`, `
 ```text
 out/dist/
 ├── eva-tool_v3.2.0_linux_amd64.tar.gz   # 설치 실행용 EVA CLI
-├── eva-tool-installer_v3.2.0.sh          # system-wide EVA CLI installer
+├── eva-tool-installer.sh                 # system-wide EVA CLI installer
 ├── eva-infra_v3.2.0.tar.gz              # Infra 설치 정의
 ├── eva-solution_v3.2.0.tar.gz           # Solution 설치 정의
 ├── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz  # Airgap Runtime, 패키지, 이미지, 모델
@@ -449,7 +446,7 @@ artifacts:
     file: eva-tool_v3.2.0_linux_amd64.tar.gz
     sha256: <SHA256>
   - name: eva-tool-installer
-    file: eva-tool-installer_v3.2.0.sh
+    file: eva-tool-installer.sh
     sha256: <SHA256>
   - name: eva-infra
     file: eva-infra_v3.2.0.tar.gz
@@ -477,7 +474,7 @@ s3://<release-bucket>/eva-deployer/
 ├── releases/
 │   └── v3.2.0/
 │       ├── eva-tool_v3.2.0_linux_amd64.tar.gz
-│       ├── eva-tool-installer_v3.2.0.sh
+│       ├── eva-tool-installer.sh
 │       ├── eva-infra_v3.2.0.tar.gz
 │       ├── eva-solution_v3.2.0.tar.gz
 │       ├── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz
@@ -508,7 +505,7 @@ S3에서 받는 파일:
 release.yaml
 checksums.sha256
 eva-tool_v3.2.0_linux_amd64.tar.gz
-eva-tool-installer_v3.2.0.sh
+eva-tool-installer.sh
 eva-infra_v3.2.0.tar.gz
 eva-solution_v3.2.0.tar.gz
 ```
@@ -552,7 +549,7 @@ Bundle 내부:
 eva-airgap-bundle_v3.2.0/
 ├── artifacts/
 │   ├── eva-tool_v3.2.0_linux_amd64.tar.gz
-│   ├── eva-tool-installer_v3.2.0.sh
+│   ├── eva-tool-installer.sh
 │   ├── eva-infra_v3.2.0.tar.gz
 │   ├── eva-solution_v3.2.0.tar.gz
 │   └── eva-offline_v3.2.0_ubuntu24.04_amd64.tar.gz

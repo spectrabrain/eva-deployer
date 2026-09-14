@@ -58,15 +58,13 @@ export EVA_SITE_ID=customer-a
 
 ### EVA CLI 설치
 
-Tag Base Release의 `eva-tool-installer_<version>.sh`와 `eva-tool_<version>_linux_amd64.tar.gz`를 같은 디렉터리에 둡니다. `checksums.sha256`의 tool archive digest를 확인한 뒤 installer를 실행하면 `/opt/eva/tool`에 binary를 설치하고 `/usr/local/bin/eva` 링크를 생성합니다.
+Tag Base Release를 풀어 나온 디렉터리에서 installer를 실행하면 sibling `eva-tool` archive와 `checksums.sha256`의 matching digest를 자동으로 검증한 뒤 `/opt/eva/tool`에 binary를 설치하고 `/usr/local/bin/eva` 링크를 생성합니다.
 
 ```bash
-release_dir=/path/to/eva-release
-artifact="$release_dir/eva-tool_v3.2.0_linux_amd64.tar.gz"
-installer="$release_dir/eva-tool-installer_v3.2.0.sh"
-expected_sha256="$(awk -v file="$(basename "$artifact")" '$2 == file { print $1; exit }' "$release_dir/checksums.sha256")"
-
-sudo bash "$installer" --artifact "$artifact" --sha256 "$expected_sha256"
+unzip -q eva-base-release-v3.2.0.zip -d eva-base-release-v3.2.0
+cd eva-base-release-v3.2.0
+sudo bash ./eva-tool-installer.sh
+command -v eva
 eva version
 ```
 

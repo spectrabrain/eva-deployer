@@ -30,12 +30,13 @@ var expectedPlaybooks = map[string]string{
 }
 
 type Options struct {
-	StateRoot   string
-	LogRoot     string
-	RuntimeRoot string
-	Stdout      io.Writer
-	Stderr      io.Writer
-	Now         func() time.Time
+	StateRoot    string
+	LogRoot      string
+	RuntimeRoot  string
+	Prerequisite func(plan.Document) error
+	Stdout       io.Writer
+	Stderr       io.Writer
+	Now          func() time.Time
 }
 
 func Execute(options Options, record operation.Record) (operation.Record, error) {
@@ -61,6 +62,11 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 	document, err := operation.LoadPlan(options.StateRoot, record)
 	if err != nil {
 		return record, err
+	}
+	if options.Prerequisite != nil {
+		if err := options.Prerequisite(document); err != nil {
+			return record, err
+		}
 	}
 	ansiblePath, inventory, releaseRoot, err := preflight(options.RuntimeRoot, document)
 	if err != nil {

@@ -85,6 +85,7 @@ else
     fi
     "${SUDO[@]}" install -m 0644 "$GPG_PATH" /etc/apt/keyrings/docker.asc
     ARCH="$(dpkg --print-architecture)"
+    # shellcheck source=/dev/null
     CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
     [[ -n "$CODENAME" ]] || { echo "[ERROR] Ubuntu VERSION_CODENAME is unavailable" >&2; exit 1; }
     printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] %s %s stable\n' "$ARCH" "$REPO_URL" "$CODENAME" \

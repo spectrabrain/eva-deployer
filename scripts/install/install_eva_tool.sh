@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: sudo scripts/install/install_eva_tool.sh --artifact PATH [options]
+Usage: sudo bash ./eva-tool-installer_vX.Y.Z.sh --artifact PATH [options]
 
 Options:
   --artifact PATH             Required eva-tool archive.

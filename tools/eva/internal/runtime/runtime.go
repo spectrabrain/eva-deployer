@@ -18,6 +18,7 @@ import (
 const DefaultRoot = "/opt/eva/runtime"
 const descriptorName = "runtime.yaml"
 const schemaVersion = "v1"
+const runtimeDirectoryMode = os.FileMode(0o775) | os.ModeSetgid
 
 var requiredTools = map[string]struct{}{
 	"ansible-playbook": {},
@@ -104,8 +105,14 @@ func Install(source, root string) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("create runtime staging directory: %w", err)
 	}
 	defer os.RemoveAll(staging)
+	if err := os.Chmod(staging, runtimeDirectoryMode); err != nil {
+		return Resolved{}, fmt.Errorf("set runtime staging directory mode: %w", err)
+	}
 	if err := copyTree(sourceResolved.Root, staging); err != nil {
 		return Resolved{}, fmt.Errorf("stage runtime payload: %w", err)
+	}
+	if err := relocatePythonVirtualEnv(staging, destination); err != nil {
+		return Resolved{}, fmt.Errorf("relocate staged runtime Python environment: %w", err)
 	}
 	if _, err := Resolve(staging); err != nil {
 		return Resolved{}, fmt.Errorf("validate staged runtime: %w", err)
@@ -349,6 +356,68 @@ func copyFile(source, destination string, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+// Python virtual environments embed their creation path in console-script
+// shebangs. Install publishes a staged copy at a new path, so update only
+// venv console scripts whose interpreter is another venv Python executable.
+func relocatePythonVirtualEnv(root, destination string) error {
+	binDirectory := filepath.Join(root, "venv", "bin")
+	entries, err := os.ReadDir(binDirectory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		path := filepath.Join(binDirectory, entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		lineEnd := strings.IndexByte(string(contents), '\n')
+		if lineEnd < 0 {
+			continue
+		}
+		firstLine := string(contents[:lineEnd])
+		if !strings.HasPrefix(firstLine, "#!") {
+			continue
+		}
+		interpreter := strings.TrimPrefix(firstLine, "#!")
+		venvPath, ok := virtualEnvPythonPath(interpreter)
+		if !ok {
+			continue
+		}
+		replacement := "#!" + filepath.Join(destination, filepath.FromSlash(venvPath))
+		if err := os.WriteFile(path, append([]byte(replacement+"\n"), contents[lineEnd+1:]...), info.Mode().Perm()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func virtualEnvPythonPath(interpreter string) (string, bool) {
+	const marker = "/venv/bin/python"
+	index := strings.Index(interpreter, marker)
+	if index < 0 {
+		return "", false
+	}
+	path := interpreter[index+1:]
+	if strings.ContainsAny(path, " \t") || !strings.HasPrefix(path, "venv/bin/python") {
+		return "", false
+	}
+	return path, true
 }
 
 func extractOfflineRuntime(payload, destination string) error {

@@ -89,7 +89,7 @@ source_date_epoch="$(git show -s --format=%ct "$tag_commit")"
 commit_short="$(git rev-parse --short=12 "$tag_commit")"
 build_date="$(git show -s --format=%cI "$tag_commit")"
 
-for command in cmp find git go gzip sha256sum tar; do
+for command in cmp find git go gzip sha256sum stat tar; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "[error] required command is unavailable: $command" >&2
     exit 1
@@ -253,6 +253,27 @@ installer_smoke_root="$build_root/installer-smoke"
   --log-root "$installer_smoke_root/var/log/eva" \
   --skip-group-management >/dev/null
 "$installer_smoke_root/bin/eva" version >/dev/null
+
+assert_mode() {
+  local path="$1" expected="$2" actual
+  actual="$(stat -c '%a' "$path")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "[error] installer mode mismatch: $path is $actual, expected $expected" >&2
+    exit 1
+  fi
+}
+
+assert_mode "$installer_smoke_root/opt/eva/tool" 755
+assert_mode "$installer_smoke_root/opt/eva/tool/bin" 755
+assert_mode "$installer_smoke_root/opt/eva/tool/bin/eva" 755
+assert_mode "$installer_smoke_root/opt/eva/runtime" 2775
+assert_mode "$installer_smoke_root/opt/eva/releases" 2775
+assert_mode "$installer_smoke_root/var/lib/eva" 2770
+assert_mode "$installer_smoke_root/var/lib/eva/artifacts" 2770
+assert_mode "$installer_smoke_root/var/lib/eva/operations" 2770
+assert_mode "$installer_smoke_root/var/lib/eva/state" 2770
+assert_mode "$installer_smoke_root/var/log/eva" 2770
+assert_mode "$installer_smoke_root/var/log/eva/operations" 2770
 
 outputs=("${artifacts[@]}" "release-metadata|release.yaml" "checksum-manifest|checksums.sha256")
 if [[ -n "$offline_root" ]]; then

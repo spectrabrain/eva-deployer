@@ -203,9 +203,7 @@ HARBOR_REGISTRY_ENDPOINT="${HARBOR_REGISTRY_ENDPOINT%/}"
 
 if [[ $EUID -eq 0 ]]; then
   SUDO_CMD=""
-elif [[ ${SUDO_CMD+x} ]]; then
-  SUDO_CMD="$SUDO_CMD"
-else
+elif [[ ! ${SUDO_CMD+x} ]]; then
   SUDO_CMD="sudo"
 fi
 

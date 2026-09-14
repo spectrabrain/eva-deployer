@@ -78,7 +78,7 @@ fi
   echo "files:"
 } >> "$SNAPSHOT_DIR/manifest.txt"
 
-while IFS='|' read -r s3_directory snapshot_file logical_collection ignored; do
+while IFS='|' read -r s3_directory snapshot_file logical_collection _ignored; do
   [[ -z "${s3_directory}${snapshot_file}${logical_collection}" || "${s3_directory}" == \#* ]] && continue
   if [[ -z "${snapshot_file}" ]]; then
     echo "[WARN] skip spec without snapshotFile: ${s3_directory}|${snapshot_file}|${logical_collection}"

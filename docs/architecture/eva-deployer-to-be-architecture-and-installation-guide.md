@@ -283,6 +283,17 @@ CLI와 Runtime은 user home에 의존하지 않는 system-wide 경로를 사용�
 
 `eva-operators` 그룹은 `/etc/eva/sites/`의 site 입력을 읽고 `/var/lib/eva/operations/`, `/var/log/eva/operations/`의 일반 operation 기록을 생성할 수 있다. Secret 및 credential 파일은 site owner 또는 root만 읽을 수 있게 `0600`으로 관리한다.
 
+`scripts/install/install_eva_tool.sh`는 Release의 `eva-tool_<version>_linux_amd64.tar.gz`를 system-wide EVA Tool로 설치한다. archive는 `bin/eva` regular file 하나만 포함해야 하며, 선택적으로 `--sha256`으로 외부 `checksums.sha256`의 digest를 검증한다. installer는 `eva-operators` group을 만들고 sudo 실행 사용자를 group에 추가한 뒤 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
+
+```bash
+artifact=out/dist/eva-tool_v3.2.0_linux_amd64.tar.gz
+sudo scripts/install/install_eva_tool.sh \
+  --artifact "$artifact" \
+  --sha256 "$(sha256sum "$artifact" | awk '{print $1}')"
+```
+
+새 operator group membership은 다음 login session부터 적용된다. `--root`, `--bin-dir`, `--state-root`, `--log-root`, `--skip-group-management`은 automated test 전용 override이며 운영 설치에서는 기본 system-wide 경로와 group 관리를 사용한다.
+
 ### 2.4 `out/`: 생성 결과와 보존 정책
 
 | 경로 | 내용 | 보존 정책 |
@@ -385,6 +396,18 @@ compatibility:
 8. `release.yaml`과 `checksums.sha256` 생성
 9. Artifact 추출 및 install dry-run 검증
 10. S3 immutable 경로 게시
+
+현재 `scripts/release/build_release.sh`는 위 과정의 local/CI packaging 기반을 제공한다. `--tag`는 현재 `HEAD`를 가리키는 실제 Git tag여야 하고, tracked 또는 untracked 변경이 있으면 build를 거부한다. script는 `go mod download`, `go test ./...`, `CGO_ENABLED=0 GOOS=linux GOARCH=amd64` EVA Tool build를 수행하고 tag, commit, build date를 binary에 주입한다. 기본 Release는 Tool, Infra, Solution archive와 `release.yaml`, `checksums.sha256`을 생성한다. 완성된 Offline payload root를 `--offline-root`로 제공하면 `runtime/` descriptor와 관리 도구를 검증한 뒤 Offline artifact 및 byte-identical nested artifact를 가진 Airgap Bundle도 함께 생성한다.
+
+```bash
+git checkout v3.2.0
+scripts/release/build_release.sh --tag v3.2.0 \
+  --offline-root /srv/eva-offline-payload
+```
+
+Offline payload root는 `runtime/`을 필수로 하며 `packages/`, `images/`, `charts/`, `models/`, `snapshots/`, `harbor/`를 포함할 수 있다. credentials, private key, `.env` 등 민감 경로와 symlink, 특수 파일은 packaging 전에 거부한다. 생성된 local Release는 `eva verify`와 `eva release prepare`로, Airgap Bundle은 `eva verify`로 build 중 재검증한다. 고정 digest Go builder image를 사용하는 CI workflow와 S3 immutable publish는 다음 단계에서 이 script를 호출한다.
+
+`.github/workflows/pr-ci.yaml`은 PR 및 `main` push에서 Go format/test/vet, shell syntax/ShellCheck, YAML lint, 모든 Ansible playbook syntax-check를 실행한다. 이어서 workflow 내부에서만 `v0.0.0-ci` temporary tag를 만들고 Base Release builder와 `eva verify` smoke test를 수행한다. S3 publish와 Offline payload build는 수행하지 않는다. `.github/workflows/tag-release.yaml`은 `v*.*.*` tag push에서 같은 검증을 다시 실행한 뒤 clean checkout과 tag-to-HEAD 일치를 확인하고 Base Release artifact를 생성해 workflow artifact로 업로드한다. 1차 tag release에는 Tool, Infra, Solution, `release.yaml`, `checksums.sha256`만 포함한다.
 
 ### 4.3 `out/dist/` 결과
 

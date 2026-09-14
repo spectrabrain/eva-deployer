@@ -96,7 +96,7 @@ if ! touch "$manifest" 2>/dev/null; then
   manifest="${TMPDIR:-/tmp}/qdrant-harbor-artifacts.txt"
 fi
 : > "$manifest"
-while IFS='|' read -r artifact_tag snapshot_file logical_collection ignored; do
+while IFS='|' read -r artifact_tag snapshot_file logical_collection _ignored; do
   [[ -z "${artifact_tag}${snapshot_file}${logical_collection}" || "$artifact_tag" == \#* ]] && continue
   [[ -n "$artifact_tag" && -n "$snapshot_file" ]] || { echo "[ERROR] invalid SNAPSHOT_SPECS line" >&2; exit 1; }
   snapshot_path="$SNAPSHOT_DIR/$snapshot_file"

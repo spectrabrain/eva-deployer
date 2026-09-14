@@ -162,7 +162,7 @@ load_deploy_versions() {
     if [[ -n "$selected_source" && ! ${!env_name+x} ]]; then
       printf -v "$env_name" '%s' "$selected_value"
     fi
-    export "$env_name"
+    export "${env_name?}"
   done
 
   if [[ -z "${VERSIONS_QUIET:-}" ]]; then

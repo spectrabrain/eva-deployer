@@ -6,7 +6,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"eva-deployer/tools/eva/internal/operation"
+	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/runtime"
 )
 
@@ -66,7 +69,86 @@ func TestShellEnvironmentPrependsRuntimeAndWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunRetryClonesLatestFailedOperationAndAppliesIt(t *testing.T) {
+	stateRoot := t.TempDir()
+	workspaceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspaceRoot, "inventory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "inventory", "inventory.ini"), []byte("[local]\nlocalhost ansible_connection=local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseRoot := t.TempDir()
+	playbook := filepath.Join(releaseRoot, "src", "infra", "playbooks", "site_infra.yaml")
+	if err := os.MkdirAll(filepath.Dir(playbook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(playbook, []byte("---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(releaseRoot, "ansible.cfg"), []byte("[defaults]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := writeRetryRuntime(t)
+	source, err := operation.Create(stateRoot, plan.Document{
+		SchemaVersion: plan.SchemaVersion, SiteID: "customer-a", Workspace: workspaceRoot,
+		ReleaseVersion: "3.2.0", ReleaseRoot: releaseRoot,
+		Steps: []plan.Step{{Component: "infra", Playbook: "src/infra/playbooks/site_infra.yaml"}},
+	}, time.Date(2026, 9, 12, 1, 2, 3, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Status = operation.Failed
+	if err := operation.Update(stateRoot, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := runRetry([]string{
+		"--yes", "--state-root", stateRoot, "--log-root", t.TempDir(), "--runtime-root", runtimeRoot,
+	}); err != nil {
+		t.Fatalf("runRetry() error = %v", err)
+	}
+	loadedSource, err := operation.Load(stateRoot, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedSource.Status != operation.Failed || loadedSource.RetryOperationID == "" {
+		t.Fatalf("source after retry = %#v", loadedSource)
+	}
+	retry, err := operation.Load(stateRoot, loadedSource.RetryOperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.Status != operation.Succeeded || retry.SourceOperationID != source.ID {
+		t.Fatalf("retry operation = %#v", retry)
+	}
+}
+
 func writeShellRuntime(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	tools := map[string]string{
+		"ansible-playbook": "venv/bin/ansible-playbook", "helm": "bin/helm", "kubectl": "bin/kubectl", "kustomize": "bin/kustomize", "oras": "bin/oras",
+	}
+	for _, path := range tools {
+		fullPath := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contents := "schema_version: v1\nversion: 3.2.0\ntools:\n"
+	for name, path := range tools {
+		contents += "  " + name + ": " + path + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(root, "runtime.yaml"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func writeRetryRuntime(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	tools := map[string]string{

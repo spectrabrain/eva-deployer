@@ -131,6 +131,104 @@ func TestLatestUsesUpdatedAt(t *testing.T) {
 	}
 }
 
+func TestRetryClonesFailedOperationAndStagedOverrides(t *testing.T) {
+	root := t.TempDir()
+	inputRoot := t.TempDir()
+	valuesPath := filepath.Join(inputRoot, "app.yaml")
+	if err := os.WriteFile(valuesPath, []byte("token: retry-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overrides, err := fieldoverride.Parse(
+		nil, []string{"app=" + valuesPath}, []string{"app:api.token=retry-secret"}, map[string]bool{"app": true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := testPlan()
+	document.Overrides = overrides.Public()
+	document.OverrideInputs = overrides
+	source, err := Create(root, document, time.Date(2026, 9, 12, 1, 2, 3, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Status = Failed
+	source.CompletedAt = time.Date(2026, 9, 12, 1, 3, 0, 0, time.UTC)
+	if err := Update(root, source); err != nil {
+		t.Fatal(err)
+	}
+
+	retry, err := Retry(root, source, time.Date(2026, 9, 12, 1, 4, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("Retry() error = %v", err)
+	}
+	if retry.ID == source.ID || retry.Status != Planned || retry.SourceOperationID != source.ID {
+		t.Fatalf("retry record = %#v", retry)
+	}
+	loadedSource, err := Load(root, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedSource.Status != Failed || loadedSource.RetryOperationID != retry.ID {
+		t.Fatalf("source after retry = %#v", loadedSource)
+	}
+
+	sourcePlan, err := LoadPlan(root, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryPlan, err := LoadPlan(root, retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retryPlan.OperationID != retry.ID || retryPlan.GeneratedAt != sourcePlan.GeneratedAt {
+		t.Fatalf("retry plan = %#v", retryPlan)
+	}
+	sourceValues := sourcePlan.Overrides["app"].Values.StagedPath
+	retryOverride := retryPlan.Overrides["app"]
+	retryValues := retryOverride.Values.StagedPath
+	if sourceValues == retryValues || !strings.Contains(retryValues, retry.ID) {
+		t.Fatalf("retry staged values = %q, source = %q", retryValues, sourceValues)
+	}
+	contents, err := os.ReadFile(retryValues)
+	if err != nil || string(contents) != "token: retry-secret\n" {
+		t.Fatalf("retry staged values = %q, %v", contents, err)
+	}
+	variables, err := os.ReadFile(retryOverride.AnsibleVarsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(variables), "retry-secret") || !strings.Contains(string(variables), retryValues) || strings.Contains(string(variables), sourceValues) {
+		t.Fatalf("retry variables = %q", variables)
+	}
+	for _, path := range []string{retry.PlanPath, retryOverride.AnsibleVarsPath} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("permissions for %s = %o, want 600", path, info.Mode().Perm())
+		}
+	}
+}
+
+func TestRetryRejectsNonFailedOperation(t *testing.T) {
+	root := t.TempDir()
+	source, err := Create(root, testPlan(), time.Date(2026, 9, 12, 1, 2, 3, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Retry(root, source, time.Date(2026, 9, 12, 1, 3, 0, 0, time.UTC)); err == nil || !strings.Contains(err.Error(), "only failed") {
+		t.Fatalf("Retry() error = %v, want failed status error", err)
+	}
+	loaded, err := Load(root, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RetryOperationID != "" {
+		t.Fatalf("source retry relationship = %q, want empty", loaded.RetryOperationID)
+	}
+}
+
 func testPlan() plan.Document {
 	return plan.Document{
 		SchemaVersion:  plan.SchemaVersion,

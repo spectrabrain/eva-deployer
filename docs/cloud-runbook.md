@@ -185,6 +185,13 @@ eva status
 ls -lt /var/log/eva/operations
 ```
 
+원인을 해결한 뒤에는 새 Plan을 만들지 않고, 실패한 최신 Operation을 새 ID로 복제해 재시도한다.
+
+```bash
+eva retry --yes
+eva status
+```
+
 ## 7. Infra 결과 확인
 
 성공한 Apply 뒤 Managed Runtime을 통해 k3s 상태를 확인한다.

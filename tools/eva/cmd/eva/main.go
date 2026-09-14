@@ -39,6 +39,7 @@ func usage() {
 	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
+	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
@@ -81,6 +82,8 @@ func run(args []string) error {
 		return runPlan(args[1:])
 	case "apply":
 		return runApply(args[1:])
+	case "retry":
+		return runRetry(args[1:])
 	case "status":
 		return runStatus(args[1:])
 	case "verify":
@@ -597,6 +600,53 @@ func runApply(args []string) error {
 	return err
 }
 
+func runRetry(args []string) error {
+	flags := flag.NewFlagSet("retry", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	yes := flags.Bool("yes", false, "confirm retry without a prompt")
+	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected retry arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	var (
+		source operation.Record
+		err    error
+	)
+	if flags.NArg() == 0 {
+		source, err = operation.Latest(*stateRoot)
+	} else {
+		source, err = operation.Load(*stateRoot, flags.Arg(0))
+	}
+	if err != nil {
+		return err
+	}
+	if source.Status != operation.Failed {
+		return fmt.Errorf("operation %s has status %q; only failed operations can be retried", source.ID, source.Status)
+	}
+	if !*yes {
+		if err := confirmRetry(source); err != nil {
+			return err
+		}
+	}
+	retry, err := operation.Retry(*stateRoot, source, time.Now())
+	if err != nil {
+		return err
+	}
+	fmt.Printf("retry source: %s\n", source.ID)
+	completed, err := apply.Execute(apply.Options{
+		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
+		Stdout: os.Stdout, Stderr: os.Stderr,
+	}, retry)
+	printOperation(completed)
+	return err
+}
+
 func confirmApply(record operation.Record) error {
 	info, err := os.Stdin.Stat()
 	if err != nil {
@@ -614,6 +664,25 @@ func confirmApply(record operation.Record) error {
 		return nil
 	}
 	return errors.New("apply cancelled")
+}
+
+func confirmRetry(record operation.Record) error {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect terminal for retry confirmation: %w", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return errors.New("eva retry requires --yes when standard input is not a terminal")
+	}
+	fmt.Fprintf(os.Stderr, "Retry failed operation %s for site %s? [y/N]: ", record.ID, record.SiteID)
+	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && len(answer) == 0 {
+		return fmt.Errorf("read retry confirmation: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes") {
+		return nil
+	}
+	return errors.New("retry cancelled")
 }
 
 func runRuntime(args []string) error {
@@ -848,6 +917,12 @@ func printOperation(record operation.Record) {
 	fmt.Printf("release: %s\n", record.ReleaseVersion)
 	if record.HasOverrides {
 		fmt.Println("field overrides: true")
+	}
+	if record.SourceOperationID != "" {
+		fmt.Printf("retry source: %s\n", record.SourceOperationID)
+	}
+	if record.RetryOperationID != "" {
+		fmt.Printf("retry operation: %s\n", record.RetryOperationID)
 	}
 	fmt.Printf("created: %s\n", record.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Printf("updated: %s\n", record.UpdatedAt.UTC().Format(time.RFC3339))

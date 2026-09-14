@@ -28,18 +28,20 @@ const Failed = "failed"
 var operationIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[A-Za-z0-9][A-Za-z0-9._-]*-[a-f0-9]{8}$`)
 
 type Record struct {
-	ID             string    `yaml:"id"`
-	Status         string    `yaml:"status"`
-	CreatedAt      time.Time `yaml:"created_at"`
-	UpdatedAt      time.Time `yaml:"updated_at"`
-	StartedAt      time.Time `yaml:"started_at,omitempty"`
-	CompletedAt    time.Time `yaml:"completed_at,omitempty"`
-	SiteID         string    `yaml:"site_id"`
-	ReleaseVersion string    `yaml:"release_version"`
-	HasOverrides   bool      `yaml:"has_field_overrides,omitempty"`
-	PlanPath       string    `yaml:"plan_path"`
-	ResultPath     string    `yaml:"result_path,omitempty"`
-	LogDirectory   string    `yaml:"log_directory,omitempty"`
+	ID                string    `yaml:"id"`
+	Status            string    `yaml:"status"`
+	SourceOperationID string    `yaml:"source_operation_id,omitempty"`
+	RetryOperationID  string    `yaml:"retry_operation_id,omitempty"`
+	CreatedAt         time.Time `yaml:"created_at"`
+	UpdatedAt         time.Time `yaml:"updated_at"`
+	StartedAt         time.Time `yaml:"started_at,omitempty"`
+	CompletedAt       time.Time `yaml:"completed_at,omitempty"`
+	SiteID            string    `yaml:"site_id"`
+	ReleaseVersion    string    `yaml:"release_version"`
+	HasOverrides      bool      `yaml:"has_field_overrides,omitempty"`
+	PlanPath          string    `yaml:"plan_path"`
+	ResultPath        string    `yaml:"result_path,omitempty"`
+	LogDirectory      string    `yaml:"log_directory,omitempty"`
 }
 
 type StepResult struct {
@@ -113,6 +115,83 @@ func Create(root string, document plan.Document, now time.Time) (Record, error) 
 	return record, nil
 }
 
+// Retry clones a failed Operation's immutable Plan and staged override inputs
+// into a new planned Operation. The source remains failed and records the new
+// retry ID; the retry records its source ID.
+func Retry(root string, source Record, now time.Time) (Record, error) {
+	if root == "" {
+		root = DefaultRoot
+	}
+	if !operationIDPattern.MatchString(source.ID) {
+		return Record{}, fmt.Errorf("invalid operation ID %q", source.ID)
+	}
+	if source.Status != Failed {
+		return Record{}, fmt.Errorf("operation %s has status %q; only failed operations can be retried", source.ID, source.Status)
+	}
+	document, err := LoadPlan(root, source)
+	if err != nil {
+		return Record{}, err
+	}
+	if document.SiteID != source.SiteID || document.ReleaseVersion != source.ReleaseVersion {
+		return Record{}, fmt.Errorf("operation plan does not match source operation %s", source.ID)
+	}
+	id, err := newID(document.SiteID, now, rand.Reader)
+	if err != nil {
+		return Record{}, err
+	}
+	directory := filepath.Join(root, id)
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		return Record{}, fmt.Errorf("create operation root: %w", err)
+	}
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		return Record{}, fmt.Errorf("create retry operation directory: %w", err)
+	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(directory)
+		}
+	}()
+
+	document.OperationID = id
+	if err := cloneOverrideInputs(filepath.Join(root, source.ID), directory, &document); err != nil {
+		return Record{}, err
+	}
+	planContents, err := plan.Marshal(document)
+	if err != nil {
+		return Record{}, err
+	}
+	planPath := filepath.Join(directory, "plan.yaml")
+	if err := writePrivateFile(planPath, planContents); err != nil {
+		return Record{}, err
+	}
+	retry := Record{
+		ID:                id,
+		Status:            Planned,
+		SourceOperationID: source.ID,
+		CreatedAt:         now.UTC(),
+		UpdatedAt:         now.UTC(),
+		SiteID:            document.SiteID,
+		ReleaseVersion:    document.ReleaseVersion,
+		HasOverrides:      len(document.Overrides) > 0,
+		PlanPath:          planPath,
+	}
+	contents, err := yaml.Marshal(retry)
+	if err != nil {
+		return Record{}, fmt.Errorf("marshal retry operation metadata: %w", err)
+	}
+	if err := writePrivateFile(filepath.Join(directory, "operation.yaml"), contents); err != nil {
+		return Record{}, err
+	}
+
+	source.RetryOperationID = retry.ID
+	if err := Update(root, source); err != nil {
+		return Record{}, fmt.Errorf("record retry relationship for operation %s: %w", source.ID, err)
+	}
+	published = true
+	return retry, nil
+}
+
 func stageOverrideInputs(operationDirectory string, document *plan.Document) error {
 	if document.OverrideInputs.Empty() {
 		return nil
@@ -150,6 +229,94 @@ func stageOverrideInputs(operationDirectory string, document *plan.Document) err
 		document.Overrides[componentName] = staged
 	}
 	return nil
+}
+
+func cloneOverrideInputs(sourceDirectory, destinationDirectory string, document *plan.Document) error {
+	for componentName, override := range document.Overrides {
+		if !retryOverrideComponent(componentName) {
+			return fmt.Errorf("operation plan has unsupported override component %q", componentName)
+		}
+		inputDirectory := filepath.Join(destinationDirectory, "inputs", componentName)
+		if !isWithinDirectory(destinationDirectory, inputDirectory) {
+			return fmt.Errorf("retry override input directory escapes operation directory: %s", componentName)
+		}
+		if err := os.MkdirAll(inputDirectory, 0o700); err != nil {
+			return fmt.Errorf("create retry override input directory: %w", err)
+		}
+		cloned := override
+		if override.Chart != nil {
+			chart := *override.Chart
+			chart.StagedPath = filepath.Join(inputDirectory, "chart"+filepath.Ext(chart.StagedPath))
+			if err := copyStagedInput(sourceDirectory, override.Chart.StagedPath, chart.StagedPath, chart.SHA256); err != nil {
+				return fmt.Errorf("clone %s chart override: %w", componentName, err)
+			}
+			cloned.Chart = &chart
+		}
+		if override.Values != nil {
+			values := *override.Values
+			values.StagedPath = filepath.Join(inputDirectory, "values"+filepath.Ext(values.StagedPath))
+			if err := copyStagedInput(sourceDirectory, override.Values.StagedPath, values.StagedPath, values.SHA256); err != nil {
+				return fmt.Errorf("clone %s values override: %w", componentName, err)
+			}
+			cloned.Values = &values
+		}
+		cloned.AnsibleVarsPath = filepath.Join(inputDirectory, "ansible-overrides.yaml")
+		if err := cloneOverrideVars(sourceDirectory, override.AnsibleVarsPath, cloned); err != nil {
+			return fmt.Errorf("clone %s override variables: %w", componentName, err)
+		}
+		cloned.SetValues = nil
+		document.Overrides[componentName] = cloned
+	}
+	return nil
+}
+
+func retryOverrideComponent(component string) bool {
+	switch component {
+	case "app", "agent", "vision":
+		return true
+	default:
+		return false
+	}
+}
+
+func copyStagedInput(sourceDirectory, source, destination, expectedSHA256 string) error {
+	if !isWithinDirectory(sourceDirectory, source) {
+		return errors.New("staged input escapes source operation directory")
+	}
+	return copyVerifiedInput(source, destination, expectedSHA256, 0o644)
+}
+
+func cloneOverrideVars(sourceDirectory, sourcePath string, override fieldoverride.Component) error {
+	if !isWithinDirectory(sourceDirectory, sourcePath) {
+		return errors.New("staged variables escape source operation directory")
+	}
+	contents, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return err
+	}
+	var variables map[string]any
+	if err := yaml.Unmarshal(contents, &variables); err != nil {
+		return err
+	}
+	if variables == nil {
+		variables = make(map[string]any)
+	}
+	if override.Chart != nil {
+		variables["eva_cli_chart_path"] = override.Chart.StagedPath
+	}
+	if override.Values != nil {
+		variables["eva_cli_values_path"] = override.Values.StagedPath
+	}
+	encoded, err := yaml.Marshal(variables)
+	if err != nil {
+		return err
+	}
+	return writePrivateFile(override.AnsibleVarsPath, encoded)
+}
+
+func isWithinDirectory(directory, path string) bool {
+	relative, err := filepath.Rel(directory, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func copyVerifiedInput(source, destination, expectedSHA256 string, mode os.FileMode) error {

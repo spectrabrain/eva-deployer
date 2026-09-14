@@ -646,10 +646,16 @@ func runRuntime(args []string) error {
 		}
 		fmt.Printf("runtime installed: %s (version=%s)\n", resolved.Root, resolved.Descriptor.Version)
 	case "bootstrap":
-		if *offline == "" || *source != "" {
-			return errors.New("runtime bootstrap requires --offline PATH")
+		if *source != "" {
+			return errors.New("runtime bootstrap does not support --source; use runtime install --source PATH")
 		}
-		resolved, err := runtime.BootstrapOffline(*offline, *root)
+		var resolved runtime.Resolved
+		var err error
+		if *offline != "" {
+			resolved, err = runtime.BootstrapOffline(*offline, *root)
+		} else {
+			resolved, err = runtime.BootstrapOnline(*root)
+		}
 		if err != nil {
 			return err
 		}
@@ -689,10 +695,10 @@ func runRuntime(args []string) error {
 
 func runtimeUsage() {
 	fmt.Println("Usage: eva runtime install --source PATH [--runtime-root PATH]")
-	fmt.Println("       eva runtime bootstrap --offline PATH [--runtime-root PATH]")
+	fmt.Println("       eva runtime bootstrap [--offline PATH] [--runtime-root PATH]")
 	fmt.Println("       eva runtime <validate|show> [--runtime-root PATH]")
 	fmt.Println("")
-	fmt.Printf("The managed Runtime defaults to %s.\n", runtime.DefaultRoot)
+	fmt.Printf("The managed Runtime defaults to %s. Without --offline, bootstrap downloads the pinned Cloud Runtime.\n", runtime.DefaultRoot)
 }
 
 func runShell(args []string) error {

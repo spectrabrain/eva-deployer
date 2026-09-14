@@ -69,16 +69,16 @@ MSG
 fi
 
 python3 -m venv "${VENV_DIR}"
-source "${VENV_DIR}/bin/activate"
+venv_python="${VENV_DIR}/bin/python"
 
 # 전체 requirements(ansible 메타패키지 + ansible-lint)가 과할 때는 최소 구성만 넣을 수 있습니다.
 #   ANSIBLE_AIRGAP_REQUIREMENTS="ansible-core==2.20.5" ./scripts/install/install_ansible_airgap.sh
 if [[ -n "${ANSIBLE_AIRGAP_REQUIREMENTS:-}" ]]; then
   echo "[info] requirements 대신 지정된 spec 을 설치합니다: ${ANSIBLE_AIRGAP_REQUIREMENTS}"
   # shellcheck disable=SC2086
-  python -m pip install --no-index --find-links="${WHEEL_DIR}" ${ANSIBLE_AIRGAP_REQUIREMENTS}
+  "$venv_python" -m pip install --no-index --find-links="${WHEEL_DIR}" ${ANSIBLE_AIRGAP_REQUIREMENTS}
 else
-  python -m pip install --no-index --find-links="${WHEEL_DIR}" -r "${REQ_FILE}"
+  "$venv_python" -m pip install --no-index --find-links="${WHEEL_DIR}" -r "${REQ_FILE}"
 fi
 
 echo "[done] offline ansible environment created at ${VENV_DIR}"

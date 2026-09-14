@@ -122,11 +122,11 @@ assert_safe_offline_tree() {
     exit 1
   fi
   while IFS= read -r path; do
-    echo "[error] Offline payload contains a forbidden sensitive path: ${path#$root/}" >&2
+    echo "[error] Offline payload contains a forbidden sensitive path: ${path#"$root"/}" >&2
     exit 1
   done < <(find "$root" \( -iname 'aws_key.ini' -o -iname '*.pem' -o -iname '*.key' -o -iname 'id_rsa*' -o -iname '.env' \) -print)
   while IFS= read -r path; do
-    echo "[error] Offline payload contains a forbidden sensitive directory: ${path#$root/}" >&2
+    echo "[error] Offline payload contains a forbidden sensitive directory: ${path#"$root"/}" >&2
     exit 1
   done < <(find "$root" -type d \( -iname credentials -o -iname secrets \) -print)
 }

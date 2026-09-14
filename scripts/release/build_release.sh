@@ -182,6 +182,11 @@ for file in ansible.cfg src/playbook-preflight.yaml src/playbook-vars.yaml; do
     exit 1
   fi
 done
+installer_source="$repo_root/scripts/install/install_eva_tool.sh"
+if [[ ! -f "$installer_source" || -L "$installer_source" ]]; then
+  echo "[error] required EVA Tool installer is missing or is not a regular file: $installer_source" >&2
+  exit 1
+fi
 
 build_root="$(mktemp -d)"
 trap 'rm -rf "$build_root"' EXIT
@@ -195,7 +200,7 @@ echo "[info] downloading Go modules"
   cd "$repo_root/tools/eva"
   go mod download
   go test ./...
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
     -ldflags "-s -w -buildid= -X main.version=$artifact_tag -X main.commit=$commit_short -X main.buildDate=$build_date" \
     -o "$tool_binary" ./cmd/eva
 )
@@ -203,14 +208,17 @@ chmod 0755 "$tool_binary"
 install -m 0755 "$tool_binary" "$build_root/tool/bin/eva"
 
 tool_file="eva-tool_${artifact_tag}_linux_amd64.tar.gz"
+installer_file="eva-tool-installer_${artifact_tag}.sh"
 infra_file="eva-infra_${artifact_tag}.tar.gz"
 solution_file="eva-solution_${artifact_tag}.tar.gz"
 make_archive "$build_root/tool" "$staging_dist/$tool_file" bin/eva
+install -m 0755 "$installer_source" "$staging_dist/$installer_file"
 make_archive "$repo_root" "$staging_dist/$infra_file" ansible.cfg src/playbook-preflight.yaml src/playbook-vars.yaml src/infra
 make_archive "$repo_root" "$staging_dist/$solution_file" src/solution
 
 artifacts=(
   "eva-tool|$tool_file"
+  "eva-tool-installer|$installer_file"
   "eva-infra|$infra_file"
   "eva-solution|$solution_file"
 )
@@ -234,6 +242,17 @@ write_checksums "$staging_dist/checksums.sha256" "" "${artifacts[@]}"
 
 "$tool_binary" verify "$staging_dist" >/dev/null
 "$tool_binary" release prepare --release "$staging_dist" --install-root "$build_root/releases" >/dev/null
+
+installer_smoke_root="$build_root/installer-smoke"
+"$staging_dist/$installer_file" \
+  --artifact "$staging_dist/$tool_file" \
+  --sha256 "$(checksum "$staging_dist/$tool_file")" \
+  --root "$installer_smoke_root/opt/eva" \
+  --bin-dir "$installer_smoke_root/bin" \
+  --state-root "$installer_smoke_root/var/lib/eva" \
+  --log-root "$installer_smoke_root/var/log/eva" \
+  --skip-group-management >/dev/null
+"$installer_smoke_root/bin/eva" version >/dev/null
 
 outputs=("${artifacts[@]}" "release-metadata|release.yaml" "checksum-manifest|checksums.sha256")
 if [[ -n "$offline_root" ]]; then
@@ -269,7 +288,11 @@ fi
 
 for output in "${outputs[@]}"; do
   file="${output#*|}"
-  install -m 0644 "$staging_dist/$file" "$dist_dir/$file"
+  mode=0644
+  if [[ "$file" == "$installer_file" ]]; then
+    mode=0755
+  fi
+  install -m "$mode" "$staging_dist/$file" "$dist_dir/$file"
 done
 
 echo "[done] Release artifacts written to $dist_dir"

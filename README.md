@@ -56,6 +56,22 @@ Ansible playbook은 저장소 내부의 제품 소스(`src/`)와 설치자 입�
 export EVA_SITE_ID=customer-a
 ```
 
+### EVA CLI 설치
+
+Tag Base Release의 `eva-tool-installer_<version>.sh`와 `eva-tool_<version>_linux_amd64.tar.gz`를 같은 디렉터리에 둡니다. `checksums.sha256`의 tool archive digest를 확인한 뒤 installer를 실행하면 `/opt/eva/tool`에 binary를 설치하고 `/usr/local/bin/eva` 링크를 생성합니다.
+
+```bash
+release_dir=/path/to/eva-release
+artifact="$release_dir/eva-tool_v3.2.0_linux_amd64.tar.gz"
+installer="$release_dir/eva-tool-installer_v3.2.0.sh"
+expected_sha256="$(awk -v file="$(basename "$artifact")" '$2 == file { print $1; exit }' "$release_dir/checksums.sha256")"
+
+sudo bash "$installer" --artifact "$artifact" --sha256 "$expected_sha256"
+eva version
+```
+
+설치 사용자는 `eva-operators` 그룹에 추가됩니다. 새 그룹 권한은 다음 login session부터 적용됩니다.
+
 ---
 
 ## 1. 사전 준비 및 Repository 준비

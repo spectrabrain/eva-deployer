@@ -94,7 +94,7 @@ jobs:
           if-no-files-found: error
           path: |
             out/dist/eva-tool_*.tar.gz
-            out/dist/eva-tool-installer_*.sh
+            out/dist/eva-tool-installer.sh
             out/dist/eva-infra_*.tar.gz
             out/dist/eva-solution_*.tar.gz
             out/dist/release.yaml

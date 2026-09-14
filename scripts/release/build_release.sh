@@ -208,7 +208,7 @@ chmod 0755 "$tool_binary"
 install -m 0755 "$tool_binary" "$build_root/tool/bin/eva"
 
 tool_file="eva-tool_${artifact_tag}_linux_amd64.tar.gz"
-installer_file="eva-tool-installer_${artifact_tag}.sh"
+installer_file="eva-tool-installer.sh"
 infra_file="eva-infra_${artifact_tag}.tar.gz"
 solution_file="eva-solution_${artifact_tag}.tar.gz"
 make_archive "$build_root/tool" "$staging_dist/$tool_file" bin/eva
@@ -245,8 +245,6 @@ write_checksums "$staging_dist/checksums.sha256" "" "${artifacts[@]}"
 
 installer_smoke_root="$build_root/installer-smoke"
 "$staging_dist/$installer_file" \
-  --artifact "$staging_dist/$tool_file" \
-  --sha256 "$(checksum "$staging_dist/$tool_file")" \
   --root "$installer_smoke_root/opt/eva" \
   --bin-dir "$installer_smoke_root/bin" \
   --state-root "$installer_smoke_root/var/lib/eva" \

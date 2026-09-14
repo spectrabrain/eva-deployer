@@ -3,11 +3,13 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: sudo bash ./eva-tool-installer_vX.Y.Z.sh --artifact PATH [options]
+Usage: sudo bash ./eva-tool-installer.sh [options]
 
 Options:
-  --artifact PATH             Required eva-tool archive.
-  --sha256 DIGEST             Optional expected SHA-256 for the archive.
+  --artifact PATH             EVA Tool archive. Defaults to the single sibling
+                              eva-tool_*_linux_amd64.tar.gz archive.
+  --sha256 DIGEST             Expected archive SHA-256. Defaults to the matching
+                              sibling checksums.sha256 entry.
   --operator USER             Add this user to eva-operators. Defaults to SUDO_USER.
   --group NAME                Operator group. Default: eva-operators.
   --root PATH                 EVA root. Default: /opt/eva.
@@ -30,6 +32,8 @@ state_root="/var/lib/eva"
 log_root="/var/log/eva"
 force=false
 skip_group_management=false
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+auto_artifact=false
 
 while (($#)); do
   case "$1" in
@@ -48,10 +52,6 @@ while (($#)); do
   esac
 done
 
-if [[ -z "$artifact" ]]; then
-  echo "[error] --artifact is required" >&2
-  exit 2
-fi
 for command in awk install mktemp mv readlink sha256sum tar; do
   command -v "$command" >/dev/null 2>&1 || { echo "[error] missing command: $command" >&2; exit 1; }
 done
@@ -60,9 +60,29 @@ if [[ "$skip_group_management" != true && $EUID -ne 0 ]]; then
   exit 1
 fi
 
+if [[ -z "$artifact" ]]; then
+  shopt -s nullglob
+  tool_archives=("$script_dir"/eva-tool_*_linux_amd64.tar.gz)
+  if [[ ${#tool_archives[@]} -ne 1 ]]; then
+    echo "[error] expected exactly one EVA Tool archive beside this installer; found ${#tool_archives[@]}" >&2
+    echo "        use --artifact PATH to select the archive explicitly" >&2
+    exit 1
+  fi
+  artifact="${tool_archives[0]}"
+  auto_artifact=true
+fi
 artifact="$(readlink -f "$artifact")"
 if [[ ! -f "$artifact" ]]; then
   echo "[error] EVA Tool archive is not a regular file: $artifact" >&2
+  exit 1
+fi
+if [[ -z "$expected_sha256" && -f "$script_dir/checksums.sha256" ]]; then
+  archive_name="${artifact##*/}"
+  expected_sha256="$(awk -v file="$archive_name" '$2 == file || $2 == "*" file { print $1; exit }' "$script_dir/checksums.sha256")"
+fi
+if [[ "$auto_artifact" == true && -z "$expected_sha256" ]]; then
+  echo "[error] checksums.sha256 has no digest for ${artifact##*/}" >&2
+  echo "        use --sha256 DIGEST only when an external verified digest is available" >&2
   exit 1
 fi
 if [[ -n "$expected_sha256" ]]; then
@@ -174,7 +194,12 @@ if [[ -n "$backup_dir" ]]; then
   rm -rf "$backup_dir"
 fi
 
-echo "[done] EVA Tool installed: $command_link"
+echo "[done] EVA Tool installed"
+if resolved_command="$(command -v eva 2>/dev/null)"; then
+  echo "[done] eva command: $resolved_command"
+else
+  echo "[done] eva command: $command_link"
+fi
 "$command_link" version
 if [[ -n "$operator" && "$operator" != root && "$skip_group_management" != true ]]; then
   echo "[info] $operator was added to $operator_group; start a new login session before using EVA."

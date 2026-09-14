@@ -19,6 +19,9 @@ out/cache/*
 !out/cache/.gitkeep
 out/work/*
 !out/work/.gitkeep
+
+# Local EVA CLI development binary. Release builds use out/work/build/eva.
+/tools/eva/eva
 out/state/*
 !out/state/.gitkeep
 out/dist/*

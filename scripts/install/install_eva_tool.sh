@@ -141,6 +141,11 @@ if [[ ! -f "$staging_dir/bin/eva" || -L "$staging_dir/bin/eva" || ! -x "$staging
   exit 1
 fi
 "$staging_dir/bin/eva" version >/dev/null
+chmod 0755 "$staging_dir" "$staging_dir/bin" "$staging_dir/bin/eva"
+chmod g-s "$staging_dir" "$staging_dir/bin" "$staging_dir/bin/eva"
+if [[ "$skip_group_management" != true ]]; then
+  chown root:root "$staging_dir" "$staging_dir/bin" "$staging_dir/bin/eva"
+fi
 
 if [[ -e "$tool_dir" || -L "$tool_dir" ]]; then
   if [[ -L "$tool_dir" || ! -d "$tool_dir" ]]; then

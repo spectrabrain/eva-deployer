@@ -18,7 +18,7 @@ import (
 const DefaultRoot = "/opt/eva/runtime"
 const descriptorName = "runtime.yaml"
 const schemaVersion = "v1"
-const runtimeDirectoryMode = os.FileMode(0o775) | os.ModeSetgid
+const runtimeDirectoryMode = os.FileMode(0o755)
 const collectionsDirectory = "collections"
 
 var requiredTools = map[string]struct{}{

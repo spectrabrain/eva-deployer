@@ -252,54 +252,32 @@ write_checksums "$staging_dist/checksums.sha256" "" "${artifacts[@]}"
 "$tool_binary" release prepare --release "$staging_dist" --install-root "$build_root/releases" >/dev/null
 
 installer_smoke_root="$build_root/installer-smoke"
+installer_smoke_available=false
 if [[ "$EUID" -eq 0 ]]; then
   installer_smoke_sudo=()
+  installer_smoke_available=true
 elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   installer_smoke_sudo=(sudo)
+  installer_smoke_available=true
 fi
-if [[ "$EUID" -eq 0 || ${#installer_smoke_sudo[@]} -gt 0 ]]; then
-  installer_smoke_group="eva-installer-smoke-$RANDOM"
-  "${installer_smoke_sudo[@]}" groupadd --system "$installer_smoke_group"
+if [[ "$installer_smoke_available" == true ]]; then
   "${installer_smoke_sudo[@]}" "$staging_dist/$installer_file" \
     --root "$installer_smoke_root/opt/eva" \
     --bin-dir "$installer_smoke_root/bin" \
     --state-root "$installer_smoke_root/var/lib/eva" \
-    --log-root "$installer_smoke_root/var/log/eva" \
-    --group "$installer_smoke_group" \
-    --operator root >/dev/null
-else
-  echo "[warn] sudo is unavailable; installer ownership smoke test is skipped" >&2
-  "$staging_dist/$installer_file" \
-    --root "$installer_smoke_root/opt/eva" \
-    --bin-dir "$installer_smoke_root/bin" \
-    --state-root "$installer_smoke_root/var/lib/eva" \
-    --log-root "$installer_smoke_root/var/log/eva" \
-    --skip-group-management >/dev/null
-fi
-"$installer_smoke_root/bin/eva" version >/dev/null
+    --log-root "$installer_smoke_root/var/log/eva" >/dev/null
 
-assert_mode() {
-  local path="$1" expected="$2" actual
-  actual="$("${installer_smoke_sudo[@]}" stat -c '%a' "$path")"
-  if [[ "$actual" != "$expected" ]]; then
-    echo "[error] installer mode mismatch: $path is $actual, expected $expected" >&2
-    exit 1
-  fi
-}
+  "$installer_smoke_root/bin/eva" version >/dev/null
 
-assert_mode "$installer_smoke_root/opt/eva/tool" 755
-assert_mode "$installer_smoke_root/opt/eva/tool/bin" 755
-assert_mode "$installer_smoke_root/opt/eva/tool/bin/eva" 755
-assert_mode "$installer_smoke_root/opt/eva/runtime" 2775
-assert_mode "$installer_smoke_root/opt/eva/releases" 2775
-assert_mode "$installer_smoke_root/var/lib/eva" 2770
-assert_mode "$installer_smoke_root/var/lib/eva/artifacts" 2770
-assert_mode "$installer_smoke_root/var/lib/eva/operations" 2770
-assert_mode "$installer_smoke_root/var/lib/eva/state" 2770
-assert_mode "$installer_smoke_root/var/log/eva" 2770
-assert_mode "$installer_smoke_root/var/log/eva/operations" 2770
+  assert_mode() {
+    local path="$1" expected="$2" actual
+    actual="$("${installer_smoke_sudo[@]}" stat -c '%a' "$path")"
+    if [[ "$actual" != "$expected" ]]; then
+      echo "[error] installer mode mismatch: $path is $actual, expected $expected" >&2
+      exit 1
+    fi
+  }
 
-if [[ -n "$installer_smoke_group" ]]; then
   assert_owner_group() {
     local path="$1" expected="$2" actual
     actual="$("${installer_smoke_sudo[@]}" stat -c '%U:%G' "$path")"
@@ -309,13 +287,27 @@ if [[ -n "$installer_smoke_group" ]]; then
     fi
   }
 
-  assert_owner_group "$installer_smoke_root/opt/eva/tool" root:root
-  assert_owner_group "$installer_smoke_root/opt/eva/tool/bin" root:root
-  assert_owner_group "$installer_smoke_root/opt/eva/tool/bin/eva" root:root
-  assert_owner_group "$installer_smoke_root/opt/eva/runtime" "root:$installer_smoke_group"
-  assert_owner_group "$installer_smoke_root/opt/eva/releases" "root:$installer_smoke_group"
-  assert_owner_group "$installer_smoke_root/var/lib/eva" "root:$installer_smoke_group"
-  assert_owner_group "$installer_smoke_root/var/log/eva" "root:$installer_smoke_group"
+  for path in \
+    "$installer_smoke_root/opt/eva/tool" \
+    "$installer_smoke_root/opt/eva/tool/bin" \
+    "$installer_smoke_root/opt/eva/tool/bin/eva" \
+    "$installer_smoke_root/opt/eva/runtime" \
+    "$installer_smoke_root/opt/eva/releases"; do
+    assert_mode "$path" 755
+    assert_owner_group "$path" root:root
+  done
+  for path in \
+    "$installer_smoke_root/var/lib/eva" \
+    "$installer_smoke_root/var/lib/eva/artifacts" \
+    "$installer_smoke_root/var/lib/eva/operations" \
+    "$installer_smoke_root/var/lib/eva/state" \
+    "$installer_smoke_root/var/log/eva" \
+    "$installer_smoke_root/var/log/eva/operations"; do
+    assert_mode "$path" 700
+    assert_owner_group "$path" root:root
+  done
+else
+  echo "[warn] sudo is unavailable; root-only installer smoke test is skipped" >&2
 fi
 
 outputs=("${artifacts[@]}" "release-metadata|release.yaml" "checksum-manifest|checksums.sha256")

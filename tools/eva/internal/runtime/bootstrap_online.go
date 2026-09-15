@@ -116,6 +116,11 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 	if destination == DefaultRoot && os.Geteuid() != 0 {
 		return Resolved{}, fmt.Errorf("Cloud Runtime bootstrap into %s requires root; run sudo eva runtime bootstrap", DefaultRoot)
 	}
+	if destination == DefaultRoot {
+		if err := installCloudPrerequisites(dependencies.run); err != nil {
+			return Resolved{}, err
+		}
+	}
 	parent := filepath.Dir(destination)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return Resolved{}, fmt.Errorf("create runtime parent: %w", err)
@@ -159,6 +164,16 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 		return Resolved{}, fmt.Errorf("validate staged Cloud Runtime: %w", err)
 	}
 	return Install(staging, destination)
+}
+
+func installCloudPrerequisites(run func(string, ...string) error) error {
+	if err := run("apt-get", "update"); err != nil {
+		return fmt.Errorf("update APT package index for Cloud Runtime bootstrap: %w", err)
+	}
+	if err := run("apt-get", "install", "--yes", "ca-certificates", "python3", "python3-venv"); err != nil {
+		return fmt.Errorf("install Cloud Runtime prerequisites: %w", err)
+	}
+	return nil
 }
 
 func installAnsibleCollections(root string, collections []string, run func([]string, string, ...string) error) error {

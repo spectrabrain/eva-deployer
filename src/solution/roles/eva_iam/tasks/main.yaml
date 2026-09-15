@@ -109,7 +109,9 @@
     # host-only 로 두세요. 차트가 Ingress/TLS host 에 그대로 쓰기 때문에 :port 를 붙이면 깨집니다.
     # IP 를 넣어도 됩니다 — 차트 3.1.4+ 는 IP 일 때 Ingress 규칙에서 host 를 생략합니다
     # (Kubernetes 가 spec.rules[].host 에 IP 를 허용하지 않기 때문입니다).
-    eva_iam_host: "{{ eva_iam_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
+    eva_iam_host: >-
+      {{ eva_iam_host
+         | default(ansible_facts.get('default_ipv4', {}).get('address', '127.0.0.1')) }}
     # config.publicPort / config.publicUrl (차트 3.1.4+). ingress 컨트롤러가 443 이 아닌
     # 포트로 노출될 때만 씁니다. 빈 값이면 렌더에서 생략하고 차트 기본 동작을 따릅니다.
     eva_iam_public_port: "{{ eva_iam_public_port | default('') }}"
@@ -125,7 +127,12 @@
     eva_iam_write_app_config: "{{ eva_iam_write_app_config | default(true) | bool }}"
     eva_iam_app_redirect_uris: >-
       {{ eva_iam_app_redirect_uris
-         | default(['https://' ~ (eva_iam_host | default(ansible_default_ipv4.address | default('127.0.0.1'))) ~ '/*']) }}
+         | default(
+             ['https://'
+              ~ (eva_iam_host
+                 | default(ansible_facts.get('default_ipv4', {}).get('address', '127.0.0.1')))
+              ~ '/*']
+           ) }}
     # ingress — node directory holding tls.crt / tls.key
     eva_iam_ingress_path: "{{ eva_iam_ingress_path | default('/') }}"
     eva_iam_tls_host_path: "{{ eva_iam_tls_host_path | default(eva_iam_node_home ~ '/certs') }}"
@@ -157,9 +164,12 @@
 # Airgap: the chart comes from a .tgz under install/ instead of the Helm repo, and every
 # image is pulled from Harbor instead of ECR. Same arrangement as eva_app — the offline
 # bundle is expected at the same path on the target (install/ is copied over with the repo).
-- name: Resolve eva-iam chart source and image repositories
+- name: Resolve eva-iam offline directory
   ansible.builtin.set_fact:
     eva_iam_offline_dir: "{{ eva_iam_offline_dir | default(eva_cache_root ~ '/eva-iam') }}"
+
+- name: Resolve eva-iam chart source and image repositories
+  ansible.builtin.set_fact:
     eva_iam_offline_chart_tgz: >-
       {{ eva_iam_offline_chart_tgz
          | default(eva_iam_offline_dir ~ '/eva-iam-' ~ eva_iam_chart_version ~ '.tgz') }}

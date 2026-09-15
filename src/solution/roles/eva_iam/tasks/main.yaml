@@ -63,11 +63,13 @@
 # so it matches eva_app's behavior.
 # One knob moves all three: -e eva_iam_node_home=/home/<user>
 # (or -e eva_iam_node_user=<user>)
-- name: Resolve node-side home for eva-iam hostPath defaults
+- name: Resolve node-side user for eva-iam hostPath defaults
   ansible.builtin.set_fact:
     eva_iam_node_user: "{{ eva_iam_node_user | default(ansible_user | default(ansible_ssh_user | default('eva'))) }}"
-    eva_iam_node_home: >-
-      {{ eva_iam_node_home | default('/home/' ~ eva_iam_node_user) }}
+
+- name: Resolve node-side home for eva-iam hostPath defaults
+  ansible.builtin.set_fact:
+    eva_iam_node_home: "{{ eva_iam_node_home | default('/home/' ~ eva_iam_node_user) }}"
 
 # Deploy-level knobs plus the variables that drive values/eva-iam-k3s-override.yaml.j2 —
 # same arrangement as eva_app. Site-specific values go in values/eva-iam.yaml instead,

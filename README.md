@@ -1113,9 +1113,9 @@ kubectl rollout status deployment/eva-iam-keycloak -n eva-iam --timeout=600s
 curl -fsS https://iam.customer.example/iam/realms/eva-iam/.well-known/openid-configuration
 ```
 
-IAM과 App이 같은 EVA CLI Operation에 포함되면, IAM role은 control node의 `out/work/config/<site>/<target>/eva-iam.yaml`에 App SSO handoff를 권한 `0600`으로 기록하고 App role이 이를 자동으로 읽어 `app.sso.baseUrl`, `app.sso.adminClientSecret`에 병합합니다. Workspace의 `site-values/app.yaml`은 설치자 입력으로 유지되며 실행 중 수정하지 않습니다. IAM handoff가 없거나 SSO 값이 비어 있으면 App 단계는 secret을 출력하지 않고 명확한 오류로 중단합니다.
+IAM role은 control node의 `/var/lib/eva/sites/<site>/<target>/eva-iam.yaml`에 App SSO handoff를 `root:root`, 권한 `0600`으로 atomically 기록하고 App role은 동일 site/target metadata를 검증해 자동으로 읽습니다. Workspace의 `site-values/app.yaml`은 설치자 입력으로 유지되며 실행 중 수정하지 않습니다. Workspace에 `app.sso.baseUrl`과 `app.sso.adminClientSecret`을 모두 명시하면 그 값이 handoff보다 우선합니다. 둘 다 없고 유효한 handoff도 없으면 App 단계는 secret을 출력하지 않고 명확한 오류로 중단합니다.
 
-App-only Operation은 `workspace/site-values/app.yaml`의 `app.sso`를 공식 입력으로 사용한다. 이 값이 없을 때만 현재 Workspace의 동일 site/target metadata를 통과한 handoff를 재사용하며, 다른 site 또는 target의 handoff는 자동으로 사용하지 않는다. 중앙 IAM을 별도 서버 또는 Workspace에 구성하는 경우에는 각 App Workspace의 `app.sso.baseUrl`, `app.sso.adminClientSecret`에 중앙 IAM 값을 명시한다.
+App-only Operation은 `workspace/site-values/app.yaml`의 명시적 `app.sso.baseUrl`과 `app.sso.adminClientSecret`을 공식 입력으로 사용한다. 두 값이 모두 없는 경우에만 `/var/lib/eva/sites/`의 동일 site/target metadata를 통과한 handoff를 재사용하며, 다른 site 또는 target의 handoff는 자동으로 사용하지 않는다. `app.sso.redis` 같은 partial override는 유효한 handoff 위에 recursive merge된다. 중앙 IAM을 별도 서버 또는 Workspace에 구성하는 경우에는 각 App Workspace의 `app.sso.baseUrl`, `app.sso.adminClientSecret`에 중앙 IAM 값을 명시한다.
 
 ---
 

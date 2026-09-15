@@ -626,7 +626,7 @@ ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_iam.ya
   -e eva_iam_redis_nodeport=32070 \
   -e '{"eva_iam_app_redirect_uris": ["https://magok.eva.lge.com/*"]}'
 
-cat out/work/config/$EVA_SITE_ID/localhost/eva-iam.yaml     # ssoBaseUrl / adminClientSecret
+sudo cat /var/lib/eva/sites/$EVA_SITE_ID/localhost/eva-iam.yaml     # ssoBaseUrl / adminClientSecret
 ```
 
 - 같은 host 에서 eva-iam 과 eva-app 이 모두 `/` 를 쓰면 Keycloak 요청이 eva-app 으로 가서

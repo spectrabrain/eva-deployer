@@ -248,11 +248,10 @@
     eva_app_iam_values: {}
     eva_app_values_override: {}
     eva_app_cli_values_override: {}
-    eva_app_workspace_sso_defined: false
+    eva_app_workspace_sso_complete: false
     eva_app_handoff_used: false
     eva_app_generated_config_path: "{{ eva_site_config_root ~ '/' ~ eva_app_values_host ~ '/eva.yaml' }}"
-    eva_app_iam_handoff_path: "{{ eva_site_config_root ~ '/' ~ eva_app_values_host ~ '/eva-iam.yaml' }}"
-    eva_app_iam_selected: "{{ 'iam' in (eva_enabled_components | default('') | split(',')) }}"
+    eva_app_iam_handoff_path: "{{ eva_site_state_root ~ '/' ~ eva_app_values_host ~ '/eva-iam.yaml' }}"
 
 - name: Load EVA App role defaults for effective values
   no_log: true
@@ -293,10 +292,10 @@
     eva_app_values_override: "{{ (eva_app_values_config | default({}, true)).get(eva_app_values_host, {}) }}"
   when: eva_app_values_file_status.stat.exists
 
-- name: Determine whether Workspace defines complete EVA App SSO
+- name: Determine whether Workspace explicitly defines complete EVA App SSO
   no_log: true
   ansible.builtin.set_fact:
-    eva_app_workspace_sso_defined: >-
+    eva_app_workspace_sso_complete: >-
       {{
         (((eva_app_values_override | default({}, true)).app
           | default({}, true)).sso | default({}, true)) is mapping
@@ -311,29 +310,32 @@
       }}
 
 - name: Check same-target IAM-to-App handoff
+  no_log: true
   ansible.builtin.stat:
     path: "{{ eva_app_iam_handoff_path }}"
   register: eva_app_iam_handoff_status
   delegate_to: localhost
-  become: false
-  when: (eva_app_iam_selected | bool) or not (eva_app_workspace_sso_defined | bool)
+  become: true
+  when: not (eva_app_workspace_sso_complete | bool)
 
-- name: Require IAM-to-App handoff when IAM and App share this Operation
-  ansible.builtin.assert:
-    that:
-      - eva_app_iam_handoff_status.stat.exists
-    fail_msg: >-
-      IAM과 EVA App이 같은 Operation에 선택됐지만 IAM handoff가 없습니다.
-      IAM component가 성공적으로 완료됐는지 확인한 뒤 App을 다시 실행하세요.
-  when: eva_app_iam_selected | bool
+- name: Read same-target IAM-to-App handoff
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ eva_app_iam_handoff_path }}"
+  register: eva_app_iam_handoff_raw
+  delegate_to: localhost
+  become: true
+  when:
+    - eva_app_iam_handoff_status.stat.exists | default(false)
+    - not (eva_app_workspace_sso_complete | bool)
 
 - name: Load same-target IAM-to-App handoff
   no_log: true
   ansible.builtin.set_fact:
-    eva_app_iam_handoff: "{{ lookup('ansible.builtin.file', eva_app_iam_handoff_path) | from_yaml }}"
+    eva_app_iam_handoff: "{{ eva_app_iam_handoff_raw.content | b64decode | from_yaml }}"
   when:
     - eva_app_iam_handoff_status.stat.exists | default(false)
-    - (eva_app_iam_selected | bool) or not (eva_app_workspace_sso_defined | bool)
+    - not (eva_app_workspace_sso_complete | bool)
 
 - name: Validate same-target IAM-to-App handoff metadata
   no_log: true
@@ -352,21 +354,23 @@
       }}
   when: eva_app_iam_handoff_status.stat.exists | default(false)
 
-- name: Require complete IAM handoff when IAM and App share this Operation
+- name: Require complete Workspace SSO or valid IAM handoff
   ansible.builtin.assert:
     that:
-      - eva_app_handoff_valid | default(false) | bool
+      - (eva_app_workspace_sso_complete | bool) or (eva_app_handoff_valid | default(false) | bool)
     fail_msg: >-
-      IAM과 EVA App이 같은 Operation에 선택됐지만 IAM handoff metadata 또는 SSO 값이 올바르지 않습니다.
-      IAM component가 성공적으로 완료됐는지 확인한 뒤 App을 다시 실행하세요.
-  when: eva_app_iam_selected | bool
+      EVA App SSO 입력이 필요합니다: site={{ eva_site_id }}, target={{ eva_app_values_host }}.
+      Workspace app.yaml에 app.sso.baseUrl 및 app.sso.adminClientSecret을 모두 지정하거나,
+      {{ eva_app_iam_handoff_path }} 의 schema_version, site_id, target, iam_public_host,
+      generated_at, sso.baseUrl, sso.adminClientSecret을 포함한 유효한 IAM handoff를 준비하세요.
 
-- name: Use current or validated same-target IAM handoff
+- name: Use validated same-target IAM handoff
   no_log: true
   ansible.builtin.set_fact:
-    eva_app_handoff_used: >-
-      {{ (eva_app_iam_selected | bool) or (eva_app_handoff_valid | default(false) | bool) }}
-  when: eva_app_iam_selected | bool or (eva_app_handoff_valid | default(false) | bool)
+    eva_app_handoff_used: "{{ eva_app_handoff_valid | default(false) | bool }}"
+  when:
+    - not (eva_app_workspace_sso_complete | bool)
+    - eva_app_handoff_valid | default(false) | bool
 
 - name: Build IAM SSO values for EVA App
   no_log: true
@@ -446,6 +450,24 @@
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
+- name: Delete existing EVA App TLS Job before upgrade
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - delete
+      - job
+      - "{{ eva_app_name }}-tls-job"
+      - -n
+      - "{{ eva_app_namespace }}"
+      - --ignore-not-found=true
+      - --wait=true
+      - --timeout=120s
+  register: eva_app_tls_job_delete
+  changed_when: "'deleted' in eva_app_tls_job_delete.stdout"
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
 - name: Scale down existing EVA App deployment before reinstall
   ansible.builtin.command: >-
     kubectl scale deployment {{ eva_app_name }} -n {{ eva_app_namespace }} --replicas=0
@@ -507,6 +529,22 @@
     'has been upgraded' in eva_app_install_offline.stdout
     or 'has been installed' in eva_app_install_offline.stdout
   when: airgap_mode | default(false) | bool
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Wait for new EVA App TLS Job to complete
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --for=condition=Complete
+      - "job/{{ eva_app_name }}-tls-job"
+      - -n
+      - "{{ eva_app_namespace }}"
+      - --timeout=120s
+  register: eva_app_tls_job_complete
+  changed_when: false
+  when: not ansible_check_mode
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 

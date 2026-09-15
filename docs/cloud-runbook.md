@@ -78,7 +78,7 @@ RELEASE_ROOT="/opt/eva/releases/$RELEASE_VERSION"
 
 ## 3. Managed Runtime 준비
 
-Cloud Runtime bootstrap은 Ansible과 ansible-core의 version을 고정해 Python venv에 설치하고, standalone Helm, kubectl, kustomize, ORAS 4개 도구만 고정 SHA-256을 검증해 staging Runtime에 구성한다. 검증이 모두 성공한 경우에만 `/opt/eva/runtime`으로 원자적으로 교체한다. 따라서 bootstrap 실패는 기존 Managed Runtime을 변경하지 않는다.
+Cloud Runtime bootstrap은 Ansible과 ansible-core의 version을 고정해 Python venv에 설치하고, `ansible.posix` collection도 `2.2.2`로 고정한다. standalone Helm, kubectl, kustomize, ORAS 4개 도구는 고정 SHA-256을 검증해 staging Runtime에 구성한다. 검증이 모두 성공한 경우에만 `/opt/eva/runtime`으로 원자적으로 교체한다. 따라서 bootstrap 실패는 기존 Managed Runtime을 변경하지 않는다.
 
 Bootstrap은 linux/amd64 Cloud 환경을 지원하며 `python3-venv`가 필요하다. Runtime 안의 Ansible 의존성은 PyPI에서 다운로드하므로, 이 단계에서는 외부 HTTPS 연결이 필요하다. 시스템 PATH의 동명 도구는 Apply에 사용하지 않는다.
 

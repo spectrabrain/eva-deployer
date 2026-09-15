@@ -102,7 +102,7 @@ components:
 
 ```ini
 [eva]
-site-dev-196 ansible_connection=local ansible_user=eva ansible_password='!234qwer' ansible_become=true ansible_become_password='!234qwer'
+site-dev-196 ansible_connection=local ansible_user=eva ansible_password='<SSH_PASSWORD>' ansible_become=true ansible_become_password='<SUDO_PASSWORD>'
 ```
 
 ### `credentials/aws_key.ini`
@@ -164,6 +164,7 @@ site-dev-196:
   app:
     browserTitleName: "EVA DEV(196)"
     backendHost: "app196.eva-dev.lge.com"
+    backendSecure: true
     license:
       activation_mode: "online"
       product_code: "eva-dev"
@@ -174,6 +175,9 @@ site-dev-196:
         port: 32079
         db: 0
         password: eva-redis-pass
+  ingress:
+    tls:
+      hostPath: /home/eva/certs
 ```
 
 `aws_key.ini`, `iam.yaml`, `app.yaml`에는 credential 또는 Secret이 포함될 수 있으므로 조직의 승인된 Secret 관리 절차로 작성하고 Release artifact나 source repository에 넣지 않는다. Runtime과 CLI는 `sudo eva ...`로 실행하므로 root가 이 파일을 읽을 수 있어야 한다.

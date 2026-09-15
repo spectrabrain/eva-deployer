@@ -216,7 +216,7 @@ func stageOverrideInputs(operationDirectory string, document *plan.Document) err
 		if input.Values != nil {
 			values := *input.Values
 			values.StagedPath = filepath.Join(inputDirectory, "values"+filepath.Ext(values.SourcePath))
-			if err := copyVerifiedInput(values.SourcePath, values.StagedPath, values.SHA256, 0o644); err != nil {
+			if err := copyVerifiedInput(values.SourcePath, values.StagedPath, values.SHA256, 0o600); err != nil {
 				return fmt.Errorf("stage %s values override: %w", componentName, err)
 			}
 			staged.Values = &values
@@ -247,7 +247,7 @@ func cloneOverrideInputs(sourceDirectory, destinationDirectory string, document 
 		if override.Chart != nil {
 			chart := *override.Chart
 			chart.StagedPath = filepath.Join(inputDirectory, "chart"+filepath.Ext(chart.StagedPath))
-			if err := copyStagedInput(sourceDirectory, override.Chart.StagedPath, chart.StagedPath, chart.SHA256); err != nil {
+			if err := copyStagedInput(sourceDirectory, override.Chart.StagedPath, chart.StagedPath, chart.SHA256, 0o644); err != nil {
 				return fmt.Errorf("clone %s chart override: %w", componentName, err)
 			}
 			cloned.Chart = &chart
@@ -255,7 +255,7 @@ func cloneOverrideInputs(sourceDirectory, destinationDirectory string, document 
 		if override.Values != nil {
 			values := *override.Values
 			values.StagedPath = filepath.Join(inputDirectory, "values"+filepath.Ext(values.StagedPath))
-			if err := copyStagedInput(sourceDirectory, override.Values.StagedPath, values.StagedPath, values.SHA256); err != nil {
+			if err := copyStagedInput(sourceDirectory, override.Values.StagedPath, values.StagedPath, values.SHA256, 0o600); err != nil {
 				return fmt.Errorf("clone %s values override: %w", componentName, err)
 			}
 			cloned.Values = &values
@@ -279,11 +279,11 @@ func retryOverrideComponent(component string) bool {
 	}
 }
 
-func copyStagedInput(sourceDirectory, source, destination, expectedSHA256 string) error {
+func copyStagedInput(sourceDirectory, source, destination, expectedSHA256 string, mode os.FileMode) error {
 	if !isWithinDirectory(sourceDirectory, source) {
 		return errors.New("staged input escapes source operation directory")
 	}
-	return copyVerifiedInput(source, destination, expectedSHA256, 0o644)
+	return copyVerifiedInput(source, destination, expectedSHA256, mode)
 }
 
 func cloneOverrideVars(sourceDirectory, sourcePath string, override fieldoverride.Component) error {

@@ -562,10 +562,9 @@
     - not ansible_check_mode
     - eva_iam_admin_api_client_secret | length == 0
 
-# A hand-off note for whoever installs eva-app later: the SSO values this deploy
-# produced, and where they go. Nothing in this repo reads it back — it is written for
-# a human. Kept as its own file next to the config role's eva.yaml, because eva.yaml is
-# regenerated wholesale by site_eva_config.yaml and would drop anything merged into it.
+# The App role consumes this handoff only for the same Operation or when its metadata
+# matches the current site and target. It remains generated output next to eva.yaml;
+# it is never copied into a Workspace input file.
 - name: Ensure generated config directory exists on control node
   ansible.builtin.file:
     path: "{{ eva_iam_app_config_dir }}"
@@ -583,18 +582,11 @@
     dest: "{{ eva_iam_app_config_dir }}/eva-iam.yaml"
     mode: "0600"
     content: |
-      # eva-app 에 넣을 SSO 설정. {{ eva_iam_namespace }}/{{ eva_iam_name }} 배포가 생성했습니다.
-      # eva-app 차트의 app.sso.* 에 해당합니다 (차트 3.1.0 이상에만 있는 키입니다).
-      #
-      # 넣는 방법 1 — values/app.yaml (호스트별, 차트 키 그대로):
-      #   {{ ansible_host | default(inventory_hostname) }}:
-      #     app:
-      #       sso:
-      #         baseUrl: {{ eva_iam_app_sso_base_url | to_json }}
-      # 넣는 방법 2 — 실행 시 -e:
-      #   -e eva_app_sso_base_url={{ eva_iam_app_sso_base_url }}
-      #
-      # realm / clientId / adminClientId / brokerMode 는 차트 기본값을 그대로 쓰면 됩니다.
+      schema_version: v1
+      site_id: {{ eva_site_id | to_json }}
+      target: {{ ansible_host | default(inventory_hostname) | to_json }}
+      iam_public_host: {{ eva_iam_effective_host | to_json }}
+      generated_at: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') | to_json }}
       sso:
         baseUrl: {{ eva_iam_app_sso_base_url | to_json }}
       {% if eva_iam_admin_api_client_secret | length > 0 %}
@@ -624,16 +616,13 @@
       - "base URL          : {{ eva_iam_app_sso_base_url }}/"
       - "admin console     : {{ eva_iam_app_sso_base_url }}/admin"
       - "realm             : {{ eva_iam_realm }}"
-      # eva-app 에 넘길 값이 어디 적혀 있는지. 이 파일은 아무것도 읽어가지 않으므로
-      # (사람이 보고 -e 로 넘기는 메모) 경로를 여기서 알려주지 않으면 찾기 어렵습니다.
       - >-
-        eva-app SSO 설정   : {{ (eva_iam_app_config_dir ~ '/eva-iam.yaml')
-                                if eva_iam_write_app_config else '(eva_iam_write_app_config=false — 미작성)' }}
+        eva-app SSO handoff : {{ (eva_iam_app_config_dir ~ '/eva-iam.yaml')
+                                 if eva_iam_write_app_config else '(eva_iam_write_app_config=false — 미작성)' }}
       - >-
-        {{ '  → adminClientSecret 이 비어 있습니다. admin console > Clients > '
-           ~ eva_iam_admin_api_client_id ~ ' > Credentials 에서 복사하세요.'
+        {{ '  → adminClientSecret 이 비어 있어 IAM과 App을 함께 설치할 수 없습니다. IAM 문제를 해결한 뒤 다시 실행하세요.'
            if (eva_iam_write_app_config and (eva_iam_admin_api_client_secret | default('') | length == 0))
-           else '  → eva-app 배포 시 -e eva_app_sso_base_url= / -e eva_app_sso_admin_client_secret= 로 넘기세요.' }}
+           else '  → 같은 Operation의 EVA App 단계가 이 handoff를 자동으로 적용합니다.' }}
       - "resources:"
       - "{{ eva_iam_resources.stdout_lines | default([]) }}"
   when: not ansible_check_mode

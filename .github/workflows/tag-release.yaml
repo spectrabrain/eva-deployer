@@ -82,6 +82,9 @@ jobs:
               "$playbook"
           done
 
+      - name: Test EVA App values contract
+        run: scripts/test/test_eva_app_values.sh
+
       - name: Build and verify Base Release
         run: |
           scripts/release/build_release.sh --tag "$GITHUB_REF_NAME" --dist-dir out/dist

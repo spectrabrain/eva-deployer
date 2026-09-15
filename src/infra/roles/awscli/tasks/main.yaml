@@ -99,7 +99,13 @@
         fail_msg: "aws_key.ini must include aws_access_key_id and aws_secret_access_key entries."
 
     - name: Set aws_access_key_id
-      ansible.builtin.command: aws configure set aws_access_key_id "{{ awscli_access_key_id }}"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/aws
+          - configure
+          - set
+          - aws_access_key_id
+          - "{{ awscli_access_key_id }}"
       changed_when: false
       become: true
       become_user: "{{ awscli_target_user }}"
@@ -107,7 +113,13 @@
         HOME: "{{ awscli_target_home }}"
 
     - name: Set aws_secret_access_key
-      ansible.builtin.command: aws configure set aws_secret_access_key "{{ awscli_secret_access_key }}"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/aws
+          - configure
+          - set
+          - aws_secret_access_key
+          - "{{ awscli_secret_access_key }}"
       changed_when: false
       become: true
       become_user: "{{ awscli_target_user }}"
@@ -115,7 +127,13 @@
         HOME: "{{ awscli_target_home }}"
 
     - name: Set AWS default region
-      ansible.builtin.command: aws configure set region "{{ awscli_region_effective }}"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/aws
+          - configure
+          - set
+          - region
+          - "{{ awscli_region_effective }}"
       changed_when: false
       become: true
       become_user: "{{ awscli_target_user }}"

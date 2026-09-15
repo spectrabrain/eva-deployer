@@ -12,8 +12,28 @@ import (
 	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
+	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/runtime"
 )
+
+func TestReleaseEnvironmentUsesExpectedPreparedRoot(t *testing.T) {
+	resolved := release.Resolved{Root: "/tmp/eva-base-release", Metadata: release.Metadata{Version: "v3.2.0"}}
+	got := releaseEnvironment(resolved)
+	want := map[string]string{
+		"RELEASE_DIR":     "/tmp/eva-base-release",
+		"RELEASE_VERSION": "v3.2.0",
+		"RELEASE_ROOT":    "/opt/eva/releases/v3.2.0",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("releaseEnvironment() = %#v, want %#v", got, want)
+	}
+
+	resolved.Root = "/opt/eva/releases/v3.2.0"
+	resolved.Prepared = true
+	if got := releaseEnvironment(resolved)["RELEASE_ROOT"]; got != resolved.Root {
+		t.Fatalf("prepared RELEASE_ROOT = %q, want %q", got, resolved.Root)
+	}
+}
 
 func TestNormalizeInstallArgsKeepsRepeatableComponentFlags(t *testing.T) {
 	got, err := normalizeInstallArgs([]string{

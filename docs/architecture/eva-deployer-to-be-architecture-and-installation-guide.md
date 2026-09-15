@@ -281,16 +281,16 @@ CLI와 Runtime은 user home에 의존하지 않는 system-wide 경로를 사용�
 └── operations/
 ```
 
-`eva-operators` 그룹은 `/etc/eva/sites/`의 site 입력을 읽고 `/var/lib/eva/operations/`, `/var/log/eva/operations/`의 일반 operation 기록을 생성할 수 있다. Secret 및 credential 파일은 site owner 또는 root만 읽을 수 있게 `0600`으로 관리한다.
+EVA는 별도 operator group을 만들거나 login session의 group membership에 의존하지 않는다. Tool, Runtime, Release와 Secret이 없는 site/inventory 입력은 조회 가능하게 유지한다. credential, Secret values, operation state와 log는 `root:root`로 보호하며, 설치·상태 확인·문제 분석은 권한 있는 계정에서 `sudo eva ...`로 실행한다. Secret 및 credential 파일은 `0600`으로 관리한다.
 
-Release는 `eva-tool-installer.sh`를 함께 제공한다. 이 파일은 source tree의 `scripts/install/install_eva_tool.sh`에서 생성되며, 실행된 release directory의 단일 `eva-tool_*_linux_amd64.tar.gz`와 `checksums.sha256` matching digest를 자동으로 찾아 system-wide EVA Tool을 설치한다. Tool archive는 `bin/eva` regular file 하나만 포함해야 하며, archive가 없거나 여러 개이거나 checksum entry가 없으면 installer는 중단한다. `--artifact`와 `--sha256`은 자동 탐색을 사용할 수 없는 경우의 명시적 override다. installer는 `eva-operators` group을 만들고 sudo 실행 사용자를 group에 추가한 뒤 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
+Release는 `eva-tool-installer.sh`를 함께 제공한다. 이 파일은 source tree의 `scripts/install/install_eva_tool.sh`에서 생성되며, 실행된 release directory의 단일 `eva-tool_*_linux_amd64.tar.gz`와 `checksums.sha256` matching digest를 자동으로 찾아 system-wide EVA Tool을 설치한다. Tool archive는 `bin/eva` regular file 하나만 포함해야 하며, archive가 없거나 여러 개이거나 checksum entry가 없으면 installer는 중단한다. `--artifact`와 `--sha256`은 자동 탐색을 사용할 수 없는 경우의 명시적 override다. installer는 계정이나 group membership을 변경하지 않고 `/opt/eva/{runtime,releases}`, `/var/lib/eva/{artifacts,operations,state}`, `/var/log/eva/operations`을 생성한다. Runtime, Release, site workspace, operation state와 log는 삭제하거나 교체하지 않고 `/opt/eva/tool`과 `/usr/local/bin/eva`만 staging directory와 atomic rename으로 교체한다.
 
 | 경로 | 소유자 | 권한 |
 | --- | --- | --- |
 | `/opt/eva/tool`, `/opt/eva/tool/bin`, `/opt/eva/tool/bin/eva` | `root:root` | `0755` |
-| `/opt/eva/runtime`, `/opt/eva/releases` | `root:eva-operators` | `2775` |
-| `/var/lib/eva`, `/var/lib/eva/{artifacts,operations,state}` | `root:eva-operators` | `2770` |
-| `/var/log/eva`, `/var/log/eva/operations` | `root:eva-operators` | `2770` |
+| `/opt/eva`, `/opt/eva/runtime`, `/opt/eva/releases` | `root:root` | `0755` |
+| `/var/lib/eva`, `/var/lib/eva/{artifacts,operations,state}` | `root:root` | `0700` |
+| `/var/log/eva`, `/var/log/eva/operations` | `root:root` | `0700` |
 
 ```bash
 cd out/dist
@@ -299,7 +299,7 @@ command -v eva
 eva version
 ```
 
-새 operator group membership은 다음 login session부터 적용된다. `--root`, `--bin-dir`, `--state-root`, `--log-root`, `--skip-group-management`은 automated test 전용 override이며 운영 설치에서는 기본 system-wide 경로와 group 관리를 사용한다.
+`--root`, `--bin-dir`, `--state-root`, `--log-root`는 automated test 전용 override다. 운영 설치에서는 기본 system-wide 경로를 사용하며, `sudo` 권한이 있는 계정은 재로그인 없이 즉시 `sudo eva install`, `sudo eva status` 등의 상태 변경·조회 명령을 실행할 수 있다.
 
 ### 2.4 `out/`: 생성 결과와 보존 정책
 
@@ -911,7 +911,7 @@ eva exec ansible-playbook --version
 
 Component alias는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`이다. CLI의 `cloud`, `remote`, `local`은 각각 Ansible의 `cloud_repository`, `remote_repository`, `local_repository`로 변환한다.
 
-현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show|prepare`, `eva install`, `eva plan`, `eva apply`, `eva retry`, `eva status`, `eva troubleshoot apt`, `eva verify`, `eva runtime install|bootstrap|validate|show`, `eva shell`, `eva exec`다. `sudo eva runtime bootstrap`은 linux/amd64 Cloud 환경에서 Ansible과 ansible-core version을 고정해 Python venv에 설치하고, `ansible.posix` collection은 `2.2.2`로 고정해 Runtime 내부 collection 경로에 설치한다. EVA가 실행하는 Ansible은 이 경로를 우선 탐색한다. standalone Helm, kubectl, kustomize, ORAS 4개 도구만 고정 SHA-256으로 검증한다. 이어서 staging Runtime을 검증 후 `/opt/eva/runtime`으로 원자적으로 publish한다. 기본 경로의 ownership 계약을 위해 이 Cloud bootstrap은 root 권한을 요구한다. `--offline <archive>`를 지정하면 Airgap Runtime subtree bootstrap을 수행한다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
+현재 구현된 CLI 기반은 `eva workspace validate|show|ansible-vars|env`, `eva release validate|show|prepare`, `eva install`, `eva plan`, `eva apply`, `eva retry`, `eva status`, `eva troubleshoot apt`, `eva verify`, `eva runtime install|bootstrap|validate|show`, `eva shell`, `eva exec`다. `sudo eva runtime bootstrap`은 linux/amd64 Cloud 환경에서 APT package index를 갱신하고 `ca-certificates`, `python3`, `python3-venv`를 준비한 뒤 Ansible과 ansible-core version을 고정해 Python venv에 설치한다. `ansible.posix` collection은 `2.2.2`로 고정해 Runtime 내부 collection 경로에 설치한다. EVA가 실행하는 Ansible은 이 경로를 우선 탐색한다. standalone Helm, kubectl, kustomize, ORAS 4개 도구만 고정 SHA-256으로 검증한다. 이어서 staging Runtime을 검증 후 `/opt/eva/runtime`으로 원자적으로 publish한다. 기본 경로의 ownership 계약을 위해 이 Cloud bootstrap은 root 권한을 요구한다. `--offline <archive>`를 지정하면 Airgap Runtime subtree bootstrap을 수행한다. Workspace 명령은 `site-values/site.yaml`을 검증하고 system-wide 또는 `--workspace` 입력을 기존 Ansible extra vars와 Harbor/Shell 환경변수로 변환한다. Release 명령은 local Release directory의 `release.yaml`, platform, artifact checksum을 검증한다.
 
 `eva verify [--release <path> | <path>]`는 local Release directory 또는 `release.yaml`을 읽어 platform, 필수 artifact, metadata SHA-256을 검증한다. Airgap Bundle archive를 입력하면 임시 디렉터리에 안전하게 추출해 Bundle의 허용 파일 구조, `checksums.sha256`, nested artifact와 `release.yaml`의 SHA-256 일치까지 검증한 뒤 삭제한다. verify는 artifact cache, Release, operation state를 생성하거나 변경하지 않는다.
 

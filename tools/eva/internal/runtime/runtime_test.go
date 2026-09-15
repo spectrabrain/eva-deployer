@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -180,8 +181,26 @@ func TestBootstrapOnlinePublishesValidatedRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o775 || info.Mode()&os.ModeSetgid == 0 {
-		t.Fatalf("runtime directory mode = %#o, want setgid 2775", info.Mode())
+	if info.Mode().Perm() != 0o755 || info.Mode()&os.ModeSetgid != 0 {
+		t.Fatalf("runtime directory mode = %#o, want 0755", info.Mode())
+	}
+}
+
+func TestInstallCloudPrerequisitesUpdatesAPTAndInstallsRequiredPackages(t *testing.T) {
+	var commands [][]string
+	err := installCloudPrerequisites(func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("installCloudPrerequisites() error = %v", err)
+	}
+	want := [][]string{
+		{"apt-get", "update"},
+		{"apt-get", "install", "--yes", "ca-certificates", "python3", "python3-venv"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("APT commands = %#v, want %#v", commands, want)
 	}
 }
 

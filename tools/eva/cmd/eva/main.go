@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ func usage() {
 	fmt.Println("  workspace show     [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
-	fmt.Println("  release <validate|show|prepare|import-airgap> [--release PATH]")
+	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
 	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
@@ -220,6 +221,11 @@ func runRelease(args []string) error {
 	switch command {
 	case "validate":
 		fmt.Printf("release is valid: %s (version=%s, platform=%s/%s)\n", resolved.Root, resolved.Metadata.Version, resolved.Metadata.Platform.OS, resolved.Metadata.Platform.Arch)
+	case "env":
+		environment := releaseEnvironment(resolved)
+		for _, name := range []string{"RELEASE_DIR", "RELEASE_VERSION", "RELEASE_ROOT"} {
+			fmt.Printf("export %s=%s\n", name, strconv.Quote(environment[name]))
+		}
 	case "show":
 		fmt.Printf("release: %s\n", resolved.Root)
 		fmt.Printf("metadata: %s\n", resolved.MetadataPath)
@@ -244,11 +250,23 @@ func runRelease(args []string) error {
 }
 
 func releaseUsage() {
-	fmt.Println("Usage: eva release <validate|show|prepare> [--release PATH | PATH]")
+	fmt.Println("Usage: eva release <validate|show|prepare|env> [--release PATH | PATH]")
 	fmt.Println("       eva release import-airgap --bundle PATH [--artifact-root PATH]")
 	fmt.Println("")
 	fmt.Println("release prepare extracts a verified local Release into /opt/eva/releases/<version>.")
 	fmt.Println("Release tag and S3 resolution are not implemented yet.")
+}
+
+func releaseEnvironment(resolved release.Resolved) map[string]string {
+	preparedRoot := filepath.Join(release.DefaultInstallRoot, resolved.Metadata.Version)
+	if resolved.Prepared {
+		preparedRoot = resolved.Root
+	}
+	return map[string]string{
+		"RELEASE_DIR":     resolved.Root,
+		"RELEASE_VERSION": resolved.Metadata.Version,
+		"RELEASE_ROOT":    preparedRoot,
+	}
 }
 
 func runInstall(args []string) error {

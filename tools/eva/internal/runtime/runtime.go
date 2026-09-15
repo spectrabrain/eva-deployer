@@ -19,6 +19,7 @@ const DefaultRoot = "/opt/eva/runtime"
 const descriptorName = "runtime.yaml"
 const schemaVersion = "v1"
 const runtimeDirectoryMode = os.FileMode(0o775) | os.ModeSetgid
+const collectionsDirectory = "collections"
 
 var requiredTools = map[string]struct{}{
 	"ansible-playbook": {},
@@ -190,6 +191,12 @@ func (resolved Resolved) ToolNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// CollectionPath is the managed collection root used before any user or
+// system collection path when EVA runs Ansible.
+func (resolved Resolved) CollectionPath() string {
+	return filepath.Join(resolved.Root, collectionsDirectory)
 }
 
 // ToolDirectories returns unique directories containing validated Runtime

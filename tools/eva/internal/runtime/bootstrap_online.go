@@ -19,7 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const cloudRuntimeVersion = "1.0.0"
+const cloudRuntimeVersion = "1.0.1"
 
 type onlineArtifact struct {
 	Name        string
@@ -32,14 +32,16 @@ type onlineArtifact struct {
 type onlineBootstrapSpec struct {
 	Version             string
 	AnsibleRequirements []string
+	AnsibleCollections  []string
 	Artifacts           []onlineArtifact
 }
 
 type onlineBootstrapDependencies struct {
-	download func(string, string) error
-	run      func(string, ...string) error
-	goos     string
-	goarch   string
+	download   func(string, string) error
+	run        func(string, ...string) error
+	runWithEnv func([]string, string, ...string) error
+	goos       string
+	goarch     string
 }
 
 var defaultOnlineBootstrapSpec = onlineBootstrapSpec{
@@ -47,6 +49,9 @@ var defaultOnlineBootstrapSpec = onlineBootstrapSpec{
 	AnsibleRequirements: []string{
 		"ansible==13.6.0",
 		"ansible-core==2.20.5",
+	},
+	AnsibleCollections: []string{
+		"ansible.posix:==2.2.2",
 	},
 	Artifacts: []onlineArtifact{
 		{
@@ -83,10 +88,11 @@ var defaultOnlineBootstrapSpec = onlineBootstrapSpec{
 // The payload is staged and validated before Install atomically publishes it.
 func BootstrapOnline(root string) (Resolved, error) {
 	return bootstrapOnline(root, defaultOnlineBootstrapSpec, onlineBootstrapDependencies{
-		download: downloadFile,
-		run:      runCommand,
-		goos:     goruntime.GOOS,
-		goarch:   goruntime.GOARCH,
+		download:   downloadFile,
+		run:        runCommand,
+		runWithEnv: runCommandWithEnv,
+		goos:       goruntime.GOOS,
+		goarch:     goruntime.GOARCH,
 	})
 }
 
@@ -97,7 +103,7 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 	if spec.Version == "" || len(spec.AnsibleRequirements) == 0 || len(spec.Artifacts) == 0 {
 		return Resolved{}, fmt.Errorf("Cloud Runtime bootstrap specification is incomplete")
 	}
-	if dependencies.download == nil || dependencies.run == nil {
+	if dependencies.download == nil || dependencies.run == nil || dependencies.runWithEnv == nil {
 		return Resolved{}, fmt.Errorf("Cloud Runtime bootstrap dependencies are incomplete")
 	}
 	if root == "" {
@@ -130,6 +136,9 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 	if err := dependencies.run(python, append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--no-input"}, spec.AnsibleRequirements...)...); err != nil {
 		return Resolved{}, fmt.Errorf("install Runtime Ansible dependencies: %w", err)
 	}
+	if err := installAnsibleCollections(staging, spec.AnsibleCollections, dependencies.runWithEnv); err != nil {
+		return Resolved{}, err
+	}
 
 	downloadDirectory := filepath.Join(staging, ".downloads")
 	if err := os.MkdirAll(downloadDirectory, 0o700); err != nil {
@@ -150,6 +159,30 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 		return Resolved{}, fmt.Errorf("validate staged Cloud Runtime: %w", err)
 	}
 	return Install(staging, destination)
+}
+
+func installAnsibleCollections(root string, collections []string, run func([]string, string, ...string) error) error {
+	if len(collections) == 0 {
+		return nil
+	}
+	galaxy := filepath.Join(root, "venv", "bin", "ansible-galaxy")
+	collectionRoot := filepath.Join(root, "collections")
+	arguments := []string{"collection", "install", "--no-deps", "--collections-path", collectionRoot}
+	arguments = append(arguments, collections...)
+	if err := run(collectionInstallEnvironment(os.Environ(), collectionRoot), galaxy, arguments...); err != nil {
+		return fmt.Errorf("install pinned Runtime Ansible collections: %w", err)
+	}
+	return nil
+}
+
+func collectionInstallEnvironment(base []string, collectionRoot string) []string {
+	environment := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		if !strings.HasPrefix(entry, "ANSIBLE_COLLECTIONS_PATH=") {
+			environment = append(environment, entry)
+		}
+	}
+	return append(environment, "ANSIBLE_COLLECTIONS_PATH="+collectionRoot)
 }
 
 func installOnlineArtifact(root, downloadDirectory string, artifact onlineArtifact, download func(string, string) error) error {
@@ -227,7 +260,12 @@ func downloadFile(source, destination string) error {
 }
 
 func runCommand(name string, args ...string) error {
+	return runCommandWithEnv(os.Environ(), name, args...)
+}
+
+func runCommandWithEnv(environment []string, name string, args ...string) error {
 	command := exec.Command(name, args...)
+	command.Env = environment
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	return command.Run()

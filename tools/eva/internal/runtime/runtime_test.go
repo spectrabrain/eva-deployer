@@ -185,6 +185,48 @@ func TestBootstrapOnlinePublishesValidatedRuntime(t *testing.T) {
 	}
 }
 
+func TestBootstrapOnlineInstallsPinnedAnsibleCollections(t *testing.T) {
+	spec, payloads := testOnlineBootstrapSpec(t)
+	spec.AnsibleCollections = []string{"ansible.posix:==2.2.2"}
+	dependencies := testOnlineBootstrapDependencies(t, payloads)
+	runWithEnv := dependencies.runWithEnv
+	var galaxyArgs []string
+	var galaxyEnvironment []string
+	dependencies.runWithEnv = func(environment []string, name string, args ...string) error {
+		if strings.HasSuffix(name, filepath.Join("venv", "bin", "ansible-galaxy")) {
+			galaxyArgs = append([]string(nil), args...)
+			galaxyEnvironment = append([]string(nil), environment...)
+		}
+		return runWithEnv(environment, name, args...)
+	}
+
+	if _, err := bootstrapOnline(filepath.Join(t.TempDir(), "runtime"), spec, dependencies); err != nil {
+		t.Fatalf("bootstrapOnline() error = %v", err)
+	}
+	if len(galaxyArgs) != 6 ||
+		galaxyArgs[0] != "collection" || galaxyArgs[1] != "install" ||
+		galaxyArgs[2] != "--no-deps" || galaxyArgs[3] != "--collections-path" ||
+		!strings.HasSuffix(galaxyArgs[4], "collections") || galaxyArgs[5] != "ansible.posix:==2.2.2" {
+		t.Fatalf("ansible-galaxy arguments = %#v", galaxyArgs)
+	}
+	collectionPath := galaxyArgs[4]
+	if !containsEnvironment(galaxyEnvironment, "ANSIBLE_COLLECTIONS_PATH="+collectionPath) {
+		t.Fatalf("ansible-galaxy environment = %#v", galaxyEnvironment)
+	}
+}
+
+func TestCollectionInstallEnvironmentUsesOnlyStagingCollectionPath(t *testing.T) {
+	environment := collectionInstallEnvironment(
+		[]string{"KEEP=value", "ANSIBLE_COLLECTIONS_PATH=/operator/collections"},
+		"/opt/eva/.eva-runtime-cloud-123/collections",
+	)
+	if !containsEnvironment(environment, "KEEP=value") ||
+		!containsEnvironment(environment, "ANSIBLE_COLLECTIONS_PATH=/opt/eva/.eva-runtime-cloud-123/collections") ||
+		containsEnvironment(environment, "ANSIBLE_COLLECTIONS_PATH=/operator/collections") {
+		t.Fatalf("collection install environment = %#v", environment)
+	}
+}
+
 func TestBootstrapOnlineLeavesExistingRuntimeWhenDownloadFails(t *testing.T) {
 	destination := createRuntime(t)
 	spec, payloads := testOnlineBootstrapSpec(t)
@@ -246,28 +288,30 @@ func testOnlineBootstrapSpec(t *testing.T) (onlineBootstrapSpec, map[string][]by
 
 func testOnlineBootstrapDependencies(t *testing.T, payloads map[string][]byte) onlineBootstrapDependencies {
 	t.Helper()
-	return onlineBootstrapDependencies{
-		goos:   "linux",
-		goarch: "amd64",
-		run: func(name string, args ...string) error {
-			if name != "python3" {
-				return nil
-			}
-			venv := args[len(args)-1]
-			for _, path := range []string{"bin/python", "bin/ansible-playbook"} {
-				fullPath := filepath.Join(venv, path)
-				if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-					return err
-				}
-				contents := []byte("#!/bin/sh\n")
-				if path == "bin/ansible-playbook" {
-					contents = []byte("#!" + filepath.Join(venv, "bin", "python") + "\nprint('ansible')\n")
-				}
-				if err := os.WriteFile(fullPath, contents, 0o755); err != nil {
-					return err
-				}
-			}
+	run := func(name string, args ...string) error {
+		if name != "python3" {
 			return nil
+		}
+		venv := args[len(args)-1]
+		for _, path := range []string{"bin/python", "bin/ansible-playbook"} {
+			fullPath := filepath.Join(venv, path)
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+				return err
+			}
+			contents := []byte("#!/bin/sh\n")
+			if path == "bin/ansible-playbook" {
+				contents = []byte("#!" + filepath.Join(venv, "bin", "python") + "\nprint('ansible')\n")
+			}
+			if err := os.WriteFile(fullPath, contents, 0o755); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return onlineBootstrapDependencies{
+		goos: "linux", goarch: "amd64", run: run,
+		runWithEnv: func(_ []string, name string, args ...string) error {
+			return run(name, args...)
 		},
 		download: func(source, destination string) error {
 			name := filepath.Base(source)
@@ -278,6 +322,15 @@ func testOnlineBootstrapDependencies(t *testing.T, payloads map[string][]byte) o
 			return os.WriteFile(destination, contents, 0o600)
 		},
 	}
+}
+
+func containsEnvironment(environment []string, expected string) bool {
+	for _, entry := range environment {
+		if entry == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func testArchive(t *testing.T, name string, contents []byte) []byte {

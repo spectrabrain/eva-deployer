@@ -68,7 +68,11 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 			return record, err
 		}
 	}
-	ansiblePath, inventory, releaseRoot, err := preflight(options.RuntimeRoot, document)
+	resolvedRuntime, inventory, releaseRoot, err := preflight(options.RuntimeRoot, document)
+	if err != nil {
+		return record, err
+	}
+	ansiblePath, err := resolvedRuntime.ToolPath("ansible-playbook")
 	if err != nil {
 		return record, err
 	}
@@ -108,7 +112,7 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 		stepStartedAt := options.Now().UTC()
 		command := exec.Command(ansiblePath, ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars, overrideVars[step.Component])...)
 		command.Dir = releaseRoot
-		command.Env = commandEnvironment(document, releaseRoot, internalLogPath)
+		command.Env = commandEnvironment(document, releaseRoot, internalLogPath, resolvedRuntime.CollectionPath())
 		output := io.MultiWriter(options.Stdout, combinedLog)
 		command.Stdout = output
 		command.Stderr = io.MultiWriter(options.Stderr, combinedLog)
@@ -128,40 +132,36 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 	return finish(options, record, result, operation.Succeeded, nil)
 }
 
-func preflight(runtimeRoot string, document plan.Document) (string, string, string, error) {
+func preflight(runtimeRoot string, document plan.Document) (runtime.Resolved, string, string, error) {
 	resolvedRuntime, err := runtime.Resolve(runtimeRoot)
 	if err != nil {
-		return "", "", "", err
-	}
-	ansiblePath, err := resolvedRuntime.ToolPath("ansible-playbook")
-	if err != nil {
-		return "", "", "", err
+		return runtime.Resolved{}, "", "", err
 	}
 	releaseRoot, err := filepath.Abs(document.ReleaseRoot)
 	if err != nil {
-		return "", "", "", fmt.Errorf("resolve plan release root: %w", err)
+		return runtime.Resolved{}, "", "", fmt.Errorf("resolve plan release root: %w", err)
 	}
 	if err := requireRegular(filepath.Join(releaseRoot, "ansible.cfg")); err != nil {
-		return "", "", "", fmt.Errorf("prepared Release source is invalid: %w", err)
+		return runtime.Resolved{}, "", "", fmt.Errorf("prepared Release source is invalid: %w", err)
 	}
 	inventory := filepath.Join(document.Workspace, "inventory", "inventory.ini")
 	if err := requireRegular(inventory); err != nil {
-		return "", "", "", fmt.Errorf("workspace inventory is invalid: %w", err)
+		return runtime.Resolved{}, "", "", fmt.Errorf("workspace inventory is invalid: %w", err)
 	}
 	for _, step := range document.Steps {
 		expected, ok := expectedPlaybooks[step.Component]
 		if !ok || step.Playbook != expected {
-			return "", "", "", fmt.Errorf("operation plan has invalid step %q (%s)", step.Component, step.Playbook)
+			return runtime.Resolved{}, "", "", fmt.Errorf("operation plan has invalid step %q (%s)", step.Component, step.Playbook)
 		}
 		playbook, err := playbookPath(releaseRoot, step.Playbook)
 		if err != nil {
-			return "", "", "", fmt.Errorf("operation step %q: %w", step.Component, err)
+			return runtime.Resolved{}, "", "", fmt.Errorf("operation step %q: %w", step.Component, err)
 		}
 		if err := requireRegular(playbook); err != nil {
-			return "", "", "", fmt.Errorf("prepared Release source is invalid: %w", err)
+			return runtime.Resolved{}, "", "", fmt.Errorf("prepared Release source is invalid: %w", err)
 		}
 	}
-	return ansiblePath, inventory, releaseRoot, nil
+	return resolvedRuntime, inventory, releaseRoot, nil
 }
 
 func finish(options Options, record operation.Record, result operation.Result, status string, applyErr error) (operation.Record, error) {
@@ -257,8 +257,8 @@ func ansibleArgs(inventory, playbook string, extraVars []string, overrideVars st
 	return args
 }
 
-func commandEnvironment(document plan.Document, releaseRoot, internalLogPath string) []string {
-	values := make(map[string]string, len(document.Environment)+2)
+func commandEnvironment(document plan.Document, releaseRoot, internalLogPath, collectionPath string) []string {
+	values := make(map[string]string, len(document.Environment)+3)
 	for _, entry := range os.Environ() {
 		name, value, found := strings.Cut(entry, "=")
 		if found {
@@ -270,11 +270,19 @@ func commandEnvironment(document plan.Document, releaseRoot, internalLogPath str
 	}
 	values["EVA_REPO_ROOT"] = releaseRoot
 	values["ANSIBLE_LOG_PATH"] = internalLogPath
+	values["ANSIBLE_COLLECTIONS_PATH"] = prependPath(collectionPath, values["ANSIBLE_COLLECTIONS_PATH"])
 	environment := make([]string, 0, len(values))
 	for name, value := range values {
 		environment = append(environment, name+"="+value)
 	}
 	return environment
+}
+
+func prependPath(path, existing string) string {
+	if existing == "" {
+		return path
+	}
+	return path + string(os.PathListSeparator) + existing
 }
 
 func playbookPath(root, relativePath string) (string, error) {

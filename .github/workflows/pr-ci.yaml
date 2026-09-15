@@ -80,6 +80,9 @@ jobs:
       - name: Test EVA App values contract
         run: scripts/test/test_eva_app_values.sh
 
+      - name: Test Config GPU CDI contract
+        run: bash -x scripts/test/test_config_gpu_cdi.sh
+
       - name: Smoke test Base Release builder
         run: |
           git config user.name eva-ci

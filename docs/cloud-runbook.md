@@ -115,6 +115,8 @@ aws_secret_access_key = <AWS_SECRET_ACCESS_KEY>
 region = ap-northeast-2
 ```
 
+`credentials/aws_key.ini`는 EVA Workspace의 입력 파일이다. `awscli` role은 선택된 Workspace의 이 파일만 읽어 inventory target user의 `~/.aws/credentials`와 `~/.aws/config`을 구성한다. Workspace root나 `/home/eva/.aws`에 별도의 `aws_key.ini`를 둘 필요는 없다.
+
 ### `site-values/iam.yaml`
 
 inventory hostname을 최상위 key로 사용한다. IAM public host, TLS 경로, realm administrator password, App redirect URI와 image pull 경로를 설치 환경에 맞게 작성한다.
@@ -178,14 +180,11 @@ site-dev-196:
 현재 디렉터리가 Release root인 상태에서 한 번만 설치를 실행한다. 이 명령은 Workspace와 Release를 검증하고 Plan 요약을 출력한 뒤 `precondition → infra → config → iam → agent → vision → app` 순서로 적용한다. Workspace 위치에 맞는 명령 하나만 사용한다.
 
 ```bash
-# 표준 Workspace: /etc/eva/sites/site-dev-196/
-sudo eva install . --site site-dev-196 --yes
-
-# 외부 Workspace 예: /home/eva/site-dev-196/
 sudo eva install . --workspace /home/eva/site-dev-196 --yes
 ```
 
-`--site site-dev-196`은 표준 `/etc/eva/sites/site-dev-196/` Workspace를 선택한다. 외부 Workspace는 해당 절대 경로를 `--workspace`에 전달한다. `--yes`는 Plan 적용에 동의하는 비대화형 옵션이다.
+외부 Workspace는 해당 절대 경로를 `--workspace`에 전달한다. `--yes`는 Plan 적용에 동의하는 비대화형 옵션이다.
+Workspace를 /etc/eva/sites/<site-id>에 배치한 경우에만 --workspace 대신 --site <site-id>를 사용할 수 있다.
 
 Cloud 설치는 Operation을 `running`으로 바꾸기 전에 control node의 `apt-get update`를 진단한다. Jenkins LTS 2026 signing key 누락처럼 EVA가 지원하는 오류가 발견되면, interactive session에서만 변경 대상과 위험을 표시하고 별도 승인을 요청한다. `eva install --yes`의 `--yes`는 설치 실행 동의일 뿐 APT repository 변경 동의가 아니다.
 
@@ -228,22 +227,20 @@ sudo eva status
 
 ## 6. 설치 결과 확인
 
-설치가 성공하면 Managed Runtime을 통해 Infrastructure와 Solution 상태를 확인한다.
+설치 결과는 아래 한 명령으로 확인한다. 최신 Operation에서 선택한 EVA component만 확인하며, 정상 상태에서는 핵심 요약만 출력한다.
 
 ```bash
-eva exec kubectl get nodes -o wide
-eva exec kubectl get pods -A
-eva exec helm version --short
-eva exec kubectl get all -n eva-iam
-eva exec kubectl get ingress -n eva-iam
-eva exec kubectl get all -n eva-agent
-eva exec kubectl get all -n eva-vision
-eva exec kubectl get all -n eva-app
-eva exec kubectl get ingress -n eva-app
-
-sudo systemctl is-active docker
-sudo systemctl is-active k3s
+sudo eva check
 ```
+
+`eva check`는 Runtime version, Docker, k3s, Kubernetes node readiness, 각 선택 component의 workload/Pod/Ingress readiness, 최신 Operation 상태를 확인한다. 문제가 있으면 실패 항목과 다음 확인 명령만 출력한다.
+
+```bash
+sudo eva check --verbose
+sudo eva status
+```
+
+`--verbose`는 실패한 component에 한해 unhealthy Pod, workload readiness, service, 최근 Kubernetes event를 출력한다. 정상 상태에서는 raw Kubernetes 객체 목록을 출력하지 않는다.
 
 아래 파일은 해당 site의 precondition 결과다. 공개 IP, DNS, 외부 HTTPS 접근성, AWS CLI installer download 검증 결과를 검토한다.
 
@@ -273,10 +270,10 @@ IAM handoff는 `/opt/eva/releases/<version>/out/work/config/<site>/<target>/eva-
 필요한 component만 설치할 때는 `--component`를 사용한다. 예를 들어 App만 설치하려면 다음과 같이 실행한다.
 
 ```bash
-sudo eva install . --site site-dev-196 --component app --yes
+sudo eva install . --workspace /home/eva/site-dev-196 --component app --yes
 ```
 
-외부 Workspace를 사용하는 경우 `--site site-dev-196` 대신 `--workspace /home/eva/site-dev-196`을 사용한다. Agent, Vision, App을 선택하면 필요한 Config 단계는 CLI가 자동으로 포함하며, 선택하지 않은 다른 제품 component는 실행하지 않는다. IAM, Agent, Vision, App도 같은 방식으로 각각 `--component iam`, `--component agent`, `--component vision`, `--component app`을 지정한다. n8n은 필요한 경우에만 `site.yaml`에서 활성화해 선택한다.
+외부 Workspace를 사용하는 경우 `--workspace /home/eva/site-dev-196`와 같이 사용한다. Agent, Vision, App을 선택하면 필요한 Config 단계는 CLI가 자동으로 포함하며, 선택하지 않은 다른 제품 component는 실행하지 않는다. IAM, Agent, Vision, App도 같은 방식으로 각각 `--component iam`, `--component agent`, `--component vision`, `--component app`을 지정한다. n8n은 필요한 경우에만 `site.yaml`에서 활성화해 선택한다.
 
 ## 9. 변경 관리와 정리
 

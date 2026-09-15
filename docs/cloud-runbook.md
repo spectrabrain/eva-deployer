@@ -149,10 +149,14 @@ Cloud 설치에 필요한 AWS credential은 Workspace에 준비한다. 실제 ke
 ```bash
 sudo install -o root -g eva-operators -m 0600 /dev/null \
   "$WORKSPACE/credentials/aws_key.ini"
-sudoedit "$WORKSPACE/credentials/aws_key.ini"
+sudo tee "$WORKSPACE/credentials/aws_key.ini" >/dev/null <<'EOF'
+aws_access_key_id = <AWS_ACCESS_KEY_ID>
+aws_secret_access_key = <AWS_SECRET_ACCESS_KEY>
+region = ap-northeast-2
+EOF
 ```
 
-파일에는 `aws_access_key_id`, `aws_secret_access_key`, `region`을 입력한다.
+`<AWS_ACCESS_KEY_ID>`, `<AWS_SECRET_ACCESS_KEY>`를 사이트별 credential로 교체한다.
 
 ## 5. IAM Workspace Values 작성
 

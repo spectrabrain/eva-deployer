@@ -71,8 +71,18 @@
 
 - name: Build eva.yaml content
   ansible.builtin.set_fact:
-    config_eva_perceptor_worker_num: "{{ [((config_effective_gpu_count | int) * 2), 8] | min }}"
-    config_eva_detector_worker_num: "{{ [((config_effective_gpu_count | int) * 8), 32] | min }}"
+    config_eva_perceptor_worker_num: >-
+      {{
+        [((config_effective_gpu_count | int) * 2), 8] | min
+        if (config_effective_gpu_count | int) > 0
+        else 2
+      }}
+    config_eva_detector_worker_num: >-
+      {{
+        [((config_effective_gpu_count | int) * 8), 32] | min
+        if (config_effective_gpu_count | int) > 0
+        else 16
+      }}
     config_eva_request_timeout_seconds: "{{ 300 if (config_effective_gpu_count | int) >= 2 else 600 }}"
     config_eva_replica_count: "{{ (config_effective_gpu_count | int) - 1 if (config_effective_gpu_count | int) > 1 else 1 }}"
     config_eva_nfs_share_path: "{{ nfs_share_path | default('/share/eva-agent') }}"

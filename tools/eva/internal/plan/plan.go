@@ -106,7 +106,7 @@ func steps(components map[string]bool) []Step {
 	if components["infra"] {
 		steps = append(steps, Step{Component: "infra", Playbook: "src/infra/playbooks/site_infra.yaml"})
 	}
-	if components["agent"] || components["vision"] {
+	if components["agent"] || components["vision"] || components["app"] {
 		steps = append(steps, Step{Component: "config", Playbook: "src/solution/playbooks/site_eva_config.yaml"})
 	}
 	if components["iam"] {

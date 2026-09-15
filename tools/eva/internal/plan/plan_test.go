@@ -43,23 +43,36 @@ func TestBuildOrdersSelectedComponentsAndConfig(t *testing.T) {
 	}
 }
 
-func TestBuildAddsConfigForScopedAgentPlan(t *testing.T) {
-	workspaceResolved := workspace.Resolved{
-		SiteID: "customer-a",
-		Root:   "/etc/eva/sites/customer-a",
-		Config: workspace.Config{Components: map[string]bool{"agent": true}},
+func TestBuildOrdersScopedComponentPlans(t *testing.T) {
+	tests := []struct {
+		name       string
+		components map[string]bool
+		want       []string
+	}{
+		{name: "IAM only", components: map[string]bool{"iam": true}, want: []string{"precondition", "iam"}},
+		{name: "Agent only", components: map[string]bool{"agent": true}, want: []string{"precondition", "config", "agent"}},
+		{name: "Vision only", components: map[string]bool{"vision": true}, want: []string{"precondition", "config", "vision"}},
+		{name: "App only", components: map[string]bool{"app": true}, want: []string{"precondition", "config", "app"}},
 	}
+
 	releaseResolved := release.Resolved{Root: "/releases/3.2.0"}
 	releaseResolved.Metadata.Version = "3.2.0"
-
-	document := Build(workspaceResolved, releaseResolved, time.Now())
-	got := make([]string, 0, len(document.Steps))
-	for _, step := range document.Steps {
-		got = append(got, step.Component)
-	}
-	want := []string{"precondition", "config", "agent"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("step order = %v, want %v", got, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspaceResolved := workspace.Resolved{
+				SiteID: "customer-a",
+				Root:   "/etc/eva/sites/customer-a",
+				Config: workspace.Config{Components: test.components},
+			}
+			document := Build(workspaceResolved, releaseResolved, time.Now())
+			got := make([]string, 0, len(document.Steps))
+			for _, step := range document.Steps {
+				got = append(got, step.Component)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("step order = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 

@@ -1113,16 +1113,9 @@ kubectl rollout status deployment/eva-iam-keycloak -n eva-iam --timeout=600s
 curl -fsS https://iam.customer.example/iam/realms/eva-iam/.well-known/openid-configuration
 ```
 
-IAM role은 control node의 `out/work/config/<site>/<target>/eva-iam.yaml`에 App SSO handoff를 권한 `0600`으로 기록합니다. 현재 `site_eva.yaml`은 이 파일을 자동 병합하지 않으므로, 파일의 `sso.baseUrl`과 `sso.adminClientSecret`을 해당 대상의 `workspace/site-values/app.yaml` `app.sso` 아래에 넣거나 EVA App 실행 시 `eva_app_sso_base_url`과 `eva_app_sso_admin_client_secret` extra var로 전달해야 합니다. Secret을 shell history나 로그에 남기지 않도록 values 파일 또는 Secret 관리 수단을 사용하세요.
+IAM과 App이 같은 EVA CLI Operation에 포함되면, IAM role은 control node의 `out/work/config/<site>/<target>/eva-iam.yaml`에 App SSO handoff를 권한 `0600`으로 기록하고 App role이 이를 자동으로 읽어 `app.sso.baseUrl`, `app.sso.adminClientSecret`에 병합합니다. Workspace의 `site-values/app.yaml`은 설치자 입력으로 유지되며 실행 중 수정하지 않습니다. IAM handoff가 없거나 SSO 값이 비어 있으면 App 단계는 secret을 출력하지 않고 명확한 오류로 중단합니다.
 
-```yaml
-# workspace/site-values/app.yaml
-10.0.0.10:
-  app:
-    sso:
-      baseUrl: "https://iam.customer.example/iam"
-      adminClientSecret: "<VALUE_FROM_eva-iam.yaml>"
-```
+App-only Operation은 `workspace/site-values/app.yaml`의 `app.sso`를 공식 입력으로 사용한다. 이 값이 없을 때만 현재 Workspace의 동일 site/target metadata를 통과한 handoff를 재사용하며, 다른 site 또는 target의 handoff는 자동으로 사용하지 않는다. 중앙 IAM을 별도 서버 또는 Workspace에 구성하는 경우에는 각 App Workspace의 `app.sso.baseUrl`, `app.sso.adminClientSecret`에 중앙 IAM 값을 명시한다.
 
 ---
 
@@ -1234,8 +1227,7 @@ ansible-playbook -i 'localhost,' -c local site_eva_iam.yaml -K \
   -e '{"eva_iam_app_redirect_uris": ["https://10.158.2.185/*"]}'
 
 ```
-설치가 정상적으로 완료되면, 현재 경로의 config 폴더 내 eva-iam.yaml에 credential 값이 저장됩니다.
-해당 값을 EVA APP 설치 시 입력으로 넣어줍니다.
+이 레거시 Ansible 예시는 EVA CLI Operation의 자동 handoff 경로를 사용하지 않는다. 현재 설치 절차에서는 `eva install`을 사용하며, 중앙 IAM을 별도 서버 또는 Workspace에 구성할 때만 App Workspace의 `site-values/app.yaml`에 `app.sso`를 명시한다. generated handoff의 Secret을 사람이 다른 App 입력으로 복사하지 않는다.
 
 ## 4. EVA APP 설치
 
@@ -1244,9 +1236,7 @@ ansible-playbook -i 'localhost,' -c local site_eva_app.yaml -K \
   -e repository_mode=cloud_repository \
   -e repository_registry=localhost:32080 \
   -e eva_app_backend_host=10.158.2.185 \
-  -e eva_app_backend_secure=true \
-  -e eva_app_sso_base_url=https://10.158.2.185/iam \
-  -e eva_app_sso_admin_client_secret='<위 eva-iam.yaml의 credential 값>'
+  -e eva_app_backend_secure=true
 ```
 
 ## 5. EVA Vision Secret 생성

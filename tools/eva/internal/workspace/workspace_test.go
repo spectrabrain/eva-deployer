@@ -30,6 +30,7 @@ components:
 		"eva_workspace_root=" + root,
 		"eva_site_id=customer-a",
 		"repository_mode=remote_repository",
+		"eva_enabled_components=app,infra",
 		"repository_registry=harbor.customer.example:32080",
 		"repository_project=eva",
 	}

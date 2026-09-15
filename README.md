@@ -68,7 +68,7 @@ command -v eva
 eva version
 ```
 
-설치 사용자는 `eva-operators` 그룹에 추가됩니다. 새 그룹 권한은 다음 login session부터 적용됩니다.
+Installer는 계정이나 group membership을 변경하지 않습니다. Tool, Runtime, Release는 바로 조회할 수 있고, Workspace의 Secret과 Operation 상태·로그를 다루는 명령은 `sudo eva ...`로 실행합니다. 따라서 `sudo` 권한이 있는 `eva` 또는 DevOps 계정은 재로그인 없이 바로 사용할 수 있습니다.
 
 ---
 

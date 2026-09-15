@@ -1,11 +1,13 @@
 - name: Check nvidia-ctk binary exists
   ansible.builtin.stat:
-    path: /usr/bin/nvidia-ctk
+    path: "{{ config_gpu_cdi_nvidia_ctk_path | default('/usr/bin/nvidia-ctk') }}"
   register: config_gpu_cdi_nvidia_ctk
 
 - name: Fail when nvidia-ctk is missing
   ansible.builtin.fail:
-    msg: "nvidia-ctk not found at /usr/bin/nvidia-ctk. Install NVIDIA Container Toolkit first."
+    msg: >-
+      nvidia-ctk not found at {{ config_gpu_cdi_nvidia_ctk_path | default('/usr/bin/nvidia-ctk') }}.
+      Install NVIDIA Container Toolkit first.
   when:
     - not config_gpu_cdi_nvidia_ctk.stat.exists
 
@@ -19,13 +21,15 @@
 
 - name: Force NVIDIA container runtime mode to cdi
   ansible.builtin.lineinfile:
-    path: /etc/nvidia-container-runtime/config.toml
+    path: "{{ config_gpu_cdi_runtime_config_path | default('/etc/nvidia-container-runtime/config.toml') }}"
     regexp: '^\s*#?\s*mode\s*='
     line: 'mode = "cdi"'
     insertafter: '^\[nvidia-container-runtime\]'
 
 - name: Generate NVIDIA CDI spec
-  ansible.builtin.command: /usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+  ansible.builtin.command: >-
+    {{ config_gpu_cdi_nvidia_ctk_path | default('/usr/bin/nvidia-ctk') }}
+    cdi generate --output=/etc/cdi/nvidia.yaml
   register: config_gpu_cdi_generate
   changed_when: true
 
@@ -34,6 +38,7 @@
   register: config_gpu_cdi_mig_mode_status
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Check gpu-mig auto-enable systemd unit exists
   ansible.builtin.stat:
@@ -70,7 +75,7 @@
 
       [Service]
       Type=oneshot
-      ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+      ExecStart={{ config_gpu_cdi_nvidia_ctk_path | default('/usr/bin/nvidia-ctk') }} cdi generate --output=/etc/cdi/nvidia.yaml
 
       [Install]
       WantedBy=multi-user.target
@@ -83,6 +88,7 @@
   ansible.builtin.systemd:
     name: nvidia-cdi-refresh.service
     enabled: true
+  when: not ansible_check_mode
 
 - name: Mark GPU CDI policy status
   ansible.builtin.set_fact:

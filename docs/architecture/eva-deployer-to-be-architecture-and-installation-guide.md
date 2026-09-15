@@ -679,7 +679,8 @@ Repository mode별 목표 운영 원칙:
 | --- | --- | --- |
 | `precondition.yaml` | `out/work/config/<site>/<host>/` | OS, 네트워크, GPU, 디스크 사전 조사. 검토만 수행 |
 | `eva.yaml` | `out/work/config/<site>/<host>/` | GPU, MIG, NFS 등 파생 설정. 직접 수정 금지 |
-| `secret.yaml`, `eva-iam.yaml` | `out/work/config/<site>/<host>/` | 민감한 cluster Secret 및 IAM-to-App handoff. 권한 `0600`으로 생성 |
+| `secret.yaml` | `out/work/config/<site>/<host>/` | 민감한 cluster Secret. 권한 `0600`으로 생성 |
+| `eva-iam.yaml` | `/var/lib/eva/sites/<site>/<host>/` | IAM-to-App persistent handoff. `root:root`, 권한 `0600`으로 생성 |
 | `harbor-endpoint.yaml` | `out/work/config/<site>/` | repository registry, project 등 site 공통 Harbor endpoint metadata |
 | `chart-defaults.yaml` | `out/work/rendered/<site>/<host>/<component>/` | 선택한 Chart 기본값 전체. 참고용 |
 | `effective-input-values.yaml`, `resolved-values.yaml` | `out/work/rendered/<site>/<host>/<component>/` | Helm 입력 병합값과 최종 적용값. Secret 포함 파일은 `0600`으로 보존하고 검토만 수행 |

@@ -293,11 +293,22 @@
     eva_app_values_override: "{{ (eva_app_values_config | default({}, true)).get(eva_app_values_host, {}) }}"
   when: eva_app_values_file_status.stat.exists
 
-- name: Determine whether Workspace defines EVA App SSO
+- name: Determine whether Workspace defines complete EVA App SSO
   no_log: true
   ansible.builtin.set_fact:
     eva_app_workspace_sso_defined: >-
-      {{ ((eva_app_values_override | default({}, true)).app | default({}, true)).sso is defined }}
+      {{
+        (((eva_app_values_override | default({}, true)).app
+          | default({}, true)).sso | default({}, true)) is mapping
+        and
+        (((((eva_app_values_override | default({}, true)).app
+             | default({}, true)).sso | default({}, true)).baseUrl
+          | default('', true) | length) > 0)
+        and
+        (((((eva_app_values_override | default({}, true)).app
+             | default({}, true)).sso | default({}, true)).adminClientSecret
+          | default('', true) | length) > 0)
+      }}
 
 - name: Check same-target IAM-to-App handoff
   ansible.builtin.stat:

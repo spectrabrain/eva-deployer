@@ -16,6 +16,7 @@ import (
 	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/fieldoverride"
+	"eva-deployer/tools/eva/internal/health"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/release"
@@ -53,6 +54,7 @@ func usage() {
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
+	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
@@ -104,6 +106,8 @@ func run(args []string) error {
 		return runRetry(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "check":
+		return runCheck(args[1:])
 	case "troubleshoot":
 		return runTroubleshoot(args[1:])
 	case "verify":
@@ -563,6 +567,123 @@ func runStatus(args []string) error {
 	}
 	printOperation(record)
 	return nil
+}
+
+func runCheck(args []string) error {
+	flags := flag.NewFlagSet("check", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	verbose := flags.Bool("verbose", false, "show details for unhealthy EVA components")
+	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected check arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	resolvedRuntime, runtimeErr := runtime.Resolve(*runtimeRoot)
+	input := health.Input{RuntimeError: runtimeErr}
+	if runtimeErr == nil {
+		input.RuntimeVersion = resolvedRuntime.Descriptor.Version
+	}
+	record, operationErr := operation.Latest(*stateRoot)
+	if operationErr != nil {
+		input.OperationError = operationErr
+	} else {
+		input.OperationState = record.Status
+		document, err := operation.LoadPlan(*stateRoot, record)
+		if err != nil {
+			input.OperationError = err
+		} else {
+			input.Components = checkComponents(document)
+		}
+	}
+
+	report := health.Check(input, checkRunner(resolvedRuntime, runtimeErr == nil))
+	printCheck(report, *verbose)
+	if !report.Healthy {
+		fmt.Fprintln(os.Stderr, "\nRun:")
+		fmt.Fprintln(os.Stderr, "  sudo eva check --verbose")
+		fmt.Fprintln(os.Stderr, "  sudo eva status")
+		return &displayedError{message: "EVA installation check failed."}
+	}
+	return nil
+}
+
+func checkComponents(document plan.Document) []health.Component {
+	namespaces := map[string]string{
+		"iam":    "eva-iam",
+		"agent":  "eva-agent",
+		"vision": "eva-vision",
+		"app":    "eva-app",
+		"n8n":    "n8n",
+	}
+	components := make([]health.Component, 0, len(document.Steps))
+	for _, step := range document.Steps {
+		namespace, ok := namespaces[step.Component]
+		if ok {
+			components = append(components, health.Component{Name: step.Component, Namespace: namespace})
+		}
+	}
+	return components
+}
+
+func checkRunner(resolved runtime.Resolved, hasRuntime bool) health.Runner {
+	return func(name string, args ...string) health.CommandResult {
+		path := name
+		environment := os.Environ()
+		if name == "kubectl" {
+			if !hasRuntime {
+				return health.CommandResult{Err: errors.New("managed Runtime is unavailable")}
+			}
+			toolPath, err := resolved.ToolPath("kubectl")
+			if err != nil {
+				return health.CommandResult{Err: err}
+			}
+			path = toolPath
+			environment = runtimeEnvironment(environment, resolved)
+		}
+		command := exec.Command(path, args...)
+		command.Env = environment
+		output, err := command.CombinedOutput()
+		return health.CommandResult{Output: string(output), Err: err}
+	}
+}
+
+func printCheck(report health.Report, verbose bool) {
+	fmt.Println("EVA installation check")
+	for _, entry := range report.Entries {
+		status := "OK"
+		if !entry.Healthy {
+			status = "ERROR"
+		}
+		fmt.Printf("[%s] %-12s %s\n", status, entry.Name, entry.Detail)
+	}
+	if report.Healthy {
+		fmt.Println("\n[OK] EVA installation is healthy")
+		return
+	}
+	if !verbose {
+		return
+	}
+	for _, detail := range report.Details {
+		fmt.Printf("\n[ERROR] %s\n", detail.Name)
+		printCheckDetail("Unhealthy pods", detail.UnhealthyPods)
+		printCheckDetail("Workloads", detail.Workloads)
+		printCheckDetail("Services", detail.Services)
+		printCheckDetail("Recent events", detail.Events)
+	}
+}
+
+func printCheckDetail(label string, entries []string) {
+	if len(entries) == 0 {
+		return
+	}
+	fmt.Printf("\n%s:\n", label)
+	for _, entry := range entries {
+		fmt.Printf("  %s\n", entry)
+	}
 }
 
 func runTroubleshoot(args []string) error {

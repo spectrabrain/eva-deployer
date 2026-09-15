@@ -596,7 +596,7 @@
     content: |
       schema_version: v1
       site_id: {{ eva_site_id | to_json }}
-      target: {{ ansible_host | default(inventory_hostname) | to_json }}
+      target: {{ eva_iam_values_host | to_json }}
       iam_public_host: {{ eva_iam_effective_host | to_json }}
       generated_at: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') | to_json }}
       sso:

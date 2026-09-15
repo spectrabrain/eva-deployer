@@ -150,7 +150,7 @@ site-dev-196:
       enabled: true
     external:
       enabled: true
-      nodePort: 32070
+      nodePort: 32079
 ```
 
 `/home/eva/certs`에는 TLS certificate와 key가, `/home/eva/.aws`에는 IAM image pull에 필요한 AWS credential이 있어야 한다. Redis external NodePort `32070`은 cluster 전체에서 사용 중이지 않아야 한다.
@@ -169,6 +169,11 @@ site-dev-196:
       product_code: "eva-dev"
       api_key: "<SITE_API_KEY>"
       shared_key: "<SITE_SHARED_KEY>"
+    sso:
+      redis:
+        port: 32079
+        db: 0
+        password: eva-redis-pass
 ```
 
 `aws_key.ini`, `iam.yaml`, `app.yaml`에는 credential 또는 Secret이 포함될 수 있으므로 조직의 승인된 Secret 관리 절차로 작성하고 Release artifact나 source repository에 넣지 않는다. Runtime과 CLI는 `sudo eva ...`로 실행하므로 root가 이 파일을 읽을 수 있어야 한다.

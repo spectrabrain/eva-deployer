@@ -1,45 +1,10 @@
-- name: Install GPU prerequisites
+- name: Install NVIDIA driver prerequisite
   ansible.builtin.apt:
     name:
       - ubuntu-drivers-common
-      - pciutils
     state: present
     update_cache: true
   when: not (airgap_mode | default(false) | bool)
-
-- name: Verify GPU prerequisite binary on airgap host
-  ansible.builtin.command: lspci -nn
-  register: gpu_lspci_prerequisite
-  changed_when: false
-  failed_when: false
-  check_mode: false
-  when: airgap_mode | default(false) | bool
-
-- name: Fail when GPU prerequisite binary is missing on airgap host
-  ansible.builtin.assert:
-    that:
-      - gpu_lspci_prerequisite.rc == 0
-    fail_msg: >-
-      Airgap host is missing pciutils (lspci). Install pciutils from the
-      offline apt bundle before running the infrastructure playbook.
-  when:
-    - airgap_mode | default(false) | bool
-    - not ansible_check_mode
-
-- name: Detect PCI devices
-  ansible.builtin.command: lspci -nn
-  register: gpu_pci_devices
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Set NVIDIA GPU presence flag
-  ansible.builtin.set_fact:
-    gpu_has_nvidia: "{{ 'nvidia' in (gpu_pci_devices.stdout | lower) }}"
-
-- name: Show GPU detection result
-  ansible.builtin.debug:
-    msg: "NVIDIA GPU detected: {{ gpu_has_nvidia }}"
 
 - name: Check NVIDIA driver availability with nvidia-smi
   ansible.builtin.command: nvidia-smi

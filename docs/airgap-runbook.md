@@ -101,8 +101,8 @@ B 에서 추가로 필요한 것
 
 1. **wheelhouse 에 full `ansible`** — `site_infra.yaml` 의 nfs role 이 `ansible.posix.mount` 를 씁니다.
    `ANSIBLE_AIRGAP_REQUIREMENTS="ansible-core==..."` 단축로는 쓸 수 없습니다
-2. **NVIDIA 드라이버 offline 리포** — gpu role 이 `lspci` 로 GPU 를 감지하면 드라이버부터 설치합니다 (03번 참고).
-   GPU 가 없거나 건너뛰려면 `-e gpu_skip_driver_update=true`
+2. **NVIDIA 드라이버 offline 리포** — gpu role 이 `lspci` 로 NVIDIA GPU를 감지하면 드라이버를 설치합니다 (03번 참고).
+   GPU가 없는 서버는 NVIDIA 관련 단계를 자동으로 건너뜁니다. `-e gpu_skip_driver_update=true`는 드라이버 설치/업데이트만 생략하며, 감지된 GPU의 Container Toolkit, K3s NVIDIA runtime, device plugin은 계속 구성합니다.
 3. **Ubuntu 릴리스 일치** — `base` role 이 `out/cache/apt/debs` 의 `.deb` 를 dpkg 로 설치합니다.
    준비 서버와 대상 서버의 릴리스·패치 레벨이 다르면 `libc6` 같은 버전 의존성에서 깨집니다
 

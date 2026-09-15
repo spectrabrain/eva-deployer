@@ -7,9 +7,9 @@
 - name: Configure k3s nvidia runtime
   ansible.builtin.import_tasks: nvidia-runtime.yaml
   when:
-    - not (gpu_skip_driver_update | default(false) | bool)
+    - gpu_has_nvidia | default(false) | bool
 
 - name: Install nvidia device plugin
   ansible.builtin.import_tasks: nvidia-device-plugin.yaml
   when:
-    - not (gpu_skip_driver_update | default(false) | bool)
+    - gpu_has_nvidia | default(false) | bool

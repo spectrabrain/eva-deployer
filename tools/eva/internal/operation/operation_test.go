@@ -93,7 +93,7 @@ func TestCreateStagesPrivateOverrideInputs(t *testing.T) {
 		t.Fatalf("staged values = %q, %v", contents, err)
 	}
 	for path, wantMode := range map[string]os.FileMode{
-		stagedValues:                            0o644,
+		stagedValues:                            0o600,
 		loaded.Overrides["app"].AnsibleVarsPath: 0o600,
 	} {
 		info, err := os.Stat(path)
@@ -200,7 +200,7 @@ func TestRetryClonesFailedOperationAndStagedOverrides(t *testing.T) {
 	if !strings.Contains(string(variables), "retry-secret") || !strings.Contains(string(variables), retryValues) || strings.Contains(string(variables), sourceValues) {
 		t.Fatalf("retry variables = %q", variables)
 	}
-	for _, path := range []string{retry.PlanPath, retryOverride.AnsibleVarsPath} {
+	for _, path := range []string{retry.PlanPath, retryValues, retryOverride.AnsibleVarsPath} {
 		info, err := os.Stat(path)
 		if err != nil {
 			t.Fatal(err)

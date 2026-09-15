@@ -23,6 +23,8 @@ eva_site_id: >-
   }}
 eva_site_config_root: "{{ eva_generated_config_root ~ '/' ~ eva_site_id }}"
 eva_site_deploy_root: "{{ eva_deploy_root ~ '/' ~ eva_site_id }}"
+eva_persistent_state_root: "/var/lib/eva/sites"
+eva_site_state_root: "{{ eva_persistent_state_root ~ '/' ~ eva_site_id }}"
 eva_workspace_root: >-
   {{
     lookup('ansible.builtin.env', 'EVA_WORKSPACE_ROOT')

@@ -120,10 +120,10 @@
     eva_iam_admin_password: "{{ eva_iam_admin_password | default('EVAEVA123@') }}"
     eva_iam_admin_email: "{{ eva_iam_admin_email | default('admin@eva.com') }}"
     # eva-app 이 쓰는 confidential client. 시크릿은 지정하지 않고 Keycloak 이 생성한 것을
-    # 배포 후 읽어서 config/<host>/eva-iam.yaml 에 기록합니다.
+    # 배포 후 읽어서 persistent state의 eva-iam.yaml 에 기록합니다.
     eva_iam_admin_api_client_id: "{{ eva_iam_admin_api_client_id | default('eva-admin-api') }}"
     eva_iam_realm: "{{ eva_iam_realm | default('eva-iam') }}"
-    # Hand-off note for eva-app at config/<host>/eva-iam.yaml. Nothing reads it back.
+    # Private IAM-to-App handoff written to persistent state after deployment.
     eva_iam_write_app_config: "{{ eva_iam_write_app_config | default(true) | bool }}"
     eva_iam_app_redirect_uris: >-
       {{ eva_iam_app_redirect_uris
@@ -229,9 +229,8 @@
     # keycloak.realmConfig.clientSecrets 는 릴리스 Secret 의 CLIENT_SECRET_<CLIENT_ID> 로 렌더됩니다.
     eva_iam_admin_api_secret_key: >-
       {{ 'CLIENT_SECRET_' ~ (eva_iam_admin_api_client_id | upper | replace('-', '_')) }}
-    eva_iam_app_config_dir: >-
-      {{ eva_iam_app_config_dir
-         | default(eva_site_config_root ~ '/' ~ (ansible_host | default(inventory_hostname))) }}
+    eva_iam_app_handoff_dir: "{{ eva_site_state_root ~ '/' ~ eva_iam_values_host }}"
+    eva_iam_app_handoff_path: "{{ eva_site_state_root ~ '/' ~ eva_iam_values_host ~ '/eva-iam.yaml' }}"
     # app.sso.baseUrl — keycloak 이 서비스되는 주소. ingress.path 가 '/' 면 호스트만.
     # 차트 3.1.4+ 의 eva-iam.baseUrl 헬퍼와 우선순위를 맞춰야 합니다. 어긋나면 eva-app 이
     # 토큰 issuer 와 다른 주소로 discovery 를 호출해 invalid_grant 로 실패합니다.
@@ -564,7 +563,7 @@
   ansible.builtin.debug:
     msg: >-
       [경고] Keycloak 에서 {{ eva_iam_admin_api_client_id }} client 시크릿을 읽지 못했습니다.
-      {{ eva_iam_app_config_dir }}/eva-iam.yaml 의 adminClientSecret 이 빈 값으로 기록됩니다.
+      {{ eva_iam_app_handoff_path }} 의 adminClientSecret 이 빈 값으로 기록됩니다.
       직접 확인하려면:
       kubectl exec -n {{ eva_iam_namespace }} deploy/{{ eva_iam_name }}-keycloak --
       /opt/keycloak/bin/kcadm.sh get clients -r {{ eva_iam_realm }}
@@ -574,16 +573,22 @@
     - not ansible_check_mode
     - eva_iam_admin_api_client_secret | length == 0
 
-# The App role consumes this handoff only for the same Operation or when its metadata
-# matches the current site and target. It remains generated output next to eva.yaml;
-# it is never copied into a Workspace input file.
-- name: Ensure generated config directory exists on control node
+# The App role consumes this handoff only when its metadata matches the current site
+# and target. It is persistent private state, never a Workspace input.
+- name: Ensure persistent IAM handoff directories exist on control node
+  no_log: true
   ansible.builtin.file:
-    path: "{{ eva_iam_app_config_dir }}"
+    path: "{{ item }}"
     state: directory
-    mode: "0755"
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - "{{ eva_persistent_state_root }}"
+    - "{{ eva_site_state_root }}"
+    - "{{ eva_iam_app_handoff_dir }}"
   delegate_to: localhost
-  become: false
+  become: true
   when:
     - eva_iam_write_app_config
     - not ansible_check_mode
@@ -591,8 +596,11 @@
 - name: Write eva-iam.yaml (eva-app SSO hand-off) on control node
   no_log: true
   ansible.builtin.copy:
-    dest: "{{ eva_iam_app_config_dir }}/eva-iam.yaml"
+    dest: "{{ eva_iam_app_handoff_path }}"
+    owner: root
+    group: root
     mode: "0600"
+    unsafe_writes: false
     content: |
       schema_version: v1
       site_id: {{ eva_site_id | to_json }}
@@ -611,7 +619,7 @@
         adminClientSecret: ""
       {% endif %}
   delegate_to: localhost
-  become: false
+  become: true
   when:
     - eva_iam_write_app_config
     - not ansible_check_mode
@@ -629,7 +637,7 @@
       - "admin console     : {{ eva_iam_app_sso_base_url }}/admin"
       - "realm             : {{ eva_iam_realm }}"
       - >-
-        eva-app SSO handoff : {{ (eva_iam_app_config_dir ~ '/eva-iam.yaml')
+        eva-app SSO handoff : {{ eva_iam_app_handoff_path
                                  if eva_iam_write_app_config else '(eva_iam_write_app_config=false — 미작성)' }}
       - >-
         {{ '  → adminClientSecret 이 비어 있어 IAM과 App을 함께 설치할 수 없습니다. IAM 문제를 해결한 뒤 다시 실행하세요.'

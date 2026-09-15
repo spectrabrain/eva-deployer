@@ -2,8 +2,8 @@
 #
 # eva-app 만 배포합니다. site_eva.yaml 은 eva_agent → eva_vision → eva_app 묶음이라
 # app 만 다시 올리려면 agent/vision 까지 같이 돌았습니다. eva_app role 은
-# config/<host>/eva.yaml 의 값을 하나도 쓰지 않으므로(그 파일은 agent 의 nfs 경로,
-# vision 의 MIG 설정, vllm override 용입니다) site_eva_config.yaml 선행 없이 돕니다.
+# config/<host>/eva.yaml 의 App generated values를 읽으므로 CLI의 App plan은 Config를
+# 내부 선행 단계로 포함합니다.
 #
 #   .venv/bin/ansible-playbook \
 #     -i workspace/inventory/hosts.ini \
@@ -15,9 +15,8 @@
 #     src/solution/playbooks/site_eva_app.yaml \
 #     -e repository_mode=local_repository -e repository_registry=localhost:32080
 #
-#   # eva-iam 을 함께 쓰는 경우 (site_eva_iam.yaml 이 config/<host>/eva-iam.yaml 에 남긴 값)
-#     -e eva_app_sso_base_url=https://<host>/<path>
-#     -e eva_app_sso_admin_client_secret=<secret>
+#   # 중앙 IAM을 쓰는 App-only 설치는 workspace/site-values/app.yaml에
+#   # app.sso.baseUrl과 app.sso.adminClientSecret을 명시합니다.
 #
 - name: Deploy EVA App
   hosts: all

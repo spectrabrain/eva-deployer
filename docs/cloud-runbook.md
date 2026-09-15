@@ -272,7 +272,7 @@ App의 chart defaults, Helm에 전달한 effective input values, Helm이 반환�
   values-sources.yaml              # 0644, secret 없는 source metadata
 ```
 
-IAM handoff는 `/opt/eva/releases/<version>/out/work/config/<site>/<target>/eva-iam.yaml`에 `0600`으로 보존된다. 정상 설치 중 설치자가 열거나 App values에 복사할 필요는 없으며, IAM 또는 App 장애 분석이 필요한 경우에만 권한 있는 운영자가 확인한다.
+IAM handoff는 `/var/lib/eva/sites/<site>/<target>/eva-iam.yaml`에 `root:root`, `0600`으로 보존된다. 정상 설치 중 설치자가 열거나 App values에 복사할 필요는 없으며, IAM 또는 App 장애 분석이 필요한 경우에만 root 권한을 가진 운영자가 확인한다.
 
 ## 8. 선택 Component 설치
 

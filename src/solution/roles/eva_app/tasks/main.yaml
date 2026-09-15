@@ -17,12 +17,15 @@
     eva_app_deploy_values_dir: "{{ eva_app_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/app') }}"
     eva_app_values_file: "{{ eva_app_values_file | default(eva_site_values_root ~ '/app.yaml') }}"
     eva_app_values_host: "{{ ansible_host | default(inventory_hostname) }}"
-    eva_app_values_dest: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}/app-host-override.yaml"
+    eva_app_effective_values_dest: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}/effective-input-values.yaml"
     eva_app_kubeconfig: "{{ eva_app_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_app_chart_ref: "{{ eva_app_chart_ref | default('eva-app/eva-app') }}"
     eva_app_chart_version: "{{ eva_app_chart_version | mandatory }}"
     eva_app_offline_dir: "{{ eva_app_offline_dir | default(eva_cache_root ~ '/eva-app') }}"
-    eva_app_offline_chart_tgz: "{{ eva_app_offline_chart_tgz | default(eva_app_offline_dir ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}"
+    eva_app_offline_chart_tgz: >-
+      {{ eva_app_offline_chart_tgz
+         | default((eva_app_offline_dir | default(eva_cache_root ~ '/eva-app'))
+                   ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}
     eva_app_backend_host: "{{ eva_app_backend_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
     eva_app_backend_secure: "{{ eva_app_backend_secure | default(false) }}"
     eva_app_tls_host_path: >-
@@ -141,14 +144,6 @@
     mode: "0644"
   when: eva_cli_chart_path | default('') | length > 0
 
-- name: Copy CLI EVA App values override to target workspace
-  no_log: true
-  ansible.builtin.copy:
-    src: "{{ eva_cli_values_path }}"
-    dest: "{{ eva_app_workdir }}/cli-override-values.yaml"
-    mode: "0644"
-  when: eva_cli_values_path | default('') | length > 0
-
 - name: Resolve EVA App chart source
   ansible.builtin.set_fact:
     eva_app_chart_source: >-
@@ -241,18 +236,43 @@
   ansible.builtin.template:
     src: "{{ eva_template_values_root }}/app-k3s-override.yaml.j2"
     dest: "{{ eva_app_deploy_values_dir }}/app-k3s-override.yaml"
-    mode: "0644"
+    mode: "0600"
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
 
-- name: Copy EVA App k3s override values to remote workspace
+- name: Initialize EVA App generated and override values
   no_log: true
-  ansible.builtin.copy:
-    src: "{{ eva_app_deploy_values_dir }}/app-k3s-override.yaml"
-    dest: "{{ eva_app_workdir }}/app-k3s-override.yaml"
-    mode: "0644"
-  when: not ansible_check_mode
+  ansible.builtin.set_fact:
+    eva_app_config_values: {}
+    eva_app_iam_values: {}
+    eva_app_values_override: {}
+    eva_app_cli_values_override: {}
+    eva_app_workspace_sso_defined: false
+    eva_app_handoff_used: false
+    eva_app_generated_config_path: "{{ eva_site_config_root ~ '/' ~ eva_app_values_host ~ '/eva.yaml' }}"
+    eva_app_iam_handoff_path: "{{ eva_site_config_root ~ '/' ~ eva_app_values_host ~ '/eva-iam.yaml' }}"
+    eva_app_iam_selected: "{{ 'iam' in (eva_enabled_components | default('') | split(',')) }}"
+
+- name: Load EVA App role defaults for effective values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_role_values: "{{ lookup('ansible.builtin.file', eva_app_deploy_values_dir ~ '/app-k3s-override.yaml') | from_yaml }}"
+
+- name: Check generated EVA config for App values
+  ansible.builtin.stat:
+    path: "{{ eva_app_generated_config_path }}"
+  register: eva_app_generated_config_status
+  delegate_to: localhost
+  become: false
+
+- name: Load generated EVA config App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_config_values: >-
+      {{ ((lookup('ansible.builtin.file', eva_app_generated_config_path) | from_yaml)
+          | default({}, true)).app | default({}, true) }}
+  when: eva_app_generated_config_status.stat.exists
 
 - name: Check for host-specific EVA App values on control node
   ansible.builtin.stat:
@@ -262,25 +282,149 @@
   become: false
 
 - name: Load host-specific EVA App values
+  no_log: true
   ansible.builtin.set_fact:
     eva_app_values_config: "{{ lookup('ansible.builtin.file', eva_app_values_file) | from_yaml }}"
   when: eva_app_values_file_status.stat.exists
 
 - name: Select host-specific EVA App values
+  no_log: true
   ansible.builtin.set_fact:
-    eva_app_values_override: "{{ eva_app_values_config.get(eva_app_values_host, {}) }}"
+    eva_app_values_override: "{{ (eva_app_values_config | default({}, true)).get(eva_app_values_host, {}) }}"
   when: eva_app_values_file_status.stat.exists
 
-- name: Copy host-specific EVA App values to remote workspace
+- name: Determine whether Workspace defines EVA App SSO
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_workspace_sso_defined: >-
+      {{ ((eva_app_values_override | default({}, true)).app | default({}, true)).sso is defined }}
+
+- name: Check same-target IAM-to-App handoff
+  ansible.builtin.stat:
+    path: "{{ eva_app_iam_handoff_path }}"
+  register: eva_app_iam_handoff_status
+  delegate_to: localhost
+  become: false
+  when: (eva_app_iam_selected | bool) or not (eva_app_workspace_sso_defined | bool)
+
+- name: Require IAM-to-App handoff when IAM and App share this Operation
+  ansible.builtin.assert:
+    that:
+      - eva_app_iam_handoff_status.stat.exists
+    fail_msg: >-
+      IAM과 EVA App이 같은 Operation에 선택됐지만 IAM handoff가 없습니다.
+      IAM component가 성공적으로 완료됐는지 확인한 뒤 App을 다시 실행하세요.
+  when: eva_app_iam_selected | bool
+
+- name: Load same-target IAM-to-App handoff
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_iam_handoff: "{{ lookup('ansible.builtin.file', eva_app_iam_handoff_path) | from_yaml }}"
+  when:
+    - eva_app_iam_handoff_status.stat.exists | default(false)
+    - (eva_app_iam_selected | bool) or not (eva_app_workspace_sso_defined | bool)
+
+- name: Validate same-target IAM-to-App handoff metadata
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_handoff_valid: >-
+      {{
+        ((eva_app_iam_handoff | default({}, true)).schema_version | default('') == 'v1')
+        and ((eva_app_iam_handoff | default({}, true)).site_id | default('') == eva_site_id)
+        and ((eva_app_iam_handoff | default({}, true)).target | default('') == eva_app_values_host)
+        and ((eva_app_iam_handoff | default({}, true)).iam_public_host | default('') | length > 0)
+        and ((eva_app_iam_handoff | default({}, true)).generated_at | default('') | length > 0)
+        and ((eva_app_iam_handoff | default({}, true)).generated_at | default('') is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'))
+        and ((eva_app_iam_handoff | default({}, true)).sso is mapping)
+        and (((eva_app_iam_handoff | default({}, true)).sso | default({}, true)).baseUrl | default('', true) | length > 0)
+        and (((eva_app_iam_handoff | default({}, true)).sso | default({}, true)).adminClientSecret | default('', true) | length > 0)
+      }}
+  when: eva_app_iam_handoff_status.stat.exists | default(false)
+
+- name: Require complete IAM handoff when IAM and App share this Operation
+  ansible.builtin.assert:
+    that:
+      - eva_app_handoff_valid | default(false) | bool
+    fail_msg: >-
+      IAM과 EVA App이 같은 Operation에 선택됐지만 IAM handoff metadata 또는 SSO 값이 올바르지 않습니다.
+      IAM component가 성공적으로 완료됐는지 확인한 뒤 App을 다시 실행하세요.
+  when: eva_app_iam_selected | bool
+
+- name: Use current or validated same-target IAM handoff
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_handoff_used: >-
+      {{ (eva_app_iam_selected | bool) or (eva_app_handoff_valid | default(false) | bool) }}
+  when: eva_app_iam_selected | bool or (eva_app_handoff_valid | default(false) | bool)
+
+- name: Build IAM SSO values for EVA App
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_iam_values:
+      app:
+        sso: "{{ (eva_app_iam_handoff | default({}, true)).sso | default({}, true) }}"
+  when: eva_app_handoff_used | bool
+
+- name: Load CLI EVA App values override
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_cli_values_override: "{{ (lookup('ansible.builtin.file', eva_cli_values_path) | from_yaml) | default({}, true) }}"
+  when: eva_cli_values_path | default('') | length > 0
+
+- name: Merge generated and installer EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_generated_values: "{{ eva_app_role_values | combine(eva_app_config_values, recursive=true) }}"
+
+- name: Merge IAM handoff into EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_generated_values: "{{ eva_app_generated_values | combine(eva_app_iam_values, recursive=true) }}"
+
+- name: Merge Workspace EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_effective_values: "{{ eva_app_generated_values | combine(eva_app_values_override, recursive=true) }}"
+
+- name: Merge CLI EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_effective_values: "{{ eva_app_effective_values | combine(eva_app_cli_values_override, recursive=true) }}"
+
+- name: Record private EVA App effective input values on control node
   no_log: true
   ansible.builtin.copy:
-    content: "{{ eva_app_values_override | to_nice_yaml(indent=2, sort_keys=false) }}"
-    dest: "{{ eva_app_values_dest }}"
+    content: "{{ eva_app_effective_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_app_deploy_values_dir }}/effective-input-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA App values source metadata on control node
+  ansible.builtin.copy:
+    content: |
+      config_generated_values: {{ (eva_app_config_values | length > 0) | lower }}
+      iam_handoff: {{ eva_app_handoff_used | bool | lower }}
+      workspace_override: {{ (eva_app_values_override | length > 0) | lower }}
+      cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}
+      rendered_artifacts:
+        chart_defaults: {{ eva_app_deploy_values_dir }}/chart-defaults.yaml
+        effective_input_values: {{ eva_app_deploy_values_dir }}/effective-input-values.yaml
+        resolved_values: {{ eva_app_deploy_values_dir }}/resolved-values.yaml
+    dest: "{{ eva_app_deploy_values_dir }}/values-sources.yaml"
     mode: "0644"
-  when:
-    - not ansible_check_mode
-    - eva_app_values_file_status.stat.exists
-    - eva_app_values_override | length > 0
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy private EVA App effective input values to target workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_app_deploy_values_dir }}/effective-input-values.yaml"
+    dest: "{{ eva_app_effective_values_dest }}"
+    mode: "0600"
+  when: not ansible_check_mode
 
 - name: Check existing EVA App deployment
   ansible.builtin.command: kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }}
@@ -320,16 +464,14 @@
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
 - name: Install EVA App from online Helm repo
-  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+  no_log: true
   ansible.builtin.command: >-
     helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
     -n {{ eva_app_namespace }}
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
     --create-namespace
     -f {{ eva_app_workdir }}/values.yaml
-    -f {{ eva_app_workdir }}/app-k3s-override.yaml
-    {% if eva_app_values_file_status.stat.exists and (eva_app_values_override | default({}) | length > 0) %}-f {{ eva_app_values_dest }}{% endif %}
-    {% if eva_cli_values_path | default('') | length > 0 %}-f {{ eva_app_workdir }}/cli-override-values.yaml{% endif %}
+    -f {{ eva_app_effective_values_dest }}
     {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   register: eva_app_install_online
   changed_when: >-
@@ -340,16 +482,14 @@
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
 - name: Install EVA App from offline chart
-  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+  no_log: true
   ansible.builtin.command: >-
     helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
     -n {{ eva_app_namespace }}
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
     --create-namespace
     -f {{ eva_app_workdir }}/values.yaml
-    -f {{ eva_app_workdir }}/app-k3s-override.yaml
-    {% if eva_app_values_file_status.stat.exists and (eva_app_values_override | default({}) | length > 0) %}-f {{ eva_app_values_dest }}{% endif %}
-    {% if eva_cli_values_path | default('') | length > 0 %}-f {{ eva_app_workdir }}/cli-override-values.yaml{% endif %}
+    -f {{ eva_app_effective_values_dest }}
     {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   register: eva_app_install_offline
   changed_when: >-
@@ -380,9 +520,10 @@
   when: not ansible_check_mode
 
 - name: Publish effective EVA App Helm values on control node
+  no_log: true
   ansible.builtin.file:
     path: "{{ eva_app_deploy_values_dir }}/resolved-values.yaml"
-    mode: "0644"
+    mode: "0600"
   delegate_to: localhost
   become: false
   when: not ansible_check_mode

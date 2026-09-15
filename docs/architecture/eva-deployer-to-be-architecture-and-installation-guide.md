@@ -682,7 +682,7 @@ Repository mode별 목표 운영 원칙:
 | `secret.yaml`, `eva-iam.yaml` | `out/work/config/<site>/<host>/` | 민감한 cluster Secret 및 IAM-to-App handoff. 권한 `0600`으로 생성 |
 | `harbor-endpoint.yaml` | `out/work/config/<site>/` | repository registry, project 등 site 공통 Harbor endpoint metadata |
 | `chart-defaults.yaml` | `out/work/rendered/<site>/<host>/<component>/` | 선택한 Chart 기본값 전체. 참고용 |
-| `resolved-values.yaml` | `out/work/rendered/<site>/<host>/<component>/` | Helm 최종 적용값. 검토만 수행 |
+| `effective-input-values.yaml`, `resolved-values.yaml` | `out/work/rendered/<site>/<host>/<component>/` | Helm 입력 병합값과 최종 적용값. Secret 포함 파일은 `0600`으로 보존하고 검토만 수행 |
 | `plan.yaml` | `out/work/plan/<operation-id>/` | Release, 대상, 설치 순서 및 변경 계획 |
 | `operation.yaml`, `audit.yaml` | `out/state/<site>/<operation-id>/` | 감사, 재실행, rollback/resume 근거 |
 
@@ -794,11 +794,12 @@ Chart template이 사용하지 않는 키는 Helm이 조용히 무시할 수 있
 낮은 우선순위부터 높은 우선순위 순서:
 
 1. Chart 기본 values
-2. 제품 공통 k3s/repository values
-3. 자동 생성 runtime values
-4. 고객 `workspace/site-values/app.yaml`
-5. Base digest에 결합된 Patch overlay
-6. IAM 결과 등 설치 중 생성된 허용된 runtime handoff
+2. Release 및 App role defaults
+3. Config 단계가 생성한 App values
+4. IAM handoff
+5. 고객 `workspace/site-values/app.yaml`
+6. CLI `--values`
+7. CLI `--set`
 
 일반 설치 흐름은 Release가 고정한 Chart와 image를 사용한다. 다만 현장 복구나 검증을 위해 CLI의 명시적 `--chart`, `--values`, `--set` override는 허용한다. Release 기본값과 다른 Chart 또는 image 관련 값은 차단하지 않고 `[WARN] field override detected`로 Plan과 operation 결과에 기록한다. Artifact 내부 plugin binary 경로와 release metadata 자체는 override 대상이 아니다.
 
@@ -916,7 +917,7 @@ Component alias는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`이다.
 
 `eva plan --workspace <path> --release <path> [--component <name>] [--chart <component>=<path>] [--values <component>=<path>] [--set [<component>:]key=value] [--output <path> | --save]`은 선택 component와 기존 playbook 순서, Ansible extra vars, 환경변수를 YAML로 생성한다. `--component`는 반복 지정할 수 있고 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`, `all`을 받는다. 명시한 component는 반드시 `site.yaml`에서 활성화되어야 하며, `all`은 다른 이름과 함께 지정할 수 없다. 생략하면 `site.yaml`의 모든 활성 component를 사용한다. `agent` 또는 `vision`을 선택하면 `site_eva_config.yaml`을 자동 선행 단계로 넣는다. 모든 Plan에는 `site_precondition.yaml`이 첫 단계로 포함된다. stdout 출력이 기본이며 `--output`을 지정한 plan 파일은 `0600` 권한으로 생성한다. `--save`는 `/var/lib/eva/operations/<operation-id>/`에 `planned` operation record와 Plan을 `0600` 권한으로 저장한다. 개발과 테스트에서는 `--state-root <path>`로 해당 기본 경로를 바꿀 수 있고, `eva status [operation-id]`는 최신 또는 지정 record를 읽는다.
 
-현장 Helm override의 1차 대상은 `app`, `agent`, `vision`이다. `--chart <component>=<path>`와 `--values <component>=<path>`는 regular file만 허용하며, 선택된 Helm component가 하나일 때만 `--set key=value`의 component 접두사는 생략할 수 있다. 여러 Helm component를 선택한 경우 `--set app:key=value`처럼 명시한다. `--set`은 Helm의 기본 type 추론을 그대로 사용한다. Chart override는 package의 `Chart.yaml`에서 name, version, appVersion을 읽어 Plan에 기록하고, 기대 component Chart 이름과 다르면 차단하지 않고 `[WARN]`으로 표시한다. Chart와 Values는 operation 생성 시 SHA-256을 확인해 `/var/lib/eva/operations/<operation-id>/inputs/<component>/`에 `0644`으로 snapshot하며, Apply는 원본 경로 대신 이 snapshot만 사용한다. 실제 `--set` 값이 담긴 staged Ansible vars 파일만 `0600`으로 유지한다. Plan과 일반 status에는 `--set`의 키만 남기고 값은 기록하지 않는다. `n8n`은 Helm Chart가 아닌 manifest 배포이므로 이 override 대상이 아니다. 성공한 component Apply는 `out/work/rendered/<site>/<host>/<component>/chart-defaults.yaml`과 Helm의 `get values --all` 결과인 `resolved-values.yaml`을 남기며, 둘 다 검토 편의를 위해 `0644`으로 저장한다.
+현장 Helm override의 1차 대상은 `app`, `agent`, `vision`이다. `--chart <component>=<path>`와 `--values <component>=<path>`는 regular file만 허용하며, 선택된 Helm component가 하나일 때만 `--set key=value`의 component 접두사는 생략할 수 있다. 여러 Helm component를 선택한 경우 `--set app:key=value`처럼 명시한다. `--set`은 Helm의 기본 type 추론을 그대로 사용한다. Chart override는 package의 `Chart.yaml`에서 name, version, appVersion을 읽어 Plan에 기록하고, 기대 component Chart 이름과 다르면 차단하지 않고 `[WARN]`으로 표시한다. Chart와 Values는 operation 생성 시 SHA-256을 확인해 `/var/lib/eva/operations/<operation-id>/inputs/<component>/`에 `0644`으로 snapshot하며, Apply는 원본 경로 대신 이 snapshot만 사용한다. 실제 `--set` 값이 담긴 staged Ansible vars 파일만 `0600`으로 유지한다. Plan과 일반 status에는 `--set`의 키만 남기고 값은 기록하지 않는다. `n8n`은 Helm Chart가 아닌 manifest 배포이므로 이 override 대상이 아니다. 성공한 App Apply는 `out/work/rendered/<site>/<host>/app/`에 `chart-defaults.yaml`(`0644`), `effective-input-values.yaml`과 Helm의 `get values --all` 결과인 `resolved-values.yaml`(각각 `0600`), secret 없는 `values-sources.yaml`(`0644`)을 남긴다.
 
 `eva apply [operation-id]`는 최신 또는 지정 `planned` operation만 실행한다. TTY에서는 site와 operation ID를 표시하고 확인을 받고, 비대화형 실행은 `--yes`가 필수다. Runtime의 `ansible-playbook` 절대 경로만 사용하며, workspace inventory와 Plan에 기록된 allowlist playbook을 검증한 뒤 순차 실행한다. Helm field override가 있는 Plan은 operation 내부의 staged Ansible vars 파일도 검증해 해당 component playbook에만 전달한다. 성공한 App, Agent, Vision Helm 단계는 Chart 기본값과 effective values를 control node의 rendered 경로에 수집한다. 모든 Plan은 `site_precondition.yaml`을 첫 단계로 넣어 사전 상태를 수집하고, 실패하면 Infra와 Solution 단계로 진행하지 않는다. 첫 실패 뒤의 단계는 실행하지 않으며 `result.yaml`, `/var/log/eva/operations/<operation-id>/ansible.log`, Ansible internal log 및 terminal status를 갱신한다. Apply는 `eva release prepare`가 생성한 `ansible.cfg`와 `src/`를 가진 local Release source를 사용한다. S3 resolver는 다음 단계다.
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -82,6 +83,7 @@ func (resolved Resolved) AnsibleExtraVars() []string {
 		"eva_workspace_root=" + resolved.Root,
 		"eva_site_id=" + resolved.SiteID,
 		"repository_mode=" + resolved.AnsibleMode,
+		"eva_enabled_components=" + selectedComponents(resolved.Config.Components),
 	}
 	if registry := resolved.Config.Repository.Registry; registry != "" {
 		values = append(values, "repository_registry="+registry)
@@ -90,6 +92,17 @@ func (resolved Resolved) AnsibleExtraVars() []string {
 		values = append(values, "repository_project="+project)
 	}
 	return values
+}
+
+func selectedComponents(components map[string]bool) string {
+	selected := make([]string, 0, len(components))
+	for component, enabled := range components {
+		if enabled {
+			selected = append(selected, component)
+		}
+	}
+	sort.Strings(selected)
+	return strings.Join(selected, ",")
 }
 
 func (resolved Resolved) Environment() map[string]string {

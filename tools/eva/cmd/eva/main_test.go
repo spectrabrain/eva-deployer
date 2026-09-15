@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"eva-deployer/tools/eva/internal/apt"
+	"eva-deployer/tools/eva/internal/health"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/release"
@@ -56,6 +57,20 @@ func TestNormalizePlanArgsKeepsComponentFlagAfterReleasePath(t *testing.T) {
 	want := []string{"--component", "agent", "--save", "/releases/3.2.0"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalizePlanArgs() = %v, want %v", got, want)
+	}
+}
+
+func TestCheckComponentsUsesOnlySelectedProductSteps(t *testing.T) {
+	components := checkComponents(plan.Document{Steps: []plan.Step{
+		{Component: "precondition"}, {Component: "infra"}, {Component: "config"},
+		{Component: "iam"}, {Component: "app"},
+	}})
+	want := []health.Component{
+		{Name: "iam", Namespace: "eva-iam"},
+		{Name: "app", Namespace: "eva-app"},
+	}
+	if !reflect.DeepEqual(components, want) {
+		t.Fatalf("checkComponents() = %#v, want %#v", components, want)
 	}
 }
 

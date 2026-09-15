@@ -968,6 +968,7 @@ func shellEnvironment(base []string, resolvedRuntime runtime.Resolved, siteID, w
 		}
 	}
 	values["EVA_RUNTIME_ROOT"] = resolvedRuntime.Root
+	values["ANSIBLE_COLLECTIONS_PATH"] = prependEnvironmentPath(resolvedRuntime.CollectionPath(), values["ANSIBLE_COLLECTIONS_PATH"])
 	pathEntries := resolvedRuntime.ToolDirectories()
 	if values["PATH"] != "" {
 		pathEntries = append(pathEntries, values["PATH"])
@@ -1048,11 +1049,36 @@ func runExec(args []string) error {
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	command.Env = append(os.Environ(), "EVA_RUNTIME_ROOT="+resolved.Root)
+	command.Env = runtimeEnvironment(os.Environ(), resolved)
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("run EVA managed runtime command %q: %w", flags.Arg(0), err)
 	}
 	return nil
+}
+
+func runtimeEnvironment(base []string, resolved runtime.Resolved) []string {
+	values := make(map[string]string, len(base)+2)
+	for _, entry := range base {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[name] = value
+		}
+	}
+	values["EVA_RUNTIME_ROOT"] = resolved.Root
+	values["ANSIBLE_COLLECTIONS_PATH"] = prependEnvironmentPath(resolved.CollectionPath(), values["ANSIBLE_COLLECTIONS_PATH"])
+	environment := make([]string, 0, len(values))
+	for name, value := range values {
+		environment = append(environment, name+"="+value)
+	}
+	sort.Strings(environment)
+	return environment
+}
+
+func prependEnvironmentPath(path, existing string) string {
+	if existing == "" {
+		return path
+	}
+	return path + string(os.PathListSeparator) + existing
 }
 
 func printOperation(record operation.Record) {

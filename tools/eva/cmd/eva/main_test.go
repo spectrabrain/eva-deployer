@@ -53,13 +53,17 @@ func TestShellEnvironmentPrependsRuntimeAndWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	environment, err := shellEnvironment([]string{"PATH=/usr/bin", "KEEP=value"}, resolvedRuntime, "", workspaceRoot, "")
+	environment, err := shellEnvironment([]string{"PATH=/usr/bin", "KEEP=value", "ANSIBLE_COLLECTIONS_PATH=/operator/collections"}, resolvedRuntime, "", workspaceRoot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	values := environmentMap(environment)
 	if values["EVA_RUNTIME_ROOT"] != resolvedRuntime.Root || values["EVA_SITE_ID"] != "customer-a" || values["EVA_WORKSPACE_ROOT"] != workspaceRoot || values["KEEP"] != "value" {
 		t.Fatalf("shell environment = %#v", values)
+	}
+	wantCollectionPath := resolvedRuntime.CollectionPath() + string(os.PathListSeparator) + "/operator/collections"
+	if values["ANSIBLE_COLLECTIONS_PATH"] != wantCollectionPath {
+		t.Fatalf("ANSIBLE_COLLECTIONS_PATH = %q, want %q", values["ANSIBLE_COLLECTIONS_PATH"], wantCollectionPath)
 	}
 	for _, directory := range resolvedRuntime.ToolDirectories() {
 		if !strings.Contains(values["PATH"], directory) {

@@ -185,7 +185,31 @@ host-based Ingress TLS 흐름을 유지하고 Traefik `TLSStore`를 만들지 �
 Agent Release values, Config 생성 설정, role k3s/repository override는 자동 적용됩니다. 선택
 Agent 및 Vision Workspace Chart override는 target별로 적용되며 GPU, MIG, vLLM profile을 선택하지 않습니다.
 
-## 6. 설치
+## 6. Argo CD 관리 연결 확인
+
+기존 본사 Argo CD가 같은 site의 EVA resource를 관리했을 수 있는 환경에서는 설치 전에
+아래 preflight를 실행합니다. 대상 cluster의 tracking metadata를 다시 수집하고, 발견된 경우에만
+연결 해제 여부를 묻습니다.
+
+```bash
+sudo eva preflight argocd --workspace /home/eva/site-dev-196
+```
+
+승인하면 Argo CD 관리 서버 주소, SSH 사용자, password를 입력받습니다. 관리 서버의
+`kubectl`로 감지된 Application의 공통 destination과 ApplicationSet ownership을 확인합니다.
+ApplicationSet cluster generator의 재생성을 막기 위해 정확히 일치하는 cluster registration을 먼저
+제거한 후, 해당 cluster prefix의 Application 전체를 non-cascade로 제거하고 재생성되지 않는지
+검증합니다. Argo CD CLI 로그인이나 Argo CD 계정 정보는 필요하지 않습니다.
+거절하면 설치를 시작하지 않으므로, 필요한 경우 현재 상태를 그대로 둔 채 직접 조치할 수 있습니다.
+명령은 검증한 Release root에서 실행하며 현재 디렉터리의 Release를 자동으로
+`/opt/eva/releases`에 준비합니다. 별도의 `--release` 또는 `--install-root` 입력은 필요하지 않습니다.
+관리 서버 SSH host key는 `/home/eva/.ssh/known_hosts`에서 검증합니다.
+파일이 없으면 생성하며, 처음 보는 host key는 SHA256 fingerprint를 표시하고 별도 승인을 받습니다.
+
+`eva install` 또는 `eva apply`에서 tracking metadata가 남아 있으면 handoff를 수행하지 않고 위
+preflight 명령을 안내하며 Solution 설치 전에 중단합니다. `--yes`도 이 규칙을 우회하지 않습니다.
+
+## 7. 설치
 
 검증된 Release root에서 명령 하나를 실행합니다.
 
@@ -218,7 +242,7 @@ sudo eva troubleshoot apt --fix-known --yes
 sudo eva retry --yes
 ```
 
-## 7. 설치 결과 확인
+## 8. 설치 결과 확인
 
 설치 상태 점검으로 시작합니다. 선택된 Agent 또는 Vision component가 있으면 node의 GPU 또는
 MIG allocatable resource, NVIDIA Device Plugin readiness, Agent/Vision Pod의 GPU 또는
@@ -237,7 +261,7 @@ sudo eva status
 App이 사용하는 Agent 및 Vision endpoint는 내부 Service인 `eva-agent.eva-agent` 및
 `eva-vision.eva-vision`입니다. 연결 문제를 진단할 때 App Pod에서 선택된 endpoint를 확인합니다.
 
-## 8. Rendered Artifact 및 문제 해결
+## 9. Rendered Artifact 및 문제 해결
 
 선택된 각 Helm component는 준비된 Release 아래에 chart default, effective Helm input, resolved
 Helm values, source metadata를 보관합니다. effective 및 resolved 파일에는 Secret 값이 포함될 수
@@ -282,7 +306,7 @@ Helm values, source metadata를 보관합니다. effective 및 resolved 파일�
 private values 및 handoff 파일을 붙여 넣거나 커밋하지 않습니다. license, SSO, database,
 registry credential이 포함될 수 있습니다.
 
-## 9. 변경 및 재시도
+## 10. 변경 및 재시도
 
 Workspace values 또는 Release version을 변경하면 Helm upgrade를 수행하며 기존 database와
 영속 데이터를 보존합니다. 일반 upgrade는 `/eva-app` 또는 Agent/Vision persistence를 삭제하지
@@ -293,7 +317,7 @@ Workspace values 또는 Release version을 변경하면 Helm upgrade를 수행�
 sudo eva retry --yes
 ```
 
-## 10. 비GPU 테스트 환경
+## 11. 비GPU 테스트 환경
 
 CPU-only 서버는 제한된 테스트를 위한 예외 환경입니다. `site.yaml`에서 `agent`와 `vision`을
 `false`로 설정하면 Infra와 Config가 NVIDIA runtime/CDI 작업을 건너뜁니다. 이 가이드의 기본

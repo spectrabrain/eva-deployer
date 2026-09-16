@@ -1,3 +1,19 @@
+- name: Initialize EVA Agent cache root
+  ansible.builtin.set_fact:
+    eva_agent_cache_root: >-
+      {{ eva_agent_cache_root | default(eva_cache_root) }}
+  changed_when: false
+  tags:
+    - eva_agent_dependency_defaults
+
+- name: Initialize EVA Agent offline directory
+  ansible.builtin.set_fact:
+    eva_agent_offline_dir: >-
+      {{ eva_agent_offline_dir | default(eva_agent_cache_root ~ '/eva-agent') }}
+  changed_when: false
+  tags:
+    - eva_agent_dependency_defaults
+
 - name: Set EVA Agent dependency defaults
   ansible.builtin.set_fact:
     repository_mode: "{{ repository_mode | default('cloud_repository') }}"
@@ -16,7 +32,6 @@
     eva_agent_qdrant_deploy_values_dir: "{{ eva_agent_qdrant_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/qdrant') }}"
     eva_agent_vllm_deploy_values_dir: "{{ eva_agent_vllm_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/vllm') }}"
     eva_agent_kubeconfig: "{{ eva_agent_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
-    eva_agent_cache_root: "{{ eva_agent_cache_root | default(eva_cache_root) }}"
     eva_agent_aws_profile: "{{ eva_agent_aws_profile | default('default') }}"
     eva_agent_sync_aws_credentials: "{{ eva_agent_sync_aws_credentials | default((not ((airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']))) | ternary(1, 0)) }}"
     eva_agent_qdrant_chart_version: "{{ eva_agent_qdrant_chart_version | default(qdrant_chart_version) | mandatory }}"
@@ -29,15 +44,32 @@
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/' ~ eva_agent_deploy_version) }}
-    eva_agent_offline_dir: "{{ eva_agent_offline_dir | default(eva_agent_cache_root ~ '/eva-agent') }}"
     eva_agent_offline_release_dir: "{{ eva_agent_offline_release_dir | default(eva_agent_offline_dir ~ '/release/' ~ eva_agent_deploy_version) }}"
     eva_agent_offline_qdrant_chart_tgz: "{{ eva_agent_offline_qdrant_chart_tgz | default(eva_agent_cache_root ~ '/qdrant/qdrant-' ~ (eva_agent_qdrant_chart_version | default(qdrant_chart_version)) ~ '.tgz') }}"
     eva_agent_offline_vllm_chart_tgz: "{{ eva_agent_offline_vllm_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-vllm-' ~ eva_agent_vllm_chart_version ~ '.tgz') }}"
     eva_agent_offline_init_chart_tgz: "{{ eva_agent_offline_init_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-init-1.0.0.tgz') }}"
     eva_agent_offline_kustomize_bin: "{{ eva_agent_offline_kustomize_bin | default(eva_agent_cache_root ~ '/tools/kustomize') }}"
     eva_agent_offline_models_dir: "{{ eva_agent_offline_models_dir | default(eva_agent_cache_root ~ '/models') }}"
-    eva_agent_offline_agent_model_dir: "{{ eva_agent_offline_agent_model_dir | default(eva_agent_offline_models_dir ~ '/agent/hf') }}"
-    eva_agent_offline_vllm_model_dir: "{{ eva_agent_offline_vllm_model_dir | default(eva_agent_offline_models_dir ~ '/vllm/hf') }}"
+    eva_agent_offline_agent_model_dir: >-
+      {{
+        eva_agent_offline_agent_model_dir
+        | default(
+            (
+              eva_agent_offline_models_dir
+              | default(eva_agent_cache_root ~ '/models')
+            ) ~ '/agent/hf'
+          )
+      }}
+    eva_agent_offline_vllm_model_dir: >-
+      {{
+        eva_agent_offline_vllm_model_dir
+        | default(
+            (
+              eva_agent_offline_models_dir
+              | default(eva_agent_cache_root ~ '/models')
+            ) ~ '/vllm/hf'
+          )
+      }}
     eva_agent_qdrant_statefulset_name: "{{ eva_agent_qdrant_statefulset_name | default('eva-agent-qdrant') }}"
     eva_agent_qdrant_snapshots_volume_name: "{{ eva_agent_qdrant_snapshots_volume_name | default('eva-agent-qdrant-snapshots') }}"
     eva_agent_qdrant_snapshot_pv_size: "{{ eva_agent_qdrant_snapshot_pv_size | default('10Gi') }}"

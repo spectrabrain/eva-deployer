@@ -4,7 +4,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 TMP_ROOT="$(mktemp -d)"
-RESOURCE='nvidia.com/mig-1g.24gb'
 
 cleanup() {
   rm -rf "$TMP_ROOT"
@@ -27,12 +26,14 @@ run_case() {
   local expected_available="$8"
   local expected_ready_eva_pods="$9"
   local pod_reason="${10:-}"
+  local allocatable_sequence="${11:-$allocatable}"
   local root="$TMP_ROOT/$name"
 
   mkdir -p "$root/bin"
-  printf '%s\n' "{\"items\":[{\"status\":{\"allocatable\":{\"$RESOURCE\":\"$allocatable\"}}}]}" >"$root/nodes.json"
+  printf '%s\n' "$allocatable_sequence" >"$root/allocatable-sequence.txt"
   printf '%s\n' "$pods_json" >"$root/pods.json"
   : >"$root/kubectl.log"
+  printf '0\n' >"$root/nodes-call-count"
 
   cat >"$root/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
@@ -46,7 +47,33 @@ case "$args" in
     printf '    nvidia.com/mig-1g.24gb: "4"\n'
     ;;
   'get nodes -o json')
-    cat "${FIXTURE_ROOT:?}/nodes.json"
+    call_count="$(cat "${FIXTURE_ROOT:?}/nodes-call-count")"
+    call_count=$((call_count + 1))
+    printf '%s\n' "$call_count" >"${FIXTURE_ROOT:?}/nodes-call-count"
+
+    IFS=',' read -r -a values \
+      <"${FIXTURE_ROOT:?}/allocatable-sequence.txt"
+
+    index=$((call_count - 1))
+    if (( index >= ${#values[@]} )); then
+      index=$((${#values[@]} - 1))
+    fi
+
+    value="${values[$index]}"
+
+    if [[ "$value" == 'none' ]]; then
+      printf '{"items":[{"status":{"allocatable":{}}}]}\n'
+    elif [[ "$value" == gpu:* ]]; then
+      printf \
+        '{"items":[{"status":{"allocatable":{"%s":"%s"}}}]}\n' \
+        'nvidia.com/gpu' \
+        "${value#gpu:}"
+    else
+      printf \
+        '{"items":[{"status":{"allocatable":{"%s":"%s"}}}]}\n' \
+        'nvidia.com/mig-1g.24gb' \
+        "$value"
+    fi
     ;;
   'get pods -A -o json')
     cat "${FIXTURE_ROOT:?}/pods.json"
@@ -87,6 +114,9 @@ EOF
     k3s_gpu_validation_pod_manifest_path: $root/k3s-gpu-pod.yaml
   tasks:
     - ansible.builtin.include_tasks: $REPO_ROOT/src/infra/roles/k3s/tasks/nvidia-device-plugin.yaml
+      vars:
+        k3s_gpu_validation_allocatable_retries: 3
+        k3s_gpu_validation_allocatable_delay: 0
     - ansible.builtin.assert:
         that:
           - k3s_gpu_validation_allocated | int == $expected_allocated
@@ -118,6 +148,24 @@ EOF
     fi
   fi
 
+  if [[ "$name" == 'registration-timeout' ]]; then
+    grep -Fq \
+      'NVIDIA resource discovery and registration timed out' \
+      "$root/ansible.log"
+
+    if grep -Fq 'get pods -A -o json' "$root/kubectl.log"; then
+      echo "$name entered allocation accounting unexpectedly" >&2
+      exit 1
+    fi
+
+    if grep -Fq 'apply -f ' "$root/kubectl.log"; then
+      echo "$name created a validation pod unexpectedly" >&2
+      exit 1
+    fi
+
+    return
+  fi
+
   grep -Fq "allocatable=$allocatable" "$root/ansible.log"
   grep -Fq "allocated=$expected_allocated" "$root/ansible.log"
   grep -Fq "available=$expected_available" "$root/ansible.log"
@@ -133,8 +181,18 @@ EOF
   fi
 
   case "$name" in
-    upgrade-evidence|available-one-with-eva)
+    upgrade-evidence|available-one-with-eva|upgrade-registration-delay)
       grep -Fq 'validation=existing-eva-workloads' "$root/ansible.log"
+      ;;
+    new-install-resource-discovery-delay)
+      grep -Fq \
+        'GPU validation pod resource: nvidia.com/mig-1g.24gb' \
+        "$root/ansible.log"
+      ;;
+    new-install-non-mig)
+      grep -Fq \
+        'GPU validation pod resource: nvidia.com/gpu' \
+        "$root/ansible.log"
       ;;
     external-workloads|not-ready-eva)
       grep -Fq 'evidence_pods=none' "$root/ansible.log"
@@ -191,6 +249,11 @@ terminal_pods_excluded='{"items":[
 overallocated_pods='{"items":[{"metadata":{"namespace":"external","name":"too-many"},"status":{"phase":"Running"},"spec":{"containers":[{"resources":{"limits":{"nvidia.com/mig-1g.24gb":"4"}}}]}}]}'
 
 run_case new-install 4 '{"items":[]}' Succeeded success yes 0 4 0
+run_case new-install-registration-delay 4 '{"items":[]}' Succeeded success yes 0 4 0 '' '0,0,4'
+run_case new-install-resource-discovery-delay 4 '{"items":[]}' Succeeded success yes 0 4 0 '' 'none,none,4'
+run_case new-install-non-mig 1 '{"items":[]}' Succeeded success yes 0 1 0 '' 'gpu:1'
+run_case upgrade-registration-delay 4 "$ready_eva_pods" Succeeded success no 4 0 4 '' 'none,4'
+run_case registration-timeout 0 '{"items":[]}' Succeeded failure no 0 0 0 '' 'none,none,none'
 run_case upgrade-evidence 4 "$ready_eva_pods" Succeeded success no 4 0 4
 run_case external-workloads 4 "$external_pods" Succeeded failure no 4 0 0
 run_case not-ready-eva 4 "$not_ready_eva_pods" Succeeded failure no 4 0 0

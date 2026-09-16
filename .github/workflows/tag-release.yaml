@@ -96,6 +96,7 @@ jobs:
           scripts/test/test_eva_agent_init_storageclass_migration.sh
           scripts/test/test_eva_vision_gpu_resource.sh
           scripts/test/test_k3s_gpu_validation.sh
+          scripts/test/test_precondition_argocd_tracking.sh
           scripts/test/test_eva_vllm_profile.sh
           scripts/test/test_eva_qdrant_values.sh
 

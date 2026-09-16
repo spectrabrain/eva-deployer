@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -109,6 +110,92 @@ func (prompt *argoCDPrompter) ConfirmGitRemoval(plan argocd.GitRemovalPlan) (boo
 	}
 	value := strings.TrimSpace(answer)
 	return strings.EqualFold(value, "y") || strings.EqualFold(value, "yes"), nil
+}
+
+func (prompt *argoCDPrompter) GitCredentials(
+	plan argocd.GitRemovalPlan,
+) (argocd.GitCredentials, error) {
+	if err := requireInteractiveArgoCDHandoff(); err != nil {
+		return argocd.GitCredentials{}, err
+	}
+
+	repositoryURL, err := url.Parse(plan.Repository)
+	if err != nil {
+		return argocd.GitCredentials{}, fmt.Errorf(
+			"parse Git repository URL for credentials: %w",
+			err,
+		)
+	}
+
+	if repositoryURL.Scheme != "http" &&
+		repositoryURL.Scheme != "https" {
+		return argocd.GitCredentials{}, fmt.Errorf(
+			"Git repository URL scheme %q does not "+
+				"support username/password credentials",
+			repositoryURL.Scheme,
+		)
+	}
+
+	if repositoryURL.Host == "" ||
+		repositoryURL.User != nil {
+		return argocd.GitCredentials{}, errors.New(
+			"Git repository URL must contain a host " +
+				"and must not embed credentials",
+		)
+	}
+
+	credentialBaseURL := repositoryURL.Scheme +
+		"://" +
+		repositoryURL.Host
+
+	username, err := prompt.readValue(
+		fmt.Sprintf(
+			"Username for '%s': ",
+			credentialBaseURL,
+		),
+	)
+	if err != nil {
+		return argocd.GitCredentials{}, err
+	}
+
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return argocd.GitCredentials{}, errors.New(
+			"Git repository username is required",
+		)
+	}
+
+	passwordURL := repositoryURL.Scheme +
+		"://" +
+		url.User(username).String() +
+		"@" +
+		repositoryURL.Host
+
+	fmt.Fprintf(
+		os.Stderr,
+		"Password for '%s': ",
+		passwordURL,
+	)
+
+	secret, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return argocd.GitCredentials{}, fmt.Errorf(
+			"read Git repository password or access token: %w",
+			err,
+		)
+	}
+
+	if len(secret) == 0 {
+		return argocd.GitCredentials{}, errors.New(
+			"Git repository password or access token is required",
+		)
+	}
+
+	return argocd.GitCredentials{
+		Username: username,
+		Secret:   string(secret),
+	}, nil
 }
 
 func (prompt *argoCDPrompter) Progress(message string) {

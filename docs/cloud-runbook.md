@@ -197,17 +197,27 @@ sudo eva preflight argocd --workspace /home/eva/site-dev-196
 
 승인하면 Argo CD 관리 서버 주소, SSH 사용자, password를 입력받습니다. 관리 서버의
 `kubectl`로 감지된 Application의 공통 destination과 ApplicationSet ownership을 확인합니다.
-ApplicationSet cluster generator의 재생성을 막기 위해 정확히 일치하는 cluster registration을 먼저
-제거한 후, 해당 cluster prefix의 Application 전체를 non-cascade로 제거하고 재생성되지 않는지
-검증합니다. Argo CD CLI 로그인이나 Argo CD 계정 정보는 필요하지 않습니다.
+cluster registration Secret의 tracking ID가 `Application/argocd/registration`임을 확인한 뒤,
+Git source에서 해당 site manifest만 제거하는 별도 승인을 표시합니다. 이 화면에는 repository,
+동적으로 확인한 default branch, target manifest 및 다음 commit 제목이 표시됩니다.
+
+```text
+[DEPLOYER] remove <cluster-name> from Argo CD registration
+```
+
+Git push와 `registration` Application이 pushed commit을 관측한 것이 확인된 뒤에만 live Secret을
+삭제하고, 이후 해당 cluster prefix의 legacy Application을
+non-cascade로 제거합니다. global `registration` Application의 Auto-Sync와 모든 ApplicationSet은
+변경하지 않으며 다른 site의 manifest도 수정하지 않습니다. push 실패 또는 remote HEAD 변경은
+live Secret/Application 삭제 없이 실패합니다. Argo CD CLI 로그인이나 Argo CD 계정 정보는 필요하지
+않지만 SSH 사용자는 관리 서버에서 repository clone 및 push 권한을 이미 가져야 합니다.
 
 완료된 handoff는
 `/var/lib/eva/sites/<site-id>/argocd-handoff.yaml`에 원자적으로 기록됩니다.
-대상 workload에 기존 Argo CD tracking metadata가 남아 있어도 유효한 receipt가
-현재 감지된 Application 집합을 포함하면 이후 `eva install`, `eva apply`,
-`eva retry`의 post-precondition 검사를 통과합니다. 이전 Release에서 handoff가
-이미 완료됐지만 receipt가 없는 경우에는 같은 preflight 명령을 다시 실행하면
-원격 Application 및 cluster registration 부재를 재검증한 뒤 receipt를 복구합니다.
+receipt에는 registration Application, repository, branch, manifest, pushed commit SHA도 기록합니다.
+Git-backed handoff에는 이 다섯 metadata가 모두 필요하며, 이전 형식 receipt는 계속 읽을 수 있습니다.
+receipt 복구는 `registration`이 target Secret을 원하지 않고 live Secret/Application이 안정적으로
+계속 부재한 경우에만 허용됩니다. 그렇지 않으면 full Git-backed preflight가 필요합니다.
 거절하면 설치를 시작하지 않으므로, 필요한 경우 현재 상태를 그대로 둔 채 직접 조치할 수 있습니다.
 명령은 검증한 Release root에서 실행하며 현재 디렉터리의 Release를 자동으로
 `/opt/eva/releases`에 준비합니다. 별도의 `--release` 또는 `--install-root` 입력은 필요하지 않습니다.

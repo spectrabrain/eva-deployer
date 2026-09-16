@@ -80,6 +80,9 @@ jobs:
       - name: Test EVA App values contract
         run: scripts/test/test_eva_app_values.sh
 
+      - name: Test EVA Traefik TLS contract
+        run: scripts/test/test_eva_iam_traefik_tls.sh
+
       - name: Test EVA Agent and Vision values contracts
         run: |
           scripts/test/test_eva_component_values.sh

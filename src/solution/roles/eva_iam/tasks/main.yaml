@@ -430,6 +430,15 @@
   register: eva_iam_k3s_check
   changed_when: false
 
+- name: Configure Traefik default TLS certificate for an IP-based IAM host
+  ansible.builtin.import_role:
+    name: eva_traefik_tls
+  vars:
+    eva_traefik_tls_host: "{{ eva_iam_effective_host }}"
+    eva_traefik_tls_host_path: "{{ eva_iam_tls_host_path }}"
+    eva_traefik_tls_kubeconfig: "{{ eva_iam_kubeconfig }}"
+  when: not ansible_check_mode
+
 - name: Detect NodePort collision from another namespace
   ansible.builtin.shell: >-
     set -o pipefail;

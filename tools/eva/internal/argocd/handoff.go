@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"eva-deployer/tools/eva/internal/plan"
 	"gopkg.in/yaml.v3"
@@ -119,11 +120,27 @@ type progressReporter interface {
 	Progress(string)
 }
 
+type receiptRecorder interface {
+	RecordReceipt(Receipt) error
+}
+
 func reportProgress(prompt Prompter, message string) {
 	reporter, ok := prompt.(progressReporter)
 	if ok {
 		reporter.Progress(message)
 	}
+}
+
+func recordReceipt(
+	prompt Prompter,
+	receipt Receipt,
+) error {
+	recorder, ok := prompt.(receiptRecorder)
+	if !ok {
+		return nil
+	}
+
+	return recorder.RecordReceipt(receipt)
 }
 
 type Session interface {
@@ -285,6 +302,72 @@ func RunPreflight(
 			"parse Argo CD cluster registrations before handoff: %w",
 			err,
 		)
+	}
+
+	if recovery, ok := resolveCompletedHandoff(
+		detection,
+		applications,
+		registrations,
+	); ok {
+		reportProgress(
+			prompt,
+			"[INFO] Verifying previous Argo CD ownership handoff...",
+		)
+
+		stableApplicationsOutput, err := session.Run(
+			"sleep 5 && " + applicationListCommand(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"verify previous Argo CD handoff remains stable: %w",
+				err,
+			)
+		}
+
+		stableApplications, err := parseApplications(
+			stableApplicationsOutput,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"parse stabilized Argo CD Applications: %w",
+				err,
+			)
+		}
+
+		if !detectedApplicationsAbsent(
+			detection.Applications,
+			stableApplications,
+		) {
+			return errors.New(
+				"legacy Argo CD Applications reappeared " +
+					"while recovering the handoff receipt",
+			)
+		}
+
+		if err := recordReceipt(
+			prompt,
+			recovery,
+		); err != nil {
+			return fmt.Errorf(
+				"record recovered Argo CD handoff receipt: %w",
+				err,
+			)
+		}
+
+		reportProgress(
+			prompt,
+			"[OK] Legacy Applications are absent.",
+		)
+		reportProgress(
+			prompt,
+			"[OK] Legacy cluster registration is absent.",
+		)
+		reportProgress(
+			prompt,
+			"[OK] Recorded completed Argo CD ownership handoff.",
+		)
+
+		return nil
 	}
 
 	target, err := resolveHandoffTarget(
@@ -480,6 +563,39 @@ func RunPreflight(
 		return err
 	}
 
+	applicationNames := make(
+		[]string,
+		0,
+		len(target.Applications),
+	)
+	for _, application := range target.Applications {
+		applicationNames = append(
+			applicationNames,
+			application.Metadata.Name,
+		)
+	}
+
+	if err := recordReceipt(
+		prompt,
+		Receipt{
+			SchemaVersion: receiptSchemaVersion,
+			SiteID:        detection.SiteID,
+			ClusterName:   target.Cluster.Name,
+			ClusterServer: target.Cluster.Server,
+			Applications:  applicationNames,
+			CompletedAt:   time.Now().UTC(),
+		},
+	); err != nil {
+		return fmt.Errorf(
+			"record Argo CD handoff receipt: %w",
+			err,
+		)
+	}
+
+	reportProgress(
+		prompt,
+		"[OK] Recorded completed Argo CD ownership handoff.",
+	)
 	reportProgress(
 		prompt,
 		"[OK] Argo CD ownership handoff completed.",
@@ -566,6 +682,103 @@ func requireApplicationsAbsent(
 	}
 
 	return nil
+}
+
+func resolveCompletedHandoff(
+	detection Detection,
+	applications []applicationRecord,
+	registrations []clusterRegistration,
+) (Receipt, bool) {
+	if len(detection.Applications) == 0 ||
+		!detectedApplicationsAbsent(
+			detection.Applications,
+			applications,
+		) {
+		return Receipt{}, false
+	}
+
+	clusterName, ok := commonLegacyClusterName(
+		detection.Applications,
+	)
+	if !ok {
+		return Receipt{}, false
+	}
+
+	for _, registration := range registrations {
+		if registration.Name == clusterName {
+			return Receipt{}, false
+		}
+	}
+
+	return Receipt{
+		SchemaVersion: receiptSchemaVersion,
+		SiteID:        detection.SiteID,
+		ClusterName:   clusterName,
+		Applications: append(
+			[]string(nil),
+			detection.Applications...,
+		),
+		CompletedAt: time.Now().UTC(),
+	}, true
+}
+
+func detectedApplicationsAbsent(
+	detected []string,
+	applications []applicationRecord,
+) bool {
+	remote := make(map[string]struct{}, len(applications))
+
+	for _, application := range applications {
+		remote[application.Metadata.Name] = struct{}{}
+	}
+
+	for _, application := range detected {
+		if _, exists := remote[application]; exists {
+			return false
+		}
+	}
+
+	return true
+}
+
+func commonLegacyClusterName(
+	applications []string,
+) (string, bool) {
+	clusterName := ""
+
+	for _, application := range applications {
+		current, ok := legacyClusterName(application)
+		if !ok {
+			return "", false
+		}
+
+		if clusterName != "" && clusterName != current {
+			return "", false
+		}
+
+		clusterName = current
+	}
+
+	return clusterName, clusterName != ""
+}
+
+func legacyClusterName(application string) (string, bool) {
+	for _, suffix := range []string{
+		"-eva-agent-init",
+		"-eva-agent-qdrant",
+		"-eva-agent-vllm",
+		"-eva-vision",
+		"-eva-agent",
+		"-eva-app",
+		"-eva-iam",
+	} {
+		if strings.HasSuffix(application, suffix) &&
+			len(application) > len(suffix) {
+			return strings.TrimSuffix(application, suffix), true
+		}
+	}
+
+	return "", false
 }
 
 func parseApplications(output string) ([]applicationRecord, error) {
@@ -897,18 +1110,53 @@ func RequireNoTracking(
 	document plan.Document,
 	releaseRoot string,
 ) error {
+	return RequireNoTrackingWithReceiptRoot(
+		document,
+		releaseRoot,
+		DefaultReceiptRoot,
+	)
+}
+
+func RequireNoTrackingWithReceiptRoot(
+	document plan.Document,
+	releaseRoot string,
+	receiptRoot string,
+) error {
 	if !RequiresHandoff(document) {
 		return nil
 	}
-	detection, err := LoadDetection(releaseRoot, document.SiteID)
+
+	detection, err := LoadDetection(
+		releaseRoot,
+		document.SiteID,
+	)
 	if err != nil {
 		return err
 	}
+
 	if len(detection.Applications) == 0 {
 		return nil
 	}
+
+	receipt, receiptErr := LoadReceipt(
+		receiptRoot,
+		document.SiteID,
+	)
+	if receiptErr == nil {
+		if err := ReceiptCovers(
+			receipt,
+			detection,
+		); err == nil {
+			return nil
+		}
+	}
+
 	return fmt.Errorf(
-		"Argo CD-managed EVA resources are still present for site %q. Run `eva preflight argocd --workspace %s` from the verified Release root to review and disconnect them before eva install",
+		"Argo CD-managed EVA resources are still present "+
+			"for site %q. Run "+
+			"`eva preflight argocd --workspace %s` "+
+			"from the verified Release root to review "+
+			"and disconnect them before eva install",
 		document.SiteID,
 		document.Workspace,
 	)

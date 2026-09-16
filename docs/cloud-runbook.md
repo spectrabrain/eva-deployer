@@ -200,6 +200,14 @@ sudo eva preflight argocd --workspace /home/eva/site-dev-196
 ApplicationSet cluster generator의 재생성을 막기 위해 정확히 일치하는 cluster registration을 먼저
 제거한 후, 해당 cluster prefix의 Application 전체를 non-cascade로 제거하고 재생성되지 않는지
 검증합니다. Argo CD CLI 로그인이나 Argo CD 계정 정보는 필요하지 않습니다.
+
+완료된 handoff는
+`/var/lib/eva/sites/<site-id>/argocd-handoff.yaml`에 원자적으로 기록됩니다.
+대상 workload에 기존 Argo CD tracking metadata가 남아 있어도 유효한 receipt가
+현재 감지된 Application 집합을 포함하면 이후 `eva install`, `eva apply`,
+`eva retry`의 post-precondition 검사를 통과합니다. 이전 Release에서 handoff가
+이미 완료됐지만 receipt가 없는 경우에는 같은 preflight 명령을 다시 실행하면
+원격 Application 및 cluster registration 부재를 재검증한 뒤 receipt를 복구합니다.
 거절하면 설치를 시작하지 않으므로, 필요한 경우 현재 상태를 그대로 둔 채 직접 조치할 수 있습니다.
 명령은 검증한 Release root에서 실행하며 현재 디렉터리의 Release를 자동으로
 `/opt/eva/releases`에 준비합니다. 별도의 `--release` 또는 `--install-root` 입력은 필요하지 않습니다.

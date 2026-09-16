@@ -400,34 +400,13 @@
     state: unmounted
   when: not ansible_check_mode
 
-- name: Check kustomize binary
-  ansible.builtin.stat:
-    path: /usr/local/bin/kustomize
-  register: kustomize_binary
-
-- name: Install kustomize from internet when missing
-  ansible.builtin.shell: |
-    set -euo pipefail
-    cd /tmp
-    curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
-    install -m 0755 kustomize /usr/local/bin/kustomize
-    rm -f /tmp/kustomize
-  args:
-    executable: /bin/bash
-  changed_when: true
-  when:
-    - not kustomize_binary.stat.exists
-    - not (airgap_mode | default(false) | bool)
-
-- name: Install kustomize from offline bundle when missing
-  ansible.builtin.copy:
-    src: "{{ eva_agent_offline_kustomize_bin }}"
-    dest: /usr/local/bin/kustomize
-    mode: '0755'
-    remote_src: true
-  when:
-    - not kustomize_binary.stat.exists
-    - airgap_mode | default(false) | bool
+- name: Validate EVA managed kustomize
+  ansible.builtin.command:
+    cmd: kustomize version
+  register: eva_agent_kustomize_version
+  changed_when: false
+  tags:
+    - eva_agent_managed_kustomize
 
 - name: Remove EVA dependency workspace if it exists
   ansible.builtin.file:

@@ -792,7 +792,10 @@ func runArgoCDPreflight(args []string) error {
 	if err := argoCDPreflightHandoff(document, releaseRoot); err != nil {
 		return err
 	}
-	fmt.Println("[OK] Argo CD handoff preflight passed.")
+	printStatus(
+		os.Stdout,
+		"[OK] Argo CD handoff preflight passed.",
+	)
 	return nil
 }
 

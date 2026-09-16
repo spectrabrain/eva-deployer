@@ -178,6 +178,9 @@ IAM과 App을 하나의 작업으로 설치하면 IAM SSO 값이 App에 자동�
 `iam.yaml`, 선택 `agent.yaml` 또는 `vision.yaml`, `app.yaml`, `aws_key.ini`에는 credential이
 포함될 수 있습니다. 실제 파일은 승인된 Secret 관리 절차로 관리하고 커밋하지 않습니다. 대상 TLS
 certificate와 key는 위에서 구성한 host path, 일반적으로 `/home/eva/certs`에 둡니다.
+`eva install`의 precondition은 선택된 IAM `config.host`와 App `app.backendHost`가 각 인증서의
+SAN에 포함되는지 변경 전에 검증합니다. IP와 DNS 모두 같은 검증 대상이며, DNS 기반 설치는 기존
+host-based Ingress TLS 흐름을 유지하고 Traefik `TLSStore`를 만들지 않습니다.
 
 Agent Release values, Config 생성 설정, role k3s/repository override는 자동 적용됩니다. 선택
 Agent 및 Vision Workspace Chart override는 target별로 적용되며 GPU, MIG, vLLM profile을 선택하지 않습니다.
@@ -206,6 +209,13 @@ precondition이 지원되는 APT repository 문제를 감지하면 별도로 진
 ```bash
 sudo eva troubleshoot apt
 sudo eva troubleshoot apt --fix-known --yes
+```
+
+인증서 SAN 검증이 실패하면 해당 IAM/App 외부 주소를 SAN에 포함한 인증서와 key를 같은 host path에
+다시 준비한 뒤, Workspace 값을 바꾸지 않았다면 실패한 작업을 재시도합니다.
+
+```bash
+sudo eva retry --yes
 ```
 
 ## 7. 설치 결과 확인

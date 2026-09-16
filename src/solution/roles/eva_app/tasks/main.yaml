@@ -416,6 +416,15 @@
         ((eva_app_effective_values.ingress.tls.authType | default('')) == 'hostPath')
       }}
 
+- name: Configure Traefik default TLS certificate for an IP-based App host
+  ansible.builtin.import_role:
+    name: eva_traefik_tls
+  vars:
+    eva_traefik_tls_host: "{{ eva_app_effective_values.app.backendHost | default(eva_app_backend_host) }}"
+    eva_traefik_tls_host_path: "{{ eva_app_tls_host_path }}"
+    eva_traefik_tls_kubeconfig: "{{ eva_app_kubeconfig }}"
+  when: not ansible_check_mode
+
 - name: Record private EVA App effective input values on control node
   no_log: true
   ansible.builtin.copy:

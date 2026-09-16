@@ -20,7 +20,9 @@ make_fixture() {
   local root="$TMP_ROOT/$name"
 
   mkdir -p "$root/bin" "$root/workspace/site-values" "$root/rendered" \
-    "$root/app-work" "$root/config/site/localhost" "$root/state/site/localhost"
+    "$root/app-work" "$root/certs" "$root/config/site/localhost" "$root/state/site/localhost"
+  printf 'certificate\n' >"$root/certs/tls.crt"
+  printf 'private-key\n' >"$root/certs/tls.key"
 
   cat >"$root/bin/helm" <<'EOF'
 #!/usr/bin/env bash
@@ -151,6 +153,8 @@ workspace_checksum_after="$(sha256sum "$root/workspace/site-values/app.yaml")"
 [[ "$workspace_checksum_before" == "$workspace_checksum_after" ]]
 grep -Fq 'delete job eva-app-tls-job -n eva-app --ignore-not-found=true --wait=true --timeout=120s' "$root/kubectl.log"
 grep -Fq 'wait --for=condition=Complete job/eva-app-tls-job -n eva-app --timeout=120s' "$root/kubectl.log"
+grep -Fq 'create secret tls eva-tls-for-traefik -' "$root/kubectl.log"
+grep -Fq 'apply --filename=-' "$root/kubectl.log"
 [[ "$(stat -c '%a' "$root/rendered/effective-input-values.yaml")" == 600 ]]
 [[ "$(stat -c '%a' "$root/rendered/resolved-values.yaml")" == 600 ]]
 grep -Fq 'baseUrl: https://workspace.example' "$root/rendered/effective-input-values.yaml"

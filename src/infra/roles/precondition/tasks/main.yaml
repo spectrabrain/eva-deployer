@@ -20,6 +20,10 @@
     infra_aws_cli_download_url: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
   changed_when: false
 
+- name: Validate ingress certificate SANs before apply
+  ansible.builtin.import_tasks: tls_san.yaml
+  when: not ansible_check_mode
+
 - name: Ensure local infra output directory exists on control node
   ansible.builtin.file:
     path: "{{ base_infra_output_dir }}"

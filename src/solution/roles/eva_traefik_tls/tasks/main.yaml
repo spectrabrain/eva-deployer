@@ -1,0 +1,92 @@
+---
+- name: Detect whether the effective ingress host is an IP address
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - import ipaddress, sys; ipaddress.ip_address(sys.argv[1])
+      - "{{ eva_traefik_tls_host }}"
+  register: eva_traefik_tls_host_ip
+  changed_when: false
+  failed_when: false
+
+- name: Check TLS certificate files for Traefik default certificate
+  ansible.builtin.stat:
+    path: "{{ eva_traefik_tls_host_path }}/{{ item }}"
+  loop:
+    - tls.crt
+    - tls.key
+  register: eva_traefik_tls_files
+  when: eva_traefik_tls_host_ip.rc == 0
+
+- name: Require TLS certificate files for an IP-based ingress host
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+    fail_msg: >-
+      IP 기반 ingress host에는 {{ eva_traefik_tls_host_path }}/tls.crt 및
+      {{ eva_traefik_tls_host_path }}/tls.key가 필요합니다.
+  loop: "{{ eva_traefik_tls_files.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: eva_traefik_tls_host_ip.rc == 0
+
+- name: Render Traefik default TLS Secret manifest
+  no_log: true
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - create
+      - secret
+      - tls
+      - eva-tls-for-traefik
+      - --namespace=kube-system
+      - --cert={{ eva_traefik_tls_host_path }}/tls.crt
+      - --key={{ eva_traefik_tls_host_path }}/tls.key
+      - --dry-run=client
+      - --output=yaml
+  register: eva_traefik_tls_secret_manifest
+  changed_when: false
+  when: eva_traefik_tls_host_ip.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_traefik_tls_kubeconfig }}"
+
+- name: Apply Traefik default TLS Secret
+  no_log: true
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - apply
+      - --filename=-
+    stdin: "{{ eva_traefik_tls_secret_manifest.stdout }}"
+  register: eva_traefik_tls_secret_apply
+  changed_when: >-
+    'created' in eva_traefik_tls_secret_apply.stdout
+    or 'configured' in eva_traefik_tls_secret_apply.stdout
+  when: eva_traefik_tls_host_ip.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_traefik_tls_kubeconfig }}"
+
+- name: Apply Traefik default TLSStore
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - apply
+      - --filename=-
+    stdin: |
+      apiVersion: traefik.io/v1alpha1
+      kind: TLSStore
+      metadata:
+        name: default
+        namespace: kube-system
+      spec:
+        defaultCertificate:
+          secretName: eva-tls-for-traefik
+  register: eva_traefik_tls_store_apply
+  changed_when: >-
+    'created' in eva_traefik_tls_store_apply.stdout
+    or 'configured' in eva_traefik_tls_store_apply.stdout
+  when: eva_traefik_tls_host_ip.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_traefik_tls_kubeconfig }}"

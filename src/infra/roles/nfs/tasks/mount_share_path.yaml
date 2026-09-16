@@ -46,6 +46,7 @@
 - name: Restart NFS server
   ansible.builtin.systemd:
     name: nfs-kernel-server
+    daemon_reload: true
     state: restarted
   when:
     - not ansible_check_mode

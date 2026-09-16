@@ -92,6 +92,7 @@ jobs:
         run: |
           scripts/test/test_eva_component_values.sh
           scripts/test/test_eva_vision_gpu_resource.sh
+          scripts/test/test_k3s_gpu_validation.sh
           scripts/test/test_eva_vllm_profile.sh
           scripts/test/test_eva_qdrant_values.sh
 

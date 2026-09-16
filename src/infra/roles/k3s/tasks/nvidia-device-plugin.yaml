@@ -221,95 +221,367 @@
     msg: "GPU validation pod resource: {{ k3s_gpu_validation_resource_key }}"
   when: not ansible_check_mode
 
-- name: Validate GPU workload execution on k3s
+- name: Collect node allocatable capacity for GPU validation
+  ansible.builtin.command:
+    cmd: kubectl get nodes -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_gpu_validation_nodes_cmd
+  changed_when: false
   when: not ansible_check_mode
+
+- name: Initialize GPU validation capacity accounting
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_nodes: "{{ (k3s_gpu_validation_nodes_cmd.stdout | from_json)['items'] | default([]) }}"
+    k3s_gpu_validation_allocatable: 0
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Sum selected NVIDIA resource allocatable capacity
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_allocatable: >-
+      {{
+        (k3s_gpu_validation_allocatable | int)
+        + ((item.status.allocatable | default({}))[k3s_gpu_validation_resource_key] | default(0) | int)
+      }}
+  loop: "{{ k3s_gpu_validation_nodes }}"
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Collect active pods for GPU validation capacity accounting
+  ansible.builtin.command:
+    cmd: kubectl get pods -A -o json
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_gpu_validation_pods_cmd
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Initialize GPU validation pod allocation accounting
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_pods: "{{ (k3s_gpu_validation_pods_cmd.stdout | from_json)['items'] | default([]) }}"
+    k3s_gpu_validation_app_allocations: {}
+    k3s_gpu_validation_init_allocations: {}
+    k3s_gpu_validation_pod_allocations: {}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Sum selected NVIDIA resource requests from active pod app containers
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_app_allocations: >-
+      {{
+        k3s_gpu_validation_app_allocations | combine({
+          item.0.metadata.namespace ~ '/' ~ item.0.metadata.name:
+            (
+              (k3s_gpu_validation_app_allocations[
+                item.0.metadata.namespace ~ '/' ~ item.0.metadata.name
+              ] | default(0) | int)
+              + (((item.1.resources | default({})).limits | default({}))[k3s_gpu_validation_resource_key] | default(0) | int)
+            )
+        })
+      }}
+  loop: "{{ k3s_gpu_validation_pods | subelements('spec.containers', skip_missing=True) }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - item.0.status.phase | default('') not in ['Succeeded', 'Failed']
+
+- name: Find maximum selected NVIDIA resource request from active pod init containers
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_init_allocations: >-
+      {{
+        k3s_gpu_validation_init_allocations | combine({
+          item.0.metadata.namespace ~ '/' ~ item.0.metadata.name:
+            [
+              k3s_gpu_validation_init_allocations[
+                item.0.metadata.namespace ~ '/' ~ item.0.metadata.name
+              ] | default(0) | int,
+              (((item.1.resources | default({})).limits | default({}))[k3s_gpu_validation_resource_key] | default(0) | int)
+            ] | max
+        })
+      }}
+  loop: "{{ k3s_gpu_validation_pods | subelements('spec.initContainers', skip_missing=True) }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - item.0.status.phase | default('') not in ['Succeeded', 'Failed']
+
+- name: Calculate effective selected NVIDIA allocation for each active pod
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_pod_allocations: >-
+      {{
+        k3s_gpu_validation_pod_allocations | combine({
+          item.metadata.namespace ~ '/' ~ item.metadata.name:
+            [
+              k3s_gpu_validation_app_allocations[
+                item.metadata.namespace ~ '/' ~ item.metadata.name
+              ] | default(0) | int,
+              k3s_gpu_validation_init_allocations[
+                item.metadata.namespace ~ '/' ~ item.metadata.name
+              ] | default(0) | int
+            ] | max
+        })
+      }}
+  loop: "{{ k3s_gpu_validation_pods }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - item.status.phase | default('') not in ['Succeeded', 'Failed']
+
+- name: Finalize GPU validation allocation accounting
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_allocated: >-
+      {{
+        k3s_gpu_validation_pod_allocations | dict2items | map(attribute='value') | map('int') | sum(start=0)
+      }}
+    k3s_gpu_validation_ready_eva_pods: []
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Find ready EVA GPU workloads usable as validation evidence
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_ready_eva_pods: >-
+      {{
+        k3s_gpu_validation_ready_eva_pods
+        + [item.metadata.namespace ~ '/' ~ item.metadata.name]
+      }}
+  loop: "{{ k3s_gpu_validation_pods }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - item.metadata.namespace | default('') in ['eva-agent', 'eva-vision']
+    - item.status.phase | default('') == 'Running'
+    - >-
+      item.status.conditions | default([])
+      | selectattr('type', 'equalto', 'Ready')
+      | selectattr('status', 'equalto', 'True')
+      | list | length > 0
+    - >-
+      k3s_gpu_validation_pod_allocations[
+        item.metadata.namespace ~ '/' ~ item.metadata.name
+      ] | default(0) | int > 0
+
+- name: Select GPU validation strategy from capacity accounting
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_available: >-
+      {{ (k3s_gpu_validation_allocatable | int) - (k3s_gpu_validation_allocated | int) }}
+    k3s_gpu_validation_mode: >-
+      {{
+        ((k3s_gpu_validation_allocatable | int) - (k3s_gpu_validation_allocated | int) > 0)
+        | ternary(
+          'validation-pod',
+          ((k3s_gpu_validation_ready_eva_pods | length > 0)
+            | ternary('existing-eva-workloads', 'unavailable'))
+        )
+      }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Show NVIDIA resource capacity accounting
+  ansible.builtin.debug:
+    msg: |
+      NVIDIA resource capacity:
+      resource={{ k3s_gpu_validation_resource_key }}
+      allocatable={{ k3s_gpu_validation_allocatable }}
+      allocated={{ k3s_gpu_validation_allocated }}
+      available={{ k3s_gpu_validation_available }}
+      ready_eva_pods={{ k3s_gpu_validation_ready_eva_pods | length }}
+      validation={{ k3s_gpu_validation_mode }}
+  when: not ansible_check_mode
+
+- name: Fail on invalid negative NVIDIA resource capacity
+  ansible.builtin.fail:
+    msg: >-
+      NVIDIA resource capacity is invalid: resource={{ k3s_gpu_validation_resource_key }},
+      allocatable={{ k3s_gpu_validation_allocatable }},
+      allocated={{ k3s_gpu_validation_allocated }},
+      available={{ k3s_gpu_validation_available }}. No validation pod was created.
+  when:
+    - not ansible_check_mode
+    - k3s_gpu_validation_available | int < 0
+
+- name: Fail when no NVIDIA resource is available and no ready EVA workload proves it
+  ansible.builtin.fail:
+    msg: >-
+      NVIDIA resource capacity has no slot for validation and no ready EVA workload evidence:
+      resource={{ k3s_gpu_validation_resource_key }},
+      allocatable={{ k3s_gpu_validation_allocatable }},
+      allocated={{ k3s_gpu_validation_allocated }},
+      available={{ k3s_gpu_validation_available }},
+      evidence_pods={{ k3s_gpu_validation_ready_eva_pods | join(',') | default('none', true) }}.
+      No validation pod was created; existing workloads were not changed.
+  when:
+    - not ansible_check_mode
+    - k3s_gpu_validation_available | int == 0
+    - k3s_gpu_validation_ready_eva_pods | length == 0
+
+- name: Validate GPU workload execution on k3s when capacity is available
+  vars:
+    k3s_gpu_validation_terminal_reasons:
+      - FailedScheduling
+      - Unschedulable
+      - ImagePullBackOff
+      - ErrImagePull
+      - CreateContainerError
+      - CreateContainerConfigError
+      - InvalidImageName
+      - CrashLoopBackOff
+  when:
+    - not ansible_check_mode
+    - k3s_gpu_validation_available | int >= 1
   block:
-    - name: Ensure previous GPU validation pod is absent
-      ansible.builtin.command:
-        cmd: kubectl delete pod gpu-pod --ignore-not-found=true
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      changed_when: false
+    - block:
+        - name: Ensure previous GPU validation pod is absent
+          ansible.builtin.command:
+            cmd: kubectl delete pod gpu-pod --ignore-not-found=true
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          changed_when: false
 
-    - name: Create GPU validation pod manifest
-      ansible.builtin.copy:
-        dest: /tmp/k3s-gpu-pod.yaml
-        mode: '0644'
-        content: |
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: gpu-pod
-          spec:
-            restartPolicy: Never
-            runtimeClassName: nvidia
-            tolerations:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
-                effect: NoSchedule
-              - key: node-role.kubernetes.io/master
-                operator: Exists
-                effect: NoSchedule
-            containers:
-              - name: cuda-container
-                image: {{ nvidia_cuda_sample_image }}
-                resources:
-                  limits:
-                    "{{ k3s_gpu_validation_resource_key }}": 1
+        - name: Create GPU validation pod manifest
+          ansible.builtin.copy:
+            dest: "{{ k3s_gpu_validation_pod_manifest_path | default('/tmp/k3s-gpu-pod.yaml') }}"
+            mode: '0644'
+            content: |
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: gpu-pod
+              spec:
+                restartPolicy: Never
+                runtimeClassName: nvidia
+                tolerations:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+                    effect: NoSchedule
+                  - key: node-role.kubernetes.io/master
+                    operator: Exists
+                    effect: NoSchedule
+                containers:
+                  - name: cuda-container
+                    image: {{ nvidia_cuda_sample_image }}
+                    resources:
+                      limits:
+                        "{{ k3s_gpu_validation_resource_key }}": 1
 
-    - name: Apply GPU validation pod
-      ansible.builtin.command:
-        cmd: kubectl apply -f /tmp/k3s-gpu-pod.yaml
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: k3s_gpu_validation_pod_apply
-      changed_when: "'created' in k3s_gpu_validation_pod_apply.stdout or 'configured' in k3s_gpu_validation_pod_apply.stdout"
+        - name: Apply GPU validation pod
+          ansible.builtin.command:
+            cmd: >-
+              kubectl apply -f
+              {{ k3s_gpu_validation_pod_manifest_path | default('/tmp/k3s-gpu-pod.yaml') }}
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_gpu_validation_pod_apply
+          changed_when: "'created' in k3s_gpu_validation_pod_apply.stdout or 'configured' in k3s_gpu_validation_pod_apply.stdout"
 
-    - name: Describe GPU validation pod
-      ansible.builtin.command:
-        cmd: kubectl describe pod gpu-pod
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: k3s_gpu_validation_pod_describe
-      changed_when: false
+        - name: Wait for GPU validation pod completion or terminal failure
+          ansible.builtin.command:
+            cmd: >-
+              kubectl get pod gpu-pod
+              -o jsonpath='{.status.phase}{"|"}{range .status.conditions[*]}{.reason}{"|"}{end}{range .status.containerStatuses[*]}{.state.waiting.reason}{"|"}{.state.terminated.reason}{"|"}{end}'
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_gpu_validation_pod_status
+          changed_when: false
+          failed_when: false
+          retries: 120
+          delay: 5
+          until: >-
+            k3s_gpu_validation_pod_status.rc == 0 and (
+              (k3s_gpu_validation_pod_status.stdout | default('')).split('|') | first == 'Succeeded'
+              or (k3s_gpu_validation_pod_status.stdout | default('')).split('|') | first == 'Failed'
+              or k3s_gpu_validation_pod_status.stdout | default('') is search(
+                k3s_gpu_validation_terminal_reasons | join('|')
+              )
+            )
 
-    - name: Wait for GPU validation pod completion
-      ansible.builtin.command:
-        cmd: kubectl wait --for=jsonpath='{.status.phase}'=Succeeded pod/gpu-pod --timeout=600s
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: k3s_gpu_validation_pod_wait
-      changed_when: false
-      failed_when: false
+        - name: Ensure GPU validation pod completed successfully
+          ansible.builtin.assert:
+            that:
+              - k3s_gpu_validation_pod_status.rc == 0
+              - "(k3s_gpu_validation_pod_status.stdout | default('')).split('|') | first == 'Succeeded'"
+            fail_msg: >-
+              GPU validation pod did not complete successfully. Diagnostics were collected in the operation log before cleanup.
+            success_msg: GPU validation pod reached Succeeded.
 
-    - name: Ensure GPU validation pod completed successfully
-      ansible.builtin.assert:
-        that:
-          - k3s_gpu_validation_pod_wait.rc == 0
-        fail_msg: >-
-          GPU validation pod did not reach Succeeded within timeout. Check `kubectl describe pod gpu-pod` for details.
-        success_msg: GPU validation pod reached Succeeded.
+        - name: Read GPU validation pod logs
+          ansible.builtin.command:
+            cmd: kubectl logs gpu-pod
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_gpu_validation_pod_logs
+          changed_when: false
 
-    - name: Read GPU validation pod logs
-      ansible.builtin.command:
-        cmd: kubectl logs gpu-pod
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      register: k3s_gpu_validation_pod_logs
-      changed_when: false
+        - name: Verify GPU validation output
+          ansible.builtin.assert:
+            that:
+              - "'Test PASSED' in k3s_gpu_validation_pod_logs.stdout"
+            fail_msg: >-
+              GPU validation pod completed but expected 'Test PASSED' was not found in logs.
+            success_msg: GPU validation pod log contains 'Test PASSED'.
 
-    - name: Verify GPU validation output
-      ansible.builtin.assert:
-        that:
-          - "'Test PASSED' in k3s_gpu_validation_pod_logs.stdout"
-        fail_msg: >-
-          GPU validation pod completed but expected 'Test PASSED' was not found in logs.
-        success_msg: GPU validation pod log contains 'Test PASSED'.
+      rescue:
+        - name: Collect GPU validation pod status before cleanup
+          ansible.builtin.command:
+            cmd: kubectl get pod gpu-pod -o wide
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_gpu_validation_diagnostic_get
+          changed_when: false
+          failed_when: false
 
-  always:
-    - name: Cleanup GPU validation pod
-      ansible.builtin.command:
-        cmd: kubectl delete pod gpu-pod --ignore-not-found=true
-      environment:
-        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-      changed_when: false
+        - name: Collect GPU validation pod description before cleanup
+          ansible.builtin.command:
+            cmd: kubectl describe pod gpu-pod
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_gpu_validation_diagnostic_describe
+          changed_when: false
+          failed_when: false
+
+        - name: Collect GPU validation pod logs before cleanup
+          ansible.builtin.command:
+            cmd: kubectl logs gpu-pod --all-containers=true
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_gpu_validation_diagnostic_logs
+          changed_when: false
+          failed_when: false
+
+        - name: Collect GPU validation pod events before cleanup
+          ansible.builtin.command:
+            cmd: >-
+              kubectl get events --field-selector involvedObject.kind=Pod,involvedObject.name=gpu-pod
+              --sort-by=.lastTimestamp
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: k3s_gpu_validation_diagnostic_events
+          changed_when: false
+          failed_when: false
+
+        - name: Record GPU validation diagnostics in operation log
+          ansible.builtin.debug:
+            msg: |
+              GPU validation diagnostics collected before cleanup:
+              kubectl get pod:
+              {{ k3s_gpu_validation_diagnostic_get.stdout | default('') }}
+              kubectl describe pod:
+              {{ k3s_gpu_validation_diagnostic_describe.stdout | default('') }}
+              kubectl logs:
+              {{ k3s_gpu_validation_diagnostic_logs.stdout | default('') }}
+              related events:
+              {{ k3s_gpu_validation_diagnostic_events.stdout | default('') }}
+
+        - name: Fail GPU validation after collecting diagnostics
+          ansible.builtin.fail:
+            msg: >-
+              GPU validation failed. Pod status, description, logs, and related events were collected in the
+              operation log before cleanup.
+
+      always:
+        - name: Cleanup GPU validation pod
+          ansible.builtin.command:
+            cmd: kubectl delete pod gpu-pod --ignore-not-found=true
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          changed_when: false

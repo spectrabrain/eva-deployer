@@ -1186,6 +1186,42 @@
       scripts/download/download_offline_assets.sh 를 먼저 실행하세요.
   when: airgap_mode | default(false) | bool
 
+- name: Define supported legacy eva-agent-init StorageClasses
+  ansible.builtin.set_fact:
+    eva_agent_init_legacy_storage_classes:
+      - name: eva-agent-sc-bs
+        provisioner: rancher.io/local-path
+        parameters:
+          fsType: ext4
+          type: local
+        reclaim_policy: Retain
+        volume_binding_mode: WaitForFirstConsumer
+      - name: eva-agent-sc-fs
+        provisioner: nfs.csi.k8s.io
+        parameters:
+          server: localhost
+          share: /share/eva-agent
+        reclaim_policy: Retain
+        volume_binding_mode: WaitForFirstConsumer
+  changed_when: false
+  when: not ansible_check_mode
+  tags:
+    - eva_agent_init_storageclass_migration
+
+- name: Reconcile legacy eva-agent-init StorageClass ownership
+  ansible.builtin.include_tasks:
+    file: migrate_init_storageclass.yaml
+    apply:
+      tags:
+        - eva_agent_init_storageclass_migration
+  loop: "{{ eva_agent_init_legacy_storage_classes }}"
+  loop_control:
+    loop_var: eva_agent_init_storage_class_contract
+    label: "{{ eva_agent_init_storage_class_contract.name }}"
+  when: not ansible_check_mode
+  tags:
+    - eva_agent_init_storageclass_migration
+
 - name: Check eva-agent-init release
   ansible.builtin.command: helm status eva-agent-init -n {{ eva_agent_namespace }}
   register: eva_agent_init_status

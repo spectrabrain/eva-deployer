@@ -1,28 +1,27 @@
-# EVA Cloud Installation Guide
+# EVA Cloud 설치 가이드
 
-This guide installs EVA on one Ubuntu 24.04 `linux/amd64` server with a supported
-NVIDIA GPU. The normal installation is one `eva install` operation for Infra,
-Config, IAM, Agent, Vision, and App. It changes Docker, k3s, NVIDIA runtime, and
-host persistence; confirm the maintenance window and backup policy first.
+이 가이드는 지원되는 NVIDIA GPU가 장착된 Ubuntu 24.04 `linux/amd64` 서버 한 대에
+EVA를 설치하는 절차입니다. 일반 설치는 Infra, Config, IAM, Agent, Vision, App을
+하나의 `eva install` 작업으로 설치합니다. Docker, k3s, NVIDIA runtime, 호스트 영속
+데이터를 변경하므로 먼저 작업 가능 시간과 백업 정책을 확인합니다.
 
-## 1. Target Environment
+## 1. 대상 환경
 
-| Item | Required operating baseline |
+| 항목 | 필수 운영 기준 |
 | --- | --- |
-| OS and platform | Ubuntu 24.04, `linux/amd64` |
-| Accelerator | Supported NVIDIA GPU, installed NVIDIA driver, and `nvidia-smi` |
-| Container platform | Docker, k3s, NVIDIA Container Toolkit/CDI, NVIDIA Device Plugin |
-| Network | Cloud Repository, GitHub, Docker Hub, AWS/ECR/S3, and other required HTTPS endpoints |
-| Site inputs | AWS credentials and TLS certificate/key on the target host |
-| Privilege | A user that can run `sudo eva ...` |
+| OS 및 플랫폼 | Ubuntu 24.04, `linux/amd64` |
+| 가속기 | 지원되는 NVIDIA GPU, 설치된 NVIDIA driver, `nvidia-smi` |
+| 컨테이너 플랫폼 | Docker, k3s, NVIDIA Container Toolkit/CDI, NVIDIA Device Plugin |
+| 네트워크 | Cloud Repository, GitHub, Docker Hub, AWS/ECR/S3 및 필요한 HTTPS endpoint |
+| 사이트 입력 | 대상 호스트의 AWS credential 및 TLS certificate/key |
+| 권한 | `sudo eva ...`를 실행할 수 있는 사용자 |
 
-The default components are `infra`, `iam`, `agent`, `vision`, and `app`; `n8n` is
-optional. Agent installs EVA Agent, `eva-agent-init`, vLLM, and Qdrant together.
+기본 component는 `infra`, `iam`, `agent`, `vision`, `app`이며 `n8n`은 선택 사항입니다.
+Agent 설치는 EVA Agent, `eva-agent-init`, vLLM, Qdrant를 함께 배포합니다.
 
-## 2. Install EVA Tool And Verify Release
+## 2. EVA Tool 설치 및 Release 검증
 
-Extract the Tag Base Release artifact and run the bundled installer from its
-Release root.
+Tag Base Release artifact의 압축을 풀고 Release root에서 포함된 installer를 실행합니다.
 
 ```bash
 unzip -q eva-base-release-*.zip -d eva-base-release
@@ -31,45 +30,42 @@ sudo bash ./eva-tool-installer.sh
 eva verify .
 ```
 
-The installer verifies the single `eva-tool_*_linux_amd64.tar.gz` archive against
-`checksums.sha256`. `eva install` later prepares the verified Release under
-`/opt/eva/releases/<version>/`; no Release version variable is needed.
+installer는 하나의 `eva-tool_*_linux_amd64.tar.gz` archive를 `checksums.sha256`로
+검증합니다. 이후 `eva install`이 검증된 Release를 `/opt/eva/releases/<version>/`에
+준비하므로 Release version 변수를 따로 설정할 필요가 없습니다.
 
-## 3. Prepare Managed Runtime
+## 3. Managed Runtime 준비
 
-Bootstrap only when the server does not already have an EVA Runtime. It installs
-and validates the managed Ansible and Kubernetes tools before publishing
-`/opt/eva/runtime`.
+서버에 EVA Runtime이 아직 없을 때만 bootstrap을 실행합니다. 관리되는 Ansible 및 Kubernetes
+도구를 설치하고 검증한 뒤 `/opt/eva/runtime`에 게시합니다.
 
 ```bash
 sudo eva runtime bootstrap
 ```
 
-Do not repeat bootstrap merely because the EVA Release changes. `eva install`
-validates the managed Runtime before it starts an operation.
+EVA Release가 바뀌었다는 이유로 bootstrap을 반복하지 않습니다. `eva install`은 작업을
+시작하기 전에 Managed Runtime을 검증합니다.
 
-## 4. Verify GPU Prerequisites
+## 4. GPU 사전 조건 확인
 
-Before installation, run the EVA GPU prerequisite check. It verifies the NVIDIA
-driver, shows detected GPU and MIG state, and explains what must be corrected when
-the driver is unavailable.
+설치 전 EVA GPU 사전 조건 검사를 실행합니다. 이 명령은 NVIDIA driver를 확인하고 감지된
+GPU 및 MIG 상태를 표시하며 driver가 없을 때 필요한 조치를 안내합니다.
 
 ```bash
 sudo eva preflight gpu
 ```
 
-Configure the intended MIG layout before installation when the site uses MIG.
-`infra` configures Docker, CDI, k3s, the NVIDIA Device Plugin, and allocatable
-resources. Config then selects `nvidia.com/gpu` or a positive
-`nvidia.com/mig-*` resource automatically. Multiple positive MIG resource types
-stop installation rather than being selected arbitrarily.
+사이트에서 MIG를 사용할 경우 설치 전에 의도한 MIG 구성을 적용합니다. `infra`가 Docker,
+CDI, k3s, NVIDIA Device Plugin, allocatable resource를 구성합니다. 이후 Config가
+`nvidia.com/gpu` 또는 양수 `nvidia.com/mig-*` resource를 자동 선택합니다. 양수인 MIG
+resource type이 여러 개면 임의로 선택하지 않고 설치를 중단합니다.
 
-## 5. Create Workspace Inputs
+## 5. Workspace 입력 준비
 
-Choose an absolute Workspace path. `/etc/eva/sites/<site-id>` is conventional, but
-any location such as `/home/eva/site-dev-196` works when passed with `--workspace`.
-The inventory target name is the top-level key for `iam.yaml` and `app.yaml`.
-Create `agent.yaml` or `vision.yaml` only for an intentional chart override.
+절대 Workspace 경로를 선택합니다. `/etc/eva/sites/<site-id>`가 관례이지만
+`--workspace`에 지정하면 `/home/eva/site-dev-196` 같은 경로도 사용할 수 있습니다.
+inventory target 이름은 `iam.yaml` 및 `app.yaml`의 최상위 key입니다. 의도적인 Chart override가
+필요할 때만 `agent.yaml` 또는 `vision.yaml`을 만듭니다.
 
 ```bash
 mkdir -p /home/eva/site-dev-196/{credentials,inventory,site-values}
@@ -86,7 +82,7 @@ mkdir -p /home/eva/site-dev-196/{credentials,inventory,site-values}
     ├── iam.yaml
     └── app.yaml
 
-# Optional only for intentional chart overrides:
+# 의도적인 Chart override가 필요할 때만 선택적으로 추가:
 # site-values/agent.yaml
 # site-values/vision.yaml
 ```
@@ -125,8 +121,8 @@ aws_secret_access_key = <AWS_SECRET_ACCESS_KEY>
 region = ap-northeast-2
 ```
 
-`awscli` reads only this Workspace file and configures the inventory target user's
-AWS CLI credentials. Keep this file out of Git, chat, and Release artifacts.
+`awscli`는 이 Workspace 파일만 읽어 inventory target 사용자의 AWS CLI credential을
+구성합니다. 이 파일을 Git, 채팅, Release artifact에 포함하지 않습니다.
 
 ### `site-values/iam.yaml`
 
@@ -148,19 +144,18 @@ site-dev-196:
     hostPath: /home/eva/.aws
 ```
 
-### Optional `site-values/agent.yaml`
+### 선택 `site-values/agent.yaml`
 
-Create this file only for a deliberate EVA Agent main chart override. The Agent,
-vLLM, and Qdrant baseline values are supplied by the Agent Release; do not copy or
-edit them in the Workspace. Config automatically selects the vLLM profile from the
-GPU model, physical GPU count, MIG state, and Kubernetes allocatable resources.
+의도적인 EVA Agent main chart override가 필요할 때만 이 파일을 만듭니다. Agent, vLLM,
+Qdrant의 기준 values는 Agent Release가 제공하므로 Workspace에 복사하거나 수정하지 않습니다.
+Config가 GPU 모델, 물리 GPU 수, MIG 상태, Kubernetes allocatable resource에서 vLLM profile을
+자동 선택합니다.
 
-### Optional `site-values/vision.yaml`
+### 선택 `site-values/vision.yaml`
 
-This optional file is only for deliberate Vision chart overrides such as persistent
-storage capacity, CPU/memory, image policy, or rollout timeout. Config and
-Kubernetes automatically select the GPU or MIG resource; do not create this file
-to choose a GPU count, MIG profile, or resource name.
+이 파일은 persistent storage 크기, CPU/memory, image policy, rollout timeout처럼 의도적인
+Vision Chart override가 필요할 때만 사용합니다. Config와 Kubernetes가 GPU 또는 MIG resource를
+자동 선택하므로 GPU 수, MIG profile, resource 이름을 지정하려고 이 파일을 만들지 않습니다.
 
 ### `site-values/app.yaml`
 
@@ -176,72 +171,67 @@ site-dev-196:
       shared_key: "<SITE_SHARED_KEY>"
 ```
 
-With IAM and App in one operation, IAM SSO values are handed to App automatically.
-For a separate central IAM server, provide `app.sso.baseUrl` and
-`app.sso.adminClientSecret` explicitly in this Workspace file.
+IAM과 App을 하나의 작업으로 설치하면 IAM SSO 값이 App에 자동으로 전달됩니다. 중앙 IAM
+서버가 별도로 있다면 이 Workspace 파일에 `app.sso.baseUrl` 및
+`app.sso.adminClientSecret`을 명시합니다.
 
-`iam.yaml`, optional `agent.yaml` or `vision.yaml`, `app.yaml`, and `aws_key.ini`
-can contain credentials. Keep real files in approved Secret management and never commit them.
-Place the target TLS certificate and key in the host path configured above, normally
-`/home/eva/certs`.
+`iam.yaml`, 선택 `agent.yaml` 또는 `vision.yaml`, `app.yaml`, `aws_key.ini`에는 credential이
+포함될 수 있습니다. 실제 파일은 승인된 Secret 관리 절차로 관리하고 커밋하지 않습니다. 대상 TLS
+certificate와 key는 위에서 구성한 host path, 일반적으로 `/home/eva/certs`에 둡니다.
 
-Agent Release values, Config-generated settings, and role k3s/repository overrides
-are applied automatically. Optional Agent and Vision Workspace chart overrides are
-target-specific and do not select GPU, MIG, or vLLM profiles.
+Agent Release values, Config 생성 설정, role k3s/repository override는 자동 적용됩니다. 선택
+Agent 및 Vision Workspace Chart override는 target별로 적용되며 GPU, MIG, vLLM profile을 선택하지 않습니다.
 
-## 6. Install
+## 6. 설치
 
-Run one command from the verified Release root.
+검증된 Release root에서 명령 하나를 실행합니다.
 
 ```bash
 sudo eva install . --workspace /home/eva/site-dev-196 --yes
 ```
 
-The Plan order is always:
+Plan 순서는 항상 다음과 같습니다.
 
 ```text
 precondition -> infra and GPU/MIG -> config -> iam -> agent -> vision -> app
 ```
 
-Config is automatically included whenever Agent, Vision, or App is selected. Do
-not run Config separately. A component-only operation does not run unselected
-product components. Agent installs `eva-agent`, `eva-agent-vllm`, and
-`eva-agent-qdrant` together from the Release-managed values.
+Agent, Vision, App 중 하나를 선택하면 Config가 자동으로 포함됩니다. Config를 별도로 실행하지
+않습니다. Component-only 작업은 선택하지 않은 제품 component를 실행하지 않습니다. Agent는
+Release 관리 values로 `eva-agent`, `eva-agent-vllm`, `eva-agent-qdrant`를 함께 설치합니다.
 
-If precondition detects a supported APT repository issue, diagnose it separately;
-`eva install --yes` does not approve external APT repository changes.
+precondition이 지원되는 APT repository 문제를 감지하면 별도로 진단합니다.
+`eva install --yes`는 외부 APT repository 변경을 승인하지 않습니다.
 
 ```bash
 sudo eva troubleshoot apt
 sudo eva troubleshoot apt --fix-known --yes
 ```
 
-## 7. Verify Installation
+## 7. 설치 결과 확인
 
-Start with the installation health check. For selected Agent or Vision components,
-it also verifies a node GPU or MIG allocatable resource, NVIDIA Device Plugin
-readiness, and an Agent/Vision Pod GPU or MIG allocation.
+설치 상태 점검으로 시작합니다. 선택된 Agent 또는 Vision component가 있으면 node의 GPU 또는
+MIG allocatable resource, NVIDIA Device Plugin readiness, Agent/Vision Pod의 GPU 또는
+MIG 할당도 함께 확인합니다.
 
 ```bash
 sudo eva check --verbose
 ```
 
-When the check fails, use the operation summary before opening Kubernetes or
-private rendered artifacts.
+점검에 실패하면 Kubernetes 또는 private rendered artifact를 열기 전에 작업 요약을 확인합니다.
 
 ```bash
 sudo eva status
 ```
 
-The App endpoints for Agent and Vision are the internal `eva-agent.eva-agent` and
-`eva-vision.eva-vision` Services. Check their selected endpoints from the App pod
-when diagnosing a connection failure.
+App이 사용하는 Agent 및 Vision endpoint는 내부 Service인 `eva-agent.eva-agent` 및
+`eva-vision.eva-vision`입니다. 연결 문제를 진단할 때 App Pod에서 선택된 endpoint를 확인합니다.
 
-## 8. Rendered Artifacts And Troubleshooting
+## 8. Rendered Artifact 및 문제 해결
 
-Each selected Helm component keeps chart defaults, effective Helm input, resolved
-Helm values, and source metadata under the prepared Release. Effective and resolved
-files are private because they can contain Secret values.
+선택된 각 Helm component는 준비된 Release 아래에 chart default, effective Helm input, resolved
+Helm values, source metadata를 보관합니다. effective 및 resolved 파일에는 Secret 값이 포함될 수
+있으므로 private 파일입니다.
 
 ```text
 /opt/eva/releases/<version>/out/work/config/<site>/<target>/eva.yaml
@@ -250,52 +240,51 @@ files are private because they can contain Secret values.
   chart-defaults.yaml              # 0644
   effective-input-values.yaml      # 0600
   resolved-values.yaml             # 0600
-  values-sources.yaml              # 0644, no Secret values
+  values-sources.yaml              # 0644, Secret 값 없음
 
 /opt/eva/releases/<version>/out/work/rendered/<site>/<target>/vllm/
   chart-defaults.yaml              # 0644
   effective-input-values.yaml      # 0600
   resolved-values.yaml             # 0600
-  values-sources.yaml              # 0644, no Secret values
+  values-sources.yaml              # 0644, Secret 값 없음
 
 /opt/eva/releases/<version>/out/work/rendered/<site>/<target>/qdrant/
   chart-defaults.yaml              # 0644
   effective-input-values.yaml      # 0600
   resolved-values.yaml             # 0600
-  values-sources.yaml              # 0644, no Secret values
+  values-sources.yaml              # 0644, Secret 값 없음
 
 /opt/eva/releases/<version>/out/work/rendered/<site>/<target>/vision/
   chart-defaults.yaml              # 0644
   effective-input-values.yaml      # 0600
   resolved-values.yaml             # 0600
-  values-sources.yaml              # 0644, no Secret values
+  values-sources.yaml              # 0644, Secret 값 없음
 
 /opt/eva/releases/<version>/out/work/rendered/<site>/<target>/app/
   chart-defaults.yaml              # 0644
   effective-input-values.yaml      # 0600
   resolved-values.yaml             # 0600
-  values-sources.yaml              # 0644, no Secret values
+  values-sources.yaml              # 0644, Secret 값 없음
 
 /var/lib/eva/sites/<site>/<target>/eva-iam.yaml  # root:root, 0600
 ```
 
-Do not paste or commit private values and handoff files. They can contain license,
-SSO, database, or registry credentials.
+private values 및 handoff 파일을 붙여 넣거나 커밋하지 않습니다. license, SSO, database,
+registry credential이 포함될 수 있습니다.
 
-## 9. Change And Retry
+## 9. 변경 및 재시도
 
-Updating Workspace values or a Release version performs a Helm upgrade and preserves
-the existing database and persistent data. A normal upgrade does not delete
-`/eva-app` or Agent/Vision persistence. Config is regenerated automatically for
-the selected components. After correcting a failed operation, retry only that
-operation.
+Workspace values 또는 Release version을 변경하면 Helm upgrade를 수행하며 기존 database와
+영속 데이터를 보존합니다. 일반 upgrade는 `/eva-app` 또는 Agent/Vision persistence를 삭제하지
+않습니다. Config는 선택된 component에 맞춰 자동 생성됩니다. 실패한 작업을 수정한 뒤 해당 작업만
+재시도합니다.
 
 ```bash
 sudo eva retry --yes
 ```
 
-## 10. Non-GPU Test Environment
+## 10. 비GPU 테스트 환경
 
-A CPU-only server is an exception intended for limited testing. Set `agent` and
-`vision` to `false` in `site.yaml`; Infra and Config skip NVIDIA runtime/CDI work.
-It is not the baseline Cloud operating environment in this guide.
+CPU-only 서버는 제한된 테스트를 위한 예외 환경입니다. `site.yaml`에서 `agent`와 `vision`을
+`false`로 설정하면 Infra와 Config가 NVIDIA runtime/CDI 작업을 건너뜁니다. 이 가이드의 기본
+Cloud 운영 환경은 아닙니다.

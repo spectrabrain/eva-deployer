@@ -34,9 +34,44 @@ type Options struct {
 	LogRoot      string
 	RuntimeRoot  string
 	Prerequisite func(plan.Document) error
-	Stdout       io.Writer
-	Stderr       io.Writer
-	Now          func() time.Time
+	// AfterPrecondition runs after the target precondition step succeeds and
+	// before any remaining installation step. It is used for interactive
+	// preflight actions which must not run before target state is collected.
+	AfterPrecondition func(plan.Document, string) error
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Now               func() time.Time
+}
+
+// RunPrecondition executes only the target precondition playbook. It does not
+// create an installation operation, making it suitable for explicit checks
+// that must be completed before eva install.
+func RunPrecondition(options Options, document plan.Document) (string, error) {
+	if options.Stdout == nil {
+		options.Stdout = io.Discard
+	}
+	if options.Stderr == nil {
+		options.Stderr = io.Discard
+	}
+	preconditionDocument := document
+	preconditionDocument.Steps = []plan.Step{{Component: "precondition", Playbook: expectedPlaybooks["precondition"]}}
+	resolvedRuntime, inventory, releaseRoot, err := preflight(options.RuntimeRoot, preconditionDocument)
+	if err != nil {
+		return "", err
+	}
+	ansiblePath, err := resolvedRuntime.ToolPath("ansible-playbook")
+	if err != nil {
+		return "", err
+	}
+	command := exec.Command(ansiblePath, ansibleArgs(inventory, filepath.Join(releaseRoot, expectedPlaybooks["precondition"]), document.AnsibleExtraVars, "")...)
+	command.Dir = releaseRoot
+	command.Env = commandEnvironment(document, releaseRoot, "", resolvedRuntime)
+	command.Stdout = options.Stdout
+	command.Stderr = options.Stderr
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf("run precondition: %w", err)
+	}
+	return releaseRoot, nil
 }
 
 func Execute(options Options, record operation.Record) (operation.Record, error) {
@@ -132,6 +167,11 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 		result.Steps = append(result.Steps, stepResult)
 		if err != nil {
 			return finish(options, record, result, operation.Failed, fmt.Errorf("apply component %q: %w", step.Component, err))
+		}
+		if step.Component == "precondition" && options.AfterPrecondition != nil {
+			if err := options.AfterPrecondition(document, releaseRoot); err != nil {
+				return finish(options, record, result, operation.Failed, fmt.Errorf("post-precondition handoff: %w", err))
+			}
 		}
 	}
 	return finish(options, record, result, operation.Succeeded, nil)

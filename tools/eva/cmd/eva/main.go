@@ -59,7 +59,7 @@ func usage() {
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
 	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
-	fmt.Println("  preflight gpu")
+	fmt.Println("  preflight <gpu|argocd>")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
@@ -365,7 +365,7 @@ func runInstall(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Prerequisite: aptPrerequisite, Stdout: os.Stdout, Stderr: os.Stderr,
+		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
 	return err
@@ -701,7 +701,11 @@ type gpuPreflight struct {
 func runPreflight(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		fmt.Println("Usage: eva preflight gpu")
+		fmt.Println("       eva preflight argocd --site ID|--workspace PATH [--runtime-root PATH]")
 		return nil
+	}
+	if args[0] == "argocd" {
+		return runArgoCDPreflight(args[1:])
 	}
 	if len(args) != 1 || args[0] != "gpu" {
 		return fmt.Errorf("unknown preflight command %q", args[0])
@@ -726,6 +730,69 @@ func runPreflight(args []string) error {
 		fmt.Println("[OK] MIG            not configured")
 	}
 	fmt.Println("[OK] Ready          eva install will configure Docker, CDI, k3s, and the NVIDIA Device Plugin")
+	return nil
+}
+
+func runArgoCDPreflight(args []string) error {
+	flags := flag.NewFlagSet("preflight argocd", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	siteID := flags.String("site", "", "site identifier")
+	workspaceRoot := flags.String("workspace", "", "workspace path")
+	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf(
+			"unexpected preflight argocd arguments: %s",
+			strings.Join(flags.Args(), " "),
+		)
+	}
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot})
+	if err != nil {
+		return err
+	}
+	releaseResolved, err := release.Resolve(".")
+	if err != nil {
+		return fmt.Errorf(
+			"resolve Release from current directory: %w",
+			err,
+		)
+	}
+	if !releaseResolved.Prepared {
+		prepared, err := release.Prepare(
+			releaseResolved,
+			release.DefaultInstallRoot,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"prepare Release for Argo CD preflight: %w",
+				err,
+			)
+		}
+		releaseResolved, err = release.Resolve(prepared.Root)
+		if err != nil {
+			return fmt.Errorf(
+				"resolve prepared Release %s: %w",
+				prepared.Root,
+				err,
+			)
+		}
+		fmt.Printf("release prepared: %s\n", prepared.Root)
+	}
+	document := plan.Build(
+		workspaceResolved,
+		releaseResolved,
+		time.Now(),
+	)
+	releaseRoot, err := apply.RunPrecondition(apply.Options{RuntimeRoot: *runtimeRoot, Stdout: os.Stdout, Stderr: os.Stderr}, document)
+	if err != nil {
+		return err
+	}
+	if err := argoCDPreflightHandoff(document, releaseRoot); err != nil {
+		return err
+	}
+	fmt.Println("[OK] Argo CD handoff preflight passed.")
 	return nil
 }
 
@@ -948,7 +1015,7 @@ func runApply(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Prerequisite: aptPrerequisite, Stdout: os.Stdout, Stderr: os.Stderr,
+		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
 	return err
@@ -995,7 +1062,7 @@ func runRetry(args []string) error {
 	fmt.Printf("retry source: %s\n", source.ID)
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Prerequisite: aptPrerequisite, Stdout: os.Stdout, Stderr: os.Stderr,
+		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, retry)
 	printOperation(completed)
 	return err

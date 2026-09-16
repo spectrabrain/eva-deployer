@@ -95,6 +95,55 @@ func TestExecuteStopsAfterFailedStep(t *testing.T) {
 	}
 }
 
+func TestRunPreconditionRunsOnlyPreconditionWithoutOperationState(t *testing.T) {
+	workspace := createWorkspace(t)
+	releaseRoot := createReleaseSource(t, "")
+	runtimeRoot := createRuntime(t)
+	var output bytes.Buffer
+	root, err := RunPrecondition(Options{RuntimeRoot: runtimeRoot, Stdout: &output, Stderr: &output}, plan.Document{
+		SiteID: "customer-a", Workspace: workspace, ReleaseRoot: releaseRoot,
+		Steps:            []plan.Step{{Component: "app", Playbook: expectedPlaybooks["app"]}},
+		AnsibleExtraVars: []string{"eva_site_id=customer-a"},
+		Environment:      map[string]string{"EVA_SITE_ID": "customer-a", "EVA_WORKSPACE_ROOT": workspace},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != releaseRoot || !strings.Contains(output.String(), expectedPlaybooks["precondition"]) || strings.Contains(output.String(), expectedPlaybooks["app"]) {
+		t.Fatalf("RunPrecondition() root=%q output=%q", root, output.String())
+	}
+}
+
+func TestExecuteStopsBeforeSolutionWhenPostPreconditionHandoffFails(t *testing.T) {
+	stateRoot := t.TempDir()
+	workspace := createWorkspace(t)
+	releaseRoot := createReleaseSource(t, "")
+	runtimeRoot := createRuntime(t)
+	record := createOperation(t, stateRoot, workspace, releaseRoot, []plan.Step{
+		{Component: "precondition", Playbook: expectedPlaybooks["precondition"]},
+		{Component: "app", Playbook: expectedPlaybooks["app"]},
+	})
+	var output bytes.Buffer
+	completed, err := Execute(Options{
+		StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: runtimeRoot, Stdout: &output, Stderr: &output, Now: fixedClock(),
+		AfterPrecondition: func(document plan.Document, root string) error {
+			if root != releaseRoot || document.SiteID != "customer-a" {
+				t.Fatalf("handoff context = root %q, document %#v", root, document)
+			}
+			return errors.New("Argo CD handoff declined")
+		},
+	}, record)
+	if err == nil || !strings.Contains(err.Error(), "handoff declined") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if completed.Status != operation.Failed {
+		t.Fatalf("operation status = %q", completed.Status)
+	}
+	if strings.Count(output.String(), "ARGS=") != 1 || strings.Contains(output.String(), expectedPlaybooks["app"]) {
+		t.Fatalf("Solution step ran after declined handoff: %q", output.String())
+	}
+}
+
 func TestExecuteStopsBeforeRunningWhenPrerequisiteFails(t *testing.T) {
 	stateRoot := t.TempDir()
 	record := createOperation(t, stateRoot, createWorkspace(t), createReleaseSource(t, ""), []plan.Step{{Component: "infra", Playbook: expectedPlaybooks["infra"]}})

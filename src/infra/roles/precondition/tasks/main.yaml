@@ -260,6 +260,10 @@
   changed_when: false
   when: not ansible_check_mode
 
+- name: Detect Argo CD tracking metadata for this EVA site
+  ansible.builtin.import_tasks: argocd_tracking.yaml
+  when: not ansible_check_mode
+
 - name: Write precondition.yaml on control node
   ansible.builtin.copy:
     dest: "{{ base_infra_output_file }}"
@@ -297,6 +301,14 @@
       {% endfor %}
       mig_activation:
       {{ infra_mig_activation_report | default({}) | to_nice_yaml(indent=2) | indent(2, true) }}
+      argocd_tracking:
+        status: "{{ precondition_argocd_tracking_status | default('unavailable') }}"
+        detected: {{ (precondition_argocd_applications | default([]) | length) > 0 }}
+        applications:
+      {% for application in (precondition_argocd_applications | default([])) %}
+          - "{{ application }}"
+      {% endfor %}
+        metadata_entries: {{ precondition_argocd_metadata_entries | default(0) | int }}
   delegate_to: localhost
   become: false
   when: not ansible_check_mode

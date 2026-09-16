@@ -1,3 +1,6 @@
+- name: Load target-specific EVA Agent Workspace values
+  ansible.builtin.import_tasks: workspace_values.yaml
+
 - name: Install Agent Dependencies
   ansible.builtin.import_tasks: dependencies.yaml
 

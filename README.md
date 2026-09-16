@@ -1176,27 +1176,11 @@ out/work/rendered/<site>/<target>/
 
 ### [cloud_repository]
 
-## 1. TLSStore 생성 (IP 사용시에만)
+## 1. IP 기반 TLSStore 자동 구성
 
-```bash
-kubectl create secret tls eva-tls-for-traefik \
-  -n kube-system \
-  --cert=/home/eva/certs/tls.crt \
-  --key=/home/eva/certs/tls.key
-```
-
-```bash
-cat <<EOF | kubectl apply -f -
-apiVersion: traefik.io/v1alpha1
-kind: TLSStore
-metadata:
-  name: default
-  namespace: kube-system
-spec:
-  defaultCertificate:
-    secretName: eva-tls-for-traefik
-EOF
-```
+IP 주소를 IAM 또는 App host로 사용하면 `eva install`의 해당 단계가
+`/home/eva/certs/tls.crt`와 `tls.key`를 검증한 뒤 `kube-system`의
+`eva-tls-for-traefik` Secret 및 `TLSStore/default`를 자동으로 적용합니다.
 
 ## 2. EVA IAM 설치
 

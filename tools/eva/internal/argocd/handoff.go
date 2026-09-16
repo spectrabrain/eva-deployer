@@ -114,6 +114,7 @@ type Credentials struct {
 type Prompter interface {
 	Confirm(Detection) (bool, error)
 	Credentials() (Credentials, error)
+	ConfirmGitRemoval(GitRemovalPlan) (bool, error)
 }
 
 type progressReporter interface {
@@ -122,6 +123,13 @@ type progressReporter interface {
 
 type receiptRecorder interface {
 	RecordReceipt(Receipt) error
+}
+
+type pendingStateManager interface {
+	LoadPending(siteID string) (PendingHandoff, bool, error)
+	LoadCompletedReceipt(siteID string) (Receipt, bool, error)
+	RecordPending(PendingHandoff) error
+	RemovePending(siteID string) error
 }
 
 func reportProgress(prompt Prompter, message string) {
@@ -141,6 +149,54 @@ func recordReceipt(
 	}
 
 	return recorder.RecordReceipt(receipt)
+}
+
+func loadPending(
+	prompt Prompter,
+	siteID string,
+) (PendingHandoff, bool, error) {
+	manager, ok := prompt.(pendingStateManager)
+	if !ok {
+		return PendingHandoff{}, false, nil
+	}
+
+	return manager.LoadPending(siteID)
+}
+
+func loadCompletedReceipt(
+	prompt Prompter,
+	siteID string,
+) (Receipt, bool, error) {
+	manager, ok := prompt.(pendingStateManager)
+	if !ok {
+		return Receipt{}, false, nil
+	}
+
+	return manager.LoadCompletedReceipt(siteID)
+}
+
+func recordPending(
+	prompt Prompter,
+	pending PendingHandoff,
+) error {
+	manager, ok := prompt.(pendingStateManager)
+	if !ok {
+		return nil
+	}
+
+	return manager.RecordPending(pending)
+}
+
+func removePending(
+	prompt Prompter,
+	siteID string,
+) error {
+	manager, ok := prompt.(pendingStateManager)
+	if !ok {
+		return nil
+	}
+
+	return manager.RemovePending(siteID)
 }
 
 type Session interface {
@@ -180,7 +236,8 @@ type applicationList struct {
 type clusterSecretList struct {
 	Items []struct {
 		Metadata struct {
-			Name string `json:"name"`
+			Name        string            `json:"name"`
+			Annotations map[string]string `json:"annotations"`
 		} `json:"metadata"`
 		Data map[string]string `json:"data"`
 	} `json:"items"`
@@ -259,10 +316,11 @@ func RunPreflight(
 
 	if _, err := session.Run(
 		"command -v timeout >/dev/null 2>&1 && " +
-			"command -v kubectl >/dev/null 2>&1",
+			"command -v kubectl >/dev/null 2>&1 && " +
+			"command -v git >/dev/null 2>&1",
 	); err != nil {
 		return fmt.Errorf(
-			"validate timeout and kubectl on "+
+			"validate timeout, kubectl, and git on "+
 				"Argo CD management server: %w",
 			err,
 		)
@@ -304,69 +362,90 @@ func RunPreflight(
 		)
 	}
 
-	if recovery, ok := resolveCompletedHandoff(
-		detection,
-		applications,
-		registrations,
-	); ok {
+	pending, pendingFound, err := loadPending(
+		prompt,
+		detection.SiteID,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"load pending Argo CD handoff: %w",
+			err,
+		)
+	}
+
+	if pendingFound {
+		completed, completedFound, err := loadCompletedReceipt(
+			prompt,
+			detection.SiteID,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"load completed Argo CD handoff receipt "+
+					"while pending state exists: %w",
+				err,
+			)
+		}
+
+		if completedFound {
+			if err := cleanupCompletedPending(
+				session,
+				prompt,
+				detection,
+				applications,
+				registrations,
+				pending,
+				completed,
+			); err != nil {
+				return fmt.Errorf(
+					"clean stale completed Argo CD "+
+						"pending state: %w",
+					err,
+				)
+			}
+
+			reportProgress(
+				prompt,
+				"[OK] Cleared stale completed Argo CD "+
+					"pending state.",
+			)
+
+			return nil
+		}
+
 		reportProgress(
 			prompt,
-			"[INFO] Verifying previous Argo CD ownership handoff...",
+			"[INFO] Resuming recorded pending Argo CD handoff...",
 		)
 
-		stableApplicationsOutput, err := session.Run(
-			"sleep 5 && " + applicationListCommand(),
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"verify previous Argo CD handoff remains stable: %w",
-				err,
-			)
-		}
-
-		stableApplications, err := parseApplications(
-			stableApplicationsOutput,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"parse stabilized Argo CD Applications: %w",
-				err,
-			)
-		}
-
-		if !detectedApplicationsAbsent(
-			detection.Applications,
-			stableApplications,
-		) {
-			return errors.New(
-				"legacy Argo CD Applications reappeared " +
-					"while recovering the handoff receipt",
-			)
-		}
-
-		if err := recordReceipt(
+		if err := resumePendingHandoff(
+			session,
 			prompt,
-			recovery,
+			detection,
+			applications,
+			registrations,
+			pending,
 		); err != nil {
 			return fmt.Errorf(
-				"record recovered Argo CD handoff receipt: %w",
+				"resume pending Argo CD handoff: %w",
 				err,
 			)
 		}
 
 		reportProgress(
 			prompt,
-			"[OK] Legacy Applications are absent.",
-		)
-		reportProgress(
-			prompt,
-			"[OK] Legacy cluster registration is absent.",
-		)
-		reportProgress(
-			prompt,
-			"[OK] Recorded completed Argo CD ownership handoff.",
+			"[OK] Pending Argo CD handoff completed.",
 		)
 
+		return nil
+	}
+
+	if recovery, recovered, err := recoverGitBackedHandoff(session, detection, applications, registrations); err != nil {
+		return fmt.Errorf("verify recorded Git-backed Argo CD handoff: %w", err)
+	} else if recovered {
+		if err := recordReceipt(prompt, recovery); err != nil {
+			return fmt.Errorf("record recovered Argo CD handoff receipt: %w", err)
+		}
+		reportProgress(prompt, "[OK] Verified recorded Git-backed Argo CD ownership handoff.")
 		return nil
 	}
 
@@ -384,6 +463,84 @@ func RunPreflight(
 	); err != nil {
 		return fmt.Errorf(
 			"verify owner ApplicationSets before handoff: %w",
+			err,
+		)
+	}
+
+	gitPlan, err := prepareGitRemovalPlan(session, target)
+	if err != nil {
+		return err
+	}
+	approvedGit, err := prompt.ConfirmGitRemoval(gitPlan)
+	if err != nil {
+		return err
+	}
+	if !approvedGit {
+		return errors.New("Git-backed cluster registration removal was not approved; no Git or Kubernetes mutation was performed")
+	}
+
+	reportProgress(prompt, "[INFO] Removing only the target cluster registration manifest from Git...")
+	commitOutput, err := session.Run(gitRemovalCommand(gitPlan, target.Cluster.Server))
+	if err != nil {
+		return fmt.Errorf("commit and push target cluster registration removal: %w; no live Kubernetes resource was deleted", err)
+	}
+	commit, err := parseGitRemovalCommit(commitOutput)
+	if err != nil {
+		return fmt.Errorf("parse Git removal result: %w; no live Kubernetes resource was deleted", err)
+	}
+	pendingApplications := make(
+		[]string,
+		0,
+		len(target.Applications),
+	)
+
+	for _, application := range target.Applications {
+		pendingApplications = append(
+			pendingApplications,
+			application.Metadata.Name,
+		)
+	}
+
+	pendingState := PendingHandoff{
+		SchemaVersion:           pendingSchemaVersion,
+		SiteID:                  detection.SiteID,
+		ClusterName:             target.Cluster.Name,
+		ClusterServer:           target.Cluster.Server,
+		Applications:            pendingApplications,
+		RegistrationApplication: registrationApplicationName,
+		RegistrationRepository:  gitPlan.Repository,
+		RegistrationBranch:      gitPlan.Branch,
+		RegistrationManifest:    gitPlan.Manifest,
+		RegistrationCommit:      commit,
+		CreatedAt:               time.Now().UTC(),
+	}
+
+	if err := recordPending(prompt, pendingState); err != nil {
+		return fmt.Errorf(
+			"record pending Argo CD handoff after Git push "+
+				"and before live deletion: %w; "+
+				"Git removal commit %s was already pushed, "+
+				"but no live Kubernetes resource was deleted",
+			err,
+			commit,
+		)
+	}
+
+	reportProgress(
+		prompt,
+		"[OK] Recorded pending Argo CD handoff state.",
+	)
+
+	if err := waitForRegistrationRevision(
+		session,
+		commit,
+	); err != nil {
+		return fmt.Errorf(
+			"verify registration Application observed "+
+				"Git removal commit %s: %w; "+
+				"pending handoff state remains for recovery "+
+				"and no live Kubernetes resource was deleted",
+			commit,
 			err,
 		)
 	}
@@ -562,32 +719,20 @@ func RunPreflight(
 	); err != nil {
 		return err
 	}
-
-	applicationNames := make(
-		[]string,
-		0,
-		len(target.Applications),
-	)
-	for _, application := range target.Applications {
-		applicationNames = append(
-			applicationNames,
-			application.Metadata.Name,
-		)
+	if err := verifyStableRemoval(session, target.Cluster, commit); err != nil {
+		return err
 	}
 
 	if err := recordReceipt(
 		prompt,
-		Receipt{
-			SchemaVersion: receiptSchemaVersion,
-			SiteID:        detection.SiteID,
-			ClusterName:   target.Cluster.Name,
-			ClusterServer: target.Cluster.Server,
-			Applications:  applicationNames,
-			CompletedAt:   time.Now().UTC(),
-		},
+		pendingToReceipt(
+			pendingState,
+			time.Now().UTC(),
+		),
 	); err != nil {
 		return fmt.Errorf(
-			"record Argo CD handoff receipt: %w",
+			"record Argo CD handoff receipt: %w; "+
+				"pending handoff state remains for recovery",
 			err,
 		)
 	}
@@ -595,6 +740,22 @@ func RunPreflight(
 	reportProgress(
 		prompt,
 		"[OK] Recorded completed Argo CD ownership handoff.",
+	)
+
+	if err := removePending(
+		prompt,
+		detection.SiteID,
+	); err != nil {
+		return fmt.Errorf(
+			"remove completed Argo CD pending handoff: %w; "+
+				"the completed receipt was already recorded",
+			err,
+		)
+	}
+
+	reportProgress(
+		prompt,
+		"[OK] Cleared pending Argo CD handoff state.",
 	)
 	reportProgress(
 		prompt,
@@ -684,44 +845,6 @@ func requireApplicationsAbsent(
 	return nil
 }
 
-func resolveCompletedHandoff(
-	detection Detection,
-	applications []applicationRecord,
-	registrations []clusterRegistration,
-) (Receipt, bool) {
-	if len(detection.Applications) == 0 ||
-		!detectedApplicationsAbsent(
-			detection.Applications,
-			applications,
-		) {
-		return Receipt{}, false
-	}
-
-	clusterName, ok := commonLegacyClusterName(
-		detection.Applications,
-	)
-	if !ok {
-		return Receipt{}, false
-	}
-
-	for _, registration := range registrations {
-		if registration.Name == clusterName {
-			return Receipt{}, false
-		}
-	}
-
-	return Receipt{
-		SchemaVersion: receiptSchemaVersion,
-		SiteID:        detection.SiteID,
-		ClusterName:   clusterName,
-		Applications: append(
-			[]string(nil),
-			detection.Applications...,
-		),
-		CompletedAt: time.Now().UTC(),
-	}, true
-}
-
 func detectedApplicationsAbsent(
 	detected []string,
 	applications []applicationRecord,
@@ -739,46 +862,6 @@ func detectedApplicationsAbsent(
 	}
 
 	return true
-}
-
-func commonLegacyClusterName(
-	applications []string,
-) (string, bool) {
-	clusterName := ""
-
-	for _, application := range applications {
-		current, ok := legacyClusterName(application)
-		if !ok {
-			return "", false
-		}
-
-		if clusterName != "" && clusterName != current {
-			return "", false
-		}
-
-		clusterName = current
-	}
-
-	return clusterName, clusterName != ""
-}
-
-func legacyClusterName(application string) (string, bool) {
-	for _, suffix := range []string{
-		"-eva-agent-init",
-		"-eva-agent-qdrant",
-		"-eva-agent-vllm",
-		"-eva-vision",
-		"-eva-agent",
-		"-eva-app",
-		"-eva-iam",
-	} {
-		if strings.HasSuffix(application, suffix) &&
-			len(application) > len(suffix) {
-			return strings.TrimSuffix(application, suffix), true
-		}
-	}
-
-	return "", false
 }
 
 func parseApplications(output string) ([]applicationRecord, error) {
@@ -1146,7 +1229,7 @@ func RequireNoTrackingWithReceiptRoot(
 		if err := ReceiptCovers(
 			receipt,
 			detection,
-		); err == nil {
+		); err == nil && hasCompleteGitReceiptMetadata(receipt) {
 			return nil
 		}
 	}

@@ -189,29 +189,92 @@
     var: k3s_node_gpu_allocatable.stdout_lines
   when: not ansible_check_mode
 
-- name: Collect NVIDIA MIG resource keys from k3s nodes
+- name: Initialize NVIDIA resource registration wait settings
+  ansible.builtin.set_fact:
+    k3s_gpu_validation_allocatable_retries: >-
+      {{ k3s_gpu_validation_allocatable_retries | default(24) | int }}
+    k3s_gpu_validation_allocatable_delay: >-
+      {{ k3s_gpu_validation_allocatable_delay | default(5) | int }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Wait for NVIDIA resource discovery and registration on k3s nodes
   ansible.builtin.shell: |
     set -o pipefail
-    kubectl get nodes -o yaml | awk -F: '/nvidia.com\/mig-/{gsub(/^[[:space:]]+/, "", $1); print $1}' | sort -u
+
+    attempts={{ k3s_gpu_validation_allocatable_retries | int }}
+    delay={{ k3s_gpu_validation_allocatable_delay | int }}
+    attempt=1
+    nodes_json=''
+
+    while (( attempt <= attempts )); do
+      nodes_json="$(kubectl get nodes -o json)"
+
+      observation="$(
+        printf '%s' "$nodes_json" |
+          python3 -c 'import json, sys; document = json.load(sys.stdin); totals = {}; [(totals.__setitem__(name, totals.get(name, 0) + int(quantity)) if name == "nvidia.com/gpu" or name.startswith("nvidia.com/mig-") else None) for node in document.get("items", []) for name, quantity in node.get("status", {}).get("allocatable", {}).items()]; mig = sorted(name for name, total in totals.items() if name.startswith("nvidia.com/mig-") and total > 0); resource = mig[0] if mig else ("nvidia.com/gpu" if totals.get("nvidia.com/gpu", 0) > 0 else ""); print(json.dumps({"resource": resource, "nodes": document}) if resource else "")'
+      )"
+
+      if [[ -n "$observation" ]]; then
+        printf '%s' "$observation"
+        exit 0
+      fi
+
+      if (( attempt < attempts && delay > 0 )); then
+        sleep "$delay"
+      fi
+
+      attempt=$((attempt + 1))
+    done
+
+    printf >&2       'No registered NVIDIA resource with positive node allocatable was found after %s attempts with %ss delay. NVIDIA Device Plugin rollout completed, but Kubelet resource registration did not become ready. Inspect kubectl get nodes -o json, NVIDIA Device Plugin pods, and their logs.\n'       "$attempts"       "$delay"
+
+    exit 1
   args:
     executable: /bin/bash
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-  register: k3s_node_mig_resource_keys_cmd
+  register: k3s_gpu_validation_resource_observation_cmd
   changed_when: false
+  failed_when: false
   when: not ansible_check_mode
 
-- name: Select NVIDIA resource for GPU validation
+- name: Ensure NVIDIA resource discovery and registration completed
+  ansible.builtin.assert:
+    that:
+      - k3s_gpu_validation_resource_observation_cmd.rc == 0
+      - k3s_gpu_validation_resource_observation_cmd.stdout | trim | length > 0
+    fail_msg: >-
+      NVIDIA resource discovery and registration timed out:
+      attempts={{ k3s_gpu_validation_allocatable_retries }},
+      delay={{ k3s_gpu_validation_allocatable_delay }}s.
+      NVIDIA Device Plugin rollout completed, but no NVIDIA resource with
+      positive node allocatable appeared. Inspect `kubectl get nodes -o json`,
+      NVIDIA Device Plugin pods, and NVIDIA Device Plugin logs.
+    success_msg: NVIDIA resource discovery and registration completed.
+  when: not ansible_check_mode
+
+- name: Select registered NVIDIA resource and node observation
   ansible.builtin.set_fact:
+    k3s_gpu_validation_resource_observation: >-
+      {{
+        k3s_gpu_validation_resource_observation_cmd.stdout
+        | from_json
+      }}
     k3s_gpu_validation_resource_key: >-
       {{
         (
-          k3s_node_mig_resource_keys_cmd.stdout_lines
-          | map('trim')
-          | reject('equalto', '')
-          | list
-          | first
-        ) | default('nvidia.com/gpu')
+          k3s_gpu_validation_resource_observation_cmd.stdout
+          | from_json
+        )['resource']
+      }}
+    k3s_gpu_validation_nodes: >-
+      {{
+        (
+          k3s_gpu_validation_resource_observation_cmd.stdout
+          | from_json
+        )['nodes']['items']
+        | default([])
       }}
   changed_when: false
   when: not ansible_check_mode
@@ -221,18 +284,8 @@
     msg: "GPU validation pod resource: {{ k3s_gpu_validation_resource_key }}"
   when: not ansible_check_mode
 
-- name: Collect node allocatable capacity for GPU validation
-  ansible.builtin.command:
-    cmd: kubectl get nodes -o json
-  environment:
-    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
-  register: k3s_gpu_validation_nodes_cmd
-  changed_when: false
-  when: not ansible_check_mode
-
 - name: Initialize GPU validation capacity accounting
   ansible.builtin.set_fact:
-    k3s_gpu_validation_nodes: "{{ (k3s_gpu_validation_nodes_cmd.stdout | from_json)['items'] | default([]) }}"
     k3s_gpu_validation_allocatable: 0
   changed_when: false
   when: not ansible_check_mode

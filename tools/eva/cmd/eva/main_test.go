@@ -74,6 +74,37 @@ func TestCheckComponentsUsesOnlySelectedProductSteps(t *testing.T) {
 	}
 }
 
+func TestInspectGPUPreflightReportsGPUsAndMIGInstances(t *testing.T) {
+	result, err := inspectGPUPreflight(func(args ...string) (string, error) {
+		switch strings.Join(args, " ") {
+		case "--query-gpu=name,driver_version --format=csv,noheader":
+			return "NVIDIA RTX PRO 6000 Blackwell Server Edition, 570.42.01\n", nil
+		case "-L":
+			return "GPU 0: NVIDIA RTX PRO 6000 Blackwell Server Edition\n  MIG 1g.24gb Device 0\n  MIG 1g.24gb Device 1\n", nil
+		default:
+			return "", errors.New("unexpected nvidia-smi arguments")
+		}
+	})
+	if err != nil {
+		t.Fatalf("inspectGPUPreflight() error = %v", err)
+	}
+	if got, want := result.GPUs, []string{"NVIDIA RTX PRO 6000 Blackwell Server Edition, 570.42.01"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("GPUs = %v, want %v", got, want)
+	}
+	if result.MIGInstances != 2 {
+		t.Fatalf("MIGInstances = %d, want 2", result.MIGInstances)
+	}
+}
+
+func TestInspectGPUPreflightFailsWithoutGPU(t *testing.T) {
+	_, err := inspectGPUPreflight(func(args ...string) (string, error) {
+		return "", nil
+	})
+	if err == nil {
+		t.Fatal("inspectGPUPreflight() succeeded without GPUs")
+	}
+}
+
 func TestShellEnvironmentPrependsRuntimeAndWorkspace(t *testing.T) {
 	runtimeRoot := writeShellRuntime(t)
 	resolvedRuntime, err := runtime.Resolve(runtimeRoot)

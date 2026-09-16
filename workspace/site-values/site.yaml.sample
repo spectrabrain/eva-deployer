@@ -20,6 +20,3 @@ components:
   vision: true
   app: true
   n8n: false
-
-# Optional deployment knobs. Omit values that can be detected at install time.
-# gpu_profile: PRO6000-MIGx4

@@ -1,57 +1,39 @@
-- name: Resolve EVA Agent Workspace values file
+- name: Resolve optional EVA Agent Workspace values file
   no_log: true
   ansible.builtin.set_fact:
     eva_agent_values_host: "{{ ansible_host | default(inventory_hostname) }}"
-    eva_agent_values_file: "{{ eva_agent_values_file | default(eva_site_values_root ~ '/agent.yaml') }}"
+    eva_agent_values_file: "{{ eva_site_values_root ~ '/agent.yaml' }}"
     eva_agent_workspace_values: {}
     eva_agent_workspace_chart_values: {}
-    eva_agent_workspace_deploy_options: {}
 
-- name: Check for EVA Agent Workspace values on control node
+- name: Check for optional EVA Agent Workspace values on control node
   ansible.builtin.stat:
     path: "{{ eva_agent_values_file }}"
   register: eva_agent_values_file_status
   delegate_to: localhost
   become: false
 
-- name: Load EVA Agent Workspace values
+- name: Load optional EVA Agent Workspace values
   no_log: true
   ansible.builtin.set_fact:
     eva_agent_values_config: "{{ lookup('ansible.builtin.file', eva_agent_values_file) | from_yaml }}"
   when: eva_agent_values_file_status.stat.exists
 
-- name: Select target-specific EVA Agent Workspace values
+- name: Select target-specific optional EVA Agent Workspace values
   no_log: true
   ansible.builtin.set_fact:
-    eva_agent_workspace_values: >-
-      {{ (eva_agent_values_config | default({}, true)).get(eva_agent_values_host, {}) }}
+    eva_agent_workspace_values: "{{ (eva_agent_values_config | default({}, true)).get(eva_agent_values_host, {}) }}"
   when: eva_agent_values_file_status.stat.exists
 
-- name: Validate target-specific EVA Agent Workspace values
+- name: Validate target-specific optional EVA Agent Workspace values
   ansible.builtin.assert:
     that:
       - eva_agent_workspace_values is mapping
     fail_msg: >-
-      {{ eva_agent_values_file }}의 {{ eva_agent_values_host }} 값은 mapping이어야 합니다.
+      {{ eva_agent_values_file }} target {{ eva_agent_values_host }} must be a mapping.
   when: eva_agent_values_file_status.stat.exists
 
-- name: Split EVA Agent deploy options from chart values
+- name: Use optional EVA Agent chart values
   no_log: true
   ansible.builtin.set_fact:
-    eva_agent_workspace_deploy_options: >-
-      {{ (eva_agent_workspace_values.eva_agent_deploy | default({}, true)) }}
-    eva_agent_workspace_chart_values: >-
-      {{ eva_agent_workspace_values
-         | dict2items
-         | rejectattr('key', 'equalto', 'eva_agent_deploy')
-         | list
-         | items2dict }}
-
-- name: Apply target-specific EVA Agent deploy options
-  no_log: true
-  ansible.builtin.set_fact:
-    "eva_agent_{{ item.key }}": "{{ item.value }}"
-  loop: "{{ eva_agent_workspace_deploy_options | dict2items }}"
-  loop_control:
-    label: "eva_agent_{{ item.key }}"
-  when: eva_agent_workspace_deploy_options | length > 0
+    eva_agent_workspace_chart_values: "{{ eva_agent_workspace_values }}"

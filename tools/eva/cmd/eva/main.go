@@ -30,6 +30,10 @@ var (
 	buildDate     = "unknown"
 	newAPTService = apt.NewService
 	stdinStat     = func() (os.FileInfo, error) { return os.Stdin.Stat() }
+	runGPUCommand = func(args ...string) (string, error) {
+		output, err := exec.Command("nvidia-smi", args...).CombinedOutput()
+		return string(output), err
+	}
 )
 
 type displayedError struct {
@@ -55,6 +59,7 @@ func usage() {
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
 	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
+	fmt.Println("  preflight gpu")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
@@ -108,6 +113,8 @@ func run(args []string) error {
 		return runStatus(args[1:])
 	case "check":
 		return runCheck(args[1:])
+	case "preflight":
+		return runPreflight(args[1:])
 	case "troubleshoot":
 		return runTroubleshoot(args[1:])
 	case "verify":
@@ -684,6 +691,69 @@ func printCheckDetail(label string, entries []string) {
 	for _, entry := range entries {
 		fmt.Printf("  %s\n", entry)
 	}
+}
+
+type gpuPreflight struct {
+	GPUs         []string
+	MIGInstances int
+}
+
+func runPreflight(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println("Usage: eva preflight gpu")
+		return nil
+	}
+	if len(args) != 1 || args[0] != "gpu" {
+		return fmt.Errorf("unknown preflight command %q", args[0])
+	}
+
+	result, err := inspectGPUPreflight(runGPUCommand)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[ERROR] NVIDIA Driver unavailable")
+		fmt.Fprintln(os.Stderr, "Install a supported NVIDIA driver, confirm nvidia-smi succeeds, then rerun:")
+		fmt.Fprintln(os.Stderr, "  sudo eva preflight gpu")
+		return &displayedError{message: "GPU prerequisite check failed."}
+	}
+
+	fmt.Println("EVA GPU prerequisite check")
+	fmt.Printf("[OK] NVIDIA Driver GPUs=%d\n", len(result.GPUs))
+	for _, gpu := range result.GPUs {
+		fmt.Printf("     %s\n", gpu)
+	}
+	if result.MIGInstances > 0 {
+		fmt.Printf("[OK] MIG            instances=%d\n", result.MIGInstances)
+	} else {
+		fmt.Println("[OK] MIG            not configured")
+	}
+	fmt.Println("[OK] Ready          eva install will configure Docker, CDI, k3s, and the NVIDIA Device Plugin")
+	return nil
+}
+
+func inspectGPUPreflight(run func(...string) (string, error)) (gpuPreflight, error) {
+	info, err := run("--query-gpu=name,driver_version", "--format=csv,noheader")
+	if err != nil {
+		return gpuPreflight{}, err
+	}
+	result := gpuPreflight{}
+	for _, line := range strings.Split(info, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			result.GPUs = append(result.GPUs, line)
+		}
+	}
+	if len(result.GPUs) == 0 {
+		return gpuPreflight{}, errors.New("nvidia-smi reported no GPUs")
+	}
+
+	devices, err := run("-L")
+	if err != nil {
+		return gpuPreflight{}, err
+	}
+	for _, line := range strings.Split(devices, "\n") {
+		if strings.Contains(line, "MIG ") {
+			result.MIGInstances++
+		}
+	}
+	return result, nil
 }
 
 func runTroubleshoot(args []string) error {

@@ -83,6 +83,7 @@
       ansible.builtin.set_fact:
         eva_agent_nfs_share_path: "{{ eva_agent_generated_config.nfs_share_path | default(eva_agent_nfs_share_path | default(omit)) }}"
         eva_agent_vllm_values_override_from_config: "{{ eva_agent_generated_config.vllm | default({}) }}"
+        eva_agent_vllm_profile: "{{ eva_agent_generated_config.vllm_profile | mandatory }}"
       changed_when: false
 
     - name: Build airgap cache root candidates on target

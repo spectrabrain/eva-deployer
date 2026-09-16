@@ -521,8 +521,8 @@ workspace/inventory/inventory.ini
 workspace/site-values/site.yaml
 workspace/site-values/app.yaml  # 필요한 경우
 workspace/site-values/iam.yaml  # 필요한 경우
-workspace/site-values/agent.yaml  # 필요한 경우
-workspace/site-values/vision.yaml  # 필요한 경우
+workspace/site-values/agent.yaml  # 명시적 Agent chart override가 필요한 경우
+workspace/site-values/vision.yaml  # 명시적 Vision chart override가 필요한 경우
 workspace/credentials/aws_key.ini  # AWS 직접 접근이 필요한 경우
 ```
 

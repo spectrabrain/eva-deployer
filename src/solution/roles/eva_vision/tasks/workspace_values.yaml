@@ -5,7 +5,6 @@
     eva_vision_values_file: "{{ eva_vision_values_file | default(eva_site_values_root ~ '/vision.yaml') }}"
     eva_vision_workspace_values: {}
     eva_vision_workspace_chart_values: {}
-    eva_vision_workspace_deploy_options: {}
 
 - name: Check for EVA Vision Workspace values on control node
   ansible.builtin.stat:
@@ -35,23 +34,7 @@
       {{ eva_vision_values_file }}의 {{ eva_vision_values_host }} 값은 mapping이어야 합니다.
   when: eva_vision_values_file_status.stat.exists
 
-- name: Split EVA Vision deploy options from chart values
+- name: Use target-specific optional EVA Vision chart values
   no_log: true
   ansible.builtin.set_fact:
-    eva_vision_workspace_deploy_options: >-
-      {{ (eva_vision_workspace_values.eva_vision_deploy | default({}, true)) }}
-    eva_vision_workspace_chart_values: >-
-      {{ eva_vision_workspace_values
-         | dict2items
-         | rejectattr('key', 'equalto', 'eva_vision_deploy')
-         | list
-         | items2dict }}
-
-- name: Apply target-specific EVA Vision deploy options
-  no_log: true
-  ansible.builtin.set_fact:
-    "eva_vision_{{ item.key }}": "{{ item.value }}"
-  loop: "{{ eva_vision_workspace_deploy_options | dict2items }}"
-  loop_control:
-    label: "eva_vision_{{ item.key }}"
-  when: eva_vision_workspace_deploy_options | length > 0
+    eva_vision_workspace_chart_values: "{{ eva_vision_workspace_values }}"

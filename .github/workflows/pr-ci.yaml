@@ -80,6 +80,13 @@ jobs:
       - name: Test EVA App values contract
         run: scripts/test/test_eva_app_values.sh
 
+      - name: Test EVA Agent and Vision values contracts
+        run: |
+          scripts/test/test_eva_component_values.sh
+          scripts/test/test_eva_vision_gpu_resource.sh
+          scripts/test/test_eva_vllm_profile.sh
+          scripts/test/test_eva_qdrant_values.sh
+
       - name: Test Config GPU CDI contract
         run: bash -x scripts/test/test_config_gpu_cdi.sh
 

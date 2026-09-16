@@ -155,7 +155,7 @@ src/solution/
 └── version.yaml
 ```
 
-`src/solution/values/`에는 제품팀이 소유하는 불변 Helm values 또는 `.j2` 템플릿만 둔다. 실제 고객이 작성하는 `app.yaml`, `iam.yaml` 등의 파일은 이 경로에 두지 않는다.
+`src/solution/values/`에는 제품팀이 소유하는 불변 Helm values 또는 `.j2` 템플릿만 둔다. 실제 고객이 작성하는 `app.yaml`, `iam.yaml`, `agent.yaml`, `vision.yaml` 파일은 이 경로에 두지 않는다.
 
 ### 2.2 `workspace/`: 설치자 입력
 
@@ -166,7 +166,9 @@ workspace/
 ├── site-values/
 │  ├── site.yaml
 │  ├── app.yaml
-│  └── iam.yaml
+│  ├── iam.yaml
+│  ├── agent.yaml
+│  └── vision.yaml
 └── credentials/
   ├── aws_key.ini
 ```
@@ -177,6 +179,8 @@ workspace/
 - `site-values/site.yaml`: site ID, repository mode, Harbor endpoint, 설치 component 등 CLI 공통 입력
 - `site-values/app.yaml`: EVA App Chart에 적용할 고객 변경분. App 커스텀이 있을 때만 생성
 - `site-values/iam.yaml`: EVA IAM Chart에 적용할 고객 변경분. IAM 커스텀이 있을 때만 생성
+- `site-values/agent.yaml`: inventory target key 아래의 EVA Agent deploy 및 Chart 변경분. 다른 target이나 unkeyed values는 사용하지 않음
+- `site-values/vision.yaml`: inventory target key 아래의 EVA Vision deploy 및 Chart 변경분. 다른 target이나 unkeyed values는 사용하지 않음
 - `credentials/aws_key.ini`: AWS ECR, S3, release asset 접근이 필요한 설치 단계에서 사용하는 AWS credential 입력
 
 생성된 `eva.yaml`, 최종 values, 로그와 상태는 `workspace/`에 두지 않는다.
@@ -517,6 +521,8 @@ workspace/inventory/inventory.ini
 workspace/site-values/site.yaml
 workspace/site-values/app.yaml  # 필요한 경우
 workspace/site-values/iam.yaml  # 필요한 경우
+workspace/site-values/agent.yaml  # 필요한 경우
+workspace/site-values/vision.yaml  # 필요한 경우
 workspace/credentials/aws_key.ini  # AWS 직접 접근이 필요한 경우
 ```
 

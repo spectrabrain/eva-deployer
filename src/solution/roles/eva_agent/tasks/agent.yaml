@@ -99,14 +99,6 @@
     mode: "0644"
   when: eva_cli_chart_path | default('') | length > 0
 
-- name: Copy CLI EVA Agent values override to target workspace
-  no_log: true
-  ansible.builtin.copy:
-    src: "{{ eva_cli_values_path }}"
-    dest: "{{ eva_agent_workdir }}/eva-agent/cli-override-values.yaml"
-    mode: "0644"
-  when: eva_cli_values_path | default('') | length > 0
-
 - name: Resolve EVA Agent chart source
   ansible.builtin.set_fact:
     eva_agent_chart_source: >-
@@ -253,6 +245,78 @@
     mode: "0644"
   when: not ansible_check_mode
 
+- name: Read EVA Agent generated input values
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ eva_agent_workdir }}/eva-agent/values-k3s.yaml"
+    - "{{ eva_agent_workdir }}/eva-agent/agent-k3s-override.yaml"
+  register: eva_agent_generated_values_raw
+  when: not ansible_check_mode
+
+- name: Read EVA Agent secret values
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ eva_agent_workdir }}/eva-agent/values-secret.yaml"
+  register: eva_agent_secret_values_raw
+  when:
+    - not ansible_check_mode
+    - eva_agent_values_secret_stat.stat.exists
+
+- name: Load CLI EVA Agent values override
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_cli_values_override: "{{ lookup('ansible.builtin.file', eva_cli_values_path) | from_yaml }}"
+  when: eva_cli_values_path | default('') | length > 0
+
+- name: Build effective EVA Agent Helm input values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_effective_values: >-
+      {{ (eva_agent_generated_values_raw.results[0].content | b64decode | from_yaml)
+         | combine(
+             (eva_agent_secret_values_raw.content | default('') | b64decode | from_yaml)
+             if eva_agent_values_secret_stat.stat.exists else {}, recursive=true)
+         | combine(eva_agent_generated_values_raw.results[1].content | b64decode | from_yaml, recursive=true)
+         | combine(eva_agent_workspace_chart_values, recursive=true)
+         | combine(eva_agent_cli_values_override | default({}, true), recursive=true) }}
+  when: not ansible_check_mode
+
+- name: Record private EVA Agent effective input values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_agent_effective_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_agent_deploy_values_dir }}/effective-input-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy private EVA Agent effective input values to target workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_agent_deploy_values_dir }}/effective-input-values.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent/effective-input-values.yaml"
+    mode: "0600"
+  when: not ansible_check_mode
+
+- name: Record EVA Agent values source metadata on control node
+  ansible.builtin.copy:
+    content: |
+      config_generated_values: {{ (eva_agent_vllm_values_override_from_config | default({}) | length > 0) | lower }}
+      workspace_override: {{ (eva_agent_workspace_values | length > 0) | lower }}
+      cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}
+      rendered_artifacts:
+        chart_defaults: {{ eva_agent_deploy_values_dir }}/chart-defaults.yaml
+        effective_input_values: {{ eva_agent_deploy_values_dir }}/effective-input-values.yaml
+        resolved_values: {{ eva_agent_deploy_values_dir }}/resolved-values.yaml
+    dest: "{{ eva_agent_deploy_values_dir }}/values-sources.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
 - name: Build EVA Agent helm command (online)
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   ansible.builtin.set_fact:
@@ -261,10 +325,7 @@
       {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_agent_chart_version }}{% endif %}
       --namespace {{ eva_agent_namespace }}
       --create-namespace
-      -f {{ eva_agent_workdir }}/eva-agent/values-k3s.yaml
-      {% if eva_agent_values_secret_stat.stat.exists %}-f {{ eva_agent_workdir }}/eva-agent/values-secret.yaml{% endif %}
-      -f {{ eva_agent_workdir }}/eva-agent/agent-k3s-override.yaml
-      {% if eva_cli_values_path | default('') | length > 0 %}-f {{ eva_agent_workdir }}/eva-agent/cli-override-values.yaml{% endif %}
+      -f {{ eva_agent_workdir }}/eva-agent/effective-input-values.yaml
       {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   when: not ansible_check_mode
 
@@ -276,10 +337,7 @@
       {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_agent_chart_version }}{% endif %}
       --namespace {{ eva_agent_namespace }}
       --create-namespace
-      -f {{ eva_agent_workdir }}/eva-agent/values-k3s.yaml
-      {% if eva_agent_values_secret_stat.stat.exists %}-f {{ eva_agent_workdir }}/eva-agent/values-secret.yaml{% endif %}
-      -f {{ eva_agent_workdir }}/eva-agent/agent-k3s-override.yaml
-      {% if eva_cli_values_path | default('') | length > 0 %}-f {{ eva_agent_workdir }}/eva-agent/cli-override-values.yaml{% endif %}
+      -f {{ eva_agent_workdir }}/eva-agent/effective-input-values.yaml
       {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   when: not ansible_check_mode
 
@@ -362,7 +420,7 @@
 - name: Publish effective EVA Agent Helm values on control node
   ansible.builtin.file:
     path: "{{ eva_agent_deploy_values_dir }}/resolved-values.yaml"
-    mode: "0644"
+    mode: "0600"
   delegate_to: localhost
   become: false
   when: not ansible_check_mode

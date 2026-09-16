@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"eva-deployer/tools/eva/internal/plan"
 )
@@ -597,6 +598,189 @@ func TestRequireNoTrackingUsesSimplifiedPreflightCommand(
 			err,
 		)
 	}
+}
+
+func TestResolveCompletedHandoffRequiresApplicationsAndRegistrationAbsent(
+	t *testing.T,
+) {
+	detection := Detection{
+		SiteID: testWorkspaceSite,
+		Applications: []string{
+			"legacy-a-eva-agent",
+			"legacy-a-eva-app",
+		},
+	}
+
+	receipt, ok := resolveCompletedHandoff(
+		detection,
+		applicationsJSONRecords(t),
+		nil,
+	)
+	if ok {
+		t.Fatalf(
+			"resolveCompletedHandoff() unexpectedly succeeded: %#v",
+			receipt,
+		)
+	}
+
+	receipt, ok = resolveCompletedHandoff(
+		detection,
+		nil,
+		[]clusterRegistration{
+			{
+				Name:   testLegacyCluster,
+				Server: testClusterServer,
+			},
+		},
+	)
+	if ok {
+		t.Fatalf(
+			"resolveCompletedHandoff() accepted existing registration: %#v",
+			receipt,
+		)
+	}
+
+	receipt, ok = resolveCompletedHandoff(
+		detection,
+		nil,
+		nil,
+	)
+	if !ok {
+		t.Fatal(
+			"resolveCompletedHandoff() did not recover absent state",
+		)
+	}
+
+	if receipt.ClusterName != testLegacyCluster ||
+		receipt.SiteID != testWorkspaceSite ||
+		len(receipt.Applications) != 2 {
+		t.Fatalf("recovered receipt = %#v", receipt)
+	}
+}
+
+func TestRequireNoTrackingAcceptsCoveringReceipt(
+	t *testing.T,
+) {
+	releaseRoot := t.TempDir()
+	receiptRoot := t.TempDir()
+
+	writeReport(
+		t,
+		releaseRoot,
+		testWorkspaceSite,
+		"host-a",
+		"ok",
+		[]string{"legacy-a-eva-app"},
+	)
+
+	if err := WriteReceipt(
+		receiptRoot,
+		Receipt{
+			SchemaVersion: receiptSchemaVersion,
+			SiteID:        testWorkspaceSite,
+			ClusterName:   testLegacyCluster,
+			Applications: []string{
+				"legacy-a-eva-agent",
+				"legacy-a-eva-app",
+			},
+			CompletedAt: time.Now().UTC(),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RequireNoTrackingWithReceiptRoot(
+		plan.Document{
+			SiteID:    testWorkspaceSite,
+			Workspace: "/work/customer-a",
+			Steps: []plan.Step{
+				{Component: "app"},
+			},
+		},
+		releaseRoot,
+		receiptRoot,
+	)
+
+	if err != nil {
+		t.Fatalf(
+			"RequireNoTrackingWithReceiptRoot() error = %v",
+			err,
+		)
+	}
+}
+
+func TestRequireNoTrackingRejectsNonCoveringReceipt(
+	t *testing.T,
+) {
+	releaseRoot := t.TempDir()
+	receiptRoot := t.TempDir()
+
+	writeReport(
+		t,
+		releaseRoot,
+		testWorkspaceSite,
+		"host-a",
+		"ok",
+		[]string{"legacy-a-eva-vision"},
+	)
+
+	if err := WriteReceipt(
+		receiptRoot,
+		Receipt{
+			SchemaVersion: receiptSchemaVersion,
+			SiteID:        testWorkspaceSite,
+			ClusterName:   testLegacyCluster,
+			Applications: []string{
+				"legacy-a-eva-app",
+			},
+			CompletedAt: time.Now().UTC(),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err := RequireNoTrackingWithReceiptRoot(
+		plan.Document{
+			SiteID:    testWorkspaceSite,
+			Workspace: "/work/customer-a",
+			Steps: []plan.Step{
+				{Component: "vision"},
+			},
+		},
+		releaseRoot,
+		receiptRoot,
+	)
+
+	if err == nil ||
+		!strings.Contains(
+			err.Error(),
+			"eva preflight argocd",
+		) {
+		t.Fatalf(
+			"RequireNoTrackingWithReceiptRoot() error = %v",
+			err,
+		)
+	}
+}
+
+func applicationsJSONRecords(
+	t *testing.T,
+) []applicationRecord {
+	t.Helper()
+
+	records, err := parseApplications(
+		applicationsJSON(
+			applicationFixture{
+				Name:   "legacy-a-eva-agent",
+				Server: testClusterServer,
+			},
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return records
 }
 
 func TestLoadDetectionFailsClosedWhenKubectlQueryFailed(

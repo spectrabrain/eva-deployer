@@ -29,7 +29,10 @@ func (prompt *argoCDPrompter) Confirm(detection argocd.Detection) (bool, error) 
 	if err := requireInteractiveArgoCDHandoff(); err != nil {
 		return false, err
 	}
-	fmt.Fprintln(os.Stderr, "[WARN] Existing Argo CD-managed EVA resources were detected.")
+	printStatus(
+		os.Stderr,
+		"[WARN] Existing Argo CD-managed EVA resources were detected.",
+	)
 	fmt.Fprintf(os.Stderr, "Workspace site: %s\n", detection.SiteID)
 	fmt.Fprintln(os.Stderr, "Detected legacy Argo CD Applications:")
 	for _, application := range detection.Applications {
@@ -71,7 +74,10 @@ func (prompt *argoCDPrompter) Credentials() (argocd.Credentials, error) {
 		User:     strings.TrimSpace(user),
 		Password: string(password),
 		ApproveHostKey: func(hostKey argocd.HostKey) (bool, error) {
-			fmt.Fprintln(os.Stderr, "[WARN] Unknown SSH host key.")
+			printStatus(
+				os.Stderr,
+				"[WARN] Unknown SSH host key.",
+			)
 			fmt.Fprintf(os.Stderr, "Server: %s\n", hostKey.Address)
 			fmt.Fprintf(os.Stderr, "Fingerprint: %s\n", hostKey.Fingerprint)
 			fmt.Fprint(os.Stderr, "Trust and register this SSH host key? [y/N]: ")
@@ -87,7 +93,16 @@ func (prompt *argoCDPrompter) Credentials() (argocd.Credentials, error) {
 }
 
 func (prompt *argoCDPrompter) Progress(message string) {
-	fmt.Fprintln(os.Stderr, message)
+	printStatus(os.Stderr, message)
+}
+
+func (prompt *argoCDPrompter) RecordReceipt(
+	receipt argocd.Receipt,
+) error {
+	return argocd.WriteReceipt(
+		argocd.DefaultReceiptRoot,
+		receipt,
+	)
 }
 
 func (prompt *argoCDPrompter) readValue(label string) (string, error) {

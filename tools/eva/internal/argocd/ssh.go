@@ -277,11 +277,29 @@ type sshSession struct {
 }
 
 func (session *sshSession) Run(command string) (string, error) {
+	return session.run(command, "")
+}
+
+func (session *sshSession) RunWithInput(
+	command string,
+	input string,
+) (string, error) {
+	return session.run(command, input)
+}
+
+func (session *sshSession) run(
+	command string,
+	input string,
+) (string, error) {
 	remote, err := session.client.NewSession()
 	if err != nil {
 		return "", err
 	}
 	defer remote.Close()
+
+	if input != "" {
+		remote.Stdin = strings.NewReader(input)
+	}
 
 	output, err := remote.CombinedOutput(
 		"bash -lc " + shellQuote(command),
@@ -289,10 +307,16 @@ func (session *sshSession) Run(command string) (string, error) {
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		if message != "" {
-			return string(output), fmt.Errorf("%w: %s", err, message)
+			return string(output), fmt.Errorf(
+				"%w: %s",
+				err,
+				message,
+			)
 		}
+
 		return string(output), err
 	}
+
 	return string(output), nil
 }
 

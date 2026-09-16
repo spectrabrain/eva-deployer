@@ -287,3 +287,39 @@ func TestRequireReceiptMatchesPendingRejectsApplicationsMismatch(
 		)
 	}
 }
+
+func TestLegacyReceiptIsNotCompletedGitBackedEvidence(
+	t *testing.T,
+) {
+	pending := testPendingHandoff(time.Now().UTC())
+
+	legacyReceipt := Receipt{
+		SchemaVersion: receiptSchemaVersion,
+		SiteID:        pending.SiteID,
+		ClusterName:   pending.ClusterName,
+		ClusterServer: pending.ClusterServer,
+		Applications: append(
+			[]string(nil),
+			pending.Applications...,
+		),
+		CompletedAt: time.Now().UTC(),
+	}
+
+	if hasCompleteGitReceiptMetadata(legacyReceipt) {
+		t.Fatal(
+			"legacy receipt was accepted as complete " +
+				"Git-backed handoff evidence",
+		)
+	}
+
+	gitBackedReceipt := pendingToReceipt(
+		pending,
+		time.Now().UTC(),
+	)
+
+	if !hasCompleteGitReceiptMetadata(gitBackedReceipt) {
+		t.Fatal(
+			"complete Git-backed receipt was not recognized",
+		)
+	}
+}

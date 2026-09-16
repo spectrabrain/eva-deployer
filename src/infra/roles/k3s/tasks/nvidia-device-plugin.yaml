@@ -367,11 +367,13 @@
       {{ (k3s_gpu_validation_allocatable | int) - (k3s_gpu_validation_allocated | int) }}
     k3s_gpu_validation_mode: >-
       {{
-        ((k3s_gpu_validation_allocatable | int) - (k3s_gpu_validation_allocated | int) > 0)
+        (k3s_gpu_validation_ready_eva_pods | length > 0)
         | ternary(
-          'validation-pod',
-          ((k3s_gpu_validation_ready_eva_pods | length > 0)
-            | ternary('existing-eva-workloads', 'unavailable'))
+          'existing-eva-workloads',
+          (
+            ((k3s_gpu_validation_allocatable | int) - (k3s_gpu_validation_allocated | int) > 0)
+            | ternary('validation-pod', 'unavailable')
+          )
         )
       }}
   changed_when: false
@@ -428,7 +430,7 @@
       - CrashLoopBackOff
   when:
     - not ansible_check_mode
-    - k3s_gpu_validation_available | int >= 1
+    - k3s_gpu_validation_mode == 'validation-pod'
   block:
     - block:
         - name: Ensure previous GPU validation pod is absent

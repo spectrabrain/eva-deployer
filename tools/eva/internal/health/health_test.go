@@ -56,6 +56,31 @@ func TestCheckReportsUnhealthyPodsAndVerboseDetails(t *testing.T) {
 	}
 }
 
+func TestCheckReportsAcceleratorInfrastructureForAgent(t *testing.T) {
+	report := Check(Input{
+		RuntimeVersion: "1.0.1", OperationState: "succeeded",
+		Components: []Component{{Name: "agent", Namespace: "eva-agent"}},
+	}, fakeRunner(map[string]CommandResult{
+		"systemctl is-active docker":        {Output: "active\n"},
+		"systemctl is-active k3s":           {Output: "active\n"},
+		"kubectl get nodes -o json":         {Output: `{"items":[{"status":{"allocatable":{"nvidia.com/mig-2g.24gb":"4"},"conditions":[{"type":"Ready","status":"True"}]}}]}`},
+		"kubectl get daemonsets -A -o json": {Output: `{"items":[{"kind":"DaemonSet","metadata":{"name":"nvidia-device-plugin-daemonset"},"status":{"desiredNumberScheduled":1,"numberReady":1}}]}`},
+		"kubectl get pods,deployments,statefulsets,daemonsets,services,ingresses -n eva-agent -o json": {Output: `{"items":[
+          {"kind":"Pod","metadata":{"name":"eva-agent-vllm"},"spec":{"containers":[{"resources":{"limits":{"nvidia.com/mig-2g.24gb":"1"}}}]},"status":{"phase":"Running","containerStatuses":[{"name":"vllm","ready":true}]}},
+          {"kind":"Deployment","metadata":{"name":"eva-agent-vllm"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":1}}
+        ]}`},
+	}))
+	if !report.Healthy {
+		t.Fatalf("report = %#v, want healthy", report)
+	}
+	if got := entry(report, "NVIDIA GPU").Detail; got != "allocatable=nvidia.com/mig-2g.24gb=4" {
+		t.Fatalf("NVIDIA GPU summary = %q", got)
+	}
+	if got := entry(report, "NVIDIA Device Plugin").Detail; got != "ready=1/1" {
+		t.Fatalf("NVIDIA Device Plugin summary = %q", got)
+	}
+}
+
 func fakeRunner(results map[string]CommandResult) Runner {
 	return func(name string, args ...string) CommandResult {
 		key := strings.Join(append([]string{name}, args...), " ")

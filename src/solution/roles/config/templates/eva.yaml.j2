@@ -8,6 +8,7 @@ aws_dir: {{ config_eva_aws_dir | to_json }}
 auto_update : {{ config_eva_auto_update_status | default('disabled') }}
 auto_login : {{ config_eva_auto_login_status | default('enabled') }}
 gpu_cdi : {{ config_eva_gpu_cdi_status | default('enabled') }}
+vllm_profile: {{ config_eva_vllm_profile | to_json }}
 app:
   backendHost: {{ config_eva_backend_host | to_json }}
   vision:

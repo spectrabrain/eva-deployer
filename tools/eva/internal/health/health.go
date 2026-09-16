@@ -3,6 +3,7 @@ package health
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -62,6 +63,9 @@ func Check(input Input, run Runner) Report {
 	checkService(&report, run, "k3s", "k3s")
 	if report.CanCheck {
 		checkNodes(&report, run)
+		if requiresAccelerator(input.Components) {
+			checkAcceleratorInfrastructure(&report, run)
+		}
 		for _, component := range input.Components {
 			checkComponent(&report, run, component)
 		}
@@ -120,6 +124,49 @@ func checkNodes(report *Report, run Runner) {
 	report.add("Kubernetes", fmt.Sprintf("nodes=%d ready=%d", len(nodes.Items), ready), len(nodes.Items) > 0 && ready == len(nodes.Items))
 }
 
+func requiresAccelerator(components []Component) bool {
+	for _, component := range components {
+		if component.Name == "agent" || component.Name == "vision" {
+			return true
+		}
+	}
+	return false
+}
+
+func checkAcceleratorInfrastructure(report *Report, run Runner) {
+	nodesResult := run("kubectl", "get", "nodes", "-o", "json")
+	if nodesResult.Err != nil {
+		report.add("NVIDIA GPU", commandFailure(nodesResult), false)
+	} else {
+		var nodes nodeList
+		if err := json.Unmarshal([]byte(nodesResult.Output), &nodes); err != nil {
+			report.add("NVIDIA GPU", "invalid kubectl response", false)
+		} else {
+			allocatable := nodes.acceleratorResources()
+			report.add("NVIDIA GPU", "allocatable="+strings.Join(allocatable, ","), len(allocatable) > 0)
+		}
+	}
+
+	pluginResult := run("kubectl", "get", "daemonsets", "-A", "-o", "json")
+	if pluginResult.Err != nil {
+		report.add("NVIDIA Device Plugin", commandFailure(pluginResult), false)
+		return
+	}
+	var resources resourceList
+	if err := json.Unmarshal([]byte(pluginResult.Output), &resources); err != nil {
+		report.add("NVIDIA Device Plugin", "invalid kubectl response", false)
+		return
+	}
+	for _, resource := range resources.Items {
+		if resource.Kind == "DaemonSet" && strings.Contains(resource.Metadata.Name, "nvidia-device-plugin") {
+			healthy := resource.Status.DesiredNumberScheduled > 0 && resource.Status.DesiredNumberScheduled == resource.Status.NumberReady
+			report.add("NVIDIA Device Plugin", fmt.Sprintf("ready=%d/%d", resource.Status.NumberReady, resource.Status.DesiredNumberScheduled), healthy)
+			return
+		}
+	}
+	report.add("NVIDIA Device Plugin", "not found", false)
+}
+
 func checkComponent(report *Report, run Runner, component Component) {
 	result := run("kubectl", "get", "pods,deployments,statefulsets,daemonsets,services,ingresses", "-n", component.Namespace, "-o", "json")
 	if result.Err != nil {
@@ -140,6 +187,13 @@ func checkComponent(report *Report, run Runner, component Component) {
 		detail += fmt.Sprintf(" ingress=%d", ingresses)
 	}
 	healthy := len(unhealthyPods) == 0 && workloads == ready
+	acceleratorPods := resources.acceleratorPods()
+	if component.Name == "agent" || component.Name == "vision" {
+		healthy = healthy && acceleratorPods > 0
+		if acceleratorPods == 0 && len(unhealthyPods) == 0 {
+			detail = "gpu_allocations=0"
+		}
+	}
 	if !healthy && len(unhealthyPods) > 0 {
 		detail = fmt.Sprintf("unhealthy_pods=%d", len(unhealthyPods))
 	}
@@ -172,12 +226,28 @@ func commandFailure(result CommandResult) string {
 type nodeList struct {
 	Items []struct {
 		Status struct {
-			Conditions []struct {
+			Allocatable map[string]string `json:"allocatable"`
+			Conditions  []struct {
 				Type   string `json:"type"`
 				Status string `json:"status"`
 			} `json:"conditions"`
 		} `json:"status"`
 	} `json:"items"`
+}
+
+func (nodes nodeList) acceleratorResources() []string {
+	resources := make([]string, 0)
+	seen := map[string]bool{}
+	for _, node := range nodes.Items {
+		for name, quantity := range node.Status.Allocatable {
+			if (name == "nvidia.com/gpu" || strings.HasPrefix(name, "nvidia.com/mig-")) && quantity != "0" && !seen[name] {
+				resources = append(resources, name+"="+quantity)
+				seen[name] = true
+			}
+		}
+	}
+	sort.Strings(resources)
+	return resources
 }
 
 type resourceList struct {
@@ -190,7 +260,12 @@ type resource struct {
 		Name string `json:"name"`
 	} `json:"metadata"`
 	Spec struct {
-		Replicas *int `json:"replicas"`
+		Replicas   *int `json:"replicas"`
+		Containers []struct {
+			Resources struct {
+				Limits map[string]string `json:"limits"`
+			} `json:"resources"`
+		} `json:"containers"`
 	} `json:"spec"`
 	Status struct {
 		Phase                  string `json:"phase"`
@@ -211,6 +286,25 @@ type resource struct {
 			} `json:"state"`
 		} `json:"containerStatuses"`
 	} `json:"status"`
+}
+
+func (resources resourceList) acceleratorPods() int {
+	count := 0
+	for _, resource := range resources.Items {
+		if resource.Kind != "Pod" || resource.Status.Phase == "Succeeded" {
+			continue
+		}
+		for _, container := range resource.Spec.Containers {
+			for name, quantity := range container.Resources.Limits {
+				if (name == "nvidia.com/gpu" || strings.HasPrefix(name, "nvidia.com/mig-")) && quantity != "0" {
+					count++
+					goto nextPod
+				}
+			}
+		}
+	nextPod:
+	}
+	return count
 }
 
 func (resources resourceList) count(kind string) int {

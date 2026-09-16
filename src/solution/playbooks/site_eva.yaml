@@ -40,6 +40,7 @@
       ansible.builtin.set_fact:
         eva_agent_nfs_share_path: "{{ eva_generated_config.nfs_share_path | default(eva_agent_nfs_share_path | default(omit)) }}"
         eva_agent_vllm_values_override_from_config: "{{ eva_generated_config.vllm | default({}) }}"
+        eva_agent_vllm_profile: "{{ eva_generated_config.vllm_profile | mandatory }}"
         eva_vision_mig_enabled_from_config: "{{ eva_generated_config.mig_enabled | default(false) | bool }}"
       changed_when: false
 

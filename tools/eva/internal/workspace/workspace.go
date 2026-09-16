@@ -38,7 +38,6 @@ type Config struct {
 		Project  string `yaml:"project"`
 	} `yaml:"repository"`
 	Components map[string]bool `yaml:"components"`
-	GPUProfile string          `yaml:"gpu_profile"`
 }
 
 type Resolved struct {

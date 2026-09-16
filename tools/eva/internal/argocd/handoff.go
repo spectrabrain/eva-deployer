@@ -111,10 +111,16 @@ type Credentials struct {
 	ApproveHostKey HostKeyApprover
 }
 
+type GitCredentials struct {
+	Username string
+	Secret   string
+}
+
 type Prompter interface {
 	Confirm(Detection) (bool, error)
 	Credentials() (Credentials, error)
 	ConfirmGitRemoval(GitRemovalPlan) (bool, error)
+	GitCredentials(GitRemovalPlan) (GitCredentials, error)
 }
 
 type progressReporter interface {
@@ -199,8 +205,55 @@ func removePending(
 	return manager.RemovePending(siteID)
 }
 
+func validateGitCredentials(
+	credentials GitCredentials,
+) error {
+	if strings.TrimSpace(credentials.Username) == "" {
+		return errors.New(
+			"Git repository username is required",
+		)
+	}
+
+	if credentials.Secret == "" {
+		return errors.New(
+			"Git repository password or access token is required",
+		)
+	}
+
+	if strings.ContainsAny(
+		credentials.Username,
+		"\r\n\x00",
+	) {
+		return errors.New(
+			"Git repository username contains unsafe characters",
+		)
+	}
+
+	if strings.ContainsAny(
+		credentials.Secret,
+		"\r\n\x00",
+	) {
+		return errors.New(
+			"Git repository password or access token " +
+				"contains unsafe characters",
+		)
+	}
+
+	return nil
+}
+
+func gitCredentialInput(
+	credentials GitCredentials,
+) string {
+	return credentials.Username +
+		"\n" +
+		credentials.Secret +
+		"\n"
+}
+
 type Session interface {
 	Run(command string) (string, error)
+	RunWithInput(command string, input string) (string, error)
 	Close() error
 }
 
@@ -386,7 +439,8 @@ func RunPreflight(
 			)
 		}
 
-		if completedFound {
+		if completedFound &&
+			hasCompleteGitReceiptMetadata(completed) {
 			if err := cleanupCompletedPending(
 				session,
 				prompt,
@@ -479,8 +533,40 @@ func RunPreflight(
 		return errors.New("Git-backed cluster registration removal was not approved; no Git or Kubernetes mutation was performed")
 	}
 
+	gitCredentials, err := prompt.GitCredentials(gitPlan)
+	if err != nil {
+		return fmt.Errorf(
+			"read Git repository credentials: %w; "+
+				"no Git or Kubernetes mutation was performed",
+			err,
+		)
+	}
+
+	if err := validateGitCredentials(
+		gitCredentials,
+	); err != nil {
+		gitCredentials.Secret = ""
+
+		return fmt.Errorf(
+			"validate Git repository credentials: %w; "+
+				"no Git or Kubernetes mutation was performed",
+			err,
+		)
+	}
+
+	credentialInput := gitCredentialInput(
+		gitCredentials,
+	)
+
 	reportProgress(prompt, "[INFO] Removing only the target cluster registration manifest from Git...")
-	commitOutput, err := session.Run(gitRemovalCommand(gitPlan, target.Cluster.Server))
+	commitOutput, err := session.RunWithInput(
+		gitRemovalCommand(gitPlan, target.Cluster.Server),
+		credentialInput,
+	)
+
+	gitCredentials.Secret = ""
+	credentialInput = ""
+
 	if err != nil {
 		return fmt.Errorf("commit and push target cluster registration removal: %w; no live Kubernetes resource was deleted", err)
 	}
@@ -533,6 +619,7 @@ func RunPreflight(
 
 	if err := waitForRegistrationRevision(
 		session,
+		prompt,
 		commit,
 	); err != nil {
 		return fmt.Errorf(

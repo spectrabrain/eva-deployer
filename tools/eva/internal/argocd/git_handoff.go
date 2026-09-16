@@ -207,7 +207,12 @@ func parseBranchHead(output string) (string, error) {
 func gitRemovalCommand(plan GitRemovalPlan, server string) string {
 	// The script never emits the Secret content. kubectl's client-side parser
 	// validates the single YAML document and exposes only its metadata.
-	return "set -euo pipefail; base=\"$HOME/tmp\"; mkdir -p \"$base\"; work=$(mktemp -d \"$base/eva-argocd-handoff.XXXXXX\"); trap 'rm -rf \"$work\"' EXIT; " +
+	return "set -euo pipefail; umask 077; base=\"$HOME/tmp\"; mkdir -p \"$base\"; root=$(mktemp -d \"$base/eva-argocd-handoff.XXXXXX\"); trap 'rm -rf \"$root\"' EXIT; " +
+		"username_file=\"$root/git-username\"; secret_file=\"$root/git-secret\"; askpass=\"$root/git-askpass\"; work=\"$root/repository\"; " +
+		"IFS= read -r git_username; IFS= read -r git_secret; [ -n \"$git_username\" ] && [ -n \"$git_secret\" ]; " +
+		"printf '%s\\n' \"$git_username\" >\"$username_file\"; printf '%s\\n' \"$git_secret\" >\"$secret_file\"; chmod 600 \"$username_file\" \"$secret_file\"; " +
+		"printf '%s\\n' '#!/bin/sh' 'case \"$1\" in' '*Username*) cat \"$EVA_GIT_USERNAME_FILE\" ;;' '*Password*) cat \"$EVA_GIT_SECRET_FILE\" ;;' '*) false ;;' 'esac' >\"$askpass\"; chmod 700 \"$askpass\"; " +
+		"export LC_ALL=C GIT_ASKPASS=\"$askpass\" GIT_TERMINAL_PROMPT=0 EVA_GIT_USERNAME_FILE=\"$username_file\" EVA_GIT_SECRET_FILE=\"$secret_file\"; unset git_username git_secret; " +
 		"timeout 60s git clone --depth 1 --branch " + shellQuote(plan.Branch) + " " + shellQuote(plan.Repository) + " \"$work\"; cd \"$work\"; " +
 		"[ \"$(timeout 30s git rev-parse HEAD)\" = " + shellQuote(plan.ExpectedHead) + " ]; " +
 		"timeout 30s git ls-files --error-unmatch -- " + shellQuote(plan.Manifest) + " >/dev/null; " +
@@ -321,26 +326,68 @@ func prepareGitRemovalPlan(session Session, target handoffTarget) (GitRemovalPla
 	}, nil
 }
 
-func waitForRegistrationRevision(session Session, commit string) error {
-	for attempt := 0; attempt < 12; attempt++ {
-		output, err := session.Run(registrationApplicationCommand())
+func waitForRegistrationRevision(
+	session Session,
+	prompt Prompter,
+	commit string,
+) error {
+	const (
+		observationCount = 37
+		lastSleepAttempt = observationCount - 2
+	)
+
+	// Thirty-seven observations separated by thirty-six five-second
+	// waits retain a bounded three-minute wait. Progress is reported
+	// after each completed sixty-second interval.
+	for attempt := 0; attempt < observationCount; attempt++ {
+		output, err := session.Run(
+			registrationApplicationCommand(),
+		)
 		if err != nil {
 			return err
 		}
-		application, err := parseRegistrationApplication(output)
+
+		application, err := parseRegistrationApplication(
+			output,
+		)
 		if err != nil {
 			return err
 		}
+
 		if application.Status.Sync.Revision == commit {
 			return nil
 		}
-		if attempt < 11 {
-			if _, err := session.Run("sleep 5"); err != nil {
-				return err
-			}
+
+		if attempt > lastSleepAttempt {
+			continue
+		}
+
+		if _, err := session.Run("sleep 5"); err != nil {
+			return err
+		}
+
+		switch attempt + 1 {
+		case 12:
+			reportProgress(
+				prompt,
+				"[INFO] Argo CD revision is still pending "+
+					"after 60 seconds. Continuing interval 2/3...",
+			)
+		case 24:
+			reportProgress(
+				prompt,
+				"[WARN] Argo CD revision is still pending "+
+					"after 120 seconds. Continuing final "+
+					"interval 3/3...",
+			)
 		}
 	}
-	return errors.New("registration Application did not observe the pushed revision")
+
+	return fmt.Errorf(
+		"registration Application did not observe "+
+			"pushed revision %s within 180 seconds",
+		commit,
+	)
 }
 
 func verifyStableRemoval(session Session, cluster clusterRegistration, commit string) error {

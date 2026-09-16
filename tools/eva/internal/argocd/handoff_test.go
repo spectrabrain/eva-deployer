@@ -188,7 +188,17 @@ func TestRunResolvesLegacyIdentityAndUsesKubectl(t *testing.T) {
 		t.Fatal("session was not closed")
 	}
 
-	gitIndex := commandPrefixIndex(session.commands, "set -euo pipefail; base=")
+	if session.runWithInputCalls != 1 {
+		t.Fatalf(
+			"RunWithInput calls = %d, want 1",
+			session.runWithInputCalls,
+		)
+	}
+
+	gitIndex := commandPrefixIndex(
+		session.commands,
+		"set -euo pipefail; umask 077; base=",
+	)
 	secretDeleteIndex := commandIndex(session.commands, deleteClusterSecretCommand(testClusterSecret))
 	if gitIndex < 0 || secretDeleteIndex < 0 || gitIndex >= secretDeleteIndex {
 		t.Fatalf("Git commit/push must complete before live Secret deletion: commands=%v", session.commands)
@@ -774,9 +784,10 @@ type clusterSecretFixture struct {
 }
 
 type fakePrompt struct {
-	approved    bool
-	gitApproved *bool
-	credentials Credentials
+	approved      bool
+	gitApproved   *bool
+	credentials   Credentials
+	gitCredential GitCredentials
 }
 
 func approvedPrompt() fakePrompt {
@@ -809,16 +820,41 @@ func (prompt fakePrompt) ConfirmGitRemoval(
 	if prompt.gitApproved != nil {
 		return *prompt.gitApproved, nil
 	}
+
 	return prompt.approved, nil
 }
 
+func (prompt fakePrompt) GitCredentials(
+	GitRemovalPlan,
+) (GitCredentials, error) {
+	if prompt.gitCredential.Username != "" ||
+		prompt.gitCredential.Secret != "" {
+		return prompt.gitCredential, nil
+	}
+
+	return GitCredentials{
+		Username: "git-user",
+		Secret:   "git-secret",
+	}, nil
+}
+
 type fakeSession struct {
-	commands        []string
-	outputs         map[string]string
-	outputSequences map[string][]string
-	outputIndexes   map[string]int
-	failures        map[string]error
-	closed          bool
+	commands          []string
+	outputs           map[string]string
+	outputSequences   map[string][]string
+	outputIndexes     map[string]int
+	failures          map[string]error
+	runWithInputCalls int
+	closed            bool
+}
+
+func (session *fakeSession) RunWithInput(
+	command string,
+	input string,
+) (string, error) {
+	session.runWithInputCalls++
+
+	return session.Run(command)
 }
 
 func (session *fakeSession) Run(
@@ -865,7 +901,10 @@ func (session *fakeSession) Run(
 	if strings.HasPrefix(command, "timeout 30s git ls-remote ") {
 		return testGitCommit + "\trefs/heads/main\n", nil
 	}
-	if strings.HasPrefix(command, "set -euo pipefail; base=") {
+	if strings.HasPrefix(
+		command,
+		"set -euo pipefail; umask 077; base=",
+	) {
 		return "Cloning into 'eva-argocd-handoff'...\n[main " + testGitCommit[:12] + "] [DEPLOYER] remove legacy-a from Argo CD registration\nTo http://mod.lge.com/hub/prism/eva-argo-shee.git\nEVA_GIT_COMMIT=" + testGitCommit + "\n", nil
 	}
 	if strings.HasPrefix(command, "timeout 30s kubectl get secret ") {
@@ -1108,5 +1147,71 @@ func writeReport(
 		0o600,
 	); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateGitCredentials(t *testing.T) {
+	valid := GitCredentials{
+		Username: "sunghyuns.park",
+		Secret:   "access-token",
+	}
+
+	if err := validateGitCredentials(valid); err != nil {
+		t.Fatalf(
+			"validateGitCredentials() error = %v",
+			err,
+		)
+	}
+
+	for _, credentials := range []GitCredentials{
+		{},
+		{Username: "user"},
+		{Username: "user\nother", Secret: "token"},
+		{Username: "user", Secret: "token\nother"},
+		{Username: "user\x00other", Secret: "token"},
+		{Username: "user", Secret: "token\x00other"},
+	} {
+		if err := validateGitCredentials(
+			credentials,
+		); err == nil {
+			t.Fatalf(
+				"validateGitCredentials(%#v) succeeded",
+				credentials,
+			)
+		}
+	}
+}
+
+func TestGitCredentialInputIsNotPartOfCommand(
+	t *testing.T,
+) {
+	credentials := GitCredentials{
+		Username: "credential-user-9f3c",
+		Secret:   "credential-secret-7a2e",
+	}
+
+	input := gitCredentialInput(credentials)
+
+	if input != "credential-user-9f3c\ncredential-secret-7a2e\n" {
+		t.Fatalf("credential input = %q", input)
+	}
+
+	command := gitRemovalCommand(
+		GitRemovalPlan{
+			Repository:    "http://mod.lge.com/hub/prism/eva-argo-shee.git",
+			Branch:        "main",
+			Manifest:      "clusters/lge-shee-magok-d.yaml",
+			ClusterName:   "lge-shee-magok-d",
+			ClusterServer: "https://10.0.0.10:6443",
+			ExpectedHead:  testGitCommit,
+		},
+		"https://10.0.0.10:6443",
+	)
+
+	if strings.Contains(command, credentials.Username) ||
+		strings.Contains(command, credentials.Secret) {
+		t.Fatal(
+			"Git credential leaked into command text",
+		)
 	}
 }

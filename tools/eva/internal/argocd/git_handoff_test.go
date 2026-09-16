@@ -71,6 +71,19 @@ func TestGitRemovalCommandIsNarrowAndDoesNotPrintSecret(t *testing.T) {
 		"expected_string_data=",
 		"expected_data=",
 		"EVA_GIT_STAGE_FAILED=validate-manifest-identity",
+		"umask 077",
+		"git-username",
+		"git-secret",
+		"git-askpass",
+		"GIT_ASKPASS=",
+		"GIT_TERMINAL_PROMPT=0",
+		"EVA_GIT_USERNAME_FILE=",
+		"EVA_GIT_SECRET_FILE=",
+		"IFS= read -r git_username",
+		"IFS= read -r git_secret",
+		"chmod 600",
+		"chmod 700",
+		"unset git_username git_secret",
 	} {
 		if !strings.Contains(command, required) {
 			t.Fatalf("command missing %q: %s", required, command)

@@ -133,7 +133,7 @@ EOF
   fi
 
   case "$name" in
-    upgrade-evidence)
+    upgrade-evidence|available-one-with-eva)
       grep -Fq 'validation=existing-eva-workloads' "$root/ansible.log"
       ;;
     external-workloads|not-ready-eva)
@@ -194,7 +194,7 @@ run_case new-install 4 '{"items":[]}' Succeeded success yes 0 4 0
 run_case upgrade-evidence 4 "$ready_eva_pods" Succeeded success no 4 0 4
 run_case external-workloads 4 "$external_pods" Succeeded failure no 4 0 0
 run_case not-ready-eva 4 "$not_ready_eva_pods" Succeeded failure no 4 0 0
-run_case available-one-with-eva 4 "$available_one_with_eva" Succeeded success yes 3 1 1
+run_case available-one-with-eva 4 "$available_one_with_eva" Succeeded success no 3 1 1
 run_case multi-container-and-init 5 "$multi_container_and_init" Succeeded success yes 3 2 0
 run_case multiple-init-containers 5 "$multiple_init_containers" Succeeded success yes 3 2 0
 run_case larger-init-container 5 "$larger_init_container" Succeeded success yes 4 1 0

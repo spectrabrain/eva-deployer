@@ -112,7 +112,12 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 		stepStartedAt := options.Now().UTC()
 		command := exec.Command(ansiblePath, ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars, overrideVars[step.Component])...)
 		command.Dir = releaseRoot
-		command.Env = commandEnvironment(document, releaseRoot, internalLogPath, resolvedRuntime.CollectionPath())
+		command.Env = commandEnvironment(
+			document,
+			releaseRoot,
+			internalLogPath,
+			resolvedRuntime,
+		)
 		output := io.MultiWriter(options.Stdout, combinedLog)
 		command.Stdout = output
 		command.Stderr = io.MultiWriter(options.Stderr, combinedLog)
@@ -257,8 +262,13 @@ func ansibleArgs(inventory, playbook string, extraVars []string, overrideVars st
 	return args
 }
 
-func commandEnvironment(document plan.Document, releaseRoot, internalLogPath, collectionPath string) []string {
-	values := make(map[string]string, len(document.Environment)+3)
+func commandEnvironment(
+	document plan.Document,
+	releaseRoot string,
+	internalLogPath string,
+	resolvedRuntime runtime.Resolved,
+) []string {
+	values := make(map[string]string, len(document.Environment)+5)
 	for _, entry := range os.Environ() {
 		name, value, found := strings.Cut(entry, "=")
 		if found {
@@ -269,8 +279,20 @@ func commandEnvironment(document plan.Document, releaseRoot, internalLogPath, co
 		values[name] = value
 	}
 	values["EVA_REPO_ROOT"] = releaseRoot
+	values["EVA_RUNTIME_ROOT"] = resolvedRuntime.Root
 	values["ANSIBLE_LOG_PATH"] = internalLogPath
-	values["ANSIBLE_COLLECTIONS_PATH"] = prependPath(collectionPath, values["ANSIBLE_COLLECTIONS_PATH"])
+	values["ANSIBLE_COLLECTIONS_PATH"] = prependPath(
+		resolvedRuntime.CollectionPath(),
+		values["ANSIBLE_COLLECTIONS_PATH"],
+	)
+	pathEntries := resolvedRuntime.ToolDirectories()
+	if values["PATH"] != "" {
+		pathEntries = append(pathEntries, values["PATH"])
+	}
+	values["PATH"] = strings.Join(
+		pathEntries,
+		string(os.PathListSeparator),
+	)
 	environment := make([]string, 0, len(values))
 	for name, value := range values {
 		environment = append(environment, name+"="+value)

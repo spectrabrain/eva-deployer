@@ -40,6 +40,25 @@ func TestExecuteRunsPlanAndRecordsResult(t *testing.T) {
 	if !strings.Contains(output.String(), "ANSIBLE_COLLECTIONS_PATH="+filepath.Join(runtimeRoot, "collections")) {
 		t.Fatalf("managed Ansible collection path = %q", output.String())
 	}
+	if !strings.Contains(output.String(), "EVA_RUNTIME_ROOT="+runtimeRoot) {
+		t.Fatalf("managed Runtime root = %q", output.String())
+	}
+	for _, directory := range []string{
+		filepath.Join(runtimeRoot, "bin"),
+		filepath.Join(runtimeRoot, "venv", "bin"),
+	} {
+		if !strings.Contains(output.String(), "PATH="+directory) &&
+			!strings.Contains(
+				output.String(),
+				string(os.PathListSeparator)+directory,
+			) {
+			t.Fatalf(
+				"managed Ansible PATH = %q, missing %q",
+				output.String(),
+				directory,
+			)
+		}
+	}
 	for _, path := range []string{completed.ResultPath, filepath.Join(completed.LogDirectory, "ansible.log"), filepath.Join(completed.LogDirectory, "ansible-internal.log")} {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -201,7 +220,7 @@ func createRuntime(t *testing.T) string {
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		contents := "#!/bin/sh\nprintf 'EVA_REPO_ROOT=%s\\n' \"$EVA_REPO_ROOT\"\nprintf 'ANSIBLE_COLLECTIONS_PATH=%s\\n' \"$ANSIBLE_COLLECTIONS_PATH\"\nprintf 'ARGS=%s\\n' \"$*\"\n"
+		contents := "#!/bin/sh\nprintf 'EVA_REPO_ROOT=%s\\n' \"$EVA_REPO_ROOT\"\nprintf 'EVA_RUNTIME_ROOT=%s\\n' \"$EVA_RUNTIME_ROOT\"\nprintf 'ANSIBLE_COLLECTIONS_PATH=%s\\n' \"$ANSIBLE_COLLECTIONS_PATH\"\nprintf 'PATH=%s\\n' \"$PATH\"\nprintf 'ARGS=%s\\n' \"$*\"\n"
 		if name == "ansible-playbook" {
 			contents += "if [ -f \"$EVA_REPO_ROOT/fail\" ]; then exit 7; fi\n"
 		}

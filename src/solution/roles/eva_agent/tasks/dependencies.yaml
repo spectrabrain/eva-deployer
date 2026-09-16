@@ -1323,10 +1323,10 @@
     --namespace {{ eva_agent_namespace }}
     --create-namespace
     --values {{ eva_agent_workdir }}/eva-agent-vllm/{{ eva_agent_vllm_values_file }}
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/vllm-k3s-override.yaml
     {% if eva_agent_vllm_values_override_from_config is defined and (eva_agent_vllm_values_override_from_config | length) > 0 %}
     --values {{ eva_agent_workdir }}/eva-agent-vllm/values-override-from-config.yaml
     {% endif %}
+    --values {{ eva_agent_workdir }}/eva-agent-vllm/vllm-k3s-override.yaml
   changed_when: true
   when:
     - not ansible_check_mode
@@ -1340,10 +1340,10 @@
     --namespace {{ eva_agent_namespace }}
     --create-namespace
     --values {{ eva_agent_workdir }}/eva-agent-vllm/{{ eva_agent_vllm_values_file }}
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/vllm-k3s-override.yaml
     {% if eva_agent_vllm_values_override_from_config is defined and (eva_agent_vllm_values_override_from_config | length) > 0 %}
     --values {{ eva_agent_workdir }}/eva-agent-vllm/values-override-from-config.yaml
     {% endif %}
+    --values {{ eva_agent_workdir }}/eva-agent-vllm/vllm-k3s-override.yaml
   changed_when: true
   when:
     - not ansible_check_mode

@@ -16,7 +16,8 @@ const (
 	testWorkspaceSite = "customer-a"
 	testLegacyCluster = "legacy-a"
 	testClusterServer = "https://10.0.0.10:6443"
-	testClusterSecret = "legacy-a-secret"
+	testClusterSecret = "legacy-a"
+	testGitCommit     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 )
 
 func TestRunSkipsInfraOnlyAndNoTracking(t *testing.T) {
@@ -100,6 +101,11 @@ func TestRunResolvesLegacyIdentityAndUsesKubectl(t *testing.T) {
 
 	session := &fakeSession{
 		outputSequences: map[string][]string{
+			registrationApplicationCommand(): {
+				registrationApplicationJSON(testClusterSecret, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", true),
+				registrationApplicationJSON(testClusterSecret, testGitCommit, true),
+				registrationApplicationJSON(testClusterSecret, testGitCommit, false),
+			},
 			applicationsCommand: {
 				applicationsJSON(
 					applicationFixture{
@@ -182,40 +188,16 @@ func TestRunResolvesLegacyIdentityAndUsesKubectl(t *testing.T) {
 		t.Fatal("session was not closed")
 	}
 
-	wantOrder := []string{
-		"command -v timeout >/dev/null 2>&1 && " +
-			"command -v kubectl >/dev/null 2>&1",
-		applicationsCommand,
-		secretsCommand,
-		applicationSetExistenceCommand([]string{
-			"appset-legacy-a-eva-agent",
-			"appset-legacy-a-eva-agent-init",
-			"appset-legacy-a-eva-app",
-			"appset-legacy-a-eva-vision",
-		}),
-		deleteClusterSecretCommand(testClusterSecret),
-		secretsCommand,
-		deleteApplicationCommand(
-			"legacy-a-eva-agent",
-		),
-		deleteApplicationCommand(
-			"legacy-a-eva-agent-init",
-		),
-		deleteApplicationCommand(
-			"legacy-a-eva-app",
-		),
-		deleteApplicationCommand(
-			"legacy-a-eva-vision",
-		),
-		applicationsCommand,
-		"sleep 5 && " + applicationsCommand,
+	gitIndex := commandPrefixIndex(session.commands, "set -euo pipefail; base=")
+	secretDeleteIndex := commandIndex(session.commands, deleteClusterSecretCommand(testClusterSecret))
+	if gitIndex < 0 || secretDeleteIndex < 0 || gitIndex >= secretDeleteIndex {
+		t.Fatalf("Git commit/push must complete before live Secret deletion: commands=%v", session.commands)
 	}
-
-	assertExactCommandOrder(
-		t,
-		session.commands,
-		wantOrder,
-	)
+	for _, command := range session.commands[gitIndex+1 : secretDeleteIndex] {
+		if command == "sleep 5" {
+			t.Fatalf("Secret deletion waited for registration resources to prune: commands=%v", session.commands)
+		}
+	}
 
 	for _, command := range session.commands {
 		if strings.Contains(command, "legacy-b-eva-app") ||
@@ -292,6 +274,26 @@ func TestRunDestinationMismatchDoesNotMutate(
 	}
 
 	assertNoMutation(t, session.commands)
+}
+
+func TestRunGitApprovalDeclinedDoesNotMutate(t *testing.T) {
+	root := t.TempDir()
+	writeReport(t, root, testWorkspaceSite, "host-a", "ok", []string{"legacy-a-eva-app"})
+	declined := false
+	session := &fakeSession{outputSequences: map[string][]string{
+		applicationListCommand():         {applicationsJSON(applicationFixture{Name: "legacy-a-eva-app", Server: testClusterServer})},
+		clusterSecretListCommand():       {clusterSecretsJSON(clusterSecretFixture{SecretName: testClusterSecret, Name: testLegacyCluster, Server: testClusterServer})},
+		registrationApplicationCommand(): {registrationApplicationJSON(testClusterSecret, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", true)},
+	}}
+	err := Run(plan.Document{SiteID: testWorkspaceSite, Steps: []plan.Step{{Component: "app"}}}, root, fakePrompt{approved: true, gitApproved: &declined, credentials: approvedPrompt().credentials}, func(Credentials) (Session, error) { return session, nil })
+	if err == nil || !strings.Contains(err.Error(), "not approved") {
+		t.Fatalf("Run() error = %v", err)
+	}
+	for _, command := range session.commands {
+		if strings.Contains(command, "kubectl delete secret") || strings.Contains(command, " patch application ") || strings.HasPrefix(command, "set -euo pipefail; base=") {
+			t.Fatalf("Git decline caused mutation command: %s", command)
+		}
+	}
 }
 
 func TestRunMissingDetectedApplicationDoesNotMutate(
@@ -429,6 +431,10 @@ func TestRunApplicationDeletionFailureReportsRegistrationAbsent(
 
 	session := &fakeSession{
 		outputSequences: map[string][]string{
+			registrationApplicationCommand(): {
+				registrationApplicationJSON(testClusterSecret, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", true),
+				registrationApplicationJSON(testClusterSecret, testGitCommit, false),
+			},
 			applicationsCommand: {
 				applicationsJSON(
 					applicationFixture{
@@ -600,64 +606,6 @@ func TestRequireNoTrackingUsesSimplifiedPreflightCommand(
 	}
 }
 
-func TestResolveCompletedHandoffRequiresApplicationsAndRegistrationAbsent(
-	t *testing.T,
-) {
-	detection := Detection{
-		SiteID: testWorkspaceSite,
-		Applications: []string{
-			"legacy-a-eva-agent",
-			"legacy-a-eva-app",
-		},
-	}
-
-	receipt, ok := resolveCompletedHandoff(
-		detection,
-		applicationsJSONRecords(t),
-		nil,
-	)
-	if ok {
-		t.Fatalf(
-			"resolveCompletedHandoff() unexpectedly succeeded: %#v",
-			receipt,
-		)
-	}
-
-	receipt, ok = resolveCompletedHandoff(
-		detection,
-		nil,
-		[]clusterRegistration{
-			{
-				Name:   testLegacyCluster,
-				Server: testClusterServer,
-			},
-		},
-	)
-	if ok {
-		t.Fatalf(
-			"resolveCompletedHandoff() accepted existing registration: %#v",
-			receipt,
-		)
-	}
-
-	receipt, ok = resolveCompletedHandoff(
-		detection,
-		nil,
-		nil,
-	)
-	if !ok {
-		t.Fatal(
-			"resolveCompletedHandoff() did not recover absent state",
-		)
-	}
-
-	if receipt.ClusterName != testLegacyCluster ||
-		receipt.SiteID != testWorkspaceSite ||
-		len(receipt.Applications) != 2 {
-		t.Fatalf("recovered receipt = %#v", receipt)
-	}
-}
-
 func TestRequireNoTrackingAcceptsCoveringReceipt(
 	t *testing.T,
 ) {
@@ -683,7 +631,12 @@ func TestRequireNoTrackingAcceptsCoveringReceipt(
 				"legacy-a-eva-agent",
 				"legacy-a-eva-app",
 			},
-			CompletedAt: time.Now().UTC(),
+			CompletedAt:             time.Now().UTC(),
+			RegistrationApplication: registrationApplicationName,
+			RegistrationRepository:  "http://mod.lge.com/hub/prism/eva-argo-shee.git",
+			RegistrationBranch:      "main",
+			RegistrationManifest:    "registration/clusters/legacy-a.yaml",
+			RegistrationCommit:      testGitCommit,
 		},
 	); err != nil {
 		t.Fatal(err)
@@ -706,6 +659,24 @@ func TestRequireNoTrackingAcceptsCoveringReceipt(
 			"RequireNoTrackingWithReceiptRoot() error = %v",
 			err,
 		)
+	}
+}
+
+func TestRequireNoTrackingRejectsLegacyReceipt(t *testing.T) {
+	releaseRoot := t.TempDir()
+	receiptRoot := t.TempDir()
+	writeReport(t, releaseRoot, testWorkspaceSite, "host-a", "ok", []string{"legacy-a-eva-app"})
+	if err := WriteReceipt(receiptRoot, Receipt{
+		SchemaVersion: receiptSchemaVersion, SiteID: testWorkspaceSite, ClusterName: testLegacyCluster,
+		Applications: []string{"legacy-a-eva-app"}, CompletedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	err := RequireNoTrackingWithReceiptRoot(plan.Document{
+		SiteID: testWorkspaceSite, Workspace: "/work/customer-a", Steps: []plan.Step{{Component: "app"}},
+	}, releaseRoot, receiptRoot)
+	if err == nil || !strings.Contains(err.Error(), "eva preflight argocd") {
+		t.Fatalf("legacy receipt bypassed tracking guard: %v", err)
 	}
 }
 
@@ -763,26 +734,6 @@ func TestRequireNoTrackingRejectsNonCoveringReceipt(
 	}
 }
 
-func applicationsJSONRecords(
-	t *testing.T,
-) []applicationRecord {
-	t.Helper()
-
-	records, err := parseApplications(
-		applicationsJSON(
-			applicationFixture{
-				Name:   "legacy-a-eva-agent",
-				Server: testClusterServer,
-			},
-		),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return records
-}
-
 func TestLoadDetectionFailsClosedWhenKubectlQueryFailed(
 	t *testing.T,
 ) {
@@ -824,6 +775,7 @@ type clusterSecretFixture struct {
 
 type fakePrompt struct {
 	approved    bool
+	gitApproved *bool
 	credentials Credentials
 }
 
@@ -849,6 +801,15 @@ func (prompt fakePrompt) Credentials() (
 	error,
 ) {
 	return prompt.credentials, nil
+}
+
+func (prompt fakePrompt) ConfirmGitRemoval(
+	GitRemovalPlan,
+) (bool, error) {
+	if prompt.gitApproved != nil {
+		return *prompt.gitApproved, nil
+	}
+	return prompt.approved, nil
 }
 
 type fakeSession struct {
@@ -898,8 +859,41 @@ func (session *fakeSession) Run(
 
 		return sequence[index], nil
 	}
+	if strings.HasPrefix(command, "timeout 30s git ls-remote --symref ") {
+		return "ref: refs/heads/main\tHEAD\n" + testGitCommit + "\tHEAD\n", nil
+	}
+	if strings.HasPrefix(command, "timeout 30s git ls-remote ") {
+		return testGitCommit + "\trefs/heads/main\n", nil
+	}
+	if strings.HasPrefix(command, "set -euo pipefail; base=") {
+		return "Cloning into 'eva-argocd-handoff'...\n[main " + testGitCommit[:12] + "] [DEPLOYER] remove legacy-a from Argo CD registration\nTo http://mod.lge.com/hub/prism/eva-argo-shee.git\nEVA_GIT_COMMIT=" + testGitCommit + "\n", nil
+	}
+	if strings.HasPrefix(command, "timeout 30s kubectl get secret ") {
+		return liveClusterSecretJSON(testClusterSecret, testLegacyCluster, testClusterServer), nil
+	}
 
 	return session.outputs[fixtureCommand], nil
+}
+
+func commandPrefixIndex(commands []string, prefix string) int {
+	for index, command := range commands {
+		if strings.HasPrefix(command, prefix) {
+			return index
+		}
+	}
+	return -1
+}
+
+func registrationApplicationJSON(secretName, revision string, desired bool) string {
+	resources := "[]"
+	if desired {
+		resources = `[{"kind":"Secret","namespace":"argocd","name":"` + secretName + `"}]`
+	}
+	return `{"spec":{"source":{"repoURL":"http://mod.lge.com/hub/prism/eva-argo-shee.git","targetRevision":"HEAD","path":"registration"}},"status":{"resources":` + resources + `,"sync":{"revision":"` + revision + `"}}}`
+}
+
+func liveClusterSecretJSON(secretName, name, server string) string {
+	return `{"metadata":{"name":"` + secretName + `","annotations":{"argocd.argoproj.io/tracking-id":"registration:/Secret:argocd/` + secretName + `"}},"data":{"name":"` + base64Value(name) + `","server":"` + base64Value(server) + `"}}`
 }
 
 func (session *fakeSession) Close() error {

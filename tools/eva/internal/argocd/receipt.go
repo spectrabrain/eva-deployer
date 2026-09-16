@@ -22,12 +22,17 @@ const receiptFileName = "argocd-handoff.yaml"
 // tracking metadata on deployed resources after their Argo CD Application
 // objects and cluster registration have been removed.
 type Receipt struct {
-	SchemaVersion string    `yaml:"schema_version"`
-	SiteID        string    `yaml:"site_id"`
-	ClusterName   string    `yaml:"cluster_name"`
-	ClusterServer string    `yaml:"cluster_server,omitempty"`
-	Applications  []string  `yaml:"applications"`
-	CompletedAt   time.Time `yaml:"completed_at"`
+	SchemaVersion           string    `yaml:"schema_version"`
+	SiteID                  string    `yaml:"site_id"`
+	ClusterName             string    `yaml:"cluster_name"`
+	ClusterServer           string    `yaml:"cluster_server,omitempty"`
+	Applications            []string  `yaml:"applications"`
+	CompletedAt             time.Time `yaml:"completed_at"`
+	RegistrationApplication string    `yaml:"registration_application,omitempty"`
+	RegistrationRepository  string    `yaml:"registration_repository,omitempty"`
+	RegistrationBranch      string    `yaml:"registration_branch,omitempty"`
+	RegistrationManifest    string    `yaml:"registration_manifest,omitempty"`
+	RegistrationCommit      string    `yaml:"registration_commit,omitempty"`
 }
 
 func ReceiptPath(root, siteID string) string {
@@ -280,6 +285,10 @@ func ReceiptCovers(
 		}
 	}
 
+	if err := validateReceiptGitMetadata(receipt); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -325,8 +334,50 @@ func validateReceipt(receipt Receipt) error {
 
 		seen[application] = true
 	}
+	if err := validateReceiptGitMetadata(receipt); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+func validateReceiptGitMetadata(receipt Receipt) error {
+	gitValues := []string{
+		receipt.RegistrationApplication,
+		receipt.RegistrationRepository,
+		receipt.RegistrationBranch,
+		receipt.RegistrationManifest,
+		receipt.RegistrationCommit,
+	}
+	present := 0
+	for _, value := range gitValues {
+		if value != "" {
+			present++
+		}
+	}
+	if present != 0 && present != len(gitValues) {
+		return errors.New("registration Git metadata must be either all present or all absent")
+	}
+	if present == len(gitValues) {
+		suffix := "/clusters/" + receipt.ClusterName + ".yaml"
+		sourcePath, found := strings.CutSuffix(receipt.RegistrationManifest, suffix)
+		if receipt.RegistrationManifest == "clusters/"+receipt.ClusterName+".yaml" {
+			sourcePath, found = ".", true
+		}
+		if receipt.RegistrationApplication != registrationApplicationName || !found || !safeRelativePath(sourcePath) || !validCommitSHA(receipt.RegistrationCommit) {
+			return errors.New("registration Git metadata is invalid")
+		}
+	}
+	return nil
+}
+
+func hasCompleteGitReceiptMetadata(receipt Receipt) bool {
+	return receipt.RegistrationApplication != "" &&
+		receipt.RegistrationRepository != "" &&
+		receipt.RegistrationBranch != "" &&
+		receipt.RegistrationManifest != "" &&
+		validCommitSHA(receipt.RegistrationCommit) &&
+		validateReceiptGitMetadata(receipt) == nil
 }
 
 func ensureReceiptDirectory(

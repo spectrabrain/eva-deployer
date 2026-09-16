@@ -92,6 +92,25 @@ func (prompt *argoCDPrompter) Credentials() (argocd.Credentials, error) {
 	}, nil
 }
 
+func (prompt *argoCDPrompter) ConfirmGitRemoval(plan argocd.GitRemovalPlan) (bool, error) {
+	if err := requireInteractiveArgoCDHandoff(); err != nil {
+		return false, err
+	}
+	printStatus(os.Stderr, "[WARN] Cluster registration is managed by Argo CD Application \"registration\".")
+	fmt.Fprintf(os.Stderr, "Repository: %s\n", plan.Repository)
+	fmt.Fprintf(os.Stderr, "Branch: %s\n", plan.Branch)
+	fmt.Fprintf(os.Stderr, "Target manifest: %s\n\n", plan.Manifest)
+	fmt.Fprintln(os.Stderr, "Commit:")
+	fmt.Fprintf(os.Stderr, "  [DEPLOYER] remove %s from Argo CD registration\n\n", plan.ClusterName)
+	fmt.Fprint(os.Stderr, "Commit and push this site-specific change? [y/N]: ")
+	answer, err := prompt.reader.ReadString('\n')
+	if err != nil && len(answer) == 0 {
+		return false, fmt.Errorf("read Git-backed handoff approval: %w", err)
+	}
+	value := strings.TrimSpace(answer)
+	return strings.EqualFold(value, "y") || strings.EqualFold(value, "yes"), nil
+}
+
 func (prompt *argoCDPrompter) Progress(message string) {
 	printStatus(os.Stderr, message)
 }
@@ -102,6 +121,68 @@ func (prompt *argoCDPrompter) RecordReceipt(
 	return argocd.WriteReceipt(
 		argocd.DefaultReceiptRoot,
 		receipt,
+	)
+}
+
+func (prompt *argoCDPrompter) LoadPending(
+	siteID string,
+) (argocd.PendingHandoff, bool, error) {
+	pending, err := argocd.LoadPending(
+		argocd.DefaultReceiptRoot,
+		siteID,
+	)
+	if err == nil {
+		return pending, true, nil
+	}
+
+	if errors.Is(err, os.ErrNotExist) ||
+		strings.Contains(
+			err.Error(),
+			"no such file or directory",
+		) {
+		return argocd.PendingHandoff{}, false, nil
+	}
+
+	return argocd.PendingHandoff{}, false, err
+}
+
+func (prompt *argoCDPrompter) LoadCompletedReceipt(
+	siteID string,
+) (argocd.Receipt, bool, error) {
+	receipt, err := argocd.LoadReceipt(
+		argocd.DefaultReceiptRoot,
+		siteID,
+	)
+	if err == nil {
+		return receipt, true, nil
+	}
+
+	if errors.Is(err, os.ErrNotExist) ||
+		strings.Contains(
+			err.Error(),
+			"no such file or directory",
+		) {
+		return argocd.Receipt{}, false, nil
+	}
+
+	return argocd.Receipt{}, false, err
+}
+
+func (prompt *argoCDPrompter) RecordPending(
+	pending argocd.PendingHandoff,
+) error {
+	return argocd.WritePending(
+		argocd.DefaultReceiptRoot,
+		pending,
+	)
+}
+
+func (prompt *argoCDPrompter) RemovePending(
+	siteID string,
+) error {
+	return argocd.RemovePending(
+		argocd.DefaultReceiptRoot,
+		siteID,
 	)
 }
 

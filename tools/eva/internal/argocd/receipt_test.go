@@ -149,6 +149,29 @@ func TestReceiptCoversRejectsUnknownApplication(
 	}
 }
 
+func TestReceiptAcceptsLegacyOrCompleteGitMetadataOnly(t *testing.T) {
+	legacy := Receipt{
+		SchemaVersion: receiptSchemaVersion, SiteID: testWorkspaceSite, ClusterName: testLegacyCluster,
+		Applications: []string{"legacy-a-eva-app"}, CompletedAt: time.Now().UTC(),
+	}
+	if err := validateReceipt(legacy); err != nil {
+		t.Fatalf("legacy receipt = %v", err)
+	}
+	gitBacked := legacy
+	gitBacked.RegistrationApplication = registrationApplicationName
+	gitBacked.RegistrationRepository = "http://mod.lge.com/hub/prism/eva-argo-shee.git"
+	gitBacked.RegistrationBranch = "main"
+	gitBacked.RegistrationManifest = "registration/clusters/legacy-a.yaml"
+	gitBacked.RegistrationCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := validateReceipt(gitBacked); err != nil {
+		t.Fatalf("Git-backed receipt = %v", err)
+	}
+	gitBacked.RegistrationCommit = ""
+	if err := validateReceipt(gitBacked); err == nil {
+		t.Fatal("partial Git metadata succeeded")
+	}
+}
+
 func TestLoadReceiptRejectsWrongSite(t *testing.T) {
 	root := t.TempDir()
 

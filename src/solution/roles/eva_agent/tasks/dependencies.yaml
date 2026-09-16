@@ -21,10 +21,10 @@
     eva_agent_sync_aws_credentials: "{{ eva_agent_sync_aws_credentials | default((not ((airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']))) | ternary(1, 0)) }}"
     eva_agent_qdrant_chart_version: "{{ eva_agent_qdrant_chart_version | default(qdrant_chart_version) | mandatory }}"
     eva_agent_qdrant_values_file: "{{ eva_agent_qdrant_values_file | default('values-k3s.s3.yaml') }}"
-    eva_agent_qdrant_snapshot_source: "{{ eva_agent_qdrant_snapshot_source | default(((eva_agent_qdrant_values_file | default('values-k3s.yaml')) == 'values-k3s.harbor.yaml') | ternary('harbor', 'local_pv')) }}"
+    eva_agent_qdrant_snapshot_source: "{{ eva_agent_qdrant_snapshot_source | default(((eva_agent_qdrant_values_file | default('values-k3s.s3.yaml')) == 'values-k3s.harbor.yaml') | ternary('harbor', 'local_pv')) }}"
     eva_agent_vllm_chart_version: "{{ eva_agent_vllm_chart_version | mandatory }}"
-    eva_agent_vllm_profile: "{{ eva_agent_vllm_profile | default('PRO6000-MIGx4') }}"
-    eva_agent_vllm_values_file: "{{ eva_agent_vllm_values_file | default('values-k3s.' ~ (eva_agent_vllm_profile | default('PRO6000-MIGx4')) ~ '.yaml') }}"
+    eva_agent_vllm_profile: "{{ eva_agent_vllm_profile | mandatory }}"
+    eva_agent_vllm_values_file: "{{ eva_agent_vllm_values_file | default('values-k3s.' ~ eva_agent_vllm_profile ~ '.yaml') }}"
     eva_agent_vllm_engine_deployment_name: "{{ eva_agent_vllm_engine_deployment_name | default('eva-agent-vllm-qwen35-vl-9b-fp8-deployment-vllm') }}"
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
@@ -68,8 +68,12 @@
   ansible.builtin.assert:
     that:
       - eva_agent_qdrant_snapshot_source in ['local_pv', 'harbor']
+      - >-
+        (eva_agent_qdrant_values_file == 'values-k3s.s3.yaml' and eva_agent_qdrant_snapshot_source == 'local_pv')
+        or (eva_agent_qdrant_values_file == 'values-k3s.harbor.yaml' and eva_agent_qdrant_snapshot_source == 'harbor')
     fail_msg: >-
-      eva_agent_qdrant_snapshot_source는 local_pv 또는 harbor여야 합니다.
+      Cloud Qdrant uses values-k3s.s3.yaml with local_pv bootstrap snapshots.
+      Harbor snapshots require values-k3s.harbor.yaml with snapshot source harbor.
 
 - name: Set local PV Qdrant snapshot PVC name
   ansible.builtin.set_fact:
@@ -546,6 +550,24 @@
     - not ansible_check_mode
     - airgap_mode | default(false) | bool
 
+- name: Verify selected Agent Release values files exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    - "{{ eva_agent_workdir }}/eva-agent-vllm/{{ eva_agent_vllm_values_file }}"
+  register: eva_agent_release_values_stats
+  when: not ansible_check_mode
+
+- name: Require selected Agent Release values files
+  ansible.builtin.assert:
+    that:
+      - eva_agent_release_values_stats.results | map(attribute='stat.exists') | select('equalto', true) | list | length == 2
+    fail_msg: >-
+      EVA Agent Release values are missing for vLLM profile {{ eva_agent_vllm_profile }} or Qdrant profile
+      {{ eva_agent_qdrant_values_file }}. Verify the selected Release assets before deploying Agent.
+  when: not ansible_check_mode
+
 - name: Ensure Qdrant post-renderer executable bit
   ansible.builtin.file:
     path: "{{ eva_agent_workdir }}/plugin/eva-agent-qdrant/post-renderer.sh"
@@ -1019,6 +1041,120 @@
     mode: "0644"
   when: not ansible_check_mode
 
+- name: Read final Qdrant profile and k3s values
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop:
+    - "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    - "{{ eva_agent_workdir }}/eva-agent-qdrant/qdrant-k3s-override.yaml"
+  register: eva_agent_qdrant_input_values_raw
+  when: not ansible_check_mode
+
+- name: Build effective Qdrant Helm input values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_profile_values: "{{ eva_agent_qdrant_input_values_raw.results[0].content | b64decode | from_yaml }}"
+    eva_agent_qdrant_effective_values: >-
+      {{ (eva_agent_qdrant_input_values_raw.results[0].content | b64decode | from_yaml)
+         | combine(eva_agent_qdrant_input_values_raw.results[1].content | b64decode | from_yaml, recursive=true)
+      }}
+  when: not ansible_check_mode
+
+- name: Record Qdrant profile defaults on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_agent_qdrant_profile_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_agent_qdrant_deploy_values_dir }}/chart-defaults.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record private effective Qdrant input values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_agent_qdrant_effective_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_agent_qdrant_deploy_values_dir }}/effective-input-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy private effective Qdrant input values to target workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_agent_qdrant_deploy_values_dir }}/effective-input-values.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent-qdrant/effective-input-values.yaml"
+    mode: "0600"
+  when: not ansible_check_mode
+
+- name: Record Qdrant values source metadata on control node
+  ansible.builtin.copy:
+    content: |
+      release_values: true
+      rendered_artifacts:
+        chart_defaults: {{ eva_agent_qdrant_deploy_values_dir }}/chart-defaults.yaml
+        effective_input_values: {{ eva_agent_qdrant_deploy_values_dir }}/effective-input-values.yaml
+        resolved_values: {{ eva_agent_qdrant_deploy_values_dir }}/resolved-values.yaml
+    dest: "{{ eva_agent_qdrant_deploy_values_dir }}/values-sources.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Build effective vLLM Helm input values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_vllm_effective_values: >-
+      {{ eva_agent_vllm_profile_values
+         | combine(eva_agent_vllm_values_override_sanitized | default({}, true), recursive=true)
+         | combine(eva_agent_vllm_k3s_override_values, recursive=true) }}
+  when: not ansible_check_mode
+
+- name: Record vLLM profile defaults on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_agent_vllm_profile_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_agent_vllm_deploy_values_dir }}/chart-defaults.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record private effective vLLM input values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_agent_vllm_effective_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_agent_vllm_deploy_values_dir }}/effective-input-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy private effective vLLM input values to target workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_agent_vllm_deploy_values_dir }}/effective-input-values.yaml"
+    dest: "{{ eva_agent_workdir }}/eva-agent-vllm/effective-input-values.yaml"
+    mode: "0600"
+  when: not ansible_check_mode
+
+- name: Record vLLM values source metadata on control node
+  ansible.builtin.copy:
+    content: |
+      config_generated_values: {{ (eva_agent_vllm_values_override_from_config | default({}) | length > 0) | lower }}
+      release_values: true
+      rendered_artifacts:
+        chart_defaults: {{ eva_agent_vllm_deploy_values_dir }}/chart-defaults.yaml
+        effective_input_values: {{ eva_agent_vllm_deploy_values_dir }}/effective-input-values.yaml
+        resolved_values: {{ eva_agent_vllm_deploy_values_dir }}/resolved-values.yaml
+    dest: "{{ eva_agent_vllm_deploy_values_dir }}/values-sources.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
 - name: Check existing charts for airgap mode
   ansible.builtin.stat:
     path: "{{ item }}"
@@ -1289,8 +1425,7 @@
     --version {{ eva_agent_qdrant_chart_version }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}
-    --values {{ eva_agent_workdir }}/eva-agent-qdrant/qdrant-k3s-override.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-qdrant/effective-input-values.yaml
     {{ eva_agent_qdrant_post_renderer_arg }}
   changed_when: true
   when:
@@ -1305,8 +1440,7 @@
     helm upgrade --install eva-agent-qdrant {{ eva_agent_offline_qdrant_chart_tgz }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}
-    --values {{ eva_agent_workdir }}/eva-agent-qdrant/qdrant-k3s-override.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-qdrant/effective-input-values.yaml
     {{ eva_agent_qdrant_post_renderer_arg }}
   changed_when: true
   when:
@@ -1322,11 +1456,7 @@
     --version {{ eva_agent_vllm_chart_version }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/{{ eva_agent_vllm_values_file }}
-    {% if eva_agent_vllm_values_override_from_config is defined and (eva_agent_vllm_values_override_from_config | length) > 0 %}
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/values-override-from-config.yaml
-    {% endif %}
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/vllm-k3s-override.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-vllm/effective-input-values.yaml
   changed_when: true
   when:
     - not ansible_check_mode
@@ -1339,17 +1469,65 @@
     helm upgrade --install eva-agent-vllm {{ eva_agent_offline_vllm_chart_tgz }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/{{ eva_agent_vllm_values_file }}
-    {% if eva_agent_vllm_values_override_from_config is defined and (eva_agent_vllm_values_override_from_config | length) > 0 %}
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/values-override-from-config.yaml
-    {% endif %}
-    --values {{ eva_agent_workdir }}/eva-agent-vllm/vllm-k3s-override.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-vllm/effective-input-values.yaml
   changed_when: true
   when:
     - not ansible_check_mode
     - airgap_mode | default(false) | bool
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Capture effective Qdrant and vLLM Helm values
+  no_log: true
+  ansible.builtin.shell: >-
+    helm get values {{ item.release }} --namespace {{ eva_agent_namespace }} --all --output yaml
+    > {{ item.remote_dir }}/resolved-values.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+  loop:
+    - release: eva-agent-qdrant
+      remote_dir: "{{ eva_agent_workdir }}/eva-agent-qdrant"
+    - release: eva-agent-vllm
+      remote_dir: "{{ eva_agent_workdir }}/eva-agent-vllm"
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Record effective Qdrant and vLLM Helm values on control node
+  no_log: true
+  ansible.builtin.fetch:
+    src: "{{ item.remote_dir }}/resolved-values.yaml"
+    dest: "{{ item.deploy_dir }}/resolved-values.yaml"
+    flat: true
+  loop:
+    - remote_dir: "{{ eva_agent_workdir }}/eva-agent-qdrant"
+      deploy_dir: "{{ eva_agent_qdrant_deploy_values_dir }}"
+    - remote_dir: "{{ eva_agent_workdir }}/eva-agent-vllm"
+      deploy_dir: "{{ eva_agent_vllm_deploy_values_dir }}"
+  when: not ansible_check_mode
+
+- name: Protect effective Qdrant and vLLM Helm values on target
+  no_log: true
+  ansible.builtin.file:
+    path: "{{ item }}/resolved-values.yaml"
+    mode: "0600"
+  loop:
+    - "{{ eva_agent_workdir }}/eva-agent-qdrant"
+    - "{{ eva_agent_workdir }}/eva-agent-vllm"
+  when: not ansible_check_mode
+
+- name: Protect effective Qdrant and vLLM Helm values on control node
+  no_log: true
+  ansible.builtin.file:
+    path: "{{ item }}/resolved-values.yaml"
+    mode: "0600"
+  loop:
+    - "{{ eva_agent_qdrant_deploy_values_dir }}"
+    - "{{ eva_agent_vllm_deploy_values_dir }}"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
 
 - name: Wait for eva-agent-qdrant rollout to be ready
   ansible.builtin.command: >-

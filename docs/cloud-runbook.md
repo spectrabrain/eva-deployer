@@ -37,47 +37,42 @@ The installer verifies the single `eva-tool_*_linux_amd64.tar.gz` archive agains
 
 ## 3. Prepare Managed Runtime
 
-Bootstrap only when the server does not already have a valid EVA Runtime. It
-installs the managed Ansible and Kubernetes tools, then publishes `/opt/eva/runtime`
-only after validation succeeds.
+Bootstrap only when the server does not already have an EVA Runtime. It installs
+and validates the managed Ansible and Kubernetes tools before publishing
+`/opt/eva/runtime`.
 
 ```bash
 sudo eva runtime bootstrap
-sudo eva runtime validate
 ```
 
-Do not repeat bootstrap merely because the EVA Release changes.
+Do not repeat bootstrap merely because the EVA Release changes. `eva install`
+validates the managed Runtime before it starts an operation.
 
 ## 4. Verify GPU Prerequisites
 
-Before installation, verify the driver, Docker GPU access, CDI, k3s allocatable
-resources, and the NVIDIA Device Plugin. `infra` configures these during install,
-but these checks make an existing host state explicit.
+Before installation, run the EVA GPU prerequisite check. It verifies the NVIDIA
+driver, shows detected GPU and MIG state, and explains what must be corrected when
+the driver is unavailable.
 
 ```bash
-nvidia-smi
-docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu24.04 nvidia-smi
-sudo nvidia-ctk cdi list
-eva exec kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU:.status.allocatable.nvidia\\.com/gpu,MIG:.status.allocatable.nvidia\\.com/mig-1g\\.24gb
-eva exec kubectl get daemonset -A | grep nvidia-device-plugin
+sudo eva preflight gpu
 ```
 
-Config and Kubernetes automatically select the positive `nvidia.com/mig-*`
-allocatable resource when MIG is active, or `nvidia.com/gpu` for a regular GPU.
-Do not write GPU count, MIG profile, or resource names in Workspace values. If a
-node exposes multiple positive MIG resource types, installation stops rather than
-choosing one arbitrarily; normalize the MIG layout before retrying.
+Configure the intended MIG layout before installation when the site uses MIG.
+`infra` configures Docker, CDI, k3s, the NVIDIA Device Plugin, and allocatable
+resources. Config then selects `nvidia.com/gpu` or a positive
+`nvidia.com/mig-*` resource automatically. Multiple positive MIG resource types
+stop installation rather than being selected arbitrarily.
 
 ## 5. Create Workspace Inputs
 
 Choose an absolute Workspace path. `/etc/eva/sites/<site-id>` is conventional, but
 any location such as `/home/eva/site-dev-196` works when passed with `--workspace`.
-The inventory target name is the top-level key for `iam.yaml`, `agent.yaml`, and
-`app.yaml`. Create `vision.yaml` only for an intentional Vision chart override.
+The inventory target name is the top-level key for `iam.yaml` and `app.yaml`.
+Create `agent.yaml` or `vision.yaml` only for an intentional chart override.
 
 ```bash
-WORKSPACE=/home/eva/site-dev-196
-mkdir -p "$WORKSPACE"/{credentials,inventory,site-values}
+mkdir -p /home/eva/site-dev-196/{credentials,inventory,site-values}
 ```
 
 ```text
@@ -89,10 +84,10 @@ mkdir -p "$WORKSPACE"/{credentials,inventory,site-values}
 └── site-values/
     ├── site.yaml
     ├── iam.yaml
-    ├── agent.yaml
     └── app.yaml
 
-# Optional only for an intentional Vision override:
+# Optional only for intentional chart overrides:
+# site-values/agent.yaml
 # site-values/vision.yaml
 ```
 
@@ -153,34 +148,19 @@ site-dev-196:
     hostPath: /home/eva/.aws
 ```
 
-### `site-values/agent.yaml`
+### Optional `site-values/agent.yaml`
 
-Create this file for an Agent installation. Its target block selects the supported
-vLLM profile through `eva_agent_deploy` and can hold direct EVA Agent chart values.
-Config continues to derive GPU/MIG capacity, vLLM replica count, and cache defaults.
+Create this file only for a deliberate EVA Agent main chart override. The Agent,
+vLLM, and Qdrant baseline values are supplied by the Agent Release; do not copy or
+edit them in the Workspace. Config automatically selects the vLLM profile from the
+GPU model, physical GPU count, MIG state, and Kubernetes allocatable resources.
 
-```yaml
-site-dev-196:
-  eva_agent_deploy:
-    vllm_profile: PRO6000-MIGx4
-    # nfs_share_path: /data001/share/eva-agent
-    # qdrant_snapshot_pv_size: 50Gi
-  image:
-    pullPolicy: Always
-```
-
-Use [`agent.yaml.sample`](../workspace/site-values/agent.yaml.sample) as the
-complete supported example. The Agent role applies only the current target block;
-it does not treat another target or an unkeyed file as common values.
-
-### `site-values/vision.yaml`
+### Optional `site-values/vision.yaml`
 
 This optional file is only for deliberate Vision chart overrides such as persistent
 storage capacity, CPU/memory, image policy, or rollout timeout. Config and
 Kubernetes automatically select the GPU or MIG resource; do not create this file
-to choose a GPU count, MIG profile, or resource name. See
-[`vision.yaml.sample`](../workspace/site-values/vision.yaml.sample) only when a
-site-specific Vision override is required.
+to choose a GPU count, MIG profile, or resource name.
 
 ### `site-values/app.yaml`
 
@@ -200,33 +180,33 @@ With IAM and App in one operation, IAM SSO values are handed to App automaticall
 For a separate central IAM server, provide `app.sso.baseUrl` and
 `app.sso.adminClientSecret` explicitly in this Workspace file.
 
-`iam.yaml`, `agent.yaml`, `vision.yaml`, `app.yaml`, and `aws_key.ini` can contain
-credentials. Keep real files in approved Secret management and never commit them.
+`iam.yaml`, optional `agent.yaml` or `vision.yaml`, `app.yaml`, and `aws_key.ini`
+can contain credentials. Keep real files in approved Secret management and never commit them.
 Place the target TLS certificate and key in the host path configured above, normally
 `/home/eva/certs`.
 
-For Agent and Vision, Helm values are applied in this order: chart defaults,
-Config-generated values, role k3s overrides, the current target's Workspace block,
-CLI `--values`, and CLI `--set`. Later sources override earlier mappings
-recursively.
+Agent Release values, Config-generated settings, and role k3s/repository overrides
+are applied automatically. Optional Agent and Vision Workspace chart overrides are
+target-specific and do not select GPU, MIG, or vLLM profiles.
 
 ## 6. Install
 
 Run one command from the verified Release root.
 
 ```bash
-sudo eva install . --workspace "$WORKSPACE" --yes
+sudo eva install . --workspace /home/eva/site-dev-196 --yes
 ```
 
 The Plan order is always:
 
 ```text
-precondition -> infra -> config -> iam -> agent -> vision -> app
+precondition -> infra and GPU/MIG -> config -> iam -> agent -> vision -> app
 ```
 
 Config is automatically included whenever Agent, Vision, or App is selected. Do
 not run Config separately. A component-only operation does not run unselected
-product components.
+product components. Agent installs `eva-agent`, `eva-agent-vllm`, and
+`eva-agent-qdrant` together from the Release-managed values.
 
 If precondition detects a supported APT repository issue, diagnose it separately;
 `eva install --yes` does not approve external APT repository changes.
@@ -238,27 +218,19 @@ sudo eva troubleshoot apt --fix-known --yes
 
 ## 7. Verify Installation
 
-Start with the concise installation health check. Use verbose output only when it
-reports a problem.
+Start with the installation health check. For selected Agent or Vision components,
+it also verifies a node GPU or MIG allocatable resource, NVIDIA Device Plugin
+readiness, and an Agent/Vision Pod GPU or MIG allocation.
 
 ```bash
-sudo eva check
 sudo eva check --verbose
-sudo eva status
 ```
 
-Confirm the private IAM handoff exists without printing it, then inspect workloads,
-GPU allocation, in-cluster endpoints, and warning events as needed.
+When the check fails, use the operation summary before opening Kubernetes or
+private rendered artifacts.
 
 ```bash
-sudo stat -c '%U:%G %a %n' /var/lib/eva/sites/site-dev-196/site-dev-196/eva-iam.yaml
-eva exec kubectl get all -n eva-agent
-eva exec kubectl get all -n eva-vision
-eva exec kubectl get all -n eva-app
-eva exec kubectl describe node | grep -E 'nvidia.com/(gpu|mig)'
-eva exec kubectl get pod -n eva-agent -o wide
-eva exec kubectl get pod -n eva-vision -o wide
-eva exec kubectl get events -A --sort-by=.metadata.creationTimestamp
+sudo eva status
 ```
 
 The App endpoints for Agent and Vision are the internal `eva-agent.eva-agent` and
@@ -275,6 +247,18 @@ files are private because they can contain Secret values.
 /opt/eva/releases/<version>/out/work/config/<site>/<target>/eva.yaml
 
 /opt/eva/releases/<version>/out/work/rendered/<site>/<target>/agent/
+  chart-defaults.yaml              # 0644
+  effective-input-values.yaml      # 0600
+  resolved-values.yaml             # 0600
+  values-sources.yaml              # 0644, no Secret values
+
+/opt/eva/releases/<version>/out/work/rendered/<site>/<target>/vllm/
+  chart-defaults.yaml              # 0644
+  effective-input-values.yaml      # 0600
+  resolved-values.yaml             # 0600
+  values-sources.yaml              # 0644, no Secret values
+
+/opt/eva/releases/<version>/out/work/rendered/<site>/<target>/qdrant/
   chart-defaults.yaml              # 0644
   effective-input-values.yaml      # 0600
   resolved-values.yaml             # 0600

@@ -64,6 +64,9 @@
       }}
   changed_when: false
 
+- name: Resolve EVA Agent vLLM profile for eva.yaml
+  ansible.builtin.import_tasks: vllm_profile.yaml
+
 - name: Resolve NFS share path for eva.yaml
   ansible.builtin.include_role:
     name: nfs
@@ -91,6 +94,7 @@
     config_eva_auto_update_status: "{{ config_auto_update_status | default('disabled') }}"
     config_eva_auto_login_status: "{{ config_auto_login_status | default('enabled') }}"
     config_eva_gpu_cdi_status: "{{ config_gpu_cdi_status | default('enabled') }}"
+    config_eva_vllm_profile: "{{ config_eva_vllm_profile | default('') }}"
     config_eva_output_dir: "{{ eva_site_config_root ~ '/' ~ (ansible_host | default(inventory_hostname)) }}"
   changed_when: false
 

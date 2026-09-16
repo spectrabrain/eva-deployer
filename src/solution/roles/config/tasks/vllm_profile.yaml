@@ -1,0 +1,119 @@
+- name: Determine whether Config must resolve an EVA Agent vLLM profile
+  ansible.builtin.set_fact:
+    config_agent_enabled: "{{ 'agent' in (eva_enabled_components | default('')).split(',') }}"
+  changed_when: false
+
+- name: Load supported MIG model metadata for vLLM profile resolution
+  ansible.builtin.include_vars:
+    file: "{{ eva_infra_root }}/roles/gpu_mig/vars/gpu_mig.yaml"
+    name: config_gpu_mig_model_map
+  when: config_agent_enabled | bool
+
+- name: Collect GPU product names for vLLM profile resolution
+  ansible.builtin.command: nvidia-smi --query-gpu=name --format=csv,noheader
+  register: config_vllm_gpu_models
+  changed_when: false
+  failed_when: false
+  when: config_agent_enabled | bool
+
+- name: Collect Kubernetes NVIDIA allocatable resources for vLLM profile resolution
+  ansible.builtin.command: kubectl get nodes -o json
+  register: config_vllm_nodes
+  changed_when: false
+  failed_when: false
+  when: config_agent_enabled | bool
+
+- name: Extract vLLM profile resolution inputs
+  ansible.builtin.set_fact:
+    config_vllm_gpu_model_names: >-
+      {{ config_vllm_gpu_models.stdout_lines | default([]) | map('trim') | list }}
+    config_vllm_node_allocatable: >-
+      {{ ((config_vllm_nodes.stdout | from_json)['items']
+          | map(attribute='status.allocatable') | list)
+         if config_vllm_nodes.rc == 0 else [] }}
+  when: config_agent_enabled | bool
+
+- name: Select positive NVIDIA allocatable resources for vLLM profile resolution
+  ansible.builtin.set_fact:
+    config_vllm_mig_resource_items: >-
+      {{ config_vllm_node_allocatable
+         | map('dict2items') | flatten
+         | selectattr('key', 'match', '^nvidia[.]com/mig-')
+         | rejectattr('value', 'equalto', '0')
+         | list }}
+    config_vllm_gpu_resource_items: >-
+      {{ config_vllm_node_allocatable
+         | map('dict2items') | flatten
+         | selectattr('key', 'equalto', 'nvidia.com/gpu')
+         | rejectattr('value', 'equalto', '0')
+         | list }}
+  when: config_agent_enabled | bool
+
+- name: Build vLLM profile candidates from detected GPU and MIG state
+  ansible.builtin.set_fact:
+    config_vllm_mig_resource_names: >-
+      {{ config_vllm_mig_resource_items | map(attribute='key') | unique | list }}
+    config_vllm_mig_resource_total: >-
+      {{ config_vllm_mig_resource_items | map(attribute='value') | map('int') | sum }}
+    config_vllm_gpu_resource_names: >-
+      {{ config_vllm_gpu_resource_items | map(attribute='key') | unique | list }}
+  when: config_agent_enabled | bool
+
+- name: Resolve supported EVA Agent vLLM profile candidates
+  ansible.builtin.set_fact:
+    config_vllm_profile_candidates: >-
+      {{ []
+         + (
+           ['A6000x1']
+           if (config_vllm_gpu_model_names | unique | list) == ['NVIDIA RTX A6000']
+              and (config_detected_gpu_count | int) == 1
+              and not (config_mig_enabled | bool)
+              and (config_vllm_gpu_resource_names | length) > 0
+           else []
+         )
+         + (
+           ['L40sx1']
+           if (config_vllm_gpu_model_names | unique | list) == ['NVIDIA L40S']
+              and (config_detected_gpu_count | int) == 1
+              and not (config_mig_enabled | bool)
+              and (config_vllm_gpu_resource_names | length) > 0
+           else []
+         )
+         + (
+           ['PRO5000x3']
+           if (config_vllm_gpu_model_names | unique | list | length) == 1
+              and (config_vllm_gpu_model_names | unique | list | first) in ['PRO 5000 Blackwell', 'NVIDIA RTX PRO 5000 Blackwell']
+              and (config_detected_gpu_count | int) == 3
+              and not (config_mig_enabled | bool)
+              and (config_vllm_gpu_resource_names | length) > 0
+           else []
+         )
+         + (
+           ['PRO6000-MIGx4']
+           if (config_vllm_gpu_model_names | unique | list | length) == 1
+              and (config_vllm_gpu_model_names | unique | list | first) in (config_gpu_mig_model_map | default({})).keys()
+              and ((config_gpu_mig_model_map[(config_vllm_gpu_model_names | unique | list | first)].gpu_mig_mig_instance_count | int) == 4)
+              and (config_detected_gpu_count | int) == 1
+              and (config_mig_enabled | bool)
+              and (config_mig_instance_count | int) == 4
+              and (config_vllm_mig_resource_names | length) == 1
+              and (config_vllm_mig_resource_total | int) == 4
+           else []
+         ) }}
+  when: config_agent_enabled | bool
+
+- name: Require one supported EVA Agent vLLM profile
+  ansible.builtin.assert:
+    that:
+      - config_vllm_nodes.rc == 0
+      - config_vllm_profile_candidates | length == 1
+    fail_msg: >-
+      EVA Agent vLLM profile cannot be determined from the detected GPU model,
+      physical GPU count, MIG state, and Kubernetes NVIDIA allocatable resources.
+      Supported profiles are A6000x1, L40sx1, PRO5000x3, and PRO6000-MIGx4.
+  when: config_agent_enabled | bool
+
+- name: Publish resolved EVA Agent vLLM profile
+  ansible.builtin.set_fact:
+    config_eva_vllm_profile: "{{ config_vllm_profile_candidates | first }}"
+  when: config_agent_enabled | bool

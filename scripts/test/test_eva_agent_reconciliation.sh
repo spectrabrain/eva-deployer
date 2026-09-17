@@ -214,6 +214,116 @@ if invalid_counter in shell:
         "instead of arithmetic expansion"
     )
 
+persistent_adoption_markers = (
+    "adopted persistent-only EVA Agent resources into Helm ownership",
+    "EVA Agent PV/PVC identity changed during Helm adoption",
+    "EVA Agent PV/PVC Helm ownership adoption failed",
+    "app.kubernetes.io/managed-by=Helm",
+    'meta.helm.sh/release-name="$release"',
+    'meta.helm.sh/release-namespace="$namespace"',
+    "kubectl label pv",
+    "kubectl annotate pv",
+    "kubectl label pvc",
+    "kubectl annotate pvc",
+)
+
+for marker in persistent_adoption_markers:
+    if marker not in shell:
+        raise SystemExit(
+            "[ERROR] Agent persistent adoption marker is absent: "
+            + marker
+        )
+
+candidate_zero_marker = """if [[ "$candidate_count" == '0' ]]; then"""
+persistent_zero_marker = """if [[ "$persistent_count" == '0' ]]; then"""
+clean_state_marker = (
+    'echo "[INFO] clean EVA Agent installation state"'
+)
+clean_exit_marker = """exit 0"""
+persistent_state_marker = (
+    'echo "[INFO] EVA Agent persistent-only installation state"'
+)
+persistent_adoption_marker = """kubectl label pv \\"""
+persistent_success_marker = (
+    'echo "[OK] adopted persistent-only EVA Agent resources '
+    'into Helm ownership"'
+)
+
+candidate_zero_position = shell.find(
+    candidate_zero_marker
+)
+persistent_zero_position = shell.find(
+    persistent_zero_marker,
+    candidate_zero_position,
+)
+clean_state_position = shell.find(
+    clean_state_marker,
+    persistent_zero_position,
+)
+clean_exit_position = shell.find(
+    clean_exit_marker,
+    clean_state_position,
+)
+persistent_state_position = shell.find(
+    persistent_state_marker,
+    clean_exit_position,
+)
+persistent_adoption_position = shell.find(
+    persistent_adoption_marker,
+    persistent_state_position,
+)
+persistent_success_position = shell.find(
+    persistent_success_marker,
+    persistent_adoption_position,
+)
+
+persistent_positions = (
+    candidate_zero_position,
+    persistent_zero_position,
+    clean_state_position,
+    clean_exit_position,
+    persistent_state_position,
+    persistent_adoption_position,
+    persistent_success_position,
+)
+
+if min(persistent_positions) < 0:
+    raise SystemExit(
+        "[ERROR] persistent-only Agent flow is incomplete"
+    )
+
+if not (
+    candidate_zero_position
+    < persistent_zero_position
+    < clean_state_position
+    < clean_exit_position
+    < persistent_state_position
+    < persistent_adoption_position
+    < persistent_success_position
+):
+    raise SystemExit(
+        "[ERROR] persistent-only Agent flow order is invalid"
+    )
+
+candidate_branch_end = shell.find(
+    "\nfi\n",
+    persistent_state_position,
+)
+
+if candidate_branch_end < 0:
+    raise SystemExit(
+        "[ERROR] persistent-only candidate branch end is absent"
+    )
+
+persistent_only_tail = shell[
+    persistent_state_position:candidate_branch_end
+]
+
+if "exit 0" in persistent_only_tail:
+    raise SystemExit(
+        "[ERROR] persistent-only Agent state exits before Helm adoption"
+    )
+
 if shell.count(
     'resource="role.rbac.authorization.k8s.io/$name"'
 ) != 1:
@@ -268,21 +378,23 @@ if not isinstance(changed_when, str):
         "[ERROR] Agent reconciliation changed_when is absent"
     )
 
-if (
-    changed_when.count(
-        "[OK] reconciled exact legacy EVA Agent resources"
-    )
-    != 1
+for marker in (
+    "[OK] reconciled exact legacy EVA Agent resources",
+    "[OK] adopted persistent-only EVA Agent resources into Helm ownership",
 ):
-    raise SystemExit(
-        "[ERROR] Agent mutation reporting mismatch"
-    )
+    if changed_when.count(marker) != 1:
+        raise SystemExit(
+            "[ERROR] Agent mutation reporting mismatch: "
+            + marker
+        )
 
 print("[OK] clean Agent installation remains mutation-free")
 print("[OK] deployed Agent release bypasses legacy cleanup")
 print("[OK] legacy resources require rendered chart membership")
 print("[OK] Agent Secret data must match before cleanup")
 print("[OK] Agent PV/PVC identity is protected")
+print("[OK] Agent PV/PVC Helm ownership is adopted safely")
+print("[OK] persistent-only retry state remains recoverable")
 print("[OK] historical Job and Pod resources are excluded")
 print("[OK] Agent reconciliation precedes Helm installation")
 PY

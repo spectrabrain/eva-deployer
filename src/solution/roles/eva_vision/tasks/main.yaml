@@ -311,6 +311,66 @@
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
+- name: Ensure EVA Vision Helm post-renderer plugin directory exists
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer"
+    state: directory
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Render EVA Vision Helm post-renderer plugin metadata
+  ansible.builtin.template:
+    src: post-renderer/plugin.yaml.j2
+    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/plugin.yaml"
+    mode: "0644"
+  when: not ansible_check_mode
+
+- name: Render EVA Vision Helm post-renderer
+  ansible.builtin.template:
+    src: post-renderer/post-renderer.py.j2
+    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Ensure EVA Vision Helm post-renderer is executable
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Verify Helm recognizes the EVA Vision post-renderer plugin
+  ansible.builtin.command: helm plugin list
+  register: eva_vision_helm_plugins
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+
+- name: Assert Helm recognizes the EVA Vision post-renderer plugin
+  ansible.builtin.assert:
+    that:
+      - eva_vision_helm_plugins.stdout is search('(^|\\n)eva-vision-postrenderer\\s')
+    fail_msg: EVA Vision Helm post-renderer plugin was not recognized.
+  when: not ansible_check_mode
+
+- name: Render and verify final EVA Vision Helm manifest before deployment
+  no_log: true
+  ansible.builtin.shell: >-
+    helm template {{ eva_vision_name }} {{ eva_vision_chart_source }}
+    -n {{ eva_vision_namespace }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
+    -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    --post-renderer eva-vision-postrenderer
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+    > /dev/null
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+
 - name: Reconcile exact legacy Argo CD-managed EVA Vision resources
   ansible.builtin.include_tasks: reconcile_vision.yaml
   when: not ansible_check_mode
@@ -323,6 +383,7 @@
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
     --create-namespace
     -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    --post-renderer eva-vision-postrenderer
     {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   register: eva_vision_deploy_online
   changed_when: >-
@@ -331,6 +392,7 @@
   when: not (airgap_mode | default(false) | bool)
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
 
 - name: Deploy EVA Vision from offline chart
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
@@ -340,6 +402,7 @@
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
     --create-namespace
     -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    --post-renderer eva-vision-postrenderer
     {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   register: eva_vision_deploy_offline
   changed_when: >-
@@ -348,6 +411,7 @@
   when: airgap_mode | default(false) | bool
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
 
 - name: Capture effective EVA Vision Helm values
   no_log: true
@@ -376,32 +440,6 @@
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
-
-- name: Extend EVA Vision deployment progress deadline
-  ansible.builtin.command: >-
-    kubectl patch deployment {{ eva_vision_name }}
-    -n {{ eva_vision_namespace }}
-    --type merge
-    -p '{"spec":{"progressDeadlineSeconds":{{ eva_vision_progress_deadline_seconds }}}}'
-  register: eva_vision_progress_deadline_patch
-  changed_when: "'patched' in eva_vision_progress_deadline_patch.stdout"
-  when: not ansible_check_mode
-  environment:
-    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
-
-- name: Skip EVA Vision startup warmup during deployment
-  ansible.builtin.command: >-
-    kubectl patch deployment {{ eva_vision_name }}
-    -n {{ eva_vision_namespace }}
-    --type json
-    -p '[{"op":"add","path":"/spec/template/spec/containers/0/command","value":["/bin/bash","-lc","mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled 2>/dev/null || true; exec uv run ./run.sh serve --log-profile prod --foreground"]}]'
-  register: eva_vision_skip_warmup_patch
-  changed_when: "'patched' in eva_vision_skip_warmup_patch.stdout"
-  when:
-    - not ansible_check_mode
-    - eva_vision_skip_startup_warmup | bool
-  environment:
-    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
 - name: Wait for EVA Vision deployment rollout
   block:

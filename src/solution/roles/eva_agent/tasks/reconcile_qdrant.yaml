@@ -34,7 +34,7 @@
     StatefulSet	eva-agent-qdrant
     EOF
 
-    sort -o "$expected_file" "$expected_file"
+    LC_ALL=C sort -o "$expected_file" "$expected_file"
 
     resource_name() {
       case "$1" in
@@ -127,51 +127,49 @@
     }
 
     parse_manifest_resources() {
-      awk '
-        BEGIN {
-          RS="---"
-        }
+      local manifest_file="$1"
 
-        {
-          kind=""
-          name=""
-          metadata=0
-          count=split($0, lines, "\n")
+      kubectl create \
+        --dry-run=client \
+        -f "$manifest_file" \
+        -o json |
+      jq -s -r '
+        .[]
+        | if .kind == "List"
+          then .items[]
+          else .
+          end
+        | select(
+            (.kind // "") != ""
+            and
+            (.metadata.name // "") != ""
+          )
+        | [
+            .kind,
+            .metadata.name
+          ]
+        | @tsv
+      ' |
+      LC_ALL=C sort -u
+    }
 
-          for (line_number=1; line_number<=count; line_number++) {
-            line=lines[line_number]
+    validate_no_standalone_persistent_resources() {
+      local inventory_file="$1"
+      local context="$2"
+      local kind
+      local name
 
-            if (line ~ /^kind:[[:space:]]*/) {
-              kind=line
-              sub(/^kind:[[:space:]]*/, "", kind)
-            }
+      while IFS=$'\t' read -r kind name
+      do
+        [[ -n "$kind" ]] || continue
 
-            if (line ~ /^metadata:[[:space:]]*$/) {
-              metadata=1
-              continue
-            }
-
-            if (metadata && line ~ /^  name:[[:space:]]*/) {
-              name=line
-              sub(/^  name:[[:space:]]*/, "", name)
-              break
-            }
-
-            if (
-              metadata &&
-              line !~ /^[[:space:]]/ &&
-              line !~ /^metadata:[[:space:]]*$/
-            ) {
-              metadata=0
-            }
-          }
-
-          if (kind != "" && name != "") {
-            print kind "\t" name
-          }
-        }
-      ' "$1" |
-      sort -u
+        case "$kind" in
+          PersistentVolume|PersistentVolumeClaim|StorageClass)
+            echo "[ERROR] $context contains a standalone persistent resource: $kind/$name"
+            return 1
+            ;;
+        esac
+      done < "$inventory_file"
     }
 
     inspect_live_resources() {
@@ -242,15 +240,22 @@
       exit 1
     fi
 
-    if grep -Eq \
-      '^kind:[[:space:]]*(PersistentVolume|PersistentVolumeClaim|StorageClass)[[:space:]]*$' \
-      "$rendered_file"
+    if ! parse_manifest_resources \
+      "$rendered_file" \
+      > "$actual_file"
     then
-      echo "[ERROR] rendered Qdrant chart contains a standalone persistent resource"
+      echo "[ERROR] failed to build rendered Qdrant resource inventory"
       exit 1
     fi
 
-    parse_manifest_resources "$rendered_file" > "$actual_file"
+    if [[ ! -s "$actual_file" ]]; then
+      echo "[ERROR] rendered Qdrant resource inventory is empty"
+      exit 1
+    fi
+
+    validate_no_standalone_persistent_resources \
+      "$actual_file" \
+      "rendered Qdrant chart"
 
     while IFS=$'\t' read -r kind name
     do
@@ -310,15 +315,22 @@
         "$release" \
         -n "$namespace" > "$rendered_file"
 
-      if grep -Eq \
-        '^kind:[[:space:]]*(PersistentVolume|PersistentVolumeClaim|StorageClass)[[:space:]]*$' \
-        "$rendered_file"
+      if ! parse_manifest_resources \
+        "$rendered_file" \
+        > "$actual_file"
       then
-        echo "[ERROR] failed Qdrant manifest contains a persistent resource"
+        echo "[ERROR] failed to build failed-release Qdrant resource inventory"
         exit 1
       fi
 
-      parse_manifest_resources "$rendered_file" > "$actual_file"
+      if [[ ! -s "$actual_file" ]]; then
+        echo "[ERROR] failed-release Qdrant resource inventory is empty"
+        exit 1
+      fi
+
+      validate_no_standalone_persistent_resources \
+        "$actual_file" \
+        "failed Qdrant manifest"
 
       if ! cmp -s "$expected_file" "$actual_file"; then
         echo "[ERROR] failed Qdrant release manifest resource set is unexpected"

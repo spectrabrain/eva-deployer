@@ -620,7 +620,7 @@
           (.metadata.annotations."meta.helm.sh/release-namespace" // ""),
           (.metadata.annotations."argocd.argoproj.io/tracking-id" // "")
         ]
-      | @tsv
+      | join("\u001f")
     ' "$live_file" |
       sort -u > "$candidates_file"
 
@@ -646,7 +646,9 @@
 
     tracking_application=''
 
-    while IFS=$'\t' read -r \
+    : > "$expected_resources_file"
+
+    while IFS=$'\x1f' read -r \
       kind \
       name \
       managed_by \
@@ -663,8 +665,13 @@
           ;;
       esac
 
-      if [[ -n "$release_name" || -n "$release_namespace" ]]; then
-        echo "[ERROR] foreign or partial Helm ownership: $kind/$name"
+      if [[ -n "$release_name" && "$release_name" != "$release" ]]; then
+        echo "[ERROR] foreign Helm release ownership: $kind/$name=$release_name"
+        exit 1
+      fi
+
+      if [[ -n "$release_namespace" && "$release_namespace" != "$namespace" ]]; then
+        echo "[ERROR] foreign Helm namespace ownership: $kind/$name=$release_namespace"
         exit 1
       fi
 
@@ -711,9 +718,15 @@
         exit 1
       fi
 
-      printf '%s\t%s\n' "$kind" "$name"
-    done < "$candidates_file" |
-      sort -u > "$expected_resources_file"
+      printf '%s\t%s\n' \
+        "$kind" \
+        "$name" \
+        >> "$expected_resources_file"
+    done < "$candidates_file"
+
+    sort -u \
+      "$expected_resources_file" \
+      -o "$expected_resources_file"
 
     if [[ ! -s "$expected_resources_file" ]]; then
       echo "[ERROR] no validated legacy eva-agent-vllm resource was found"
@@ -722,9 +735,9 @@
 
     if (( storage_recovery_pending == 1 )); then
       candidate_identity="$(
-        sha256sum "$expected_resources_file" |
-        awk '{print $1}'
+        sha256sum "$expected_resources_file"
       )"
+      candidate_identity="${candidate_identity%% *}"
 
       printf '%s\t%s\t%s\n' \
         'recovered-after-persistent-cleanup' \

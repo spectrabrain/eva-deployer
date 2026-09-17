@@ -18,9 +18,11 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.23.12'
+          cache: true
+          cache-dependency-path: tools/eva/go.sum
 
       - name: Install validation tools
         run: |
@@ -110,7 +112,7 @@ jobs:
           out/work/build/eva verify out/dist
 
       - name: Upload Base Release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: eva-base-release-${{ github.ref_name }}
           if-no-files-found: error

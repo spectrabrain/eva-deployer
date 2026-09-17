@@ -13,12 +13,15 @@
     eva_vision_namespace: "{{ eva_vision_namespace | default('eva-vision') }}"
     eva_vision_name: "{{ eva_vision_name | default(eva_vision_release | default('eva-vision')) }}"
     eva_vision_deploy_version: "{{ eva_vision_deploy_version | mandatory }}"
-    eva_vision_workdir: "{{ eva_vision_workdir | default('/opt/eva-vision/' ~ eva_vision_deploy_version) }}"
     eva_vision_deploy_values_dir: "{{ eva_vision_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/vision') }}"
     eva_vision_kubeconfig: "{{ eva_vision_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_vision_chart_ref: "{{ eva_vision_chart_ref | default('eva-vision/eva-vision') }}"
     eva_vision_chart_version: "{{ eva_vision_chart_version | mandatory }}"
     eva_vision_offline_dir: "{{ eva_vision_offline_dir | default(eva_cache_root ~ '/eva-vision') }}"
+
+- name: Resolve derived EVA Vision install paths
+  ansible.builtin.set_fact:
+    eva_vision_workdir: "{{ eva_vision_workdir | default('/opt/eva-vision/' ~ eva_vision_deploy_version) }}"
     eva_vision_offline_chart_tgz: "{{ eva_vision_offline_chart_tgz | default(eva_vision_offline_dir ~ '/eva-vision-' ~ eva_vision_chart_version ~ '.tgz') }}"
     eva_vision_gpu_count: "{{ eva_vision_gpu_count | default(1) }}"
     eva_vision_gpu_resource_name: "{{ eva_vision_gpu_resource_name | default('') }}"

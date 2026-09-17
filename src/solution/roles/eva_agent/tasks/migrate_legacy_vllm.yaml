@@ -173,7 +173,7 @@
     legacy_candidate_count=0
 
     if kubectl get \
-      serviceaccounts,configmaps,secrets,services,deployments,statefulsets,poddisruptionbudgets \
+      serviceaccounts,configmaps,secrets,services,roles,rolebindings,deployments,statefulsets,poddisruptionbudgets \
       -n "$namespace" \
       -o json > "$live_file" 2>/dev/null
     then
@@ -578,7 +578,7 @@
     fi
 
     kubectl get \
-      serviceaccounts,configmaps,secrets,services,deployments,statefulsets,poddisruptionbudgets \
+      serviceaccounts,configmaps,secrets,services,roles,rolebindings,deployments,statefulsets,poddisruptionbudgets \
       -n "$namespace" \
       -o json > "$live_file"
 
@@ -636,7 +636,7 @@
       tracking_id
     do
       case "$kind" in
-        ServiceAccount|ConfigMap|Secret|Service|Deployment|StatefulSet|PodDisruptionBudget)
+        ServiceAccount|ConfigMap|Secret|Service|Role|RoleBinding|Deployment|StatefulSet|PodDisruptionBudget)
           ;;
         *)
           echo "[ERROR] unsupported legacy eva-agent-vllm kind: $kind/$name"
@@ -662,6 +662,9 @@
       case "$kind" in
         ServiceAccount|ConfigMap|Secret|Service)
           expected_group_kind="/$kind"
+          ;;
+        Role|RoleBinding)
+          expected_group_kind="rbac.authorization.k8s.io/$kind"
           ;;
         Deployment|StatefulSet)
           expected_group_kind="apps/$kind"
@@ -744,6 +747,12 @@
         Service)
           resource="service/$name"
           ;;
+        Role)
+          resource="role.rbac.authorization.k8s.io/$name"
+          ;;
+        RoleBinding)
+          resource="rolebinding.rbac.authorization.k8s.io/$name"
+          ;;
         Deployment)
           resource="deployment.apps/$name"
           ;;
@@ -778,6 +787,12 @@
           ;;
         Service)
           resource="service/$name"
+          ;;
+        Role)
+          resource="role.rbac.authorization.k8s.io/$name"
+          ;;
+        RoleBinding)
+          resource="rolebinding.rbac.authorization.k8s.io/$name"
           ;;
         Deployment)
           resource="deployment.apps/$name"

@@ -1,0 +1,189 @@
+---
+- name: Assess EVA App Helm ownership reconciliation
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="$EVA_APP_NAMESPACE"
+    release="$EVA_APP_RELEASE"
+    chart_source="$EVA_APP_CHART_SOURCE"
+    chart_version="$EVA_APP_CHART_VERSION"
+    values_file="$EVA_APP_VALUES_FILE"
+    effective_values_file="$EVA_APP_EFFECTIVE_VALUES_FILE"
+    handoff_file="$EVA_APP_HANDOFF_FILE"
+    use_chart_version="$EVA_APP_USE_CHART_VERSION"
+
+    rendered_file="$(mktemp)"
+    rendered_json_file="$(mktemp)"
+    candidates_file="$(mktemp)"
+    rendered_resources_file="$(mktemp)"
+    cleanup() { rm -f "$rendered_file" "$rendered_json_file" "$candidates_file" "$rendered_resources_file"; }
+    trap cleanup EXIT
+
+    if helm status "$release" -n "$namespace" >/dev/null 2>&1; then
+      release_status="$(helm status "$release" -n "$namespace" -o json | jq -r '.info.status // empty')"
+      if [[ "$release_status" == 'deployed' ]]; then
+        echo 'take_ownership=false'
+        echo '[INFO] deployed EVA App Helm release requires no legacy adoption'
+        exit 0
+      fi
+      echo "[ERROR] unsafe EVA App Helm release status: release=$release status=$release_status"
+      exit 1
+    fi
+
+    helm_template=(helm template "$release" "$chart_source" --namespace "$namespace" --values "$values_file" --values "$effective_values_file")
+    while IFS= read -r helm_set
+    do
+      [[ -n "$helm_set" ]] || continue
+      helm_template+=(--set "$helm_set")
+    done < <(python3 -c 'import json, sys; [print(item) for item in json.loads(sys.argv[1])]' "$EVA_APP_HELM_SET_JSON")
+    if [[ "$use_chart_version" == '1' ]]; then
+      helm_template+=(--version "$chart_version")
+    fi
+    "${helm_template[@]}" > "$rendered_file"
+
+    kubectl create --dry-run=client --namespace "$namespace" -f "$rendered_file" -o json |
+      jq -s '[.[] | if .kind == "List" then .items[] else . end] ' > "$rendered_json_file"
+
+    jq -r '.[] | select((.kind // "") != "" and (.metadata.name // "") != "") | [.kind, .metadata.name] | @tsv' "$rendered_json_file" |
+      LC_ALL=C sort -u > "$rendered_resources_file"
+
+    while IFS=$'\t' read -r kind name
+    do
+      [[ -n "$kind" && -n "$name" ]] || continue
+      case "$kind" in
+        PersistentVolume|PersistentVolumeClaim|StorageClass)
+          if kubectl get "$kind/$name" -n "$namespace" >/dev/null 2>&1; then
+            echo "[ERROR] persistent resource cannot be adopted: $kind/$name"
+            exit 1
+          fi
+          continue
+          ;;
+      esac
+      if kubectl get "$kind/$name" -n "$namespace" -o json >/dev/null 2>&1; then
+        kubectl get "$kind/$name" -n "$namespace" -o json | base64 | tr -d '\n' >> "$candidates_file"
+        printf '\n' >> "$candidates_file"
+      fi
+    done < "$rendered_resources_file"
+
+    candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
+    if [[ "$candidate_count" == '0' ]]; then
+      echo 'take_ownership=false'
+      echo '[INFO] clean EVA App installation state'
+      exit 0
+    fi
+
+    if [[ ! -f "$handoff_file" ]]; then
+      echo '[ERROR] EVA App legacy resources require a verified Argo CD handoff receipt'
+      exit 1
+    fi
+
+    legacy_application="$(
+      python3 - "$handoff_file" "$EVA_APP_SITE_ID" <<'PY'
+    from pathlib import Path
+    import sys
+    import yaml
+
+    data = yaml.safe_load(Path(sys.argv[1]).read_text())
+    if (
+        not isinstance(data, dict)
+        or data.get('schema_version') != 'v1'
+        or data.get('site_id') != sys.argv[2]
+        or not data.get('completed_at')
+    ):
+        raise SystemExit(1)
+    applications = data.get('applications')
+    if not isinstance(applications, list):
+        raise SystemExit(1)
+    matches = [item for item in applications if isinstance(item, str) and item.endswith('-eva-app')]
+    if len(matches) != 1:
+        raise SystemExit(1)
+    print(matches[0])
+    PY
+    )" || {
+      echo '[ERROR] Argo CD handoff receipt does not prove exactly one EVA App Application identity'
+      exit 1
+    }
+
+    while IFS= read -r encoded
+    do
+      resource_json="$(printf '%s' "$encoded" | base64 -d)"
+      kind="$(jq -r '.kind // empty' <<< "$resource_json")"
+      name="$(jq -r '.metadata.name // empty' <<< "$resource_json")"
+      resource_namespace="$(jq -r '.metadata.namespace // empty' <<< "$resource_json")"
+      api_version="$(jq -r '.apiVersion // empty' <<< "$resource_json")"
+      tracking="$(jq -r '.metadata.annotations."argocd.argoproj.io/tracking-id" // empty' <<< "$resource_json")"
+      managed_by="$(jq -r '.metadata.labels."app.kubernetes.io/managed-by" // empty' <<< "$resource_json")"
+      helm_name="$(jq -r '.metadata.annotations."meta.helm.sh/release-name" // empty' <<< "$resource_json")"
+      helm_namespace="$(jq -r '.metadata.annotations."meta.helm.sh/release-namespace" // empty' <<< "$resource_json")"
+      controller_count="$(jq '[.metadata.ownerReferences[]? | select(.controller == true)] | length' <<< "$resource_json")"
+
+      if [[ -z "$kind" || -z "$name" || "$resource_namespace" != "$namespace" ]]; then
+        echo "[ERROR] unsafe EVA App legacy resource identity: $kind/$name"
+        exit 1
+      fi
+      if [[ -n "$helm_name" || -n "$helm_namespace" ]]; then
+        echo "[ERROR] foreign or partial Helm ownership: $kind/$name"
+        exit 1
+      fi
+      if [[ -n "$managed_by" && "$managed_by" != 'Helm' ]]; then
+        echo "[ERROR] unsupported managed-by ownership: $kind/$name=$managed_by"
+        exit 1
+      fi
+      if [[ "$controller_count" != '0' ]]; then
+        echo "[ERROR] unexpected controller ownership: $kind/$name"
+        exit 1
+      fi
+      group="${api_version%%/*}"
+      if [[ "$api_version" == 'v1' ]]; then
+        tracking_group='/'
+      else
+        tracking_group="$group/"
+      fi
+      expected_tracking="$legacy_application:$tracking_group$kind:$namespace/$name"
+      if [[ "$tracking" != "$expected_tracking" ]]; then
+        echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
+        exit 1
+      fi
+    done < "$candidates_file"
+
+    # A previously Argo CD-managed App object omitted by the current chart is
+    # an ambiguous partial migration.  Discover it explicitly rather than
+    # adopting only the rendered subset.
+    kubectl get \
+      deployments.apps,statefulsets.apps,daemonsets.apps,cronjobs.batch,jobs.batch,\
+      services,configmaps,secrets,serviceaccounts,roles.rbac.authorization.k8s.io,\
+      rolebindings.rbac.authorization.k8s.io,ingresses.networking.k8s.io \
+      -n "$namespace" -o json |
+      jq -r --arg application "$legacy_application" '
+        .items[]?
+        | select((.metadata.annotations."argocd.argoproj.io/tracking-id" // "") | startswith($application + ":"))
+        | [.kind, .metadata.name] | @tsv
+      ' |
+      LC_ALL=C sort -u |
+      while IFS=$'\t' read -r kind name
+      do
+        [[ -n "$kind" && -n "$name" ]] || continue
+        if ! grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file"; then
+          echo "[ERROR] legacy EVA App resource is absent from rendered chart: $kind/$name"
+          exit 1
+        fi
+      done
+
+    echo 'take_ownership=true'
+    echo "[OK] verified EVA App legacy resources for Helm adoption application=$legacy_application count=$candidate_count"
+  args:
+    executable: /bin/bash
+  register: eva_app_legacy_reconciliation
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_RELEASE: "{{ eva_app_name }}"
+    EVA_APP_CHART_SOURCE: "{{ eva_app_chart_source }}"
+    EVA_APP_CHART_VERSION: "{{ eva_app_chart_version }}"
+    EVA_APP_VALUES_FILE: "{{ eva_app_workdir }}/values.yaml"
+    EVA_APP_EFFECTIVE_VALUES_FILE: "{{ eva_app_effective_values_dest }}"
+    EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
+    EVA_APP_SITE_ID: "{{ eva_site_id }}"
+    EVA_APP_HELM_SET_JSON: "{{ eva_cli_helm_set | default([]) | to_json }}"
+    EVA_APP_USE_CHART_VERSION: "{{ (eva_cli_chart_path | default('') | length == 0) | ternary('1', '0') }}"

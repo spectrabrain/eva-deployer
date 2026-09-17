@@ -378,13 +378,13 @@ fi
 fetch "https://mellerikat.github.io/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz" "$BASE_DIR/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
 fetch "https://mellerikat.github.io/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz" "$BASE_DIR/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
 fetch "https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/eva-vision-${EVA_VISION_CHART_VERSION}.tgz" "$BASE_DIR/eva-vision/eva-vision-${EVA_VISION_CHART_VERSION}.tgz"
-fetch "https://mellerikat.github.io/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
-fetch "https://mellerikat.github.io/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
-fetch "https://mellerikat.github.io/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
+fetch "https://spectrabrain.github.io/eva-agent-chart/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
+fetch "https://spectrabrain.github.io/eva-agent-chart/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
+fetch "https://spectrabrain.github.io/eva-agent-chart/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz" "$BASE_DIR/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
 fetch "https://github.com/qdrant/qdrant-helm/releases/download/qdrant-${QDRANT_CHART_VERSION}/qdrant-${QDRANT_CHART_VERSION}.tgz" "$BASE_DIR/qdrant/qdrant-${QDRANT_CHART_VERSION}.tgz"
 
 # EVA Agent release values/templates/scripts
-AGENT_RELEASE_BASE="https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/${EVA_AGENT_RELEASE}"
+AGENT_RELEASE_BASE="https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/${EVA_AGENT_RELEASE}"
 EVA_AGENT_QDRANT_VALUES_URL="${EVA_AGENT_QDRANT_VALUES_URL:-${AGENT_RELEASE_BASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}}"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-k3s.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-k3s.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-secret.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-secret.yaml"
@@ -413,8 +413,8 @@ for name in "${VLLM_K3S_VALUES_FILES[@]}"; do
 done
 fetch "${AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/post-renderer.sh" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/post-renderer.sh"
 fetch "${AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/plugin.yaml" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/plugin.yaml"
-fetch "https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/install_eva_agent.sh" "$BASE_DIR/eva-agent/install_eva_agent.sh"
-fetch "https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/install_eva_agent_dependencies.sh" "$BASE_DIR/eva-agent/install_eva_agent_dependencies.sh"
+fetch "https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/install_eva_agent.sh" "$BASE_DIR/eva-agent/install_eva_agent.sh"
+fetch "https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/install_eva_agent_dependencies.sh" "$BASE_DIR/eva-agent/install_eva_agent_dependencies.sh"
 chmod +x "$BASE_DIR/eva-agent/install_eva_agent.sh" "$BASE_DIR/eva-agent/install_eva_agent_dependencies.sh" "$BASE_DIR/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/post-renderer.sh"
 
 # kustomize offline binary

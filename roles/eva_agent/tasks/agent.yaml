@@ -22,7 +22,7 @@
     eva_agent_force_conflicts: "{{ eva_agent_force_conflicts | default(0) }}"
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
-         | default('https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/' ~ eva_agent_deploy_version) }}
+         | default('https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/' ~ eva_agent_deploy_version) }}
     eva_agent_image_tag: "{{ eva_agent_image_tag | default('') }}"
     eva_agent_offline_dir: "{{ eva_agent_offline_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/eva-agent') }}"
     eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default((eva_agent_offline_dir | default((eva_agent_install_root | default(playbook_dir ~ '/install')) ~ '/eva-agent')) ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"
@@ -93,7 +93,7 @@
     - "{{ eva_agent_workdir }}/eva-agent"
 
 - name: Add Helm repository for EVA Agent
-  ansible.builtin.command: helm repo add eva-agent https://mellerikat.github.io/eva-agent
+  ansible.builtin.command: helm repo add eva-agent https://spectrabrain.github.io/eva-agent-chart
   register: helm_repo_eva_agent
   changed_when: "'already exists' not in (helm_repo_eva_agent.stdout + helm_repo_eva_agent.stderr)"
   failed_when:

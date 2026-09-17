@@ -255,6 +255,54 @@ if ".s3-sync.done" in migration_shell:
         "[ERROR] environment-specific cache marker is mandatory"
     )
 
+rendered_json_inventory = (
+    '\' "$rendered_json_file" |',
+    'sort -u > "$rendered_resources_file"',
+    'rendered eva-agent-vllm resource inventory is empty',
+)
+
+for marker in rendered_json_inventory:
+    if migration_shell.count(marker) != 1:
+        raise SystemExit(
+            "[ERROR] rendered JSON inventory marker mismatch: "
+            + marker
+        )
+
+if 'RS="---"' in migration_shell:
+    raise SystemExit(
+        "[ERROR] rendered inventory parses Helm YAML manually"
+    )
+
+json_source_position = migration_shell.find(
+    '\' "$rendered_json_file" |'
+)
+inventory_sort_position = migration_shell.find(
+    'sort -u > "$rendered_resources_file"',
+    json_source_position,
+)
+candidate_source_position = migration_shell.find(
+    'join("\\u001f")',
+    inventory_sort_position,
+)
+
+if min(
+    json_source_position,
+    inventory_sort_position,
+    candidate_source_position,
+) < 0:
+    raise SystemExit(
+        "[ERROR] rendered JSON inventory is incomplete"
+    )
+
+if not (
+    json_source_position
+    < inventory_sort_position
+    < candidate_source_position
+):
+    raise SystemExit(
+        "[ERROR] rendered JSON inventory order is invalid"
+    )
+
 for marker in (
     "partial VLLM persistent resource state detected",
     "legacy VLLM static PV contract mismatch",

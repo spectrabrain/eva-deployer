@@ -557,46 +557,25 @@
       echo "[OK] prepared VLLM persistent storage for chart recreation"
     fi
 
-    awk '
-      BEGIN {
-        RS="---"
-      }
-      {
-        kind=""
-        name=""
-        metadata=0
-
-        line_count=split($0, lines, "\n")
-        for (line_number=1; line_number<=line_count; line_number++) {
-          line=lines[line_number]
-
-          if (line ~ /^kind:[[:space:]]*/) {
-            kind=line
-            sub(/^kind:[[:space:]]*/, "", kind)
-          }
-
-          if (line ~ /^metadata:[[:space:]]*$/) {
-            metadata=1
-            continue
-          }
-
-          if (metadata && line ~ /^  name:[[:space:]]*/) {
-            name=line
-            sub(/^  name:[[:space:]]*/, "", name)
-            break
-          }
-
-          if (metadata && line !~ /^[[:space:]]/ && line !~ /^metadata:[[:space:]]*$/) {
-            metadata=0
-          }
-        }
-
-        if (kind != "" && name != "") {
-          print kind "\t" name
-        }
-      }
-    ' "$rendered_file" |
+    jq -r '
+      .[]
+      | select(
+          (.kind // "") != ""
+          and
+          (.metadata.name // "") != ""
+        )
+      | [
+          .kind,
+          .metadata.name
+        ]
+      | @tsv
+    ' "$rendered_json_file" |
       sort -u > "$rendered_resources_file"
+
+    if [[ ! -s "$rendered_resources_file" ]]; then
+      echo "[ERROR] rendered eva-agent-vllm resource inventory is empty"
+      exit 1
+    fi
 
     kubectl get \
       serviceaccounts,configmaps,secrets,services,deployments,statefulsets,poddisruptionbudgets \

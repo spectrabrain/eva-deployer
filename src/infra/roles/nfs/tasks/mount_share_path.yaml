@@ -24,30 +24,23 @@
 - name: Allow localhost-only NFS export for EVA Agent share
   ansible.builtin.lineinfile:
     path: /etc/exports
-    regexp: '^{{ (nfs_share_path | regex_escape) }}\s+127\.0\.0\.1\(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001\)$'
-    state: absent
-  when: not ansible_check_mode
-
-- name: Allow localhost-only NFS export for EVA Agent share
-  ansible.builtin.lineinfile:
-    path: /etc/exports
-    regexp: '^{{ (nfs_share_path | regex_escape) }}\s+127\.0\.0\.1\(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001\)$'
+    regexp: '^{{ (nfs_share_path | regex_escape) }}\s+.*$'
     line: "{{ nfs_share_path }} 127.0.0.1(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001)"
     create: true
     mode: '0644'
   register: nfs_exports_line
   when: not ansible_check_mode
 
-- name: Reload NFS exports
-  ansible.builtin.command: exportfs -ra
-  changed_when: nfs_exports_line.changed
-  when: not ansible_check_mode
-
-- name: Restart NFS server
+- name: Ensure NFS server is running
   ansible.builtin.systemd:
     name: nfs-kernel-server
-    daemon_reload: true
-    state: restarted
+    enabled: true
+    state: started
+  when: not ansible_check_mode
+
+- name: Reload NFS exports when configuration changed
+  ansible.builtin.command: exportfs -ra
+  changed_when: true
   when:
     - not ansible_check_mode
     - nfs_exports_line.changed

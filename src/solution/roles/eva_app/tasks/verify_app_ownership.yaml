@@ -1,0 +1,51 @@
+---
+- name: Verify adopted EVA App Helm ownership
+  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="$EVA_APP_NAMESPACE"
+    release="$EVA_APP_RELEASE"
+    manifest_file="$(mktemp)"
+    inventory_file="$(mktemp)"
+    cleanup() { rm -f "$manifest_file" "$inventory_file"; }
+    trap cleanup EXIT
+
+    status="$(helm status "$release" -n "$namespace" -o json | jq -r '.info.status // empty')"
+    if [[ "$status" != 'deployed' ]]; then
+      echo "[ERROR] EVA App Helm release is not deployed after adoption: release=$release status=$status"
+      exit 1
+    fi
+
+    helm get manifest "$release" -n "$namespace" > "$manifest_file"
+    kubectl create --dry-run=client --namespace "$namespace" -f "$manifest_file" -o json |
+      jq -s '[.[] | if .kind == "List" then .items[] else . end] ' > "$inventory_file"
+
+    while IFS=$'\t' read -r kind name
+    do
+      [[ -n "$kind" && -n "$name" ]] || continue
+      resource_json="$(kubectl get "$kind/$name" -n "$namespace" -o json)" || {
+        echo "[ERROR] Helm manifest resource is missing after adoption: $kind/$name"
+        exit 1
+      }
+      resource_namespace="$(jq -r '.metadata.namespace // empty' <<< "$resource_json")"
+      managed_by="$(jq -r '.metadata.labels."app.kubernetes.io/managed-by" // empty' <<< "$resource_json")"
+      release_name="$(jq -r '.metadata.annotations."meta.helm.sh/release-name" // empty' <<< "$resource_json")"
+      release_namespace="$(jq -r '.metadata.annotations."meta.helm.sh/release-namespace" // empty' <<< "$resource_json")"
+      if [[ "$resource_namespace" != "$namespace" || "$managed_by" != 'Helm' || "$release_name" != "$release" || "$release_namespace" != "$namespace" ]]; then
+        echo "[ERROR] adopted EVA App resource has invalid Helm ownership: $kind/$name"
+        exit 1
+      fi
+    done < <(
+      jq -r '.[] | select((.kind // "") != "" and (.metadata.name // "") != "") | [.kind, .metadata.name] | @tsv' "$inventory_file" |
+        LC_ALL=C sort -u
+    )
+
+    echo '[OK] adopted EVA App resources are owned by the deployed Helm release'
+  args:
+    executable: /bin/bash
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_RELEASE: "{{ eva_app_name }}"

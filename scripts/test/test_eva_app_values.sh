@@ -31,6 +31,8 @@ printf '%s\n' "$*" >>"${FAKE_HELM_LOG:?}"
 case "$1 $2" in
   "repo add"|"repo update") exit 0 ;;
   "show values") printf 'app:\n  sso:\n    baseUrl: https://chart.example\n    adminClientSecret: chart-default-secret\n' ;;
+  "status eva-app") exit 1 ;;
+  "template eva-app") exit 0 ;;
   "upgrade --install") echo 'has been installed' ;;
   "get values") printf 'app:\n  installed: true\n' ;;
   *) exit 0 ;;
@@ -42,9 +44,16 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_KUBECTL_LOG:?}"
 case "$1 $2" in
   "get deployment")
-    [[ "${FAKE_DEPLOYMENT_EXISTS:-false}" == true ]] && exit 0
+    if [[ "${FAKE_DEPLOYMENT_EXISTS:-false}" == true ]]; then
+      case " $* " in
+        *' -o jsonpath={.metadata.uid} '*) printf 'test-deployment-uid' ;;
+        *' -o json '*) printf '%s\n' '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"eva-app","namespace":"eva-app","uid":"test-deployment-uid"},"spec":{"replicas":1}}' ;;
+      esac
+      exit 0
+    fi
     exit 1
     ;;
+  "create --dry-run=client") exit 0 ;;
   "delete job")
     [[ "${FAKE_TLS_DELETE_FAIL:-false}" == true ]] && exit 1
     exit 0

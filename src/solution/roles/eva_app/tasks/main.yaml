@@ -19,6 +19,7 @@
     eva_app_values_host: "{{ ansible_host | default(inventory_hostname) }}"
     eva_app_effective_values_dest: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}/effective-input-values.yaml"
     eva_app_kubeconfig: "{{ eva_app_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
+    eva_app_argocd_handoff_path: "{{ eva_app_argocd_handoff_path | default(eva_site_state_root ~ '/argocd-handoff.yaml') }}"
     eva_app_chart_ref: "{{ eva_app_chart_ref | default('eva-app/eva-app') }}"
     eva_app_chart_version: "{{ eva_app_chart_version | mandatory }}"
     eva_app_offline_dir: "{{ eva_app_offline_dir | default(eva_cache_root ~ '/eva-app') }}"
@@ -460,6 +461,37 @@
     mode: "0600"
   when: not ansible_check_mode
 
+- name: Reconcile verified Argo CD legacy EVA App resources
+  ansible.builtin.include_tasks: reconcile_app.yaml
+  when: not ansible_check_mode
+
+- name: Resolve EVA App Helm ownership adoption argument
+  ansible.builtin.set_fact:
+    eva_app_take_ownership_arg: >-
+      {{ (eva_app_legacy_reconciliation.stdout is search('(?m)^take_ownership=true$'))
+         | ternary('--take-ownership', '') }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Validate EVA App Helm installation with server dry-run
+  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+  ansible.builtin.command: >-
+    helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
+    -n {{ eva_app_namespace }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+    --create-namespace
+    -f {{ eva_app_workdir }}/values.yaml
+    -f {{ eva_app_effective_values_dest }}
+    {{ eva_app_take_ownership_arg }}
+    --dry-run=server
+    --hide-secret
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+  register: eva_app_server_dry_run
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
 - name: Check existing EVA App deployment
   ansible.builtin.command: kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }}
   register: eva_app_deployment_exists
@@ -468,6 +500,26 @@
   when: not ansible_check_mode
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Record existing EVA App deployment identity and replicas
+  ansible.builtin.command: >-
+    kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }} -o json
+  register: eva_app_deployment_before_install
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_app_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Set existing EVA App deployment recovery facts
+  ansible.builtin.set_fact:
+    eva_app_preinstall_deployment_uid: "{{ (eva_app_deployment_before_install.stdout | from_json).metadata.uid }}"
+    eva_app_preinstall_replicas: "{{ (eva_app_deployment_before_install.stdout | from_json).spec.replicas | default(1) }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_app_deployment_exists.rc == 0
 
 - name: Delete existing EVA App TLS Job before upgrade
   ansible.builtin.command:
@@ -517,41 +569,95 @@
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
-- name: Install EVA App from online Helm repo
-  no_log: true
-  ansible.builtin.command: >-
-    helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
-    -n {{ eva_app_namespace }}
-    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
-    --create-namespace
-    -f {{ eva_app_workdir }}/values.yaml
-    -f {{ eva_app_effective_values_dest }}
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
-  register: eva_app_install_online
-  changed_when: >-
-    'has been upgraded' in eva_app_install_online.stdout
-    or 'has been installed' in eva_app_install_online.stdout
-  when: not (airgap_mode | default(false) | bool)
-  environment:
-    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+- name: Install EVA App and restore prior replicas if Helm fails
+  block:
+    - name: Install EVA App from online Helm repo
+      no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+      ansible.builtin.command: >-
+        helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
+        -n {{ eva_app_namespace }}
+        {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+        --create-namespace
+        -f {{ eva_app_workdir }}/values.yaml
+        -f {{ eva_app_effective_values_dest }}
+        {{ eva_app_take_ownership_arg }}
+        {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+      register: eva_app_install_online
+      changed_when: >-
+        'has been upgraded' in eva_app_install_online.stdout
+        or 'has been installed' in eva_app_install_online.stdout
+      when: not (airgap_mode | default(false) | bool)
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
-- name: Install EVA App from offline chart
-  no_log: true
-  ansible.builtin.command: >-
-    helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
-    -n {{ eva_app_namespace }}
-    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
-    --create-namespace
-    -f {{ eva_app_workdir }}/values.yaml
-    -f {{ eva_app_effective_values_dest }}
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
-  register: eva_app_install_offline
-  changed_when: >-
-    'has been upgraded' in eva_app_install_offline.stdout
-    or 'has been installed' in eva_app_install_offline.stdout
-  when: airgap_mode | default(false) | bool
-  environment:
-    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    - name: Install EVA App from offline chart
+      no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+      ansible.builtin.command: >-
+        helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
+        -n {{ eva_app_namespace }}
+        {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+        --create-namespace
+        -f {{ eva_app_workdir }}/values.yaml
+        -f {{ eva_app_effective_values_dest }}
+        {{ eva_app_take_ownership_arg }}
+        {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+      register: eva_app_install_offline
+      changed_when: >-
+        'has been upgraded' in eva_app_install_offline.stdout
+        or 'has been installed' in eva_app_install_offline.stdout
+      when: airgap_mode | default(false) | bool
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+  rescue:
+    - name: Check EVA App deployment identity before replica restoration
+      ansible.builtin.command: >-
+        kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }} -o jsonpath={.metadata.uid}
+      register: eva_app_restore_identity
+      changed_when: false
+      failed_when: false
+      when: eva_app_deployment_exists.rc == 0
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Restore EVA App replicas after Helm installation failure
+      ansible.builtin.command: >-
+        kubectl scale deployment {{ eva_app_name }} -n {{ eva_app_namespace }} --replicas={{ eva_app_preinstall_replicas }}
+      register: eva_app_replica_restore
+      changed_when: "'scaled' in eva_app_replica_restore.stdout"
+      failed_when: false
+      when:
+        - eva_app_deployment_exists.rc == 0
+        - eva_app_restore_identity.stdout | default('') == eva_app_preinstall_deployment_uid
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Wait for restored EVA App replicas
+      ansible.builtin.command: >-
+        kubectl rollout status deployment/{{ eva_app_name }} -n {{ eva_app_namespace }} --timeout=300s
+      register: eva_app_replica_restore_rollout
+      changed_when: false
+      failed_when: false
+      when:
+        - eva_app_deployment_exists.rc == 0
+        - eva_app_restore_identity.stdout | default('') == eva_app_preinstall_deployment_uid
+        - eva_app_preinstall_replicas | int > 0
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Fail with Helm error and EVA App restoration result
+      ansible.builtin.fail:
+        msg: >-
+          EVA App Helm installation failed: {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('unknown Helm error')) }}.
+          expected deployment UID={{ eva_app_preinstall_deployment_uid | default('not-recorded') }},
+          observed UID={{ eva_app_restore_identity.stdout | default('not-checked') }}.
+          replica restoration rc={{ eva_app_replica_restore.rc | default('not-attempted') }},
+          rollout rc={{ eva_app_replica_restore_rollout.rc | default('not-attempted') }}.
+
+- name: Verify successful EVA App legacy Helm adoption
+  ansible.builtin.include_tasks: verify_app_ownership.yaml
+  when:
+    - not ansible_check_mode
+    - eva_app_take_ownership_arg == '--take-ownership'
 
 - name: Wait for new EVA App TLS Job to complete
   ansible.builtin.command:

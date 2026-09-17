@@ -80,8 +80,37 @@
     legacy_application="$(
       python3 - "$handoff_file" "$EVA_APP_SITE_ID" <<'PY'
     from pathlib import Path
+    import posixpath
+    import re
     import sys
     import yaml
+
+    def is_nonempty_string(value):
+        return isinstance(value, str) and bool(value)
+
+    def is_safe_relative_path(value):
+        return (
+            is_nonempty_string(value)
+            and not value.startswith('/')
+            and '\\' not in value
+            and '\x00' not in value
+            and posixpath.normpath(value) == value
+            and value != '..'
+            and not value.startswith('../')
+        )
+
+    def is_legacy_application(value):
+        return (
+            is_nonempty_string(value)
+            and re.fullmatch(r'[A-Za-z0-9.-]+', value) is not None
+            and any(
+                value.endswith(suffix) and len(value) > len(suffix)
+                for suffix in (
+                    '-eva-iam', '-eva-app', '-eva-vision', '-eva-agent',
+                    '-eva-agent-init', '-eva-agent-qdrant', '-eva-agent-vllm',
+                )
+            )
+        )
 
     data = yaml.safe_load(Path(sys.argv[1]).read_text())
     if (
@@ -91,16 +120,50 @@
         or not data.get('completed_at')
     ):
         raise SystemExit(1)
+
+    cluster_name = data.get('cluster_name')
+    registration_application = data.get('registration_application')
+    registration_repository = data.get('registration_repository')
+    registration_branch = data.get('registration_branch')
+    registration_manifest = data.get('registration_manifest')
+    registration_commit = data.get('registration_commit')
+    if (
+        not is_nonempty_string(cluster_name)
+        or registration_application != 'registration'
+        or not is_nonempty_string(registration_repository)
+        or not is_nonempty_string(registration_branch)
+        or not is_nonempty_string(registration_manifest)
+        or not isinstance(registration_commit, str)
+        or re.fullmatch(r'[0-9a-f]{40,64}', registration_commit) is None
+    ):
+        raise SystemExit(1)
+
+    manifest_suffix = '/clusters/' + cluster_name + '.yaml'
+    if registration_manifest == 'clusters/' + cluster_name + '.yaml':
+        source_path = '.'
+    elif registration_manifest.endswith(manifest_suffix):
+        source_path = registration_manifest[:-len(manifest_suffix)]
+    else:
+        raise SystemExit(1)
+    if source_path != '.' and not is_safe_relative_path(source_path):
+        raise SystemExit(1)
+
     applications = data.get('applications')
-    if not isinstance(applications, list):
+    if (
+        not isinstance(applications, list)
+        or not applications
+        or not all(is_legacy_application(application) for application in applications)
+        or len(set(applications)) != len(applications)
+    ):
         raise SystemExit(1)
-    matches = [item for item in applications if isinstance(item, str) and item.endswith('-eva-app')]
-    if len(matches) != 1:
+    expected_application = cluster_name + '-eva-app'
+    matches = [application for application in applications if application.endswith('-eva-app')]
+    if matches != [expected_application]:
         raise SystemExit(1)
-    print(matches[0])
+    print(expected_application)
     PY
     )" || {
-      echo '[ERROR] Argo CD handoff receipt does not prove exactly one EVA App Application identity'
+      echo '[ERROR] Argo CD handoff receipt does not satisfy the Git-backed EVA App identity contract'
       exit 1
     }
 
@@ -147,24 +210,47 @@
     done < "$candidates_file"
 
     # A previously Argo CD-managed App object omitted by the current chart is
-    # an ambiguous partial migration.  Discover it explicitly rather than
+    # an ambiguous partial migration. Discover it explicitly rather than
     # adopting only the rendered subset.
-    kubectl get \
-      deployments.apps,statefulsets.apps,daemonsets.apps,cronjobs.batch,jobs.batch,\
-      services,configmaps,secrets,serviceaccounts,roles.rbac.authorization.k8s.io,\
-      rolebindings.rbac.authorization.k8s.io,ingresses.networking.k8s.io \
-      -n "$namespace" -o json |
+    legacy_resource_types=(
+      deployments.apps
+      statefulsets.apps
+      daemonsets.apps
+      cronjobs.batch
+      jobs.batch
+      services
+      configmaps
+      secrets
+      serviceaccounts
+      roles.rbac.authorization.k8s.io
+      rolebindings.rbac.authorization.k8s.io
+      ingresses.networking.k8s.io
+    )
+    legacy_resource_query="$(
+      IFS=,
+      printf '%s' "${legacy_resource_types[*]}"
+    )"
+
+    kubectl get "$legacy_resource_query" -n "$namespace" -o json |
       jq -r --arg application "$legacy_application" '
         .items[]?
-        | select((.metadata.annotations."argocd.argoproj.io/tracking-id" // "") | startswith($application + ":"))
-        | [.kind, .metadata.name] | @tsv
+        | select(
+            (.metadata.annotations."argocd.argoproj.io/tracking-id" // "")
+            | startswith($application + ":")
+          )
+        | [.kind, .metadata.name]
+        | @tsv
       ' |
       LC_ALL=C sort -u |
       while IFS=$'\t' read -r kind name
       do
         [[ -n "$kind" && -n "$name" ]] || continue
-        if ! grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file"; then
-          echo "[ERROR] legacy EVA App resource is absent from rendered chart: $kind/$name"
+        if ! grep -Fxq \
+          "$kind"$'\t'"$name" \
+          "$rendered_resources_file"
+        then
+          echo \
+            "[ERROR] legacy EVA App resource is absent from rendered chart: $kind/$name"
           exit 1
         fi
       done

@@ -354,7 +354,12 @@
   when: not ansible_check_mode
 
 - name: Render and verify final EVA Vision Helm manifest before deployment
-  no_log: true
+  no_log: >-
+    {{
+      (eva_cli_values_path | default('') | length > 0)
+      or
+      (eva_cli_helm_set | default([]) | length > 0)
+    }}
   ansible.builtin.shell: >-
     helm template {{ eva_vision_name }} {{ eva_vision_chart_source }}
     -n {{ eva_vision_namespace }}

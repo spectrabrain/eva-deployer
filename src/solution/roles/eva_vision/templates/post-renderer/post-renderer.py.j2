@@ -13,7 +13,7 @@ EXPECTED_COMMAND = [
     "mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled 2>/dev/null || true; exec uv run ./run.sh serve --log-profile prod --foreground",
 ]
 EXPECTED_PROGRESS_DEADLINE = {{ eva_vision_progress_deadline_seconds | int }}
-SKIP_STARTUP_WARMUP = {{ eva_vision_skip_startup_warmup | bool | lower }}
+SKIP_STARTUP_WARMUP = {{ eva_vision_skip_startup_warmup | bool | ternary('True', 'False') }}
 
 
 def fail(message):

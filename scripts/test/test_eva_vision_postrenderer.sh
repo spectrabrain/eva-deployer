@@ -41,7 +41,7 @@ def render_postrenderer(skip_startup_warmup: bool) -> str:
         "{{ eva_vision_progress_deadline_seconds | int }}", "3600"
     )
     source = source.replace(
-        "{{ eva_vision_skip_startup_warmup | bool | lower }}",
+        "{{ eva_vision_skip_startup_warmup | bool | ternary('True', 'False') }}",
         str(skip_startup_warmup),
     )
     if "{{" in source or "}}" in source:

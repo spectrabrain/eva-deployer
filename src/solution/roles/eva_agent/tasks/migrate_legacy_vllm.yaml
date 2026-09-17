@@ -1,0 +1,304 @@
+---
+- name: Reconcile exact legacy Argo CD-managed eva-agent-vllm resources
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace={{ eva_agent_namespace | quote }}
+    release='eva-agent-vllm'
+    chart_version={{ eva_agent_vllm_chart_version | quote }}
+    values_file={{ (eva_agent_workdir ~ '/eva-agent-vllm/effective-input-values.yaml') | quote }}
+    rendered_file="$(mktemp)"
+    live_file="$(mktemp)"
+    candidates_file="$(mktemp)"
+    rendered_resources_file="$(mktemp)"
+    expected_resources_file="$(mktemp)"
+    cleanup() {
+      rm -f \
+        "$rendered_file" \
+        "$live_file" \
+        "$candidates_file" \
+        "$rendered_resources_file" \
+        "$expected_resources_file"
+    }
+    trap cleanup EXIT
+
+    if helm status "$release" -n "$namespace" >/dev/null 2>&1; then
+      echo "[INFO] eva-agent-vllm Helm release already exists"
+      exit 0
+    fi
+
+    if ! helm template \
+      "$release" \
+      {% if airgap_mode | default(false) | bool %}
+      {{ eva_agent_offline_vllm_chart_tgz | quote }} \
+      {% else %}
+      eva-agent/eva-agent-vllm \
+      --version "$chart_version" \
+      {% endif %}
+      --namespace "$namespace" \
+      --values "$values_file" \
+      > "$rendered_file"
+    then
+      echo "[ERROR] failed to render eva-agent-vllm chart"
+      exit 1
+    fi
+
+    if grep -Eq \
+      '^kind:[[:space:]]*(PersistentVolume|PersistentVolumeClaim|StorageClass)[[:space:]]*$' \
+      "$rendered_file"
+    then
+      echo "[ERROR] eva-agent-vllm chart contains a persistent resource"
+      exit 1
+    fi
+
+    awk '
+      BEGIN {
+        RS="---"
+      }
+      {
+        kind=""
+        name=""
+        metadata=0
+
+        line_count=split($0, lines, "\n")
+        for (line_number=1; line_number<=line_count; line_number++) {
+          line=lines[line_number]
+
+          if (line ~ /^kind:[[:space:]]*/) {
+            kind=line
+            sub(/^kind:[[:space:]]*/, "", kind)
+          }
+
+          if (line ~ /^metadata:[[:space:]]*$/) {
+            metadata=1
+            continue
+          }
+
+          if (metadata && line ~ /^  name:[[:space:]]*/) {
+            name=line
+            sub(/^  name:[[:space:]]*/, "", name)
+            break
+          }
+
+          if (
+            metadata &&
+            line !~ /^[[:space:]]/ &&
+            line !~ /^metadata:[[:space:]]*$/
+          ) {
+            metadata=0
+          }
+        }
+
+        if (kind != "" && name != "") {
+          print kind "\t" name
+        }
+      }
+    ' "$rendered_file" |
+      sort -u > "$rendered_resources_file"
+
+    kubectl get \
+      serviceaccounts,configmaps,secrets,services,deployments,statefulsets,poddisruptionbudgets \
+      -n "$namespace" \
+      -o json > "$live_file"
+
+    jq -r '
+      .items[]
+      | select(
+          (
+            .metadata.annotations."argocd.argoproj.io/tracking-id"
+            // ""
+          )
+          | test("^[A-Za-z0-9.-]+-eva-agent-vllm:")
+        )
+      | [
+          .kind,
+          .metadata.name,
+          (.metadata.labels."app.kubernetes.io/managed-by" // ""),
+          (.metadata.annotations."meta.helm.sh/release-name" // ""),
+          (.metadata.annotations."meta.helm.sh/release-namespace" // ""),
+          (.metadata.annotations."argocd.argoproj.io/tracking-id" // "")
+        ]
+      | @tsv
+    ' "$live_file" |
+      sort -u > "$candidates_file"
+
+    candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
+
+    if [[ "$candidate_count" == '0' ]]; then
+      echo "[INFO] no legacy eva-agent-vllm resource requires reconciliation"
+      exit 0
+    fi
+
+    vllm_pods="$(
+      kubectl get pods \
+        -n "$namespace" \
+        -l app.kubernetes.io/instance=eva-agent-vllm \
+        -o name 2>/dev/null
+    )"
+
+    if [[ -n "$vllm_pods" ]]; then
+      echo "[ERROR] eva-agent-vllm pods exist during legacy reconciliation"
+      printf '%s\n' "$vllm_pods"
+      exit 1
+    fi
+
+    tracking_application=''
+
+    while IFS=$'\t' read -r \
+      kind \
+      name \
+      managed_by \
+      release_name \
+      release_namespace \
+      tracking_id
+    do
+      case "$kind" in
+        ServiceAccount|ConfigMap|Secret|Service|Deployment|StatefulSet|PodDisruptionBudget)
+          ;;
+        *)
+          echo "[ERROR] unsupported legacy eva-agent-vllm kind: $kind/$name"
+          exit 1
+          ;;
+      esac
+
+      if [[ -n "$release_name" || -n "$release_namespace" ]]; then
+        echo "[ERROR] foreign or partial Helm ownership: $kind/$name"
+        exit 1
+      fi
+
+      if [[ -n "$managed_by" && "$managed_by" != 'helm' && "$managed_by" != 'Helm' ]]; then
+        echo "[ERROR] unsupported managed-by value: $kind/$name=$managed_by"
+        exit 1
+      fi
+
+      case "$kind" in
+        ServiceAccount|ConfigMap|Secret|Service)
+          expected_group_kind="/$kind"
+          ;;
+        Deployment|StatefulSet)
+          expected_group_kind="apps/$kind"
+          ;;
+        PodDisruptionBudget)
+          expected_group_kind="policy/$kind"
+          ;;
+      esac
+
+      expected_suffix=":${expected_group_kind}:${namespace}/${name}"
+
+      if [[ "$tracking_id" != *"$expected_suffix" ]]; then
+        echo "[ERROR] legacy tracking identity mismatch: $kind/$name"
+        exit 1
+      fi
+
+      application="${tracking_id%%:*}"
+
+      if [[ "$application" != *-eva-agent-vllm ]]; then
+        echo "[ERROR] unexpected legacy tracking application: $application"
+        exit 1
+      fi
+
+      if [[ -z "$tracking_application" ]]; then
+        tracking_application="$application"
+      elif [[ "$tracking_application" != "$application" ]]; then
+        echo "[ERROR] mixed legacy tracking applications were detected"
+        exit 1
+      fi
+
+      if ! grep -Fqx "${kind}"$'\t'"${name}" "$rendered_resources_file"; then
+        echo "[ERROR] live legacy resource is not managed by rendered chart: $kind/$name"
+        exit 1
+      fi
+
+      printf '%s\t%s\n' "$kind" "$name"
+    done < "$candidates_file" |
+      sort -u > "$expected_resources_file"
+
+    if [[ ! -s "$expected_resources_file" ]]; then
+      echo "[ERROR] no validated legacy eva-agent-vllm resource was found"
+      exit 1
+    fi
+
+    while IFS=$'\t' read -r kind name
+    do
+      case "$kind" in
+        ServiceAccount)
+          resource="serviceaccount/$name"
+          ;;
+        ConfigMap)
+          resource="configmap/$name"
+          ;;
+        Secret)
+          resource="secret/$name"
+          ;;
+        Service)
+          resource="service/$name"
+          ;;
+        Deployment)
+          resource="deployment.apps/$name"
+          ;;
+        StatefulSet)
+          resource="statefulset.apps/$name"
+          ;;
+        PodDisruptionBudget)
+          resource="poddisruptionbudget.policy/$name"
+          ;;
+      esac
+
+      kubectl delete \
+        "$resource" \
+        -n "$namespace" \
+        --wait=true \
+        --timeout=120s
+    done < "$expected_resources_file"
+
+    remaining_count=0
+
+    while IFS=$'\t' read -r kind name
+    do
+      case "$kind" in
+        ServiceAccount)
+          resource="serviceaccount/$name"
+          ;;
+        ConfigMap)
+          resource="configmap/$name"
+          ;;
+        Secret)
+          resource="secret/$name"
+          ;;
+        Service)
+          resource="service/$name"
+          ;;
+        Deployment)
+          resource="deployment.apps/$name"
+          ;;
+        StatefulSet)
+          resource="statefulset.apps/$name"
+          ;;
+        PodDisruptionBudget)
+          resource="poddisruptionbudget.policy/$name"
+          ;;
+      esac
+
+      if kubectl get \
+        "$resource" \
+        -n "$namespace" \
+        >/dev/null 2>&1
+      then
+        echo "[ERROR] legacy resource remains after deletion: $resource"
+        remaining_count=$((remaining_count + 1))
+      fi
+    done < "$expected_resources_file"
+
+    if (( remaining_count != 0 )); then
+      exit 1
+    fi
+
+    echo "[OK] reconciled exact legacy eva-agent-vllm resources application=$tracking_application count=$candidate_count"
+  args:
+    executable: /bin/bash
+  changed_when: >-
+    '[OK] reconciled exact legacy eva-agent-vllm resources'
+    in eva_agent_vllm_legacy_reconciliation.stdout
+  register: eva_agent_vllm_legacy_reconciliation
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"

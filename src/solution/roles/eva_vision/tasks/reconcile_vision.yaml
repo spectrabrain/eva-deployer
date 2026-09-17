@@ -62,6 +62,7 @@
       "$chart_source"
       --namespace "$namespace"
       --values "$values_file"
+      --post-renderer eva-vision-postrenderer
     )
 
     if [[ "$use_chart_version" == '1' ]]; then

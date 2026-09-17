@@ -43,12 +43,518 @@
       exit 1
     fi
 
-    if grep -Eq \
-      '^kind:[[:space:]]*(PersistentVolume|PersistentVolumeClaim|StorageClass)[[:space:]]*$' \
-      "$rendered_file"
+    static_pv='eva-agent-vllm-shared-pvc-storage'
+    claim='eva-agent-vllm-shared-pvc-storage-claim'
+    cache_path='/share/eva-agent/vllm-cache'
+    snapshot_file="$cache_path/.eva-vllm-storage-migration.tsv"
+    rendered_json_file="$(mktemp)"
+    static_pv_file="$(mktemp)"
+    claim_file="$(mktemp)"
+    dynamic_pv_file="$(mktemp)"
+
+    cleanup_persistent_files() {
+      rm -f \
+        "$rendered_json_file" \
+        "$static_pv_file" \
+        "$claim_file" \
+        "$dynamic_pv_file"
+    }
+
+    trap 'cleanup_persistent_files; cleanup' EXIT
+
+    if ! kubectl create \
+      --dry-run=client \
+      -f "$rendered_file" \
+      -o json |
+      jq -s '
+        [
+          .[]
+          | if .kind == "List"
+            then .items[]
+            else .
+            end
+        ]
+      ' > "$rendered_json_file"
     then
-      echo "[ERROR] eva-agent-vllm chart contains a persistent resource"
+      echo "[ERROR] failed to parse rendered eva-agent-vllm resources"
       exit 1
+    fi
+
+    rendered_persistent_count="$(
+      jq -r '
+        [
+          .[]
+          | select(
+              .kind == "PersistentVolume"
+              or
+              .kind == "PersistentVolumeClaim"
+              or
+              .kind == "StorageClass"
+            )
+        ]
+        | length
+      ' "$rendered_json_file"
+    )"
+
+    if [[ "$rendered_persistent_count" != '2' ]]; then
+      echo "[ERROR] unexpected rendered VLLM persistent resource count: actual=$rendered_persistent_count"
+      exit 1
+    fi
+
+    rendered_static_pv_count="$(
+      jq -r \
+        --arg name "$static_pv" \
+        --arg path "$cache_path" '
+          [
+            .[]
+            | select(
+                .kind == "PersistentVolume"
+                and
+                .metadata.name == $name
+                and
+                .metadata.annotations."helm.sh/resource-policy"
+                  == "keep"
+                and
+                .spec.storageClassName == "eva-agent-sc-fs"
+                and
+                .spec.capacity.storage == "50Gi"
+                and
+                (.spec.accessModes | index("ReadWriteMany")) != null
+                and
+                .spec.nfs.server == "localhost"
+                and
+                .spec.nfs.path == $path
+              )
+          ]
+          | length
+        ' "$rendered_json_file"
+    )"
+
+    rendered_claim_count="$(
+      jq -r \
+        --arg name "$claim" \
+        --arg namespace "$namespace" \
+        --arg volume "$static_pv" '
+          [
+            .[]
+            | select(
+                .kind == "PersistentVolumeClaim"
+                and
+                .metadata.name == $name
+                and
+                .metadata.namespace == $namespace
+                and
+                .metadata.annotations."helm.sh/resource-policy"
+                  == "keep"
+                and
+                .spec.volumeName == $volume
+                and
+                .spec.storageClassName == "eva-agent-sc-fs"
+                and
+                .spec.resources.requests.storage == "50Gi"
+                and
+                (.spec.accessModes | index("ReadWriteMany")) != null
+              )
+          ]
+          | length
+        ' "$rendered_json_file"
+    )"
+
+    if [[ "$rendered_static_pv_count" != '1' ]]; then
+      echo "[ERROR] rendered VLLM static PV contract mismatch"
+      exit 1
+    fi
+
+    if [[ "$rendered_claim_count" != '1' ]]; then
+      echo "[ERROR] rendered VLLM PVC contract mismatch"
+      exit 1
+    fi
+
+    legacy_candidate_count=0
+
+    if kubectl get \
+      serviceaccounts,configmaps,secrets,services,deployments,statefulsets,poddisruptionbudgets \
+      -n "$namespace" \
+      -o json > "$live_file" 2>/dev/null
+    then
+      legacy_candidate_count="$(
+        jq -r '
+          [
+            .items[]
+            | select(
+                (
+                  .metadata.annotations."argocd.argoproj.io/tracking-id"
+                  // ""
+                )
+                | test(
+                    "^[A-Za-z0-9.-]+-eva-agent-vllm:"
+                  )
+              )
+          ]
+          | length
+        ' "$live_file"
+      )"
+    fi
+
+    static_pv_exists=0
+    claim_exists=0
+
+    if kubectl get pv \
+      "$static_pv" \
+      -o json > "$static_pv_file" 2>/dev/null
+    then
+      static_pv_exists=1
+    fi
+
+    if kubectl get pvc \
+      "$claim" \
+      -n "$namespace" \
+      -o json > "$claim_file" 2>/dev/null
+    then
+      claim_exists=1
+    fi
+
+    storage_recovery_pending=0
+
+    if (( static_pv_exists == 0 && claim_exists == 0 )); then
+      if [[ -f "$snapshot_file" ]]; then
+        if [[ ! -d "$cache_path" ]]; then
+          echo "[ERROR] VLLM migration retry has no canonical cache path: $cache_path"
+          exit 1
+        fi
+
+        if [[ ! -d "$cache_path/hub" ]]; then
+          echo "[ERROR] VLLM migration retry has no model hub directory"
+          exit 1
+        fi
+
+        if [[ -z "$(find "$cache_path" -mindepth 1 -print -quit)" ]]; then
+          echo "[ERROR] VLLM migration retry cache path is empty"
+          exit 1
+        fi
+
+        echo "[OK] VLLM persistent storage migration retry state validated"
+      elif [[ "$legacy_candidate_count" == '0' ]]; then
+        echo "[INFO] clean VLLM installation state"
+      else
+        if [[ ! -d "$cache_path/hub" ]]; then
+          echo "[ERROR] interrupted VLLM migration has no canonical model hub directory"
+          exit 1
+        fi
+
+        if [[ -z "$(find "$cache_path" -mindepth 1 -print -quit)" ]]; then
+          echo "[ERROR] interrupted VLLM migration cache path is empty"
+          exit 1
+        fi
+
+        storage_recovery_pending=1
+        echo "[INFO] validating interrupted VLLM storage migration state"
+      fi
+    elif (( static_pv_exists != 1 || claim_exists != 1 )); then
+      echo "[ERROR] partial VLLM persistent resource state detected"
+      exit 1
+    else
+      if [[ "$legacy_candidate_count" == '0' ]]; then
+        echo "[ERROR] VLLM persistent drift exists without exact legacy tracking evidence"
+        exit 1
+      fi
+
+      vllm_pods="$(
+        kubectl get pods \
+          -n "$namespace" \
+          -l app.kubernetes.io/instance=eva-agent-vllm \
+          -o name 2>/dev/null
+      )"
+
+      if [[ -n "$vllm_pods" ]]; then
+        echo "[ERROR] eva-agent-vllm pods exist during persistent migration"
+        printf '%s\n' "$vllm_pods"
+        exit 1
+      fi
+
+      static_pv_errors="$(
+        jq -r \
+          --arg namespace "$namespace" \
+          --arg claim "$claim" \
+          --arg path "$cache_path" '
+            select(
+              .metadata.name
+                != "eva-agent-vllm-shared-pvc-storage"
+              or
+              .status.phase != "Released"
+              or
+              .spec.persistentVolumeReclaimPolicy != "Retain"
+              or
+              .spec.storageClassName != "eva-agent-sc-fs"
+              or
+              .spec.capacity.storage != "50Gi"
+              or
+              .spec.nfs.server != "localhost"
+              or
+              .spec.nfs.path != $path
+              or
+              .spec.claimRef.namespace != $namespace
+              or
+              .spec.claimRef.name != $claim
+              or
+              (
+                .metadata.annotations."meta.helm.sh/release-name"
+                // ""
+              ) != ""
+              or
+              (
+                .metadata.annotations."meta.helm.sh/release-namespace"
+                // ""
+              ) != ""
+              or
+              (
+                (
+                  .metadata.annotations."argocd.argoproj.io/tracking-id"
+                  // ""
+                )
+                | test(
+                    "^[A-Za-z0-9.-]+-eva-agent-vllm:"
+                    + "/PersistentVolume:"
+                    + $namespace
+                    + "/eva-agent-vllm-shared-pvc-storage$"
+                  )
+                | not
+              )
+            )
+            | "invalid"
+          ' "$static_pv_file"
+      )"
+
+      if [[ -n "$static_pv_errors" ]]; then
+        echo "[ERROR] legacy VLLM static PV contract mismatch"
+        exit 1
+      fi
+
+      claim_phase="$(jq -r '.status.phase // ""' "$claim_file")"
+      dynamic_pv="$(jq -r '.spec.volumeName // ""' "$claim_file")"
+      claim_uid="$(jq -r '.metadata.uid // ""' "$claim_file")"
+
+      if [[ "$claim_phase" != 'Bound' ]]; then
+        echo "[ERROR] legacy VLLM PVC is not Bound: phase=$claim_phase"
+        exit 1
+      fi
+
+      if [[ -z "$dynamic_pv" || "$dynamic_pv" == "$static_pv" ]]; then
+        echo "[ERROR] VLLM PVC is not bound to the expected drifted dynamic PV"
+        exit 1
+      fi
+
+      claim_errors="$(
+        jq -r \
+          --arg namespace "$namespace" \
+          --arg claim "$claim" '
+            select(
+              .metadata.name != $claim
+              or
+              .metadata.namespace != $namespace
+              or
+              .status.phase != "Bound"
+              or
+              .spec.storageClassName != "eva-agent-sc-fs"
+              or
+              .spec.resources.requests.storage != "50Gi"
+              or
+              (.spec.accessModes | index("ReadWriteMany")) == null
+              or
+              (
+                .metadata.annotations."meta.helm.sh/release-name"
+                // ""
+              ) != ""
+              or
+              (
+                .metadata.annotations."meta.helm.sh/release-namespace"
+                // ""
+              ) != ""
+              or
+              (
+                (
+                  .metadata.annotations."argocd.argoproj.io/tracking-id"
+                  // ""
+                )
+                | test(
+                    "^[A-Za-z0-9.-]+-eva-agent-vllm:"
+                    + "/PersistentVolumeClaim:"
+                    + $namespace
+                    + "/"
+                    + $claim
+                    + "$"
+                  )
+                | not
+              )
+            )
+            | "invalid"
+          ' "$claim_file"
+      )"
+
+      if [[ -n "$claim_errors" ]]; then
+        echo "[ERROR] legacy VLLM PVC contract mismatch"
+        exit 1
+      fi
+
+      if ! kubectl get pv \
+        "$dynamic_pv" \
+        -o json > "$dynamic_pv_file"
+      then
+        echo "[ERROR] dynamic VLLM PV is absent: $dynamic_pv"
+        exit 1
+      fi
+
+      dynamic_share="$(
+        jq -r '.spec.csi.volumeAttributes.share // ""' \
+          "$dynamic_pv_file"
+      )"
+
+      dynamic_subdir="$(
+        jq -r '.spec.csi.volumeAttributes.subdir // ""' \
+          "$dynamic_pv_file"
+      )"
+
+      dynamic_path="${dynamic_share%/}/${dynamic_subdir}"
+
+      dynamic_pv_errors="$(
+        jq -r \
+          --arg namespace "$namespace" \
+          --arg claim "$claim" \
+          --arg claim_uid "$claim_uid" '
+            select(
+              .status.phase != "Bound"
+              or
+              .spec.persistentVolumeReclaimPolicy != "Retain"
+              or
+              .spec.storageClassName != "eva-agent-sc-fs"
+              or
+              .spec.capacity.storage != "50Gi"
+              or
+              .spec.claimRef.namespace != $namespace
+              or
+              .spec.claimRef.name != $claim
+              or
+              .spec.claimRef.uid != $claim_uid
+              or
+              .spec.csi.driver != "nfs.csi.k8s.io"
+              or
+              .spec.csi.volumeAttributes.server != "localhost"
+              or
+              .spec.csi.volumeAttributes.share != "/share/eva-agent"
+              or
+              (
+                .metadata.annotations."pv.kubernetes.io/provisioned-by"
+                // ""
+              ) != "nfs.csi.k8s.io"
+            )
+            | "invalid"
+          ' "$dynamic_pv_file"
+      )"
+
+      if [[ -n "$dynamic_pv_errors" ]]; then
+        echo "[ERROR] drifted dynamic VLLM PV contract mismatch"
+        exit 1
+      fi
+
+      if [[ "$dynamic_subdir" != "$dynamic_pv" ]]; then
+        echo "[ERROR] dynamic VLLM PV subdirectory identity mismatch"
+        exit 1
+      fi
+
+      for path in "$cache_path" "$dynamic_path"
+      do
+        if [[ ! -d "$path" ]]; then
+          echo "[ERROR] VLLM cache path is absent: $path"
+          exit 1
+        fi
+
+        if [[ ! -d "$path/hub" ]]; then
+          echo "[ERROR] VLLM model hub directory is absent: $path"
+          exit 1
+        fi
+
+        if [[ -z "$(find "$path" -mindepth 1 -print -quit)" ]]; then
+          echo "[ERROR] VLLM cache path is empty: $path"
+          exit 1
+        fi
+      done
+
+      static_pv_uid="$(
+        jq -r '.metadata.uid' "$static_pv_file"
+      )"
+
+      dynamic_pv_uid="$(
+        jq -r '.metadata.uid' "$dynamic_pv_file"
+      )"
+
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$static_pv" \
+        "$static_pv_uid" \
+        "$claim" \
+        "$claim_uid" \
+        "$dynamic_pv" \
+        "$dynamic_pv_uid" \
+        "$cache_path" \
+        > "$snapshot_file"
+
+      chmod 0600 "$snapshot_file"
+
+      kubectl delete pvc \
+        "$claim" \
+        -n "$namespace" \
+        --wait=true \
+        --timeout=120s
+
+      if kubectl get pvc \
+        "$claim" \
+        -n "$namespace" \
+        >/dev/null 2>&1
+      then
+        echo "[ERROR] VLLM PVC remains after deletion"
+        exit 1
+      fi
+
+      kubectl delete pv \
+        "$dynamic_pv" \
+        --wait=true \
+        --timeout=120s
+
+      if kubectl get pv "$dynamic_pv" >/dev/null 2>&1; then
+        echo "[ERROR] dynamic VLLM PV remains after deletion"
+        exit 1
+      fi
+
+      if [[ ! -d "$dynamic_path" ]]; then
+        echo "[ERROR] retained dynamic VLLM cache path was removed"
+        exit 1
+      fi
+
+      kubectl delete pv \
+        "$static_pv" \
+        --wait=true \
+        --timeout=120s
+
+      if kubectl get pv "$static_pv" >/dev/null 2>&1; then
+        echo "[ERROR] legacy VLLM static PV remains after deletion"
+        exit 1
+      fi
+
+      if [[ ! -d "$cache_path" ]]; then
+        echo "[ERROR] canonical VLLM cache path was removed"
+        exit 1
+      fi
+
+      if [[ ! -d "$cache_path/hub" ]]; then
+        echo "[ERROR] canonical VLLM model hub directory was removed"
+        exit 1
+      fi
+
+      if [[ -z "$(find "$cache_path" -mindepth 1 -print -quit)" ]]; then
+        echo "[ERROR] canonical VLLM cache path became empty"
+        exit 1
+      fi
+
+      echo "[OK] prepared VLLM persistent storage for chart recreation"
     fi
 
     awk '
@@ -80,11 +586,7 @@
             break
           }
 
-          if (
-            metadata &&
-            line !~ /^[[:space:]]/ &&
-            line !~ /^metadata:[[:space:]]*$/
-          ) {
+          if (metadata && line !~ /^[[:space:]]/ && line !~ /^metadata:[[:space:]]*$/) {
             metadata=0
           }
         }
@@ -216,6 +718,23 @@
     if [[ ! -s "$expected_resources_file" ]]; then
       echo "[ERROR] no validated legacy eva-agent-vllm resource was found"
       exit 1
+    fi
+
+    if (( storage_recovery_pending == 1 )); then
+      candidate_identity="$(
+        sha256sum "$expected_resources_file" |
+        awk '{print $1}'
+      )"
+
+      printf '%s\t%s\t%s\n' \
+        'recovered-after-persistent-cleanup' \
+        "$tracking_application" \
+        "$candidate_identity" \
+        > "$snapshot_file"
+
+      chmod 0600 "$snapshot_file"
+
+      echo "[OK] recorded recovered VLLM storage migration state"
     fi
 
     while IFS=$'\t' read -r kind name

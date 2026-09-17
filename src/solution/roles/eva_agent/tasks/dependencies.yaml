@@ -1536,6 +1536,10 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
+- name: Verify eva-agent-vllm reconciliation after Helm installation
+  ansible.builtin.include_tasks: verify_vllm_reconciliation.yaml
+  when: not ansible_check_mode
+
 - name: Capture effective Qdrant and vLLM Helm values
   no_log: true
   ansible.builtin.shell: >-

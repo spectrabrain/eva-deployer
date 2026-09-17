@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+import sys
+
+try:
+    import yaml
+except ImportError as error:
+    raise SystemExit(f"[ERROR] EVA Vision post-renderer requires PyYAML: {error}")
+
+
+EXPECTED_COMMAND = [
+    "/bin/bash",
+    "-lc",
+    "mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled 2>/dev/null || true; exec uv run ./run.sh serve --log-profile prod --foreground",
+]
+EXPECTED_PROGRESS_DEADLINE = {{ eva_vision_progress_deadline_seconds | int }}
+SKIP_STARTUP_WARMUP = {{ eva_vision_skip_startup_warmup | bool | lower }}
+
+
+def fail(message):
+    print(f"[ERROR] EVA Vision post-renderer: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def mapping(value, description):
+    if not isinstance(value, dict):
+        fail(f"{description} is missing or invalid")
+    return value
+
+
+def main():
+    raw_manifest = sys.stdin.read()
+    if not raw_manifest.strip():
+        fail("manifest input is empty")
+
+    try:
+        documents = list(yaml.safe_load_all(raw_manifest))
+    except yaml.YAMLError as error:
+        fail(f"manifest parsing failed: {error}")
+
+    if not documents:
+        fail("manifest input contains no documents")
+
+    deployments = [
+        document
+        for document in documents
+        if isinstance(document, dict)
+        and document.get("apiVersion") == "apps/v1"
+        and document.get("kind") == "Deployment"
+        and isinstance(document.get("metadata"), dict)
+        and document["metadata"].get("name") == "eva-vision"
+    ]
+
+    if len(deployments) != 1:
+        fail(f"expected exactly one Deployment/eva-vision: actual={len(deployments)}")
+
+    deployment = deployments[0]
+    spec = mapping(deployment.get("spec"), "Deployment/eva-vision spec")
+    template = mapping(spec.get("template"), "Deployment/eva-vision pod template")
+    pod_spec = mapping(template.get("spec"), "Deployment/eva-vision pod spec")
+    containers = pod_spec.get("containers")
+    if not isinstance(containers, list):
+        fail("Deployment/eva-vision containers are missing or invalid")
+
+    vision_containers = [
+        container
+        for container in containers
+        if isinstance(container, dict) and container.get("name") == "eva-vision"
+    ]
+    if len(vision_containers) != 1:
+        fail(f"expected exactly one eva-vision container: actual={len(vision_containers)}")
+
+    current_deadline = spec.get("progressDeadlineSeconds")
+    if current_deadline is None:
+        spec["progressDeadlineSeconds"] = EXPECTED_PROGRESS_DEADLINE
+    elif current_deadline != EXPECTED_PROGRESS_DEADLINE:
+        fail(
+            "unexpected progressDeadlineSeconds: "
+            f"expected={EXPECTED_PROGRESS_DEADLINE} actual={current_deadline}"
+        )
+
+    container = vision_containers[0]
+    if SKIP_STARTUP_WARMUP:
+        current_command = container.get("command")
+        if current_command is None:
+            container["command"] = EXPECTED_COMMAND
+        elif current_command != EXPECTED_COMMAND:
+            fail("unexpected existing eva-vision container command")
+
+    try:
+        yaml.safe_dump_all(
+            documents,
+            sys.stdout,
+            default_flow_style=False,
+            explicit_start=True,
+            sort_keys=False,
+        )
+    except yaml.YAMLError as error:
+        fail(f"manifest serialization failed: {error}")
+
+
+if __name__ == "__main__":
+    main()

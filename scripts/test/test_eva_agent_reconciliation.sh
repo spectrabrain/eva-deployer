@@ -214,6 +214,69 @@ if invalid_counter in shell:
         "instead of arithmetic expansion"
     )
 
+failed_release_recovery_markers = (
+    "failed_release_recovery=0",
+    "failed EVA Agent Helm release requires recovery",
+    "rendered EVA Agent PV/PVC chart labels are invalid",
+    "live EVA Agent PV chart labels are inconsistent",
+    "live EVA Agent PVC chart labels are inconsistent",
+    "live EVA Agent PV/PVC chart labels differ",
+    "transferring legacy EVA Agent PV/PVC chart label ownership",
+    "EVA Agent PV/PVC identity changed during SSA ownership handoff",
+    "legacy EVA Agent PV/PVC chart labels remain after SSA handoff",
+    "transferred EVA Agent PV/PVC chart labels to Helm SSA",
+)
+
+for marker in failed_release_recovery_markers:
+    if marker not in shell:
+        raise SystemExit(
+            "[ERROR] Agent failed-release recovery marker is absent: "
+            + marker
+        )
+
+if shell.count("app.kubernetes.io/version-") != 2:
+    raise SystemExit(
+        "[ERROR] Agent version label handoff count mismatch"
+    )
+
+if shell.count("helm.sh/chart-") != 2:
+    raise SystemExit(
+        "[ERROR] Agent chart label handoff count mismatch"
+    )
+
+deployed_status_position = shell.find(
+    """if [[ "$release_status" == 'deployed' ]]; then"""
+)
+failed_status_position = shell.find(
+    """if [[ "$release_status" != 'failed' ]]; then"""
+)
+failed_recovery_position = shell.find(
+    """failed_release_recovery=1"""
+)
+render_position = shell.find(
+    """helm_template_command=("""
+)
+
+if min(
+    deployed_status_position,
+    failed_status_position,
+    failed_recovery_position,
+    render_position,
+) < 0:
+    raise SystemExit(
+        "[ERROR] Agent Helm release-state recovery flow is incomplete"
+    )
+
+if not (
+    deployed_status_position
+    < failed_status_position
+    < failed_recovery_position
+    < render_position
+):
+    raise SystemExit(
+        "[ERROR] Agent Helm release-state recovery order is invalid"
+    )
+
 persistent_adoption_markers = (
     "adopted persistent-only EVA Agent resources into Helm ownership",
     "EVA Agent PV/PVC identity changed during Helm adoption",
@@ -381,6 +444,7 @@ if not isinstance(changed_when, str):
 for marker in (
     "[OK] reconciled exact legacy EVA Agent resources",
     "[OK] adopted persistent-only EVA Agent resources into Helm ownership",
+    "[OK] transferred EVA Agent PV/PVC chart labels to Helm SSA",
 ):
     if changed_when.count(marker) != 1:
         raise SystemExit(
@@ -395,6 +459,8 @@ print("[OK] Agent Secret data must match before cleanup")
 print("[OK] Agent PV/PVC identity is protected")
 print("[OK] Agent PV/PVC Helm ownership is adopted safely")
 print("[OK] persistent-only retry state remains recoverable")
+print("[OK] failed Agent release remains recoverable")
+print("[OK] legacy PV/PVC chart labels transfer to Helm SSA")
 print("[OK] historical Job and Pod resources are excluded")
 print("[OK] Agent reconciliation precedes Helm installation")
 PY

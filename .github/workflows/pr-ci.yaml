@@ -89,6 +89,7 @@ jobs:
         run: |
           scripts/test/test_eva_component_values.sh
           scripts/test/test_eva_agent_dependency_defaults.sh
+          scripts/test/test_eva_agent_reinstall_wait.sh
           scripts/test/test_eva_agent_managed_kustomize.sh
           scripts/test/test_eva_agent_init_storageclass_migration.sh
           scripts/test/test_eva_vision_gpu_resource.sh

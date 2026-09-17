@@ -274,11 +274,10 @@
     if [[ "$candidate_count" == '0' ]]; then
       if [[ "$persistent_count" == '0' ]]; then
         echo "[INFO] clean EVA Agent installation state"
-      else
-        echo "[INFO] EVA Agent persistent-only installation state"
+        exit 0
       fi
 
-      exit 0
+      echo "[INFO] EVA Agent persistent-only installation state"
     fi
 
     remaining_deployment_pods="$(
@@ -475,7 +474,10 @@
       resources_to_delete_count=$((resources_to_delete_count + 1))
     done < "$candidates_file"
 
-    if [[ -z "$tracking_application" ]]; then
+    if [[
+      "$candidate_count" != '0' &&
+      -z "$tracking_application"
+    ]]; then
       echo "[ERROR] EVA Agent tracking Application was not resolved"
       exit 1
     fi
@@ -517,15 +519,92 @@
         echo "[ERROR] EVA Agent PV/PVC identity changed during legacy cleanup"
         exit 1
       fi
+
+      kubectl label pv \
+        "$static_pv" \
+        app.kubernetes.io/managed-by=Helm \
+        --overwrite
+
+      kubectl annotate pv \
+        "$static_pv" \
+        meta.helm.sh/release-name="$release" \
+        meta.helm.sh/release-namespace="$namespace" \
+        --overwrite
+
+      kubectl label pvc \
+        "$static_pvc" \
+        -n "$namespace" \
+        app.kubernetes.io/managed-by=Helm \
+        --overwrite
+
+      kubectl annotate pvc \
+        "$static_pvc" \
+        -n "$namespace" \
+        meta.helm.sh/release-name="$release" \
+        meta.helm.sh/release-namespace="$namespace" \
+        --overwrite
+
+      snapshot_persistent_identity "$persistent_after_file"
+
+      if ! cmp -s \
+        "$persistent_before_file" \
+        "$persistent_after_file"
+      then
+        echo "[ERROR] EVA Agent PV/PVC identity changed during Helm adoption"
+        exit 1
+      fi
+
+      pv_release_name="$(
+        kubectl get pv \
+          "$static_pv" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'
+      )"
+
+      pv_release_namespace="$(
+        kubectl get pv \
+          "$static_pv" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}'
+      )"
+
+      pvc_release_name="$(
+        kubectl get pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'
+      )"
+
+      pvc_release_namespace="$(
+        kubectl get pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}'
+      )"
+
+      if [[
+        "$pv_release_name" != "$release" ||
+        "$pv_release_namespace" != "$namespace" ||
+        "$pvc_release_name" != "$release" ||
+        "$pvc_release_namespace" != "$namespace"
+      ]]; then
+        echo "[ERROR] EVA Agent PV/PVC Helm ownership adoption failed"
+        exit 1
+      fi
     fi
 
-    echo "[OK] reconciled exact legacy EVA Agent resources application=$tracking_application count=$resources_to_delete_count"
+    if [[ "$candidate_count" == '0' ]]; then
+      echo "[OK] adopted persistent-only EVA Agent resources into Helm ownership"
+    else
+      echo "[OK] reconciled exact legacy EVA Agent resources application=$tracking_application count=$resources_to_delete_count"
+    fi
   args:
     executable: /bin/bash
   register: eva_agent_legacy_reconciliation
   changed_when: >-
-    '[OK] reconciled exact legacy EVA Agent resources'
-    in eva_agent_legacy_reconciliation.stdout
+    ('[OK] reconciled exact legacy EVA Agent resources'
+     in eva_agent_legacy_reconciliation.stdout)
+    or
+    ('[OK] adopted persistent-only EVA Agent resources into Helm ownership'
+     in eva_agent_legacy_reconciliation.stdout)
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
     HELM_PLUGINS: "{{ eva_agent_workdir }}/plugin"

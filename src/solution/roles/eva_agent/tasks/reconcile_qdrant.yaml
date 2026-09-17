@@ -1,0 +1,567 @@
+---
+- name: Reconcile legacy or failed Qdrant installation
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace={{ eva_agent_namespace | quote }}
+    release='eva-agent-qdrant'
+    values_file={{ (eva_agent_workdir ~ '/eva-agent-qdrant/effective-input-values.yaml') | quote }}
+    snapshot_file={{ (eva_agent_workdir ~ '/eva-agent-qdrant/pvc-identity-before.tsv') | quote }}
+
+    rendered_file="$(mktemp)"
+    live_file="$(mktemp)"
+    expected_file="$(mktemp)"
+    actual_file="$(mktemp)"
+    pvc_file="$(mktemp)"
+
+    cleanup() {
+      rm -f \
+        "$rendered_file" \
+        "$live_file" \
+        "$expected_file" \
+        "$actual_file" \
+        "$pvc_file"
+    }
+
+    trap cleanup EXIT
+    rm -f "$snapshot_file"
+
+    cat > "$expected_file" <<'EOF'
+    ConfigMap	eva-agent-qdrant
+    Service	eva-agent-qdrant
+    Service	eva-agent-qdrant-headless
+    ServiceAccount	eva-agent-qdrant
+    StatefulSet	eva-agent-qdrant
+    EOF
+
+    sort -o "$expected_file" "$expected_file"
+
+    resource_name() {
+      case "$1" in
+        ServiceAccount)
+          printf 'serviceaccount/%s\n' "$2"
+          ;;
+        ConfigMap)
+          printf 'configmap/%s\n' "$2"
+          ;;
+        Service)
+          printf 'service/%s\n' "$2"
+          ;;
+        StatefulSet)
+          printf 'statefulset.apps/%s\n' "$2"
+          ;;
+        *)
+          return 1
+          ;;
+      esac
+    }
+
+    snapshot_pvcs() {
+      kubectl get persistentvolumeclaims \
+        -n "$namespace" \
+        -o json |
+      jq -r '
+        .items[]
+        | select(
+            .metadata.name
+            | test(
+                "^eva-agent-qdrant-(snapshots|storage)-eva-agent-qdrant-0$"
+              )
+          )
+        | [
+            .metadata.name,
+            .metadata.uid,
+            .spec.volumeName,
+            .status.phase,
+            .spec.resources.requests.storage
+          ]
+        | @tsv
+      ' |
+      sort
+    }
+
+    validate_pvcs() {
+      local file="$1"
+      local count
+      local unbound
+
+      count="$(wc -l < "$file" | tr -d ' ')"
+
+      unbound="$(
+        awk -F '\t' '
+          $4 != "Bound" {
+            count++
+          }
+          END {
+            print count + 0
+          }
+        ' "$file"
+      )"
+
+      if [[ "$count" != '2' ]]; then
+        echo "[ERROR] expected exactly 2 Qdrant PVCs: actual=$count"
+        return 1
+      fi
+
+      if [[ "$unbound" != '0' ]]; then
+        echo "[ERROR] one or more Qdrant PVCs are not Bound"
+        return 1
+      fi
+    }
+
+    ensure_pods_absent() {
+      local pods
+
+      pods="$(
+        kubectl get pods \
+          -n "$namespace" \
+          -l app.kubernetes.io/instance=eva-agent-qdrant \
+          -o name 2>/dev/null
+      )"
+
+      if [[ -n "$pods" ]]; then
+        echo "[ERROR] Qdrant pods exist during reconciliation"
+        printf '%s\n' "$pods"
+        return 1
+      fi
+    }
+
+    parse_manifest_resources() {
+      awk '
+        BEGIN {
+          RS="---"
+        }
+
+        {
+          kind=""
+          name=""
+          metadata=0
+          count=split($0, lines, "\n")
+
+          for (line_number=1; line_number<=count; line_number++) {
+            line=lines[line_number]
+
+            if (line ~ /^kind:[[:space:]]*/) {
+              kind=line
+              sub(/^kind:[[:space:]]*/, "", kind)
+            }
+
+            if (line ~ /^metadata:[[:space:]]*$/) {
+              metadata=1
+              continue
+            }
+
+            if (metadata && line ~ /^  name:[[:space:]]*/) {
+              name=line
+              sub(/^  name:[[:space:]]*/, "", name)
+              break
+            }
+
+            if (
+              metadata &&
+              line !~ /^[[:space:]]/ &&
+              line !~ /^metadata:[[:space:]]*$/
+            ) {
+              metadata=0
+            }
+          }
+
+          if (kind != "" && name != "") {
+            print kind "\t" name
+          }
+        }
+      ' "$1" |
+      sort -u
+    }
+
+    inspect_live_resources() {
+      kubectl get \
+        serviceaccount/eva-agent-qdrant \
+        configmap/eva-agent-qdrant \
+        service/eva-agent-qdrant \
+        service/eva-agent-qdrant-headless \
+        statefulset.apps/eva-agent-qdrant \
+        -n "$namespace" \
+        -o json
+    }
+
+    delete_expected_resources() {
+      local kind
+      local name
+      local resource
+
+      while IFS=$'\t' read -r kind name
+      do
+        resource="$(resource_name "$kind" "$name")"
+
+        kubectl delete \
+          "$resource" \
+          -n "$namespace" \
+          --wait=true \
+          --timeout=120s
+      done < "$expected_file"
+    }
+
+    validate_expected_resources_absent() {
+      local kind
+      local name
+      local resource
+      local remaining=0
+
+      while IFS=$'\t' read -r kind name
+      do
+        resource="$(resource_name "$kind" "$name")"
+
+        if kubectl get \
+          "$resource" \
+          -n "$namespace" \
+          >/dev/null 2>&1
+        then
+          echo "[ERROR] Qdrant resource remains: $resource"
+          remaining=$((remaining + 1))
+        fi
+      done < "$expected_file"
+
+      [[ "$remaining" == '0' ]]
+    }
+
+    if ! helm template \
+      "$release" \
+      {% if airgap_mode | default(false) | bool %}
+      {{ eva_agent_offline_qdrant_chart_tgz | quote }} \
+      {% else %}
+      qdrant/qdrant \
+      --version {{ eva_agent_qdrant_chart_version | quote }} \
+      {% endif %}
+      --namespace "$namespace" \
+      --values "$values_file" \
+      {{ eva_agent_qdrant_post_renderer_arg }} \
+      > "$rendered_file"
+    then
+      echo "[ERROR] failed to render Qdrant chart"
+      exit 1
+    fi
+
+    if grep -Eq \
+      '^kind:[[:space:]]*(PersistentVolume|PersistentVolumeClaim|StorageClass)[[:space:]]*$' \
+      "$rendered_file"
+    then
+      echo "[ERROR] rendered Qdrant chart contains a standalone persistent resource"
+      exit 1
+    fi
+
+    parse_manifest_resources "$rendered_file" > "$actual_file"
+
+    while IFS=$'\t' read -r kind name
+    do
+      if ! grep -Fqx -- \
+        "${kind}"$'\t'"${name}" \
+        "$actual_file"
+      then
+        echo "[ERROR] rendered chart does not manage expected resource: $kind/$name"
+        exit 1
+      fi
+    done < "$expected_file"
+
+    release_status=''
+
+    if helm status \
+      "$release" \
+      -n "$namespace" \
+      >/dev/null 2>&1
+    then
+      release_status="$(
+        helm status \
+          "$release" \
+          -n "$namespace" \
+          -o json |
+        jq -r '.info.status // empty'
+      )"
+    fi
+
+    if [[ "$release_status" == 'deployed' ]]; then
+      snapshot_pvcs > "$pvc_file"
+      pvc_count="$(wc -l < "$pvc_file" | tr -d ' ')"
+
+      if [[ "$pvc_count" == '2' ]]; then
+        validate_pvcs "$pvc_file"
+        cp "$pvc_file" "$snapshot_file"
+      elif [[ "$pvc_count" != '0' ]]; then
+        echo "[ERROR] deployed Qdrant release has an unexpected PVC set"
+        exit 1
+      fi
+
+      echo "[INFO] deployed Qdrant Helm release requires no reconciliation"
+      exit 0
+    fi
+
+    if [[ -n "$release_status" && "$release_status" != 'failed' ]]; then
+      echo "[ERROR] unsafe Qdrant Helm release status: $release_status"
+      exit 1
+    fi
+
+    if [[ "$release_status" == 'failed' ]]; then
+      ensure_pods_absent
+      snapshot_pvcs > "$pvc_file"
+      validate_pvcs "$pvc_file"
+      cp "$pvc_file" "$snapshot_file"
+
+      helm get manifest \
+        "$release" \
+        -n "$namespace" > "$rendered_file"
+
+      if grep -Eq \
+        '^kind:[[:space:]]*(PersistentVolume|PersistentVolumeClaim|StorageClass)[[:space:]]*$' \
+        "$rendered_file"
+      then
+        echo "[ERROR] failed Qdrant manifest contains a persistent resource"
+        exit 1
+      fi
+
+      parse_manifest_resources "$rendered_file" > "$actual_file"
+
+      if ! cmp -s "$expected_file" "$actual_file"; then
+        echo "[ERROR] failed Qdrant release manifest resource set is unexpected"
+        exit 1
+      fi
+
+      inspect_live_resources > "$live_file"
+
+      live_count="$(
+        jq -r '.items | length' "$live_file"
+      )"
+
+      if [[ "$live_count" != '5' ]]; then
+        echo "[ERROR] failed Qdrant live resource count mismatch: actual=$live_count"
+        exit 1
+      fi
+
+      ownership_error="$(
+        jq -r \
+          --arg release "$release" \
+          --arg namespace "$namespace" '
+            .items[]
+            | select(
+                (.metadata.labels."app.kubernetes.io/managed-by" // "")
+                  != "Helm"
+                or
+                (.metadata.annotations."meta.helm.sh/release-name" // "")
+                  != $release
+                or
+                (.metadata.annotations."meta.helm.sh/release-namespace" // "")
+                  != $namespace
+              )
+            | "\(.kind)/\(.metadata.name)"
+          ' "$live_file"
+      )"
+
+      if [[ -n "$ownership_error" ]]; then
+        echo "[ERROR] failed-release ownership mismatch"
+        printf '%s\n' "$ownership_error"
+        exit 1
+      fi
+
+      if ! helm uninstall \
+        "$release" \
+        -n "$namespace" \
+        --wait \
+        --timeout 5m
+      then
+        echo "[ERROR] failed to remove failed Qdrant Helm release"
+        exit 1
+      fi
+
+      if helm status \
+        "$release" \
+        -n "$namespace" \
+        >/dev/null 2>&1
+      then
+        echo "[ERROR] failed Qdrant Helm release still exists"
+        exit 1
+      fi
+
+      validate_expected_resources_absent
+
+      snapshot_pvcs > "$actual_file"
+
+      if ! cmp -s "$snapshot_file" "$actual_file"; then
+        echo "[ERROR] Qdrant PVC identity changed during failed-release cleanup"
+        exit 1
+      fi
+
+      echo "[OK] removed failed Qdrant Helm release with PVC identities preserved"
+      exit 0
+    fi
+
+    existing_resources=0
+
+    while IFS=$'\t' read -r kind name
+    do
+      resource="$(resource_name "$kind" "$name")"
+
+      if kubectl get \
+        "$resource" \
+        -n "$namespace" \
+        >/dev/null 2>&1
+      then
+        existing_resources=$((existing_resources + 1))
+      fi
+    done < "$expected_file"
+
+    snapshot_pvcs > "$pvc_file"
+    pvc_count="$(wc -l < "$pvc_file" | tr -d ' ')"
+
+    if [[ "$existing_resources" == '0' ]]; then
+      if [[ "$pvc_count" == '2' ]]; then
+        validate_pvcs "$pvc_file"
+        cp "$pvc_file" "$snapshot_file"
+        echo "[OK] Qdrant PVC-only reinstall state validated"
+      elif [[ "$pvc_count" == '0' ]]; then
+        echo "[INFO] clean Qdrant installation state"
+      else
+        echo "[ERROR] incomplete Qdrant PVC-only state"
+        exit 1
+      fi
+
+      exit 0
+    fi
+
+    if [[ "$existing_resources" != '5' ]]; then
+      echo "[ERROR] partial legacy Qdrant resource set detected: actual=$existing_resources"
+      exit 1
+    fi
+
+    ensure_pods_absent
+    validate_pvcs "$pvc_file"
+    cp "$pvc_file" "$snapshot_file"
+    inspect_live_resources > "$live_file"
+
+    live_count="$(
+      jq -r '.items | length' "$live_file"
+    )"
+
+    if [[ "$live_count" != '5' ]]; then
+      echo "[ERROR] legacy Qdrant live resource count mismatch: actual=$live_count"
+      exit 1
+    fi
+
+    ownership_error="$(
+      jq -r '
+        .items[]
+        | select(
+            (
+              .metadata.annotations."meta.helm.sh/release-name"
+              // ""
+            ) != ""
+            or
+            (
+              .metadata.annotations."meta.helm.sh/release-namespace"
+              // ""
+            ) != ""
+            or
+            (
+              .metadata.labels."app.kubernetes.io/managed-by"
+              // ""
+            ) as $managed
+            | ($managed != "" and $managed != "Helm" and $managed != "helm")
+          )
+        | "\(.kind)/\(.metadata.name)"
+      ' "$live_file"
+    )"
+
+    if [[ -n "$ownership_error" ]]; then
+      echo "[ERROR] foreign or unsupported Qdrant ownership"
+      printf '%s\n' "$ownership_error"
+      exit 1
+    fi
+
+    tracking_applications="$(
+      jq -r '
+        .items[]
+        | [
+            .kind,
+            .metadata.name,
+            (
+              .metadata.annotations."argocd.argoproj.io/tracking-id"
+              // ""
+            )
+          ]
+        | @tsv
+      ' "$live_file" |
+      while IFS=$'\t' read -r kind name tracking
+      do
+        case "$kind" in
+          ServiceAccount|ConfigMap|Service)
+            group_kind="/$kind"
+            ;;
+          StatefulSet)
+            group_kind="apps/$kind"
+            ;;
+          *)
+            echo "[ERROR] unsupported legacy Qdrant kind: $kind/$name" >&2
+            return 1
+            ;;
+        esac
+
+        suffix=":${group_kind}:${namespace}/${name}"
+
+        if [[ "$tracking" != *"$suffix" ]]; then
+          echo "[ERROR] legacy Qdrant tracking identity mismatch: $kind/$name" >&2
+          return 1
+        fi
+
+        application="${tracking%%:*}"
+
+        if [[ "$application" != *-eva-agent-qdrant ]]; then
+          echo "[ERROR] unexpected Qdrant tracking application: $application" >&2
+          return 1
+        fi
+
+        if ! grep -Fqx -- \
+          "${kind}"$'\t'"${name}" \
+          "$actual_file"
+        then
+          echo "[ERROR] legacy Qdrant resource is not managed by rendered chart: $kind/$name" >&2
+          return 1
+        fi
+
+        printf '%s\n' "$application"
+      done |
+      sort -u
+    )"
+
+    tracking_application_count="$(
+      printf '%s\n' "$tracking_applications" |
+      sed '/^$/d' |
+      wc -l |
+      tr -d ' '
+    )"
+
+    if [[ "$tracking_application_count" != '1' ]]; then
+      echo "[ERROR] mixed Qdrant legacy tracking applications were detected"
+      exit 1
+    fi
+
+    delete_expected_resources
+    validate_expected_resources_absent
+
+    snapshot_pvcs > "$actual_file"
+
+    if ! cmp -s "$snapshot_file" "$actual_file"; then
+      echo "[ERROR] Qdrant PVC identity changed during legacy cleanup"
+      exit 1
+    fi
+
+    echo "[OK] reconciled exact legacy Qdrant resources application=$tracking_applications count=5"
+  args:
+    executable: /bin/bash
+  register: eva_agent_qdrant_reconciliation
+  changed_when: >-
+    '[OK] reconciled exact legacy Qdrant resources'
+    in eva_agent_qdrant_reconciliation.stdout
+    or
+    '[OK] removed failed Qdrant Helm release'
+    in eva_agent_qdrant_reconciliation.stdout
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_agent_workdir }}/plugin"

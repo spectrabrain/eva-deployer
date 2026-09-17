@@ -1,0 +1,98 @@
+---
+- name: Verify Qdrant reconciliation after Helm installation
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace={{ eva_agent_namespace | quote }}
+    release='eva-agent-qdrant'
+    snapshot_file={{ (eva_agent_workdir ~ '/eva-agent-qdrant/pvc-identity-before.tsv') | quote }}
+    current_snapshot_file="$(mktemp)"
+
+    cleanup() {
+      rm -f "$current_snapshot_file"
+    }
+
+    trap cleanup EXIT
+
+    release_status="$(
+      helm status \
+        "$release" \
+        -n "$namespace" \
+        -o json |
+      jq -r '.info.status // empty'
+    )"
+
+    if [[ "$release_status" != 'deployed' ]]; then
+      echo "[ERROR] Qdrant Helm release is not deployed: $release_status"
+      exit 1
+    fi
+
+    if [[ ! -f "$snapshot_file" ]]; then
+      echo "[OK] Qdrant Helm release deployed without a pre-existing PVC snapshot"
+      exit 0
+    fi
+
+    kubectl get persistentvolumeclaims \
+      -n "$namespace" \
+      -o json |
+    jq -r '
+      .items[]
+      | select(
+          .metadata.name
+          | test(
+              "^eva-agent-qdrant-(snapshots|storage)-eva-agent-qdrant-0$"
+            )
+        )
+      | [
+          .metadata.name,
+          .metadata.uid,
+          .spec.volumeName,
+          .status.phase,
+          .spec.resources.requests.storage
+        ]
+      | @tsv
+    ' |
+    sort > "$current_snapshot_file"
+
+    pvc_count="$(
+      wc -l < "$current_snapshot_file" |
+      tr -d ' '
+    )"
+
+    unbound_count="$(
+      awk -F '\t' '
+        $4 != "Bound" {
+          count++
+        }
+        END {
+          print count + 0
+        }
+      ' "$current_snapshot_file"
+    )"
+
+    if [[ "$pvc_count" != '2' ]]; then
+      echo "[ERROR] expected exactly 2 preserved Qdrant PVCs: actual=$pvc_count"
+      exit 1
+    fi
+
+    if [[ "$unbound_count" != '0' ]]; then
+      echo "[ERROR] one or more preserved Qdrant PVCs are not Bound"
+      exit 1
+    fi
+
+    if ! cmp -s \
+      "$snapshot_file" \
+      "$current_snapshot_file"
+    then
+      echo "[ERROR] Qdrant PVC identity changed after Helm installation"
+      exit 1
+    fi
+
+    rm -f "$snapshot_file"
+
+    echo "[OK] Qdrant PVC identities were preserved after Helm installation"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"

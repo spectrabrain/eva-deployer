@@ -1347,6 +1347,10 @@
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
 
+- name: Reconcile exact legacy Argo CD-managed eva-agent-vllm resources
+  ansible.builtin.include_tasks: migrate_legacy_vllm.yaml
+  when: not ansible_check_mode
+
 - name: Check existing eva-agent-vllm deployment
   ansible.builtin.command: kubectl get deployment {{ eva_agent_vllm_engine_deployment_name }} -n {{ eva_agent_namespace }}
   register: eva_agent_vllm_deployment_exists
@@ -1466,6 +1470,10 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
+- name: Reconcile legacy or failed Qdrant installation
+  ansible.builtin.include_tasks: reconcile_qdrant.yaml
+  when: not ansible_check_mode
+
 - name: Install/Upgrade Qdrant (online)
   ansible.builtin.command: >-
     helm upgrade --install eva-agent-qdrant qdrant/qdrant
@@ -1496,6 +1504,10 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
     HELM_PLUGINS: "{{ eva_agent_workdir }}/plugin"
+
+- name: Verify Qdrant reconciliation after Helm installation
+  ansible.builtin.include_tasks: verify_qdrant_reconciliation.yaml
+  when: not ansible_check_mode
 
 - name: Install/Upgrade eva-agent-vllm (online)
   ansible.builtin.command: >-

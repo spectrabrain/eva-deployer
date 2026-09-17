@@ -100,6 +100,7 @@ jobs:
           scripts/test/test_k3s_gpu_validation.sh
           scripts/test/test_precondition_argocd_tracking.sh
           scripts/test/test_eva_vllm_profile.sh
+          scripts/test/test_eva_qdrant_reconciliation.sh
           scripts/test/test_eva_vllm_reconciliation.sh
           scripts/test/test_eva_qdrant_values.sh
 

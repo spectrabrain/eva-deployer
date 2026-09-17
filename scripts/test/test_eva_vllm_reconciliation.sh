@@ -303,6 +303,68 @@ if not (
         "[ERROR] rendered JSON inventory order is invalid"
     )
 
+rbac_contract = (
+    (
+        "roles,rolebindings",
+        2,
+    ),
+    (
+        "Role|RoleBinding|Deployment",
+        1,
+    ),
+    (
+        'expected_group_kind="rbac.authorization.k8s.io/$kind"',
+        1,
+    ),
+    (
+        'resource="role.rbac.authorization.k8s.io/$name"',
+        2,
+    ),
+    (
+        'resource="rolebinding.rbac.authorization.k8s.io/$name"',
+        2,
+    ),
+)
+
+for marker, expected_count in rbac_contract:
+    actual_count = migration_shell.count(marker)
+
+    if actual_count != expected_count:
+        raise SystemExit(
+            "[ERROR] VLLM RBAC reconciliation marker mismatch: "
+            f"marker={marker} "
+            f"expected={expected_count} "
+            f"actual={actual_count}"
+        )
+
+rbac_group_position = migration_shell.find(
+    'expected_group_kind="rbac.authorization.k8s.io/$kind"'
+)
+candidate_inventory_position = migration_shell.find(
+    'join("\\u001f")'
+)
+rbac_delete_position = migration_shell.find(
+    'resource="role.rbac.authorization.k8s.io/$name"'
+)
+
+if min(
+    candidate_inventory_position,
+    rbac_group_position,
+    rbac_delete_position,
+) < 0:
+    raise SystemExit(
+        "[ERROR] VLLM RBAC reconciliation structure is incomplete"
+    )
+
+if not (
+    candidate_inventory_position
+    < rbac_group_position
+    < rbac_delete_position
+):
+    raise SystemExit(
+        "[ERROR] VLLM RBAC reconciliation ordering is invalid"
+    )
+
 for marker in (
     "partial VLLM persistent resource state detected",
     "legacy VLLM static PV contract mismatch",

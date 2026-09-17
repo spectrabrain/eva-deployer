@@ -377,6 +377,10 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
+- name: Reconcile exact legacy Argo CD-managed EVA Agent resources
+  ansible.builtin.include_tasks: reconcile_agent.yaml
+  when: not ansible_check_mode
+
 - name: Install EVA Agent from online Helm repo
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   ansible.builtin.command: "{{ eva_agent_install_cmd_online }}"

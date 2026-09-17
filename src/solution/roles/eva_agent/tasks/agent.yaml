@@ -360,8 +360,12 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
-- name: Wait until EVA Agent pods are terminated before reinstall
-  ansible.builtin.command: kubectl wait --for=delete pod -n {{ eva_agent_namespace }} -l app.kubernetes.io/name=eva-agent --timeout=180s
+- name: Wait until EVA Agent deployment pods are terminated before reinstall
+  ansible.builtin.command: >-
+    kubectl wait --for=delete pod
+    -n {{ eva_agent_namespace }}
+    -l app.kubernetes.io/name=eva-agent,pod-template-hash
+    --timeout=180s
   register: eva_agent_wait_delete
   changed_when: false
   failed_when:

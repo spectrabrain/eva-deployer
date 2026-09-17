@@ -311,6 +311,10 @@
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
+- name: Reconcile exact legacy Argo CD-managed EVA Vision resources
+  ansible.builtin.include_tasks: reconcile_vision.yaml
+  when: not ansible_check_mode
+
 - name: Deploy EVA Vision from online Helm repo
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   ansible.builtin.command: >-

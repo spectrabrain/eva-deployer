@@ -85,7 +85,9 @@ jobs:
           done
 
       - name: Test EVA App values contract
-        run: scripts/test/test_eva_app_values.sh
+        run: |
+          scripts/test/test_eva_app_values.sh
+          scripts/test/test_eva_app_reconciliation.sh
 
       - name: Test EVA Traefik TLS contract
         run: scripts/test/test_eva_iam_traefik_tls.sh

@@ -1,0 +1,119 @@
+name: PR CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.23.12'
+          cache: true
+          cache-dependency-path: tools/eva/go.sum
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          python3 -m pip install --user \
+            ansible==13.6.0 \
+            ansible-core==2.20.5 \
+            yamllint==1.37.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Check Go formatting
+        run: |
+          test -z "$(gofmt -l $(git ls-files '*.go'))"
+
+      - name: Test and vet Go CLI
+        working-directory: tools/eva
+        run: |
+          go mod download
+          go test ./...
+          go vet ./...
+
+      - name: Check shell syntax
+        run: |
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find scripts -type f -name '*.sh' -print0)
+
+      - name: Run ShellCheck
+        run: |
+          mapfile -d '' scripts < <(
+            find scripts -type f -name '*.sh' -print0
+          )
+
+          if (( ${#scripts[@]} == 0 )); then
+            echo "[ERROR] No shell scripts found"
+            false
+          fi
+
+          shellcheck -x -P "$GITHUB_WORKSPACE" "${scripts[@]}"
+          echo "[OK] ShellCheck passed: scripts=${#scripts[@]}"
+
+      - name: Lint YAML
+        run: |
+          yamllint -d '{extends: default, rules: {document-start: disable, line-length: disable, truthy: disable}}' \
+            $(git ls-files '*.yaml' '*.yml')
+
+      - name: Check Ansible playbook syntax
+        run: |
+          for playbook in src/infra/playbooks/*.yaml src/solution/playbooks/*.yaml; do
+            ansible-playbook --syntax-check \
+              -i workspace/inventory/inventory.ini.sample \
+              "$playbook"
+          done
+
+      - name: Test EVA App values contract
+        run: |
+          scripts/test/test_eva_app_values.sh
+          scripts/test/test_eva_app_reconciliation.sh
+
+      - name: Test EVA Traefik TLS contract
+        run: scripts/test/test_eva_iam_traefik_tls.sh
+
+      - name: Test EVA Agent and Vision values contracts
+        run: |
+          scripts/test/test_eva_component_values.sh
+          scripts/test/test_eva_agent_dependency_defaults.sh
+          scripts/test/test_eva_agent_reinstall_wait.sh
+          scripts/test/test_eva_agent_reconciliation.sh
+          scripts/test/test_nfs_share_idempotency.sh
+          scripts/test/test_eva_agent_managed_kustomize.sh
+          scripts/test/test_eva_agent_init_storageclass_migration.sh
+          scripts/test/test_eva_vision_gpu_resource.sh
+          scripts/test/test_eva_vision_reconciliation.sh
+          scripts/test/test_eva_vision_postrenderer.sh
+          scripts/test/test_k3s_gpu_validation.sh
+          scripts/test/test_precondition_argocd_tracking.sh
+          scripts/test/test_eva_vllm_profile.sh
+          scripts/test/test_eva_qdrant_reconciliation.sh
+          scripts/test/test_eva_vllm_reconciliation.sh
+          scripts/test/test_eva_qdrant_values.sh
+
+      - name: Test Config GPU CDI contract
+        run: bash -x scripts/test/test_config_gpu_cdi.sh
+
+      - name: Smoke test Base Release builder
+        run: |
+          git config user.name eva-ci
+          git config user.email eva-ci@example.invalid
+          git tag -a v0.0.0-ci -m 'temporary CI builder tag'
+          dist_dir="$RUNNER_TEMP/eva-base-release"
+          scripts/release/build_release.sh --tag v0.0.0-ci --dist-dir "$dist_dir"
+          out/work/build/eva verify "$dist_dir"

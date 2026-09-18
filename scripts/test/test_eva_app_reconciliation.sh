@@ -131,4 +131,172 @@ for workflow in pr-ci.yaml tag-release.yaml; do
   grep -Fq 'scripts/test/test_eva_app_reconciliation.sh' "$repo_root/.github/workflows/$workflow"
 done
 
+# Verified legacy internal Service preservation contract
+app_main="$repo_root/src/solution/roles/eva_app/tasks/main.yaml"
+
+python3 - \
+  "$app_main" <<'PY_APP_INTERNAL_CONTRACT'
+from pathlib import Path
+import sys
+
+import yaml
+
+
+tasks = yaml.safe_load(
+    Path(sys.argv[1]).read_text()
+)
+
+task_by_name = {
+    task.get("name"): task
+    for task in tasks
+    if isinstance(task, dict)
+    and isinstance(task.get("name"), str)
+}
+
+required_names = (
+    "Assess verified legacy EVA App internal Service preservation",
+    "Build verified legacy EVA App internal Service values",
+    "Preserve verified legacy EVA App internal Service",
+    "Merge Workspace EVA App values",
+    "Merge CLI EVA App values",
+    "Record private EVA App effective input values on control node",
+    "Reconcile verified Argo CD legacy EVA App resources",
+)
+
+for name in required_names:
+    if name not in task_by_name:
+        raise SystemExit(
+            f"[ERROR] missing EVA App task: {name}"
+        )
+
+ordered_names = [
+    task.get("name")
+    for task in tasks
+    if isinstance(task, dict)
+]
+
+positions = {
+    name: ordered_names.index(name)
+    for name in required_names
+}
+
+if not (
+    positions[
+        "Assess verified legacy EVA App internal Service preservation"
+    ]
+    < positions[
+        "Build verified legacy EVA App internal Service values"
+    ]
+    < positions[
+        "Preserve verified legacy EVA App internal Service"
+    ]
+    < positions["Merge Workspace EVA App values"]
+    < positions["Merge CLI EVA App values"]
+    < positions[
+        "Record private EVA App effective input values on control node"
+    ]
+    < positions[
+        "Reconcile verified Argo CD legacy EVA App resources"
+    ]
+):
+    raise SystemExit(
+        "[ERROR] EVA App legacy Service preservation "
+        "task ordering is invalid"
+    )
+
+assessment = task_by_name[
+    "Assess verified legacy EVA App internal Service preservation"
+]
+
+shell = assessment.get(
+    "ansible.builtin.shell",
+    "",
+)
+
+required_shell_contracts = (
+    "preserve_internal_service=false",
+    "preserve_internal_service=true",
+    "argocd.argoproj.io/tracking-id",
+    "meta.helm.sh/release-name",
+    "meta.helm.sh/release-namespace",
+    "app.kubernetes.io/managed-by",
+    "ownerReferences",
+    "ClusterIP",
+    "targetPort",
+    "registration_commit",
+)
+
+for contract in required_shell_contracts:
+    if contract not in shell:
+        raise SystemExit(
+            "[ERROR] legacy Service assessment is missing "
+            f"contract: {contract}"
+        )
+
+build_values = str(
+    task_by_name[
+        "Build verified legacy EVA App internal Service values"
+    ].get(
+        "ansible.builtin.set_fact",
+        {},
+    )
+)
+
+if (
+    "eva_app_legacy_service_values" not in build_values
+    or "'service'" not in build_values
+    or "'internal'" not in build_values
+    or "'enabled': true" not in build_values
+):
+    raise SystemExit(
+        "[ERROR] legacy internal Service values override "
+        "is incomplete"
+    )
+
+preserve_values = str(
+    task_by_name[
+        "Preserve verified legacy EVA App internal Service"
+    ].get(
+        "ansible.builtin.set_fact",
+        {},
+    )
+)
+
+if (
+    "eva_app_generated_values" not in preserve_values
+    or "eva_app_legacy_service_values" not in preserve_values
+    or "recursive=true" not in preserve_values
+):
+    raise SystemExit(
+        "[ERROR] verified legacy Service values are not "
+        "merged recursively"
+    )
+
+metadata_task = task_by_name[
+    "Record EVA App values source metadata on control node"
+]
+
+metadata_content = str(
+    metadata_task.get(
+        "ansible.builtin.copy",
+        {},
+    ).get(
+        "content",
+        "",
+    )
+)
+
+if "legacy_internal_service:" not in metadata_content:
+    raise SystemExit(
+        "[ERROR] values source metadata omits "
+        "legacy internal Service preservation"
+    )
+
+print(
+    "[OK] verified legacy EVA App internal "
+    "Service preservation contract"
+)
+PY_APP_INTERNAL_CONTRACT
+
+
 echo 'EVA App reconciliation contract tests passed.'

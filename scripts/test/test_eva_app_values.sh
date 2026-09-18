@@ -15,6 +15,32 @@ if ! command -v "$ANSIBLE_PLAYBOOK" >/dev/null 2>&1 && [[ ! -x "$ANSIBLE_PLAYBOO
   exit 1
 fi
 
+python3 - "$REPO_ROOT/src/solution/roles/eva_app/tasks/main.yaml" <<'PY'
+from pathlib import Path
+import re
+import sys
+import textwrap
+import yaml
+
+tasks = yaml.safe_load(Path(sys.argv[1]).read_text())
+task = next(
+    item
+    for item in tasks
+    if item.get("name") == "Assess verified legacy EVA App internal Service preservation"
+)
+shell = task.get("ansible.builtin.shell", "")
+if r"[expected_application\]" in shell:
+    raise SystemExit("[ERROR] internal Service validator contains an escaped closing bracket")
+match = re.search(
+    r"<<'PY_INTERNAL_SERVICE'\n(.*?)\nPY_INTERNAL_SERVICE",
+    shell,
+    re.DOTALL,
+)
+if match is None:
+    raise SystemExit("[ERROR] internal Service Python validator is absent")
+compile(textwrap.dedent(match.group(1)), "internal-service-validator", "exec")
+PY
+
 make_fixture() {
   local name="$1"
   local root="$TMP_ROOT/$name"

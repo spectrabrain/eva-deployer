@@ -734,6 +734,9 @@
     eva_app_take_ownership_arg: >-
       {{ (eva_app_legacy_reconciliation.stdout is search('(?m)^take_ownership=true$'))
          | ternary('--take-ownership', '') }}
+    eva_app_server_side_conflict_args: >-
+      {{ (eva_app_legacy_reconciliation.stdout is search('(?m)^force_conflicts=true$'))
+         | ternary('--server-side=true --force-conflicts', '') }}
   changed_when: false
   when: not ansible_check_mode
 
@@ -747,6 +750,7 @@
     -f {{ eva_app_workdir }}/values.yaml
     -f {{ eva_app_effective_values_dest }}
     {{ eva_app_take_ownership_arg }}
+    {{ eva_app_server_side_conflict_args }}
     --dry-run=server
     --hide-secret
     {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
@@ -845,6 +849,7 @@
         -f {{ eva_app_workdir }}/values.yaml
         -f {{ eva_app_effective_values_dest }}
         {{ eva_app_take_ownership_arg }}
+        {{ eva_app_server_side_conflict_args }}
         {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
       register: eva_app_install_online
       changed_when: >-
@@ -864,6 +869,7 @@
         -f {{ eva_app_workdir }}/values.yaml
         -f {{ eva_app_effective_values_dest }}
         {{ eva_app_take_ownership_arg }}
+        {{ eva_app_server_side_conflict_args }}
         {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
       register: eva_app_install_offline
       changed_when: >-

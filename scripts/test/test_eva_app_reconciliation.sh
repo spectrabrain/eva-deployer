@@ -24,6 +24,46 @@ for raw_path in sys.argv[1:]:
         raise SystemExit(f"[ERROR] task file is not a YAML list: {path}")
     documents[path] = tasks
 
+def find_task(tasks, name):
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if task.get("name") == name:
+            return task
+        for block_name in ("block", "rescue", "always"):
+            nested = task.get(block_name)
+            if isinstance(nested, list):
+                found = find_task(nested, name)
+                if found is not None:
+                    return found
+    return None
+
+main_tasks = documents[Path(sys.argv[1])]
+conflict_fact = find_task(
+    main_tasks,
+    "Resolve EVA App Helm ownership adoption argument",
+)
+if (
+    conflict_fact is None
+    or "eva_app_server_side_conflict_args"
+    not in str(conflict_fact.get("ansible.builtin.set_fact", {}))
+    or "^force_conflicts=true$"
+    not in str(conflict_fact.get("ansible.builtin.set_fact", {}))
+):
+    raise SystemExit("[ERROR] EVA App conflict argument fact is invalid")
+
+for task_name in (
+    "Validate EVA App Helm installation with server dry-run",
+    "Install EVA App from online Helm repo",
+    "Install EVA App from offline chart",
+):
+    task = find_task(main_tasks, task_name)
+    command = "" if task is None else task.get("ansible.builtin.command", "")
+    if "{{ eva_app_server_side_conflict_args }}" not in command:
+        raise SystemExit(
+            "[ERROR] EVA App conflict arguments are absent: " + task_name
+        )
+
 reconcile_path = Path(sys.argv[2])
 reconcile_shell = documents[reconcile_path][0].get("ansible.builtin.shell")
 match = re.search(
@@ -99,6 +139,18 @@ for required in \
   '{{ eva_app_take_ownership_arg }}' \
   'take_ownership=true' \
   'take_ownership=false' \
+  'force_conflicts=true' \
+  'force_conflicts=false' \
+  'failed_release_recovery=true' \
+  'failed_release_recovery=false' \
+  'failed EVA App Helm release will be recovered by verified Helm upgrade' \
+  'failed EVA App release manifest is incompatible with current rendered chart' \
+  'exact current release Helm ownership accepted' \
+  'partial Helm ownership' \
+  'foreign Helm ownership' \
+  '--server-side=true' \
+  '--force-conflicts' \
+  'eva_app_server_side_conflict_args' \
   'Git-backed EVA App identity contract' \
   'registration_application' \
   'registration_repository' \
@@ -110,7 +162,6 @@ for required in \
   'EVA_APP_SITE_ID' \
   'eva_cli_helm_set' \
   'unsafe EVA App Helm release status' \
-  'foreign or partial Helm ownership' \
   'unsupported managed-by ownership' \
   'unexpected controller ownership' \
   'EVA App tracking identity mismatch' \
@@ -122,8 +173,13 @@ for required in \
   grep -Fq -- "$required" "$main" "$reconcile" "$verify"
 done
 
-if grep -Eq 'kubectl (delete|patch)|--force' "$reconcile" "$verify"; then
-  echo 'EVA App reconciliation performs a forbidden resource mutation' >&2
+if grep -Eq 'kubectl (delete|patch)' "$reconcile" "$verify"; then
+  echo 'EVA App reconciliation performs a forbidden kubectl mutation' >&2
+  exit 1
+fi
+
+if grep -Eq -- '(^|[[:space:]])--force([[:space:]]|$)' "$main" "$reconcile" "$verify"; then
+  echo 'EVA App reconciliation uses forbidden Helm --force' >&2
   exit 1
 fi
 

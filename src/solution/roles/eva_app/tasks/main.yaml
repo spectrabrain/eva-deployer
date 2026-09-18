@@ -397,6 +397,269 @@
   ansible.builtin.set_fact:
     eva_app_generated_values: "{{ eva_app_generated_values | combine(eva_app_iam_values, recursive=true) }}"
 
+- name: Assess verified legacy EVA App internal Service preservation
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="$EVA_APP_NAMESPACE"
+    service_name="$EVA_APP_INTERNAL_SERVICE"
+    handoff_file="$EVA_APP_HANDOFF_FILE"
+    site_id="$EVA_APP_SITE_ID"
+
+    service_json="$(
+      kubectl get \
+        service "$service_name" \
+        -n "$namespace" \
+        -o json \
+        2>/dev/null
+    )" || {
+      echo 'preserve_internal_service=false'
+      exit 0
+    }
+
+    if [[ -z "$service_json" ]]; then
+      echo 'preserve_internal_service=false'
+      exit 0
+    fi
+
+    if [[ ! -f "$handoff_file" ]]; then
+      echo \
+        '[ERROR] active legacy EVA App internal Service requires an Argo CD handoff receipt'
+      exit 1
+    fi
+
+    python3 - \
+      "$handoff_file" \
+      "$site_id" \
+      "$namespace" \
+      "$service_name" \
+      "$service_json" <<'PY_INTERNAL_SERVICE'
+    from pathlib import Path
+    import json
+    import re
+    import sys
+
+    import yaml
+
+
+    handoff_path = Path(sys.argv[1])
+    expected_site_id = sys.argv[2]
+    expected_namespace = sys.argv[3]
+    expected_service_name = sys.argv[4]
+    service = json.loads(sys.argv[5])
+
+    handoff = yaml.safe_load(
+        handoff_path.read_text()
+    )
+
+    if (
+        not isinstance(handoff, dict)
+        or handoff.get("schema_version") != "v1"
+        or handoff.get("site_id") != expected_site_id
+        or not handoff.get("completed_at")
+    ):
+        raise SystemExit(
+            "[ERROR] invalid Argo CD handoff receipt "
+            "for EVA App internal Service preservation"
+        )
+
+    cluster_name = handoff.get("cluster_name")
+    applications = handoff.get("applications")
+
+    if (
+        not isinstance(cluster_name, str)
+        or not cluster_name
+        or not isinstance(applications, list)
+    ):
+        raise SystemExit(
+            "[ERROR] incomplete Argo CD handoff identity "
+            "for EVA App internal Service preservation"
+        )
+
+    expected_application = (
+        cluster_name + "-eva-app"
+    )
+
+    matches = [
+        application
+        for application in applications
+        if application == expected_application
+    ]
+
+    if matches != [expected_application\]:
+        raise SystemExit(
+            "[ERROR] Argo CD handoff receipt does not "
+            "identify exactly one EVA App Application"
+        )
+
+    metadata = service.get("metadata")
+    spec = service.get("spec")
+
+    if not isinstance(metadata, dict) or not isinstance(spec, dict):
+        raise SystemExit(
+            "[ERROR] malformed legacy EVA App internal Service"
+        )
+
+    annotations = metadata.get("annotations") or {}
+    labels = metadata.get("labels") or {}
+    owner_references = metadata.get("ownerReferences") or []
+
+    expected_tracking = (
+        f"{expected_application}:/Service:"
+        f"{expected_namespace}/{expected_service_name}"
+    )
+
+    if (
+        service.get("apiVersion") != "v1"
+        or service.get("kind") != "Service"
+        or metadata.get("name") != expected_service_name
+        or metadata.get("namespace") != expected_namespace
+        or annotations.get(
+            "argocd.argoproj.io/tracking-id"
+        ) != expected_tracking
+    ):
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "tracking identity mismatch"
+        )
+
+    helm_release_name = annotations.get(
+        "meta.helm.sh/release-name"
+    )
+    helm_release_namespace = annotations.get(
+        "meta.helm.sh/release-namespace"
+    )
+
+    if helm_release_name or helm_release_namespace:
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "has foreign or partial Helm annotations"
+        )
+
+    managed_by = labels.get(
+        "app.kubernetes.io/managed-by"
+    )
+
+    if managed_by not in (None, "", "Helm"):
+        raise SystemExit(
+            "[ERROR] unsupported legacy EVA App internal "
+            "Service managed-by identity"
+        )
+
+    controller_owners = [
+        owner
+        for owner in owner_references
+        if isinstance(owner, dict)
+        and owner.get("controller") is True
+    ]
+
+    if controller_owners:
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "has a controller owner"
+        )
+
+    expected_selector = {
+        "app.kubernetes.io/instance": "eva-app",
+        "app.kubernetes.io/name": "eva-app",
+        "component": "eva-app",
+    }
+
+    if (
+        spec.get("type") != "ClusterIP"
+        or spec.get("selector") != expected_selector
+    ):
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "selector or type mismatch"
+        )
+
+    ports = spec.get("ports")
+
+    if not isinstance(ports, list) or len(ports) != 1:
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "must expose exactly one port"
+        )
+
+    port = ports[0]
+
+    if (
+        not isinstance(port, dict)
+        or port.get("name") != "http"
+        or port.get("protocol", "TCP") != "TCP"
+        or port.get("port") != 32010
+        or port.get("targetPort") != 32010
+    ):
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "port contract mismatch"
+        )
+
+    commit = handoff.get("registration_commit")
+
+    if (
+        not isinstance(commit, str)
+        or re.fullmatch(
+            r"[0-9a-f]{40,64}",
+            commit,
+        )
+        is None
+    ):
+        raise SystemExit(
+            "[ERROR] invalid Argo CD handoff registration commit"
+        )
+    PY_INTERNAL_SERVICE
+
+    echo 'preserve_internal_service=true'
+    echo \
+      '[OK] verified active legacy EVA App internal Service for Helm preservation'
+  args:
+    executable: /bin/bash
+  register: eva_app_internal_service_preservation
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_INTERNAL_SERVICE: "{{ eva_app_name }}-internal"
+    EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
+    EVA_APP_SITE_ID: "{{ eva_site_id }}"
+
+- name: Build verified legacy EVA App internal Service values
+  ansible.builtin.set_fact:
+    eva_app_legacy_service_values: >-
+      {{
+        (
+          eva_app_internal_service_preservation.stdout
+          is search('(?m)^preserve_internal_service=true$')
+        )
+        | ternary(
+            {
+              'service': {
+                'internal': {
+                  'enabled': true
+                }
+              }
+            },
+            {}
+          )
+      }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Preserve verified legacy EVA App internal Service
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_generated_values: >-
+      {{
+        eva_app_generated_values
+        | combine(
+            eva_app_legacy_service_values | default({}, true),
+            recursive=true
+          )
+      }}
+
 - name: Merge Workspace EVA App values
   no_log: true
   ansible.builtin.set_fact:
@@ -441,6 +704,7 @@
     content: |
       config_generated_values: {{ (eva_app_config_values | length > 0) | lower }}
       iam_handoff: {{ eva_app_handoff_used | bool | lower }}
+      legacy_internal_service: {{ ((eva_app_legacy_service_values | default({}, true)) | length > 0) | lower }}
       workspace_override: {{ (eva_app_values_override | length > 0) | lower }}
       cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}
       rendered_artifacts:

@@ -11,23 +11,61 @@
     effective_values_file="$EVA_APP_EFFECTIVE_VALUES_FILE"
     handoff_file="$EVA_APP_HANDOFF_FILE"
     use_chart_version="$EVA_APP_USE_CHART_VERSION"
+    failed_release_recovery=false
 
     rendered_file="$(mktemp)"
     rendered_json_file="$(mktemp)"
     candidates_file="$(mktemp)"
     rendered_resources_file="$(mktemp)"
-    cleanup() { rm -f "$rendered_file" "$rendered_json_file" "$candidates_file" "$rendered_resources_file"; }
+    failed_manifest_file="$(mktemp)"
+    failed_manifest_json_file="$(mktemp)"
+    failed_manifest_resources_file="$(mktemp)"
+    cleanup() {
+      rm -f \
+        "$rendered_file" \
+        "$rendered_json_file" \
+        "$candidates_file" \
+        "$rendered_resources_file" \
+        "$failed_manifest_file" \
+        "$failed_manifest_json_file" \
+        "$failed_manifest_resources_file"
+    }
     trap cleanup EXIT
 
     if helm status "$release" -n "$namespace" >/dev/null 2>&1; then
-      release_status="$(helm status "$release" -n "$namespace" -o json | jq -r '.info.status // empty')"
+      release_status_json="$(helm status "$release" -n "$namespace" -o json)"
+      release_status="$(jq -r '.info.status // empty' <<< "$release_status_json")"
       if [[ "$release_status" == 'deployed' ]]; then
         echo 'take_ownership=false'
+        echo 'force_conflicts=false'
+        echo 'failed_release_recovery=false'
         echo '[INFO] deployed EVA App Helm release requires no legacy adoption'
         exit 0
       fi
-      echo "[ERROR] unsafe EVA App Helm release status: release=$release status=$release_status"
-      exit 1
+      if [[ "$release_status" == 'failed' ]]; then
+        release_name="$(jq -r '.name // empty' <<< "$release_status_json")"
+        release_namespace="$(jq -r '.namespace // empty' <<< "$release_status_json")"
+        release_revision="$(jq -r '.version // empty' <<< "$release_status_json")"
+        if [[ "$release_name" != "$release" || "$release_namespace" != "$namespace" || ! "$release_revision" =~ ^[1-9][0-9]*$ ]]; then
+          echo "[ERROR] invalid failed EVA App Helm release identity: release=$release status_name=$release_name status_namespace=$release_namespace revision=$release_revision"
+          exit 1
+        fi
+        failed_secret_count="$(
+          kubectl get secret -n "$namespace" \
+            -l "owner=helm,name=$release,status=failed" -o json |
+            jq --arg release "$release" \
+              '[.items[]? | select(.metadata.labels.owner == "helm" and .metadata.labels.name == $release and .metadata.labels.status == "failed")] | length'
+        )"
+        if [[ "$failed_secret_count" != '1' ]]; then
+          echo "[ERROR] failed EVA App Helm release Secret is missing or ambiguous: release=$release count=$failed_secret_count"
+          exit 1
+        fi
+        failed_release_recovery=true
+        echo '[INFO] failed EVA App Helm release will be recovered by verified Helm upgrade'
+      else
+        echo "[ERROR] unsafe EVA App Helm release status: release=$release status=$release_status"
+        exit 1
+      fi
     fi
 
     helm_template=(helm template "$release" "$chart_source" --namespace "$namespace" --values "$values_file" --values "$effective_values_file")
@@ -46,6 +84,22 @@
 
     jq -r '.[] | select((.kind // "") != "" and (.metadata.name // "") != "") | [.kind, .metadata.name] | @tsv' "$rendered_json_file" |
       LC_ALL=C sort -u > "$rendered_resources_file"
+
+    if [[ "$failed_release_recovery" == true ]]; then
+      helm get manifest "$release" -n "$namespace" > "$failed_manifest_file"
+      kubectl create --dry-run=client --namespace "$namespace" -f "$failed_manifest_file" -o json |
+        jq -s '[.[] | if .kind == "List" then .items[] else . end] ' > "$failed_manifest_json_file"
+      jq -r '.[] | select((.kind // "") != "" and (.metadata.name // "") != "") | [.kind, .metadata.name] | @tsv' "$failed_manifest_json_file" |
+        LC_ALL=C sort -u > "$failed_manifest_resources_file"
+      while IFS=$'\t' read -r kind name
+      do
+        [[ -n "$kind" && -n "$name" ]] || continue
+        if ! grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file"; then
+          echo "[ERROR] failed EVA App release manifest is incompatible with current rendered chart: $kind/$name"
+          exit 1
+        fi
+      done < "$failed_manifest_resources_file"
+    fi
 
     while IFS=$'\t' read -r kind name
     do
@@ -67,7 +121,13 @@
 
     candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
     if [[ "$candidate_count" == '0' ]]; then
+      if [[ "$failed_release_recovery" == true ]]; then
+        echo '[ERROR] failed EVA App release recovery has no live rendered resource candidates'
+        exit 1
+      fi
       echo 'take_ownership=false'
+      echo 'force_conflicts=false'
+      echo 'failed_release_recovery=false'
       echo '[INFO] clean EVA App installation state'
       exit 0
     fi
@@ -184,18 +244,6 @@
         echo "[ERROR] unsafe EVA App legacy resource identity: $kind/$name"
         exit 1
       fi
-      if [[ -n "$helm_name" || -n "$helm_namespace" ]]; then
-        echo "[ERROR] foreign or partial Helm ownership: $kind/$name"
-        exit 1
-      fi
-      if [[ -n "$managed_by" && "$managed_by" != 'Helm' ]]; then
-        echo "[ERROR] unsupported managed-by ownership: $kind/$name=$managed_by"
-        exit 1
-      fi
-      if [[ "$controller_count" != '0' ]]; then
-        echo "[ERROR] unexpected controller ownership: $kind/$name"
-        exit 1
-      fi
       group="${api_version%%/*}"
       if [[ "$api_version" == 'v1' ]]; then
         tracking_group='/'
@@ -203,8 +251,31 @@
         tracking_group="$group/"
       fi
       expected_tracking="$legacy_application:$tracking_group$kind:$namespace/$name"
-      if [[ "$tracking" != "$expected_tracking" ]]; then
-        echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
+      if [[ -z "$helm_name" && -z "$helm_namespace" ]]; then
+        if [[ -n "$managed_by" && "$managed_by" != 'Helm' ]]; then
+          echo "[ERROR] unsupported managed-by ownership: $kind/$name=$managed_by"
+          exit 1
+        fi
+        if [[ "$controller_count" != '0' ]]; then
+          echo "[ERROR] unexpected controller ownership: $kind/$name"
+          exit 1
+        fi
+        if [[ "$tracking" != "$expected_tracking" ]]; then
+          echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
+          exit 1
+        fi
+      elif [[ -n "$helm_name" && -n "$helm_namespace" ]]; then
+        if [[ "$failed_release_recovery" != true || "$helm_name" != "$release" || "$helm_namespace" != "$namespace" || "$managed_by" != 'Helm' ]]; then
+          echo "[ERROR] foreign Helm ownership: $kind/$name"
+          exit 1
+        fi
+        if [[ -n "$tracking" && "$tracking" != "$expected_tracking" ]]; then
+          echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
+          exit 1
+        fi
+        echo "[INFO] exact current release Helm ownership accepted: $kind/$name"
+      else
+        echo "[ERROR] partial Helm ownership: $kind/$name"
         exit 1
       fi
     done < "$candidates_file"
@@ -256,7 +327,9 @@
       done
 
     echo 'take_ownership=true'
-    echo "[OK] verified EVA App legacy resources for Helm adoption application=$legacy_application count=$candidate_count"
+    echo 'force_conflicts=true'
+    echo "failed_release_recovery=$failed_release_recovery"
+    echo "[OK] verified EVA App resources for Helm adoption application=$legacy_application count=$candidate_count failed_release_recovery=$failed_release_recovery"
   args:
     executable: /bin/bash
   register: eva_app_legacy_reconciliation

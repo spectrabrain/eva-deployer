@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -23,7 +24,7 @@ import (
 )
 
 func TestRunRemoteHelpAndUnknownCommand(t *testing.T) {
-	for _, arguments := range [][]string{{"remote"}, {"remote", "help"}, {"remote", "--help"}, {"remote", "publish", "--help"}, {"remote", "prepare", "--help"}, {"remote", "verify", "--help"}} {
+	for _, arguments := range [][]string{{"remote"}, {"remote", "help"}, {"remote", "--help"}, {"remote", "bootstrap", "--help"}, {"remote", "publish", "--help"}, {"remote", "prepare", "--help"}, {"remote", "verify", "--help"}} {
 		if err := run(arguments); err != nil {
 			t.Fatalf("run(%q) error = %v", arguments, err)
 		}
@@ -33,14 +34,43 @@ func TestRunRemoteHelpAndUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRunRemoteBootstrapRequiresRegistryAndConfirmation(t *testing.T) {
+	previous := newRemoteBootstrapService
+	previousReceiptPath := defaultRemoteBootstrapReceiptPath
+	defer func() { newRemoteBootstrapService = previous; defaultRemoteBootstrapReceiptPath = previousReceiptPath }()
+	defaultRemoteBootstrapReceiptPath = filepath.Join(t.TempDir(), "harbor.yaml")
+	called := false
+	newRemoteBootstrapService = func() remotecommand.BootstrapService {
+		return remotecommand.BootstrapService{EnsureRuntime: func(context.Context) error { return nil }, EnsureDocker: func(context.Context) error { return nil }, EnsureHarbor: func(context.Context, string, string, bool) (remotecommand.HarborReceipt, error) {
+			called = true
+			return remotecommand.HarborReceipt{SchemaVersion: "v1", ManagedBy: "eva", Registry: "harbor.example.internal:32080", Project: "eva", HarborVersion: "2.15.2", InstallRoot: "/opt/eva/harbor", DataRoot: "/var/lib/eva/harbor", Protocol: "http"}, nil
+		}, CheckHarbor: func(context.Context, remotecommand.HarborReceipt) error { return nil }}
+	}
+	if err := run([]string{"remote", "bootstrap", "--registry", "harbor.example.internal:32080", "--yes"}); err != nil {
+		t.Fatalf("bootstrap error = %v", err)
+	}
+	if !called {
+		t.Fatal("bootstrap Harbor service was not called")
+	}
+	if err := run([]string{"remote", "bootstrap", "--yes"}); err == nil {
+		t.Fatal("bootstrap accepted missing registry")
+	}
+	if err := run([]string{"remote", "bootstrap", "--registry", "harbor.example.internal:32080"}); err == nil {
+		t.Fatal("bootstrap accepted missing confirmation")
+	}
+}
+
 func TestRunRemotePublishForwardsPositionalReleasePath(t *testing.T) {
 	releaseRoot := writeRemotePublishRelease(t)
 	var gotArguments []string
 	restore := replaceRemoteService(t, func() remotecommand.Service {
 		return remotecommand.Service{
 			ResolveBackend: func() (string, error) { return "/fixture/publish", nil },
-			ResolvePayload: func(release.Resolved) (remotecommand.PayloadSource, error) {
+			ResolvePayload: func(release.Resolved, string, string) (remotecommand.PayloadSource, error) {
 				return remotecommand.PayloadSource{Directory: "/fixture/payload"}, nil
+			},
+			ResolveRuntime: func(release.Resolved, string, string) (remotecommand.RuntimeArtifactSource, error) {
+				return remotecommand.RuntimeArtifactSource{Directory: "/fixture/runtime"}, nil
 			},
 			Run: func(_ string, arguments []string, _ remotecommand.Streams) error {
 				gotArguments = append([]string(nil), arguments...)
@@ -50,10 +80,10 @@ func TestRunRemotePublishForwardsPositionalReleasePath(t *testing.T) {
 	})
 	defer restore()
 
-	if err := run([]string{"remote", "publish", releaseRoot, "--target", "eva@target.example.internal"}); err != nil {
+	if err := run([]string{"remote", "publish", releaseRoot, "--registry", "harbor.example.internal:32080", "--target", "eva@target.example.internal"}); err != nil {
 		t.Fatalf("run(remote publish) error = %v", err)
 	}
-	want := []string{"--release-dir", releaseRoot, "--payload-dir", "/fixture/payload", "--target", "eva@target.example.internal"}
+	want := []string{"--release-dir", releaseRoot, "--runtime-dir", "/fixture/runtime", "--payload-dir", "/fixture/payload", "--target", "eva@target.example.internal"}
 	if !reflect.DeepEqual(gotArguments, want) {
 		t.Fatalf("forwarded arguments = %#v, want %#v", gotArguments, want)
 	}
@@ -64,15 +94,18 @@ func TestRunRemotePublishAcceptsPathAfterTargetAndDefaultsToCurrentDirectory(t *
 	restore := replaceRemoteService(t, func() remotecommand.Service {
 		return remotecommand.Service{
 			ResolveBackend: func() (string, error) { return "/fixture/publish", nil },
-			ResolvePayload: func(release.Resolved) (remotecommand.PayloadSource, error) {
+			ResolvePayload: func(release.Resolved, string, string) (remotecommand.PayloadSource, error) {
 				return remotecommand.PayloadSource{Directory: "/fixture/payload"}, nil
+			},
+			ResolveRuntime: func(release.Resolved, string, string) (remotecommand.RuntimeArtifactSource, error) {
+				return remotecommand.RuntimeArtifactSource{Directory: "/fixture/runtime"}, nil
 			},
 			Run: func(string, []string, remotecommand.Streams) error { return nil },
 		}
 	})
 	defer restore()
 
-	if err := run([]string{"remote", "publish", "--target", "10.159.56.196", releaseRoot}); err != nil {
+	if err := run([]string{"remote", "publish", "--registry", "harbor.example.internal:32080", "--target", "10.159.56.196", releaseRoot}); err != nil {
 		t.Fatalf("run(remote publish path after target) error = %v", err)
 	}
 	previousDirectory, err := os.Getwd()
@@ -83,7 +116,7 @@ func TestRunRemotePublishAcceptsPathAfterTargetAndDefaultsToCurrentDirectory(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
-	if err := run([]string{"remote", "publish", "--target", "target.example.internal"}); err != nil {
+	if err := run([]string{"remote", "publish", "--registry", "harbor.example.internal:32080", "--target", "target.example.internal"}); err != nil {
 		t.Fatalf("run(remote publish default path) error = %v", err)
 	}
 }
@@ -167,10 +200,11 @@ func writeRemotePublishRelease(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	files := map[string]string{
-		"eva-tool.tar.gz":     "tool",
-		"eva-infra.tar.gz":    "infra",
-		"eva-solution.tar.gz": "solution",
-		"eva-offline.tar.gz":  "offline",
+		"eva-tool.tar.gz":       "tool",
+		"eva-tool-installer.sh": "installer",
+		"eva-infra.tar.gz":      "infra",
+		"eva-solution.tar.gz":   "solution",
+		"eva-offline.tar.gz":    "offline",
 	}
 	for name, contents := range files {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
@@ -185,6 +219,9 @@ artifacts:
   - name: eva-tool
     file: eva-tool.tar.gz
     sha256: %x
+  - name: eva-tool-installer
+    file: eva-tool-installer.sh
+    sha256: %x
   - name: eva-infra
     file: eva-infra.tar.gz
     sha256: %x
@@ -196,6 +233,7 @@ artifacts:
     sha256: %x
 `, gort.GOOS, gort.GOARCH,
 		sha256.Sum256([]byte(files["eva-tool.tar.gz"])),
+		sha256.Sum256([]byte(files["eva-tool-installer.sh"])),
 		sha256.Sum256([]byte(files["eva-infra.tar.gz"])),
 		sha256.Sum256([]byte(files["eva-solution.tar.gz"])),
 		sha256.Sum256([]byte(files["eva-offline.tar.gz"])))
@@ -492,7 +530,7 @@ func TestMaterializedRemoteCacheOnlyUsesRemoteRepository(t *testing.T) {
 	}
 }
 
-func TestEnsureInstallRuntimeRequiresOriginalOfflineReleaseForRemote(t *testing.T) {
+func TestEnsureInstallRuntimeFailsClosedForPreparedRemoteRelease(t *testing.T) {
 	releaseResolved := release.Resolved{
 		Prepared: true,
 		Metadata: release.Metadata{
@@ -505,7 +543,7 @@ func TestEnsureInstallRuntimeRequiresOriginalOfflineReleaseForRemote(t *testing.
 		"remote",
 	)
 	if err == nil ||
-		!strings.Contains(err.Error(), "original Release or Airgap Bundle") {
+		!strings.Contains(err.Error(), "original Release") {
 		t.Fatalf("ensureInstallRuntime() error = %v", err)
 	}
 }

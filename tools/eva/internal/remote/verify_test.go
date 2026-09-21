@@ -79,7 +79,7 @@ func TestVerifyRejectsIncompleteOrMismatchedPreparation(t *testing.T) {
 
 func writeCompletedPreparation(t *testing.T) (string, release.Resolved, PreparationIdentity) {
 	t.Helper()
-	resolved := writeOriginalRelease(t, true)
+	resolved := writeOriginalRelease(t, false)
 	if err := os.WriteFile(filepath.Join(resolved.Root, "checksums.sha256"), []byte("release checksums\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,11 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeYAMLReport(root, "reports/preparation-summary.yaml", map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "target-payload"}}); err != nil {
+	runtimeArtifact, err := BuildRuntimeArtifact(root, identity, writeRuntimeFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeYAMLReport(root, "reports/preparation-summary.yaml", map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "runtime-artifact", "target-payload"}, "runtime_artifact": "prepared", "runtime_version": runtimeArtifact.Manifest.Runtime.Version, "runtime_archive_sha256": runtimeArtifact.Manifest.Runtime.ArchiveSHA256, "runtime_manifest": filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml"))}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeYAMLReport(root, "reports/verification.yaml", map[string]string{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "status": "validated"}); err != nil {
@@ -140,7 +144,16 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 		manifest.Steps[index].Status, manifest.Steps[index].StartedAt, manifest.Steps[index].CompletedAt = StepSucceeded, clock(), clock()
 		manifest.Steps[index].Evidence = []string{stepEvidence(manifest.Steps[index].Name)}
 	}
-	manifest.Steps[10].Evidence = stableEvidence([]string{stepEvidence("write-manifest"), filepath.ToSlash(filepath.Join(targetPayloadDirectory, payload.Manifest.Identity, "manifest.yaml"))})
+	for index, step := range manifest.Steps {
+		if step.Name == "build-runtime-artifact" {
+			manifest.Steps[index].Evidence = stableEvidence([]string{filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml")), filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "checksums.sha256")), filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), runtimeArtifact.Manifest.Runtime.Archive))})
+		}
+	}
+	for index, step := range manifest.Steps {
+		if step.Name == "write-manifest" {
+			manifest.Steps[index].Evidence = stableEvidence([]string{stepEvidence("write-manifest"), filepath.ToSlash(filepath.Join(targetPayloadDirectory, payload.Manifest.Identity, "manifest.yaml"))})
+		}
+	}
 	manifest.Status, manifest.CompletedAt, manifest.UpdatedAt = ManifestSucceeded, clock(), clock()
 	store := NewManifestStore(filepath.Dir(root), clock)
 	if err := store.Save(manifest); err != nil {
@@ -150,8 +163,47 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 }
 
 func stepEvidence(name string) string {
-	values := map[string]string{"validate-release": "reports/release-validation.yaml", "main-preflight": "reports/main-preflight.yaml", "prepare-offline-assets": "cache/manifest.txt", "download-product-images": "cache/images/images-all.txt", "download-infra-images": "cache/images/infra-images-all.txt", "download-models": "cache/models/manifest.txt", "download-qdrant-snapshots": "cache/qdrant-snapshots/manifest.txt", "publish-product-images": "reports/repository-mapping-product.txt", "publish-infra-images": "reports/repository-mapping-infra.txt", "publish-qdrant-snapshots": "reports/qdrant-artifacts.txt", "write-manifest": "reports/preparation-summary.yaml", "verify": "reports/verification.yaml"}
+	values := map[string]string{"validate-release": "reports/release-validation.yaml", "main-preflight": "reports/main-preflight.yaml", "build-runtime-artifact": "runtime/placeholder", "prepare-offline-assets": "cache/manifest.txt", "download-product-images": "cache/images/images-all.txt", "download-infra-images": "cache/images/infra-images-all.txt", "download-models": "cache/models/manifest.txt", "download-qdrant-snapshots": "cache/qdrant-snapshots/manifest.txt", "publish-product-images": "reports/repository-mapping-product.txt", "publish-infra-images": "reports/repository-mapping-infra.txt", "publish-qdrant-snapshots": "reports/qdrant-artifacts.txt", "write-manifest": "reports/preparation-summary.yaml", "verify": "reports/verification.yaml"}
 	return values[name]
+}
+
+func writeRuntimeFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	tools := map[string]string{"ansible-playbook": "venv/bin/ansible-playbook", "helm": "bin/helm", "kubectl": "bin/kubectl", "kustomize": "bin/kustomize", "oras": "bin/oras"}
+	for _, tool := range tools {
+		path := filepath.Join(root, tool)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contents := "schema_version: v1\nversion: 1.0.1\ntools:\n"
+	for name, tool := range tools {
+		contents += "  " + name + ": " + tool + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(root, "runtime.yaml"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func writeRemoteDeliveryMarker(t *testing.T, releaseRoot string, identity PreparationIdentity) {
+	t.Helper()
+	runtimeDigest, err := regularFileSHA256(filepath.Join(releaseRoot, "remote-runtime", "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	payloadDigest, err := regularFileSHA256(filepath.Join(releaseRoot, targetPayloadDirectory, "manifest.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := fmt.Sprintf("schema_version: v1\nrelease_version: %s\nrelease_yaml_sha256: %s\nchecksums_sha256: %s\npayload_manifest_sha256: %s\nruntime_manifest_sha256: %s\nregistry: %s\nproject: %s\n", identity.ReleaseVersion, identity.ReleaseYAMLSHA256, identity.ChecksumsSHA256, payloadDigest, runtimeDigest, identity.RepositoryRegistry, identity.RepositoryProject)
+	if err := os.WriteFile(filepath.Join(releaseRoot, ".eva-remote-release"), []byte(contents), 0o640); err != nil {
+		t.Fatal(err)
+	}
 }
 func preparationFingerprint(t *testing.T, root string) string {
 	t.Helper()

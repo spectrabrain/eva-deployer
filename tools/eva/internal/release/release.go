@@ -61,10 +61,10 @@ type Prepared struct {
 	Metadata Metadata
 }
 
-// ValidateRemotePublish verifies the original-Release constraints required
-// before a Release may be sent to a Remote Target. Transport performs its own
-// source and target validation at a separate trust boundary.
-func ValidateRemotePublish(resolved Resolved) error {
+// ValidateRemotePreparationInput verifies the immutable Base Release accepted
+// by Remote preparation and delivery. Remote generates its Runtime and Target
+// payload separately, so eva-offline is intentionally not part of this role.
+func ValidateRemotePreparationInput(resolved Resolved) error {
 	if resolved.Prepared {
 		return errors.New("Remote publish requires an original Release, not a prepared Release")
 	}
@@ -73,7 +73,19 @@ func ValidateRemotePublish(resolved Resolved) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read Airgap Bundle marker: %w", err)
 	}
+	if _, err := resolved.ArtifactPath("eva-tool-installer"); err != nil {
+		return fmt.Errorf("Remote Base Release eva-tool-installer artifact: %w", err)
+	}
 
+	return nil
+}
+
+// ValidateRemotePublish is retained for callers that explicitly deliver the
+// legacy eva-offline payload (not the Remote Runtime artifact flow).
+func ValidateRemotePublish(resolved Resolved) error {
+	if err := ValidateRemotePreparationInput(resolved); err != nil {
+		return err
+	}
 	offlineCount := 0
 	for _, artifact := range resolved.Metadata.Artifacts {
 		if artifact.Name == "eva-offline" {

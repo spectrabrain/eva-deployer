@@ -6,6 +6,7 @@ usage() {
 Usage:
   scripts/remote/publish_release_to_target.sh \
     --release-dir PATH \
+    --runtime-dir PATH \
     --payload-dir PATH \
     --target HOST \
     [--target-root PATH] \
@@ -19,7 +20,7 @@ Required release contents:
   eva-tool artifact
   eva-infra artifact
   eva-solution artifact
-  eva-offline artifact
+  (Remote Runtime and Target payload are supplied separately)
 
 Default target root:
   /var/lib/eva/inbox/releases
@@ -32,6 +33,7 @@ USAGE
 
 release_dir=""
 payload_dir=""
+runtime_dir=""
 target=""
 target_root="/var/lib/eva/inbox/releases"
 ssh_options=()
@@ -44,6 +46,10 @@ while (($#)); do
       ;;
     --payload-dir)
       payload_dir="${2:-}"
+      shift 2
+      ;;
+    --runtime-dir)
+      runtime_dir="${2:-}"
       shift 2
       ;;
     --target)
@@ -79,6 +85,10 @@ if [[ -z "$payload_dir" ]]; then
   echo "[ERROR] --payload-dir is required" >&2
   exit 2
 fi
+if [[ -z "$runtime_dir" ]]; then
+  echo "[ERROR] --runtime-dir is required" >&2
+  exit 2
+fi
 
 if [[ -z "$target" ]]; then
   echo "[ERROR] --target is required" >&2
@@ -110,6 +120,53 @@ command -v "$RSYNC_CMD" >/dev/null 2>&1 || {
 
 release_dir="$(cd "$release_dir" && pwd)"
 payload_dir="$(cd "$payload_dir" && pwd)"
+runtime_dir="$(cd "$runtime_dir" && pwd)"
+
+validate_runtime_artifact() {
+  local directory="$1" prefix="$2" archive schema version platform release_version registry project descriptor_sha256 actual_descriptor_sha256
+  for required_path in "$directory/manifest.yaml" "$directory/checksums.sha256"; do
+    if [[ ! -f "$required_path" || -L "$required_path" ]]; then
+      echo "[ERROR] ${prefix} Runtime artifact file is invalid: $required_path" >&2
+      return 1
+    fi
+  done
+  if find "$directory" -type l -print -quit | grep -q .; then
+    echo "[ERROR] ${prefix} Runtime artifact contains a symbolic link" >&2; return 1
+  fi
+  archive="$(awk '/^  archive:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
+  schema="$(awk '/^schema_version:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
+  version="$(awk '/^  version:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
+  platform="$(awk '/^  platform:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
+  release_version="$(awk '/^release:/{ x=1; next } /^[^ ]/{x=0} x && /^  version:/{print $2; exit}' "$directory/manifest.yaml")"
+  registry="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  registry:/{print $2; exit}' "$directory/manifest.yaml")"
+  project="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  project:/{print $2; exit}' "$directory/manifest.yaml")"
+  if [[ "$schema" != v1 || -z "$version" || "$platform" != linux/amd64 || -z "$release_version" || -z "$registry" || -z "$project" || ! "$archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$directory/$archive" || -L "$directory/$archive" ]]; then
+    echo "[ERROR] ${prefix} Runtime artifact manifest is invalid" >&2; return 1
+  fi
+  if [[ "$(find "$directory" -mindepth 1 -maxdepth 1 -printf '%f\n' | wc -l)" -ne 3 ]] || ! (cd "$directory" && sha256sum --check --strict checksums.sha256 >/dev/null); then
+    echo "[ERROR] ${prefix} Runtime artifact checksum validation failed" >&2; return 1
+  fi
+  if [[ "$(wc -l < "$directory/checksums.sha256")" -ne 1 ]]; then
+    echo "[ERROR] ${prefix} Runtime artifact checksum manifest is invalid" >&2; return 1
+  fi
+  descriptor_sha256="$(awk '/^  descriptor_sha256:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
+  actual_descriptor_sha256="$(tar -xOzf "$directory/$archive" runtime/runtime.yaml 2>/dev/null | sha256sum | awk '{print $1}')"
+  if [[ ! "$descriptor_sha256" =~ ^[a-f0-9]{64}$ || "$descriptor_sha256" != "$actual_descriptor_sha256" ]]; then
+    echo "[ERROR] ${prefix} Runtime descriptor digest is invalid" >&2; return 1
+  fi
+  while IFS= read -r entry; do
+    case "$entry" in runtime|runtime/runtime.yaml|runtime/bin|runtime/bin/*|runtime/venv|runtime/venv/*) ;; *) echo "[ERROR] unsafe Runtime archive entry: $entry" >&2; return 1 ;; esac
+    if [[ -z "$entry" || "$entry" == /* || "/$entry/" == */../* || "$entry" == *secret* || "$entry" == *credential* || "$entry" == *token* ]]; then
+      echo "[ERROR] unsafe Runtime archive entry: $entry" >&2; return 1
+    fi
+  done < <(tar -tzf "$directory/$archive")
+  if tar -tvzf "$directory/$archive" | awk '$1 !~ /^[-d]/ { exit 1 }'; then :; else
+    echo "[ERROR] Runtime artifact contains a link or special file" >&2; return 1
+  fi
+}
+
+validate_runtime_artifact "$runtime_dir" "source"
+runtime_manifest_sha256="$(sha256sum "$runtime_dir/manifest.yaml" | awk '{print $1}')"
 
 for required_path in \
   "$payload_dir/manifest.yaml" \
@@ -209,9 +266,9 @@ fi
 
 required_artifacts=(
   eva-tool
+  eva-tool-installer
   eva-infra
   eva-solution
-  eva-offline
 )
 
 for required_name in "${required_artifacts[@]}"; do
@@ -353,6 +410,13 @@ REMOTE_PREPARE
   "$target:$target_staging/"
 
 "$RSYNC_CMD" \
+  --archive --delete --delay-updates \
+  --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
+  --rsh="$remote_shell_text" \
+  "$runtime_dir/" \
+  "$target:$target_staging/remote-runtime/"
+
+"$RSYNC_CMD" \
   --archive \
   --delete \
   --delay-updates \
@@ -367,7 +431,8 @@ REMOTE_PREPARE
     "$target_final" \
     "$release_version" \
     "$release_manifest_sha256" \
-    "$checksum_manifest_sha256" <<'REMOTE_PUBLISH'
+    "$checksum_manifest_sha256" \
+    "$runtime_manifest_sha256" <<'REMOTE_PUBLISH'
 set -euo pipefail
 
 target_staging="$1"
@@ -375,6 +440,7 @@ target_final="$2"
 release_version="$3"
 expected_release_sha256="$4"
 expected_checksums_sha256="$5"
+expected_runtime_manifest_sha256="$6"
 
 cleanup() {
   rm -rf -- "$target_staging"
@@ -389,6 +455,23 @@ for command in awk sha256sum tar; do
 done
 
 payload_dir="$target_staging/remote-payload"
+runtime_dir="$target_staging/remote-runtime"
+for required_path in "$runtime_dir/manifest.yaml" "$runtime_dir/checksums.sha256"; do
+  if [[ ! -f "$required_path" || -L "$required_path" ]]; then echo "[ERROR] transferred Runtime artifact file is invalid" >&2; exit 1; fi
+done
+runtime_archive="$(awk '/^  archive:[[:space:]]*/ { print $2; exit }' "$runtime_dir/manifest.yaml")"
+runtime_platform="$(awk '/^  platform:[[:space:]]*/ { print $2; exit }' "$runtime_dir/manifest.yaml")"
+runtime_release_version="$(awk '/^release:/{ x=1; next } /^[^ ]/{x=0} x && /^  version:/{print $2; exit}' "$runtime_dir/manifest.yaml")"
+runtime_registry="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  registry:/{print $2; exit}' "$runtime_dir/manifest.yaml")"
+runtime_project="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  project:/{print $2; exit}' "$runtime_dir/manifest.yaml")"
+runtime_descriptor_sha256="$(awk '/^  descriptor_sha256:[[:space:]]*/ { print $2; exit }' "$runtime_dir/manifest.yaml")"
+if find "$runtime_dir" -type l -print -quit | grep -q . || [[ "$(find "$runtime_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | wc -l)" -ne 3 ]] || [[ "$(wc -l < "$runtime_dir/checksums.sha256")" -ne 1 ]] || [[ "$runtime_platform" != linux/amd64 || "$runtime_release_version" != "$release_version" || -z "$runtime_registry" || -z "$runtime_project" || ! "$runtime_archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$runtime_dir/$runtime_archive" || -L "$runtime_dir/$runtime_archive" ]] || ! (cd "$runtime_dir" && sha256sum --check --strict checksums.sha256 >/dev/null) || [[ ! "$runtime_descriptor_sha256" =~ ^[a-f0-9]{64}$ ]] || [[ "$(tar -xOzf "$runtime_dir/$runtime_archive" runtime/runtime.yaml 2>/dev/null | sha256sum | awk '{print $1}')" != "$runtime_descriptor_sha256" ]]; then echo "[ERROR] transferred Runtime artifact is invalid" >&2; exit 1; fi
+while IFS= read -r runtime_entry; do
+  case "$runtime_entry" in runtime|runtime/runtime.yaml|runtime/bin|runtime/bin/*|runtime/venv|runtime/venv/*) ;; *) echo "[ERROR] unsafe Runtime archive entry: $runtime_entry" >&2; exit 1 ;; esac
+  if [[ -z "$runtime_entry" || "$runtime_entry" == /* || "/$runtime_entry/" == */../* || "$runtime_entry" == *secret* || "$runtime_entry" == *credential* || "$runtime_entry" == *token* ]]; then echo "[ERROR] unsafe Runtime archive entry: $runtime_entry" >&2; exit 1; fi
+done < <(tar -tzf "$runtime_dir/$runtime_archive")
+runtime_manifest_sha256="$(sha256sum "$runtime_dir/manifest.yaml" | awk '{print $1}')"
+if [[ "$runtime_manifest_sha256" != "$expected_runtime_manifest_sha256" ]]; then echo "[ERROR] transferred Runtime artifact digest mismatch" >&2; exit 1; fi
 for required_path in "$payload_dir/manifest.yaml" "$payload_dir/checksums.sha256"; do
   if [[ ! -f "$required_path" || -L "$required_path" ]]; then
     echo "[ERROR] transferred target payload file is invalid: $required_path" >&2
@@ -422,6 +505,10 @@ while IFS= read -r payload_file; do
 done < <(find "$payload_dir" -mindepth 1 -maxdepth 1 -printf '%f\n')
 if [[ "$payload_release_version" != "$release_version" || "$payload_release_digest" != "$expected_release_sha256" || "$payload_checksums_digest" != "$expected_checksums_sha256" ]]; then
   echo "[ERROR] transferred target payload identity does not match Release" >&2
+  exit 1
+fi
+if [[ "$runtime_registry" != "$payload_registry" || "$runtime_project" != "$payload_project" ]]; then
+  echo "[ERROR] transferred Runtime artifact repository identity does not match Target payload" >&2
   exit 1
 fi
 if ! (cd "$payload_dir" && sha256sum --check --strict checksums.sha256 >/dev/null); then
@@ -505,30 +592,15 @@ if ! (
   exit 1
 fi
 
-offline_count="$(
-  awk '
-    /^[[:space:]]*-[[:space:]]+name:[[:space:]]*eva-offline[[:space:]]*$/ {
-      count++
-    }
-    END {
-      print count + 0
-    }
-  ' "$target_staging/release.yaml"
-)"
-
-if [[ "$offline_count" -ne 1 ]]; then
-  echo \
-    "[ERROR] Target Remote Release requires exactly one eva-offline artifact: count=$offline_count" \
-    >&2
-  exit 1
-fi
-
 cat > "$target_staging/.eva-remote-release" <<MARKER
 schema_version: v1
 release_version: $release_version
 release_yaml_sha256: $actual_release_sha256
 checksums_sha256: $actual_checksums_sha256
 payload_manifest_sha256: $payload_manifest_sha256
+runtime_manifest_sha256: $runtime_manifest_sha256
+registry: $payload_registry
+project: $payload_project
 MARKER
 
 chmod 0644 "$target_staging/.eva-remote-release"
@@ -549,6 +621,7 @@ if [[ -d "$target_final" ]]; then
 
   if [[ "$existing_release_sha256" == "$actual_release_sha256" ]] &&
      [[ "$(awk -F': *' '/^payload_manifest_sha256:/ { print $2; exit }' "$target_final/.eva-remote-release")" == "$payload_manifest_sha256" ]] &&
+     [[ "$(awk -F': *' '/^runtime_manifest_sha256:/ { print $2; exit }' "$target_final/.eva-remote-release")" == "$runtime_manifest_sha256" ]] &&
      cmp -s \
        "$target_final/checksums.sha256" \
        "$target_staging/checksums.sha256"; then

@@ -59,6 +59,7 @@ type Preflight struct {
 	HTTP            func(*http.Request) (*http.Response, error)
 	Credential      func(string) bool
 	Docker          DockerProbe
+	PlaneReady      func(string, string) error
 	DockerRoot      string
 	Timeout         time.Duration
 	ExternalSources []string
@@ -73,6 +74,16 @@ func NewPreflight() Preflight {
 	p.HTTP = (&http.Client{Timeout: 5 * time.Second}).Do
 	p.Credential = dockerCredentialPresent
 	p.Docker = probeDocker
+	p.PlaneReady = func(registry, project string) error {
+		receipt, err := LoadHarborReceipt(DefaultHarborReceiptPath)
+		if err != nil {
+			return err
+		}
+		if receipt.Registry != registry || receipt.Project != project {
+			return errors.New("Harbor receipt does not match requested registry or project")
+		}
+		return nil
+	}
 	p.Timeout = 8 * time.Second
 	p.ExternalSources = append([]string(nil), DefaultExternalSources...)
 	return p
@@ -87,6 +98,9 @@ func (p Preflight) Check(ctx context.Context, options PreflightOptions) (Preflig
 	}
 	if options.ReleaseRoot == "" || options.PreparationRoot == "" {
 		return PreflightReport{}, errors.New("preparation storage paths are required")
+	}
+	if p.PlaneReady == nil || p.PlaneReady(options.Registry, options.Project) != nil {
+		return PreflightReport{}, errors.New("Main Preparation Plane is not ready. Run: sudo eva remote bootstrap --registry " + options.Registry)
 	}
 	if p.Timeout <= 0 {
 		p.Timeout = 8 * time.Second

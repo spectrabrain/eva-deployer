@@ -23,14 +23,14 @@ func TestPublishRejectsInvalidTarget(t *testing.T) {
 	}
 }
 
-func TestPublishRejectsPreparedAndOfflineMissingReleases(t *testing.T) {
+func TestPublishRejectsPreparedAndAcceptsBaseReleaseContract(t *testing.T) {
 	service := NewService()
 	if err := service.Publish(PublishOptions{Release: release.Resolved{Prepared: true}, Target: "eva@target"}); err == nil || !strings.Contains(err.Error(), "prepared") {
 		t.Fatalf("Publish(prepared) error = %v", err)
 	}
-	missingOffline := writeOriginalRelease(t, false)
-	if err := service.Publish(PublishOptions{Release: missingOffline, Target: "eva@target"}); err == nil || !strings.Contains(err.Error(), "eva-offline") {
-		t.Fatalf("Publish(missing offline) error = %v", err)
+	baseRelease := writeOriginalRelease(t, false)
+	if err := release.ValidateRemotePreparationInput(baseRelease); err != nil {
+		t.Fatalf("ValidateRemotePreparationInput(base release) error = %v", err)
 	}
 	airgapImported := writeOriginalRelease(t, true)
 	if err := os.WriteFile(filepath.Join(airgapImported.Root, ".eva-airgap-bundle"), []byte("bundle\n"), 0o600); err != nil {
@@ -49,8 +49,11 @@ func TestPublishForwardsReleaseAndVerifiedPayload(t *testing.T) {
 		ResolveBackend: func() (string, error) {
 			return "/tool/libexec/remote-root/scripts/remote/publish_release_to_target.sh", nil
 		},
-		ResolvePayload: func(release.Resolved) (PayloadSource, error) {
+		ResolvePayload: func(release.Resolved, string, string) (PayloadSource, error) {
 			return PayloadSource{Directory: "/preparation/target-payload"}, nil
+		},
+		ResolveRuntime: func(release.Resolved, string, string) (RuntimeArtifactSource, error) {
+			return RuntimeArtifactSource{Directory: "/preparation/runtime"}, nil
 		},
 		Run: func(path string, arguments []string, _ Streams) error {
 			gotPath = path
@@ -58,13 +61,13 @@ func TestPublishForwardsReleaseAndVerifiedPayload(t *testing.T) {
 			return nil
 		},
 	}
-	if err := service.Publish(PublishOptions{Release: resolved, Target: "eva@target.example.internal"}); err != nil {
+	if err := service.Publish(PublishOptions{Release: resolved, Target: "eva@target.example.internal", Registry: "harbor.example.internal:32080"}); err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
 	if gotPath == "" {
 		t.Fatal("backend was not invoked")
 	}
-	want := []string{"--release-dir", resolved.Root, "--payload-dir", "/preparation/target-payload", "--target", "eva@target.example.internal"}
+	want := []string{"--release-dir", resolved.Root, "--runtime-dir", "/preparation/runtime", "--payload-dir", "/preparation/target-payload", "--target", "eva@target.example.internal"}
 	if strings.Join(gotArguments, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("arguments = %#v, want %#v", gotArguments, want)
 	}
@@ -74,10 +77,15 @@ func TestPublishPreservesBackendFailure(t *testing.T) {
 	backendFailure := errors.New("backend failed")
 	service := Service{
 		ResolveBackend: func() (string, error) { return "/backend", nil },
-		ResolvePayload: func(release.Resolved) (PayloadSource, error) { return PayloadSource{Directory: "/payload"}, nil },
-		Run:            func(string, []string, Streams) error { return backendFailure },
+		ResolvePayload: func(release.Resolved, string, string) (PayloadSource, error) {
+			return PayloadSource{Directory: "/payload"}, nil
+		},
+		ResolveRuntime: func(release.Resolved, string, string) (RuntimeArtifactSource, error) {
+			return RuntimeArtifactSource{Directory: "/runtime"}, nil
+		},
+		Run: func(string, []string, Streams) error { return backendFailure },
 	}
-	err := service.Publish(PublishOptions{Release: writeOriginalRelease(t, true), Target: "target.example.internal"})
+	err := service.Publish(PublishOptions{Release: writeOriginalRelease(t, true), Target: "target.example.internal", Registry: "harbor.example.internal:32080"})
 	if !errors.Is(err, backendFailure) {
 		t.Fatalf("Publish() error = %v, want wrapped backend failure", err)
 	}
@@ -87,9 +95,10 @@ func writeOriginalRelease(t *testing.T, includeOffline bool) release.Resolved {
 	t.Helper()
 	root := t.TempDir()
 	files := map[string]string{
-		"eva-tool.tar.gz":     "tool",
-		"eva-infra.tar.gz":    "infra",
-		"eva-solution.tar.gz": "solution",
+		"eva-tool.tar.gz":       "tool",
+		"eva-tool-installer.sh": "installer",
+		"eva-infra.tar.gz":      "infra",
+		"eva-solution.tar.gz":   "solution",
 	}
 	if includeOffline {
 		files["eva-offline.tar.gz"] = "offline"
@@ -101,6 +110,7 @@ func writeOriginalRelease(t *testing.T, includeOffline bool) release.Resolved {
 	}
 	artifacts := []string{
 		artifactYAML("eva-tool", "eva-tool.tar.gz", files["eva-tool.tar.gz"]),
+		artifactYAML("eva-tool-installer", "eva-tool-installer.sh", files["eva-tool-installer.sh"]),
 		artifactYAML("eva-infra", "eva-infra.tar.gz", files["eva-infra.tar.gz"]),
 		artifactYAML("eva-solution", "eva-solution.tar.gz", files["eva-solution.tar.gz"]),
 	}

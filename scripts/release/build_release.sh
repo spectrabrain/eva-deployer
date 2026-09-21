@@ -128,6 +128,8 @@ remote_backend_paths=(
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
   scripts/remote/publish_release_to_target.sh
+  scripts/install/install_docker.sh
+  scripts/install/setup_harbor.sh
   scripts/install/requirements-airgap.txt
   src/infra/version.yaml
   src/solution/version.yaml
@@ -148,6 +150,8 @@ remote_backend_shell_paths=(
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
   scripts/remote/publish_release_to_target.sh
+  scripts/install/install_docker.sh
+  scripts/install/setup_harbor.sh
 )
 
 assert_remote_backend_source() {

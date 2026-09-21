@@ -36,10 +36,13 @@ var (
 		output, err := exec.Command("nvidia-smi", args...).CombinedOutput()
 		return string(output), err
 	}
-	newRemoteService         = remote.NewService
-	newRemotePrepareService  = remote.NewPrepareService
-	newRemoteVerifyService   = remote.NewVerifyService
-	materializeRemotePayload = remote.MaterializeTargetPayload
+	newRemoteService                  = remote.NewService
+	newRemotePrepareService           = remote.NewPrepareService
+	newRemoteVerifyService            = remote.NewVerifyService
+	newRemoteBootstrapService         = remote.NewBootstrapService
+	defaultRemoteBootstrapReceiptPath = remote.DefaultHarborReceiptPath
+	materializeRemotePayload          = remote.MaterializeTargetPayload
+	bootstrapRemoteRuntime            = remote.BootstrapTargetRuntime
 )
 
 type displayedError struct {
@@ -59,7 +62,7 @@ func usage() {
 	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
-	fmt.Println("  remote publish [RELEASE_PATH] --target USER@HOST")
+	fmt.Println("  remote publish [RELEASE_PATH] --registry HOST[:PORT] --target USER@HOST")
 	fmt.Println("  remote prepare [RELEASE_PATH] --registry HOST[:PORT]")
 	fmt.Println("  remote verify [RELEASE_PATH] --registry HOST[:PORT]")
 	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
@@ -147,6 +150,8 @@ func runRemote(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "bootstrap":
+		return runRemoteBootstrap(args[1:])
 	case "publish":
 		return runRemotePublish(args[1:])
 	case "prepare":
@@ -159,9 +164,44 @@ func runRemote(args []string) error {
 }
 
 func remoteUsage() {
-	fmt.Println("Usage: eva remote <publish|prepare|verify> [RELEASE_PATH] --target USER@HOST | --registry HOST[:PORT]")
+	fmt.Println("Usage: eva remote <bootstrap|publish|prepare|verify> [RELEASE_PATH] --target USER@HOST | --registry HOST[:PORT]")
 	fmt.Println("")
 	fmt.Println("Publishes a verified original EVA Release or prepares and verifies Remote repository assets.")
+}
+
+func remoteBootstrapUsage() {
+	fmt.Println("Usage: eva remote bootstrap --registry HOST[:PORT] --yes")
+	fmt.Println("")
+	fmt.Println("Configures the Remote Main Preparation Plane.")
+}
+func runRemoteBootstrap(args []string) error {
+	for _, argument := range args {
+		if argument == "help" || argument == "--help" || argument == "-h" {
+			remoteBootstrapUsage()
+			return nil
+		}
+	}
+	flags := flag.NewFlagSet("remote bootstrap", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	registry := flags.String("registry", "", "repository registry")
+	yes := flags.Bool("yes", false, "confirm Main Preparation Plane changes")
+	external := flags.Bool("external-harbor", false, "use an existing external Harbor")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("remote bootstrap does not accept a Release path")
+	}
+	if *registry == "" {
+		return errors.New("remote bootstrap requires --registry HOST[:PORT]")
+	}
+	receipt, err := newRemoteBootstrapService().Bootstrap(context.Background(), remote.BootstrapOptions{Registry: *registry, Yes: *yes, ExternalHarbor: *external, ReceiptPath: defaultRemoteBootstrapReceiptPath, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
+	if err != nil {
+		return err
+	}
+	fmt.Println("[OK] Remote Preparation Plane ready")
+	fmt.Printf("[INFO] registry=%s project=%s\n", receipt.Registry, receipt.Project)
+	return nil
 }
 
 func remotePrepareUsage() {
@@ -298,7 +338,7 @@ func normalizeRemoteRepositoryArgs(args []string, command string) ([]string, err
 }
 
 func remotePublishUsage() {
-	fmt.Println("Usage: eva remote publish [RELEASE_PATH] --target USER@HOST")
+	fmt.Println("Usage: eva remote publish [RELEASE_PATH] --registry HOST[:PORT] --target USER@HOST")
 	fmt.Println("")
 	fmt.Println("RELEASE_PATH defaults to the current directory.")
 }
@@ -317,6 +357,7 @@ func runRemotePublish(args []string) error {
 	flags := flag.NewFlagSet("remote publish", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	target := flags.String("target", "", "Remote Target in USER@HOST form")
+	registry := flags.String("registry", "", "repository registry")
 	if err := flags.Parse(normalizedArgs); err != nil {
 		return err
 	}
@@ -325,6 +366,9 @@ func runRemotePublish(args []string) error {
 	}
 	if *target == "" {
 		return errors.New("remote publish requires --target USER@HOST")
+	}
+	if *registry == "" {
+		return errors.New("remote publish requires --registry HOST[:PORT]")
 	}
 	releaseInput := "."
 	if flags.NArg() == 1 {
@@ -338,9 +382,10 @@ func runRemotePublish(args []string) error {
 		return err
 	}
 	return newRemoteService().Publish(remote.PublishOptions{
-		Release: resolved,
-		Target:  *target,
-		Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr},
+		Release:  resolved,
+		Target:   *target,
+		Registry: *registry,
+		Streams:  remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr},
 	})
 }
 
@@ -357,7 +402,7 @@ func normalizeRemotePublishArgs(args []string) ([]string, error) {
 			positionals = append(positionals, argument)
 			continue
 		}
-		if argument == "--target" {
+		if argument == "--target" || argument == "--registry" {
 			if index+1 == len(args) {
 				return nil, errors.New("--target requires a value")
 			}
@@ -365,7 +410,7 @@ func normalizeRemotePublishArgs(args []string) ([]string, error) {
 			index++
 			continue
 		}
-		if strings.HasPrefix(argument, "--target=") {
+		if strings.HasPrefix(argument, "--target=") || strings.HasPrefix(argument, "--registry=") {
 			flags = append(flags, argument)
 			continue
 		}
@@ -590,12 +635,12 @@ func runInstall(args []string) error {
 			return err
 		}
 	}
+	if err := ensureInstallRuntimeForRepository(*runtimeRoot, releaseResolved, workspaceResolved.Config.Repository.Mode, workspaceResolved.Config.Repository.Registry, workspaceResolved.Config.Repository.Project); err != nil {
+		return err
+	}
 	remoteCacheRoot, err := materializedRemoteCache(releaseResolved, workspaceResolved)
 	if err != nil {
 		return fmt.Errorf("materialize Remote Target payload: %w", err)
-	}
-	if err := ensureInstallRuntime(*runtimeRoot, releaseResolved, workspaceResolved.Config.Repository.Mode); err != nil {
-		return err
 	}
 	if !releaseResolved.Prepared {
 		prepared, err := release.Prepare(releaseResolved, *installRoot)
@@ -645,17 +690,33 @@ func materializedRemoteCache(releaseResolved release.Resolved, workspaceResolved
 }
 
 func ensureInstallRuntime(root string, releaseResolved release.Resolved, repositoryMode string) error {
+	return ensureInstallRuntimeForRepository(root, releaseResolved, repositoryMode, "", "")
+}
+
+func ensureInstallRuntimeForRepository(root string, releaseResolved release.Resolved, repositoryMode, registry, project string) error {
 	if _, err := runtime.Resolve(root); err == nil {
 		return nil
 	} else if !offlineRepositoryMode(repositoryMode) {
 		return err
+	} else if strings.EqualFold(repositoryMode, "remote") || strings.EqualFold(repositoryMode, "remote_repository") {
+		if _, statErr := os.Lstat(root); statErr == nil {
+			return fmt.Errorf("existing Remote managed Runtime is invalid; refusing to overwrite it: %w", err)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return fmt.Errorf("inspect existing Remote managed Runtime: %w", statErr)
+		}
+		installed, bootstrapErr := bootstrapRemoteRuntime(releaseResolved, registry, project, root)
+		if bootstrapErr != nil {
+			return bootstrapErr
+		}
+		fmt.Printf("runtime bootstrapped: %s (version=%s)\n", installed.Root, installed.Descriptor.Version)
+		return nil
 	}
 	if releaseResolved.Prepared {
-		return errors.New("remote/local install needs eva-offline from the original Release or Airgap Bundle when the managed Runtime is absent")
+		return errors.New("local install needs eva-offline from the original Release or Airgap Bundle when the managed Runtime is absent")
 	}
 	offlinePayload, err := releaseResolved.ArtifactPath("eva-offline")
 	if err != nil {
-		return fmt.Errorf("remote/local install requires an eva-offline artifact: %w", err)
+		return fmt.Errorf("local install requires an eva-offline artifact: %w", err)
 	}
 	installed, err := runtime.BootstrapOffline(offlinePayload, root)
 	if err != nil {

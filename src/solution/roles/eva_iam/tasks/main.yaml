@@ -42,6 +42,25 @@
          | rejectattr('key', 'equalto', 'eva_iam_deploy')
          | list | items2dict }}
 
+- name: Load CLI eva-iam values override
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_iam_cli_values_override: >-
+      {{ lookup('ansible.builtin.file', eva_cli_values_path) | from_yaml }}
+  when: eva_cli_values_path | default('') | length > 0
+
+- name: Resolve effective eva-iam user values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_iam_effective_user_values: >-
+      {{
+        eva_iam_user_values
+        | combine(
+            eva_iam_cli_values_override | default({}),
+            recursive=true
+          )
+      }}
+
 - name: Apply eva-iam deploy options from values file
   ansible.builtin.set_fact:
     "eva_iam_{{ item.key }}": "{{ item.value }}"
@@ -161,6 +180,19 @@
                    ~ (ansible_host | default(inventory_hostname)) ~ '/iam') }}
     eva_iam_values_dest: "{{ (eva_iam_workdir | default(eva_iam_base_dir)) ~ '/eva-iam-host-override.yaml' }}"
 
+- name: Ensure EVA IAM workspace exists on target
+  ansible.builtin.file:
+    path: "{{ eva_iam_workdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy CLI eva-iam chart override to target workspace
+  ansible.builtin.copy:
+    src: "{{ eva_cli_chart_path }}"
+    dest: "{{ eva_iam_workdir }}/cli-chart.tgz"
+    mode: "0644"
+  when: eva_cli_chart_path | default('') | length > 0
+
 # Airgap: the chart comes from a .tgz under install/ instead of the Helm repo, and every
 # image is pulled from Harbor instead of ECR. Same arrangement as eva_app — the offline
 # bundle is expected at the same path on the target (install/ is copied over with the repo).
@@ -203,26 +235,36 @@
 - name: Resolve the eva-iam chart reference to install from
   ansible.builtin.set_fact:
     eva_iam_chart_source: >-
-      {{ eva_iam_offline_chart_tgz if (airgap_mode | bool) else eva_iam_chart_ref }}
-    # A .tgz is already version-pinned; --version on a local file is an error.
+      {{
+        (eva_cli_chart_path | default('') | length > 0)
+        | ternary(
+            eva_iam_workdir ~ '/cli-chart.tgz',
+            eva_iam_offline_chart_tgz if (airgap_mode | bool) else eva_iam_chart_ref
+          )
+      }}
+    # A local .tgz is already version-pinned; --version on a local file is an error.
     eva_iam_chart_version_arg: >-
-      {{ '' if (airgap_mode | bool) else ('--version ' ~ eva_iam_chart_version) }}
+      {{
+        ''
+        if ((eva_cli_chart_path | default('') | length > 0) or (airgap_mode | bool))
+        else ('--version ' ~ eva_iam_chart_version)
+      }}
 
 # NodePort pre-flight has to look at the effective value: values/eva-iam.yaml is the
 # last -f, so an override there wins over the rendered template.
 - name: Resolve effective eva-iam NodePorts
   ansible.builtin.set_fact:
     eva_iam_nodeports: >-
-      {{ [eva_iam_user_values.database.internal.service.nodePort | default(eva_iam_db_nodeport) | int]
-         + ([eva_iam_user_values.redis.external.nodePort | default(eva_iam_redis_nodeport) | int]
-            if (eva_iam_user_values.redis.external.enabled | default(eva_iam_redis_external_enabled) | bool)
+      {{ [eva_iam_effective_user_values.database.internal.service.nodePort | default(eva_iam_db_nodeport) | int]
+         + ([eva_iam_effective_user_values.redis.external.nodePort | default(eva_iam_redis_nodeport) | int]
+            if (eva_iam_effective_user_values.redis.external.enabled | default(eva_iam_redis_external_enabled) | bool)
             else []) }}
-    eva_iam_effective_host: "{{ eva_iam_user_values.config.host | default(eva_iam_host) }}"
-    eva_iam_effective_ingress_path: "{{ eva_iam_user_values.ingress.path | default(eva_iam_ingress_path) }}"
+    eva_iam_effective_host: "{{ eva_iam_effective_user_values.config.host | default(eva_iam_host) }}"
+    eva_iam_effective_ingress_path: "{{ eva_iam_effective_user_values.ingress.path | default(eva_iam_ingress_path) }}"
     eva_iam_effective_public_port: >-
-      {{ eva_iam_user_values.config.publicPort | default(eva_iam_public_port) }}
+      {{ eva_iam_effective_user_values.config.publicPort | default(eva_iam_public_port) }}
     eva_iam_effective_public_url: >-
-      {{ eva_iam_user_values.config.publicUrl | default(eva_iam_public_url) }}
+      {{ eva_iam_effective_user_values.config.publicUrl | default(eva_iam_public_url) }}
 
 - name: Resolve eva-iam generated config for eva-app
   ansible.builtin.set_fact:
@@ -316,7 +358,9 @@
   # Local, idempotent helm config write — run it in --check too, otherwise the
   # chart lookups below have no repo to read from and the dry run fails.
   check_mode: false
-  when: not (airgap_mode | bool)
+  when:
+    - not (airgap_mode | bool)
+    - eva_cli_chart_path | default('') | length == 0
   environment:
     KUBECONFIG: "{{ eva_iam_kubeconfig }}"
 
@@ -324,7 +368,9 @@
   ansible.builtin.command: helm repo update {{ eva_iam_chart_repo_name }}
   changed_when: true
   check_mode: false
-  when: not (airgap_mode | bool)
+  when:
+    - not (airgap_mode | bool)
+    - eva_cli_chart_path | default('') | length == 0
   environment:
     KUBECONFIG: "{{ eva_iam_kubeconfig }}"
 
@@ -333,7 +379,9 @@
     path: "{{ eva_iam_offline_chart_tgz }}"
   register: eva_iam_offline_chart
   check_mode: false
-  when: airgap_mode | bool
+  when:
+    - airgap_mode | bool
+    - eva_cli_chart_path | default('') | length == 0
 
 - name: Assert the offline eva-iam chart is prepared
   ansible.builtin.assert:
@@ -343,7 +391,9 @@
       airgap 모드에서는 {{ eva_iam_offline_chart_tgz }} 파일이 필요합니다.
       인터넷이 가능한 준비 서버에서 scripts/download/download_offline_assets.sh 를 실행한 뒤
       out/cache/ 전체를 대상 서버로 복사하세요.
-  when: airgap_mode | bool
+  when:
+    - airgap_mode | bool
+    - eva_cli_chart_path | default('') | length == 0
 
 # Ask the chart what it accepts instead of keeping a list here — a hardcoded list is
 # exactly the kind of mirror that went stale before.
@@ -359,7 +409,7 @@
 - name: Reject unknown top-level keys in the eva-iam values file
   vars:
     eva_iam_chart_keys: "{{ (eva_iam_chart_defaults.stdout | from_yaml).keys() | list }}"
-    eva_iam_unknown_keys: "{{ eva_iam_user_values.keys() | list | difference(eva_iam_chart_keys) }}"
+    eva_iam_unknown_keys: "{{ eva_iam_effective_user_values.keys() | list | difference(eva_iam_chart_keys) }}"
   ansible.builtin.assert:
     that:
       - eva_iam_unknown_keys | length == 0
@@ -371,12 +421,6 @@
       차트가 받는 키: {{ eva_iam_chart_keys }}
       (의도한 키라면 -e eva_iam_allow_unknown_keys=true 로 통과시킬 수 있습니다)
   when: not (eva_iam_allow_unknown_keys | default(false) | bool)
-
-- name: Ensure EVA IAM workspace exists on target
-  ansible.builtin.file:
-    path: "{{ eva_iam_workdir }}"
-    state: directory
-    mode: "0755"
 
 - name: Export default values.yaml from eva-iam chart
   ansible.builtin.copy:
@@ -415,12 +459,12 @@
 - name: Copy host-specific eva-iam values to remote workspace
   no_log: true
   ansible.builtin.copy:
-    content: "{{ eva_iam_user_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    content: "{{ eva_iam_effective_user_values | to_nice_yaml(indent=2, sort_keys=false) }}"
     dest: "{{ eva_iam_values_dest }}"
     mode: "0600"
   when:
     - not ansible_check_mode
-    - eva_iam_user_values | length > 0
+    - eva_iam_effective_user_values | length > 0
 
 - name: Check k3s API accessibility for eva-iam
   ansible.builtin.command:
@@ -479,7 +523,9 @@
     --create-namespace
     -f {{ eva_iam_workdir }}/values.yaml
     -f {{ eva_iam_workdir }}/eva-iam-k3s-override.yaml
-    {% if eva_iam_user_values | length > 0 %}-f {{ eva_iam_values_dest }}{% endif %}
+    {% if eva_iam_effective_user_values | length > 0 %}-f {{ eva_iam_values_dest }}{% endif %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   register: eva_iam_install
   changed_when: >-
     'has been upgraded' in eva_iam_install.stdout

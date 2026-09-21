@@ -163,7 +163,7 @@ func validateSetExpression(expression string) (string, error) {
 
 func validateComponent(component string, selected map[string]bool) error {
 	if !helmComponent(component) {
-		return fmt.Errorf("field overrides support app, agent, and vision; got %q", component)
+		return fmt.Errorf("field overrides support iam, app, agent, and vision; got %q", component)
 	}
 	if !selected[component] {
 		return fmt.Errorf("component %q must be enabled and selected before applying field overrides", component)
@@ -186,7 +186,7 @@ func singleHelmComponent(selected map[string]bool) (string, bool) {
 
 func helmComponent(component string) bool {
 	switch component {
-	case "app", "agent", "vision":
+	case "iam", "app", "agent", "vision":
 		return true
 	default:
 		return false
@@ -271,6 +271,8 @@ func inspectChartMetadata(chartPath, component string) (ChartMetadata, error) {
 
 func expectedChartName(component string) string {
 	switch component {
+	case "iam":
+		return "eva-iam"
 	case "app":
 		return "eva-app"
 	case "agent":

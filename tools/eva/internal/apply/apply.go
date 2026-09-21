@@ -276,7 +276,7 @@ func overrideVars(record operation.Record, document plan.Document) (map[string]s
 
 func overrideComponent(component string) bool {
 	switch component {
-	case "app", "agent", "vision":
+	case "iam", "app", "agent", "vision":
 		return true
 	default:
 		return false

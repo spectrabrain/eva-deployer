@@ -299,9 +299,9 @@ func runInstall(args []string) error {
 	var components stringList
 	flags.Var(&components, "component", "enabled component to install (repeatable; use all for every enabled component)")
 	var charts, values, sets stringList
-	flags.Var(&charts, "chart", "App, Agent, or Vision chart override in COMPONENT=PATH form")
-	flags.Var(&values, "values", "App, Agent, or Vision values override in COMPONENT=PATH form")
-	flags.Var(&sets, "set", "App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
+	flags.Var(&charts, "chart", "IAM, App, Agent, or Vision chart override in COMPONENT=PATH form")
+	flags.Var(&values, "values", "IAM, App, Agent, or Vision values override in COMPONENT=PATH form")
+	flags.Var(&sets, "set", "IAM, App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
 	if err := flags.Parse(normalizedArgs); err != nil {
 		return err
 	}
@@ -482,9 +482,9 @@ func runPlan(args []string) error {
 	var components stringList
 	flags.Var(&components, "component", "enabled component to plan (repeatable; use all for every enabled component)")
 	var charts, values, sets stringList
-	flags.Var(&charts, "chart", "App, Agent, or Vision chart override in COMPONENT=PATH form")
-	flags.Var(&values, "values", "App, Agent, or Vision values override in COMPONENT=PATH form")
-	flags.Var(&sets, "set", "App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
+	flags.Var(&charts, "chart", "IAM, App, Agent, or Vision chart override in COMPONENT=PATH form")
+	flags.Var(&values, "values", "IAM, App, Agent, or Vision values override in COMPONENT=PATH form")
+	flags.Var(&sets, "set", "IAM, App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
 	if err := flags.Parse(normalizedArgs); err != nil {
 		return err
 	}

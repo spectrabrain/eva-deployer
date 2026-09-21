@@ -272,7 +272,7 @@ func cloneOverrideInputs(sourceDirectory, destinationDirectory string, document 
 
 func retryOverrideComponent(component string) bool {
 	switch component {
-	case "app", "agent", "vision":
+	case "iam", "app", "agent", "vision":
 		return true
 	default:
 		return false

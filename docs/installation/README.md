@@ -13,8 +13,6 @@
 
 각 Repository Runbook은 설치자가 해당 문서 하나만 보고 전체 설치와 검증을 수행할 수 있도록 작성합니다.
 
-`common-installation.md`는 현재 필수 선행 문서가 아닙니다.
-
 자산 준비 작업의 상세 절차는 다음 문서를 참고합니다.
 
 - [Remote Asset Preparation](../preparation/remote-asset-preparation.md)

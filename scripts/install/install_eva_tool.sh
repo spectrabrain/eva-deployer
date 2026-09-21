@@ -43,7 +43,7 @@ while (($#)); do
   esac
 done
 
-for command in awk install mktemp mv readlink sha256sum tar; do
+for command in awk find grep install mktemp mv readlink sha256sum tar; do
   command -v "$command" >/dev/null 2>&1 || { echo "[error] missing command: $command" >&2; exit 1; }
 done
 if [[ $EUID -ne 0 ]]; then
@@ -85,15 +85,112 @@ if [[ -n "$expected_sha256" ]]; then
   fi
 fi
 
-mapfile -t archive_entries < <(tar -tzf "$artifact")
-if [[ ${#archive_entries[@]} -ne 1 || "${archive_entries[0]}" != "bin/eva" ]]; then
-  echo "[error] EVA Tool archive must contain exactly bin/eva" >&2
-  exit 1
-fi
-if ! tar -tvzf "$artifact" | awk 'NR == 1 { valid = ($1 ~ /^-/ && $NF == "bin/eva") } END { exit !(NR == 1 && valid) }'; then
-  echo "[error] EVA Tool archive bin/eva must be a regular file" >&2
-  exit 1
-fi
+remote_backend_paths=(
+  scripts/download/build_nvidia_driver_repo.sh
+  scripts/download/download_ansible_wheels.sh
+  scripts/download/download_display_mode_selector.sh
+  scripts/download/download_eva_images.sh
+  scripts/download/download_eva_models.sh
+  scripts/download/download_infra_images.sh
+  scripts/download/download_n8n_images.sh
+  scripts/download/download_offline_assets.sh
+  scripts/download/download_python_venv_debs.sh
+  scripts/download/download_qdrant_snapshots.sh
+  scripts/lib/load_versions.sh
+  scripts/publish/push_images_to_repository.sh
+  scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/remote/publish_release_to_target.sh
+  scripts/install/requirements-airgap.txt
+  src/infra/version.yaml
+  src/solution/version.yaml
+)
+
+remote_backend_shell_paths=(
+  scripts/download/build_nvidia_driver_repo.sh
+  scripts/download/download_ansible_wheels.sh
+  scripts/download/download_display_mode_selector.sh
+  scripts/download/download_eva_images.sh
+  scripts/download/download_eva_models.sh
+  scripts/download/download_infra_images.sh
+  scripts/download/download_n8n_images.sh
+  scripts/download/download_offline_assets.sh
+  scripts/download/download_python_venv_debs.sh
+  scripts/download/download_qdrant_snapshots.sh
+  scripts/lib/load_versions.sh
+  scripts/publish/push_images_to_repository.sh
+  scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/remote/publish_release_to_target.sh
+)
+
+archive_contains_exactly_one() {
+  local expected="$1" entry count=0
+  for entry in "${archive_entries[@]}"; do
+    [[ "$entry" == "$expected" ]] && ((count += 1))
+  done
+  [[ "$count" -eq 1 ]]
+}
+
+archive_member_is_executable() {
+  local expected="$1"
+  tar -tvzf "$artifact" | awk -v expected="$expected" '
+    $NF == expected {
+      matches += 1
+      executable = (substr($1, 1, 1) == "-" && substr($1, 4, 1) == "x")
+    }
+    END { exit !(matches == 1 && executable) }
+  '
+}
+
+validate_archive_layout() {
+  local entry path type
+
+  mapfile -t archive_entries < <(tar -tzf "$artifact")
+  if ((${#archive_entries[@]} == 0)); then
+    echo "[error] EVA Tool archive is empty" >&2
+    exit 1
+  fi
+  for entry in "${archive_entries[@]}"; do
+    if [[ -z "$entry" || "$entry" == /* || "/$entry/" == */../* ]]; then
+      echo "[error] EVA Tool archive contains an unsafe path: $entry" >&2
+      exit 1
+    fi
+  done
+  if ! archive_contains_exactly_one "bin/eva"; then
+    echo "[error] EVA Tool archive must contain exactly one bin/eva" >&2
+    exit 1
+  fi
+  if ! archive_contains_exactly_one "libexec/remote-root/"; then
+    echo "[error] EVA Tool archive must contain libexec/remote-root" >&2
+    exit 1
+  fi
+  for path in "${remote_backend_paths[@]}"; do
+    if ! archive_contains_exactly_one "libexec/remote-root/$path"; then
+      echo "[error] EVA Tool archive is missing required Remote backend file: $path" >&2
+      exit 1
+    fi
+  done
+  if ! archive_member_is_executable "bin/eva"; then
+    echo "[error] EVA Tool archive bin/eva must be an executable regular file" >&2
+    exit 1
+  fi
+  for path in "${remote_backend_shell_paths[@]}"; do
+    if ! archive_member_is_executable "libexec/remote-root/$path"; then
+      echo "[error] EVA Tool archive backend script must be executable: $path" >&2
+      exit 1
+    fi
+  done
+  while IFS= read -r type; do
+    case "${type:0:1}" in
+      -|d) ;;
+      *)
+        echo "[error] EVA Tool archive contains a link or special file" >&2
+        exit 1
+        ;;
+    esac
+  done < <(tar -tvzf "$artifact")
+}
+
+validate_archive_layout
 
 setup_directory() {
   local path="$1" mode="$2"
@@ -135,14 +232,46 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$staging_dir/bin"
 tar -xzf "$artifact" -C "$staging_dir" --no-same-owner --no-same-permissions
-if [[ ! -f "$staging_dir/bin/eva" || -L "$staging_dir/bin/eva" || ! -x "$staging_dir/bin/eva" ]]; then
+if find "$staging_dir" -xdev \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
+  echo "[error] extracted EVA Tool contains a link or special file" >&2
+  exit 1
+fi
+if find "$staging_dir" -xdev -type f -links +1 -print -quit | grep -q .; then
+  echo "[error] extracted EVA Tool contains a hard-linked file" >&2
+  exit 1
+fi
+if find "$staging_dir" -xdev ! -type f ! -type d -print -quit | grep -q .; then
+  echo "[error] extracted EVA Tool contains an unsupported file type" >&2
+  exit 1
+fi
+if [[ ! -f "$staging_dir/bin/eva" || -L "$staging_dir/bin/eva" ]]; then
   echo "[error] extracted EVA Tool is not an executable regular file" >&2
   exit 1
 fi
+for path in "${remote_backend_paths[@]}"; do
+  if [[ ! -f "$staging_dir/libexec/remote-root/$path" || -L "$staging_dir/libexec/remote-root/$path" ]]; then
+    echo "[error] extracted EVA Tool is missing required Remote backend file: $path" >&2
+    exit 1
+  fi
+done
+find "$staging_dir" -xdev -type d -exec chmod 0755 {} +
+find "$staging_dir" -xdev -type f -exec chmod 0644 {} +
+chmod 0755 "$staging_dir/bin/eva"
+for path in "${remote_backend_shell_paths[@]}"; do
+  chmod 0755 "$staging_dir/libexec/remote-root/$path"
+done
+chown -R root:root "$staging_dir"
+if [[ ! -x "$staging_dir/bin/eva" ]]; then
+  echo "[error] extracted EVA Tool is not an executable regular file" >&2
+  exit 1
+fi
+for path in "${remote_backend_shell_paths[@]}"; do
+  if [[ ! -x "$staging_dir/libexec/remote-root/$path" ]]; then
+    echo "[error] extracted Remote backend script is not executable: $path" >&2
+    exit 1
+  fi
+done
 "$staging_dir/bin/eva" version >/dev/null
-chmod 0755 "$staging_dir" "$staging_dir/bin" "$staging_dir/bin/eva"
-chmod g-s "$staging_dir" "$staging_dir/bin" "$staging_dir/bin/eva"
-chown root:root "$staging_dir" "$staging_dir/bin" "$staging_dir/bin/eva"
 
 if [[ -e "$tool_dir" || -L "$tool_dir" ]]; then
   if [[ -L "$tool_dir" || ! -d "$tool_dir" ]]; then

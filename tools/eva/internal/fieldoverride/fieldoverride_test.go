@@ -69,6 +69,33 @@ func TestParseSupportsAgentAndVision(t *testing.T) {
 	}
 }
 
+func TestParseSupportsIAM(t *testing.T) {
+	root := t.TempDir()
+	chart := writeChart(t, root, "eva-iam", "3.2.0", "3.2.0")
+	values := writeInput(t, root, "iam.yaml", "config:\n  host: iam.example.test\n")
+	request, err := Parse(
+		[]string{"iam=" + chart},
+		[]string{"iam=" + values},
+		[]string{"iam:config.publicPort=443"},
+		map[string]bool{"iam": true},
+	)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	component := request.Components["iam"]
+	if component.Chart == nil || component.Values == nil || len(component.SetValues) != 1 {
+		t.Fatalf("IAM override = %#v", component)
+	}
+	metadata := component.Chart.ChartMetadata
+	if metadata == nil || metadata.ExpectedName != "eva-iam" || !metadata.NameMatches {
+		t.Fatalf("IAM chart metadata = %#v", metadata)
+	}
+	public := request.Public()["iam"]
+	if len(public.SetValues) != 0 || len(public.SetKeys) != 1 {
+		t.Fatalf("public IAM override = %#v", public)
+	}
+}
+
 func TestParseRecordsUnexpectedChartNameWithoutRejectingOverride(t *testing.T) {
 	chart := writeChart(t, t.TempDir(), "customer-app", "1.0.0", "1.0.0")
 	request, err := Parse([]string{"app=" + chart}, nil, nil, map[string]bool{"app": true})

@@ -14,6 +14,7 @@ env/
 
 # Local design notes and implementation planning are not release artifacts.
 docs/todo/
+docs/development/
 
 out/cache/*
 !out/cache/.gitkeep

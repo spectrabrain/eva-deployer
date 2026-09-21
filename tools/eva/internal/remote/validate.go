@@ -36,8 +36,14 @@ func ValidatePreparation(root string, resolved release.Resolved, identity Prepar
 	if err := validateReleaseReport(root, resolved, identity); err != nil {
 		return fmt.Errorf("release report: %w", err)
 	}
+	if err := validatePreflightReport(root, identity); err != nil {
+		return fmt.Errorf("main preflight report: %w", err)
+	}
 	if err := validatePreparationAssets(root, identity); err != nil {
 		return err
+	}
+	if _, err := LoadTargetPayload(TargetPayloadPath(root, identity), identity); err != nil {
+		return fmt.Errorf("target payload: %w", err)
 	}
 	if err := validateSummaryReport(root, identity); err != nil {
 		return fmt.Errorf("preparation summary: %w", err)
@@ -148,6 +154,31 @@ func validateReleaseReport(root string, resolved release.Resolved, identity Prep
 	}
 	return nil
 }
+func validatePreflightReport(root string, identity PreparationIdentity) error {
+	report, err := readReport(root, "reports/main-preflight.yaml")
+	if err != nil {
+		return err
+	}
+	if report["schema_version"] != preflightSchemaVersion || report["release_version"] != identity.ReleaseVersion || report["registry"] != identity.RepositoryRegistry || report["project"] != identity.RepositoryProject {
+		return errors.New("preflight identity does not match preparation identity")
+	}
+	categories, ok := report["categories"].([]any)
+	if !ok || len(categories) != 6 {
+		return errors.New("preflight categories are incomplete")
+	}
+	want := map[string]bool{"host-tools": true, "docker": true, "aws": true, "harbor": true, "storage": true, "external-sources": true}
+	for _, category := range categories {
+		value, ok := category.(string)
+		if !ok || !want[value] {
+			return errors.New("preflight categories are invalid")
+		}
+		delete(want, value)
+	}
+	if len(want) != 0 {
+		return errors.New("preflight categories are incomplete")
+	}
+	return nil
+}
 func validateSummaryReport(root string, identity PreparationIdentity) error {
 	report, err := readReport(root, "reports/preparation-summary.yaml")
 	if err != nil {
@@ -157,10 +188,10 @@ func validateSummaryReport(root string, identity PreparationIdentity) error {
 		return errors.New("summary identity does not match preparation identity")
 	}
 	assets, ok := report["assets"].([]any)
-	if !ok || len(assets) != 5 {
+	if !ok || len(assets) != 6 {
 		return errors.New("summary asset status is incomplete")
 	}
-	want := map[string]bool{"offline": true, "product-images": true, "infra-images": true, "models": true, "qdrant-snapshots": true}
+	want := map[string]bool{"offline": true, "product-images": true, "infra-images": true, "models": true, "qdrant-snapshots": true, "target-payload": true}
 	for _, asset := range assets {
 		value, ok := asset.(string)
 		if !ok || !want[value] {

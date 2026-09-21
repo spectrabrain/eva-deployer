@@ -118,7 +118,14 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 	if err := writeYAMLReport(root, "reports/release-validation.yaml", map[string]string{"release_version": identity.ReleaseVersion, "release_yaml_sha256": identity.ReleaseYAMLSHA256, "checksums_sha256": identity.ChecksumsSHA256, "platform": resolved.Metadata.Platform.OS + "/" + resolved.Metadata.Platform.Arch, "offline_artifact": offlineArtifactName(resolved), "offline_artifact_sha256": offlineArtifactSHA256(resolved)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeYAMLReport(root, "reports/preparation-summary.yaml", map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots"}}); err != nil {
+	if err := writeYAMLReport(root, "reports/main-preflight.yaml", PreflightReport{SchemaVersion: preflightSchemaVersion, Release: identity.ReleaseVersion, Registry: identity.RepositoryRegistry, Project: identity.RepositoryProject, Categories: []string{"host-tools", "docker", "aws", "harbor", "storage", "external-sources"}, CheckedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := BuildTargetPayload(root, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeYAMLReport(root, "reports/preparation-summary.yaml", map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "target-payload"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeYAMLReport(root, "reports/verification.yaml", map[string]string{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "status": "validated"}); err != nil {
@@ -133,6 +140,7 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 		manifest.Steps[index].Status, manifest.Steps[index].StartedAt, manifest.Steps[index].CompletedAt = StepSucceeded, clock(), clock()
 		manifest.Steps[index].Evidence = []string{stepEvidence(manifest.Steps[index].Name)}
 	}
+	manifest.Steps[10].Evidence = stableEvidence([]string{stepEvidence("write-manifest"), filepath.ToSlash(filepath.Join(targetPayloadDirectory, payload.Manifest.Identity, "manifest.yaml"))})
 	manifest.Status, manifest.CompletedAt, manifest.UpdatedAt = ManifestSucceeded, clock(), clock()
 	store := NewManifestStore(filepath.Dir(root), clock)
 	if err := store.Save(manifest); err != nil {
@@ -142,7 +150,7 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 }
 
 func stepEvidence(name string) string {
-	values := map[string]string{"validate-release": "reports/release-validation.yaml", "prepare-offline-assets": "cache/manifest.txt", "download-product-images": "cache/images/images-all.txt", "download-infra-images": "cache/images/infra-images-all.txt", "download-models": "cache/models/manifest.txt", "download-qdrant-snapshots": "cache/qdrant-snapshots/manifest.txt", "publish-product-images": "reports/repository-mapping-product.txt", "publish-infra-images": "reports/repository-mapping-infra.txt", "publish-qdrant-snapshots": "reports/qdrant-artifacts.txt", "write-manifest": "reports/preparation-summary.yaml", "verify": "reports/verification.yaml"}
+	values := map[string]string{"validate-release": "reports/release-validation.yaml", "main-preflight": "reports/main-preflight.yaml", "prepare-offline-assets": "cache/manifest.txt", "download-product-images": "cache/images/images-all.txt", "download-infra-images": "cache/images/infra-images-all.txt", "download-models": "cache/models/manifest.txt", "download-qdrant-snapshots": "cache/qdrant-snapshots/manifest.txt", "publish-product-images": "reports/repository-mapping-product.txt", "publish-infra-images": "reports/repository-mapping-infra.txt", "publish-qdrant-snapshots": "reports/qdrant-artifacts.txt", "write-manifest": "reports/preparation-summary.yaml", "verify": "reports/verification.yaml"}
 	return values[name]
 }
 func preparationFingerprint(t *testing.T, root string) string {

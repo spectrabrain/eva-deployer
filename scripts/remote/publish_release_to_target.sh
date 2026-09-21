@@ -6,6 +6,7 @@ usage() {
 Usage:
   scripts/remote/publish_release_to_target.sh \
     --release-dir PATH \
+    --payload-dir PATH \
     --target HOST \
     [--target-root PATH] \
     [--ssh-option OPTION]
@@ -30,6 +31,7 @@ USAGE
 }
 
 release_dir=""
+payload_dir=""
 target=""
 target_root="/var/lib/eva/inbox/releases"
 ssh_options=()
@@ -38,6 +40,10 @@ while (($#)); do
   case "$1" in
     --release-dir)
       release_dir="${2:-}"
+      shift 2
+      ;;
+    --payload-dir)
+      payload_dir="${2:-}"
       shift 2
       ;;
     --target)
@@ -54,34 +60,39 @@ while (($#)); do
       ;;
     -h|--help)
       usage
-      return 0 2>/dev/null || true
+      exit 0
       ;;
     *)
       echo "[ERROR] unknown option: $1" >&2
       usage >&2
-      return 2 2>/dev/null || true
+      exit 2
       ;;
   esac
 done
 
 if [[ -z "$release_dir" ]]; then
   echo "[ERROR] --release-dir is required" >&2
-  return 2 2>/dev/null || true
+  exit 2
+fi
+
+if [[ -z "$payload_dir" ]]; then
+  echo "[ERROR] --payload-dir is required" >&2
+  exit 2
 fi
 
 if [[ -z "$target" ]]; then
   echo "[ERROR] --target is required" >&2
-  return 2 2>/dev/null || true
+  exit 2
 fi
 
 if [[ "$target" == -* || "$target" =~ [[:space:]] ]]; then
   echo "[ERROR] invalid target: $target" >&2
-  return 2 2>/dev/null || true
+  exit 2
 fi
 
 if [[ "$target_root" != /* || "$target_root" == "/" ]]; then
   echo "[ERROR] --target-root must be an absolute non-root path" >&2
-  return 2 2>/dev/null || true
+  exit 2
 fi
 
 SSH_CMD="${SSH_CMD:-ssh}"
@@ -89,28 +100,69 @@ RSYNC_CMD="${RSYNC_CMD:-rsync}"
 
 command -v "$SSH_CMD" >/dev/null 2>&1 || {
   echo "[ERROR] SSH command not found: $SSH_CMD" >&2
-  return 1 2>/dev/null || true
+  exit 1
 }
 
 command -v "$RSYNC_CMD" >/dev/null 2>&1 || {
   echo "[ERROR] rsync command not found: $RSYNC_CMD" >&2
-  return 1 2>/dev/null || true
+  exit 1
 }
 
 release_dir="$(cd "$release_dir" && pwd)"
+payload_dir="$(cd "$payload_dir" && pwd)"
+
+for required_path in \
+  "$payload_dir/manifest.yaml" \
+  "$payload_dir/checksums.sha256"; do
+  if [[ ! -f "$required_path" || -L "$required_path" ]]; then
+    echo "[ERROR] required target payload file is missing: $required_path" >&2
+    exit 1
+  fi
+done
+if find "$payload_dir" -type l -print -quit | grep -q .; then
+  echo "[ERROR] target payload contains a symbolic link" >&2
+  exit 1
+fi
+payload_archive="$(awk '/^archive:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_schema="$(awk '/^schema_version:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_identity="$(awk '/^identity:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_release_version="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  version:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_registry="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  registry:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_project="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  project:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+if [[ "$payload_schema" != "v1" || ! "$payload_identity" =~ ^[a-f0-9]{32}$ || -z "$payload_release_version" || -z "$payload_registry" || -z "$payload_project" || ! "$payload_archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$payload_dir/$payload_archive" || -L "$payload_dir/$payload_archive" ]]; then
+  echo "[ERROR] target payload archive is invalid" >&2
+  exit 1
+fi
+while IFS= read -r payload_file; do
+  case "$payload_file" in
+    manifest.yaml|checksums.sha256|"$payload_archive") ;;
+    *)
+      echo "[ERROR] target payload has an unexpected file: $payload_file" >&2
+      exit 1
+      ;;
+  esac
+done < <(find "$payload_dir" -mindepth 1 -maxdepth 1 -printf '%f\n')
+if [[ "$(wc -l < "$payload_dir/checksums.sha256")" -ne 1 || ! "$(awk 'NF == 2 { print $1 " " $2 }' "$payload_dir/checksums.sha256")" =~ ^[a-f0-9]{64}\ {1,2}${payload_archive}$ ]]; then
+  echo "[ERROR] target payload checksum manifest is invalid" >&2
+  exit 1
+fi
+if ! (cd "$payload_dir" && sha256sum --check --strict checksums.sha256 >/dev/null); then
+  echo "[ERROR] target payload checksum validation failed" >&2
+      exit 1
+fi
 
 for required_path in \
   "$release_dir/release.yaml" \
   "$release_dir/checksums.sha256"; do
   if [[ ! -f "$required_path" || -L "$required_path" ]]; then
     echo "[ERROR] required regular file is missing: $required_path" >&2
-    return 1 2>/dev/null || true
+    exit 1
   fi
 done
 
 if find "$release_dir" -type l -print -quit | grep -q .; then
   echo "[ERROR] Release directory contains a symbolic link" >&2
-  return 1 2>/dev/null || true
+  exit 1
 fi
 
 release_version="$(
@@ -127,7 +179,7 @@ release_version="$(
 
 if [[ ! "$release_version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.-]+)?$ ]]; then
   echo "[ERROR] invalid or missing Release version: $release_version" >&2
-  return 1 2>/dev/null || true
+  exit 1
 fi
 
 mapfile -t artifact_entries < <(
@@ -152,7 +204,7 @@ mapfile -t artifact_entries < <(
 
 if ((${#artifact_entries[@]} == 0)); then
   echo "[ERROR] release.yaml has no artifacts" >&2
-  return 1 2>/dev/null || true
+  exit 1
 fi
 
 required_artifacts=(
@@ -177,13 +229,13 @@ for required_name in "${required_artifacts[@]}"; do
             "$artifact_file" == ../* ||
             "$artifact_file" == */../* ]]; then
         echo "[ERROR] unsafe artifact path: $artifact_file" >&2
-        return 1 2>/dev/null || true
+        exit 1
       fi
 
       if [[ ! -f "$release_dir/$artifact_file" ||
             -L "$release_dir/$artifact_file" ]]; then
         echo "[ERROR] artifact is missing: $artifact_name ($artifact_file)" >&2
-        return 1 2>/dev/null || true
+        exit 1
       fi
 
       break
@@ -192,7 +244,7 @@ for required_name in "${required_artifacts[@]}"; do
 
   if [[ "$found" != true ]]; then
     echo "[ERROR] Remote Release is missing artifact: $required_name" >&2
-    return 1 2>/dev/null || true
+    exit 1
   fi
 done
 
@@ -208,7 +260,7 @@ manifest_files="$(
 
 if [[ -z "$manifest_files" ]]; then
   echo "[ERROR] checksums.sha256 is empty" >&2
-  return 1 2>/dev/null || true
+  exit 1
 fi
 
 while IFS= read -r manifest_file; do
@@ -217,13 +269,13 @@ while IFS= read -r manifest_file; do
         "$manifest_file" == ../* ||
         "$manifest_file" == */../* ]]; then
     echo "[ERROR] unsafe checksum path: $manifest_file" >&2
-    return 1 2>/dev/null || true
+    exit 1
   fi
 
   if [[ ! -f "$release_dir/$manifest_file" ||
         -L "$release_dir/$manifest_file" ]]; then
     echo "[ERROR] checksum input is missing: $manifest_file" >&2
-    return 1 2>/dev/null || true
+    exit 1
   fi
 done <<< "$manifest_files"
 
@@ -234,7 +286,7 @@ if (
   echo "[OK] Source Release checksum verified"
 else
   echo "[ERROR] Source Release checksum validation failed" >&2
-  return 1 2>/dev/null || true
+  exit 1
 fi
 
 release_manifest_sha256="$(
@@ -300,6 +352,15 @@ REMOTE_PREPARE
   "$release_dir/" \
   "$target:$target_staging/"
 
+"$RSYNC_CMD" \
+  --archive \
+  --delete \
+  --delay-updates \
+  --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
+  --rsh="$remote_shell_text" \
+  "$payload_dir/" \
+  "$target:$target_staging/remote-payload/"
+
 "$SSH_CMD" "${ssh_options[@]}" "$target" \
   bash -s -- \
     "$target_staging" \
@@ -320,12 +381,68 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for command in awk sha256sum; do
+for command in awk sha256sum tar; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "[ERROR] required Target command not found: $command" >&2
     exit 1
   }
 done
+
+payload_dir="$target_staging/remote-payload"
+for required_path in "$payload_dir/manifest.yaml" "$payload_dir/checksums.sha256"; do
+  if [[ ! -f "$required_path" || -L "$required_path" ]]; then
+    echo "[ERROR] transferred target payload file is invalid: $required_path" >&2
+    exit 1
+  fi
+done
+if find "$payload_dir" -type l -print -quit | grep -q .; then
+  echo "[ERROR] transferred target payload contains a symbolic link" >&2
+  exit 1
+fi
+payload_archive="$(awk '/^archive:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_schema="$(awk '/^schema_version:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_identity="$(awk '/^identity:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_release_version="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  version:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_release_digest="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  release_yaml_sha256:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_checksums_digest="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  checksums_sha256:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_registry="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  registry:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_project="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  project:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+if [[ "$payload_schema" != "v1" || ! "$payload_identity" =~ ^[a-f0-9]{32}$ || -z "$payload_registry" || -z "$payload_project" || ! "$payload_archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$payload_dir/$payload_archive" || -L "$payload_dir/$payload_archive" ]]; then
+  echo "[ERROR] transferred target payload archive is invalid" >&2
+  exit 1
+fi
+while IFS= read -r payload_file; do
+  case "$payload_file" in
+    manifest.yaml|checksums.sha256|"$payload_archive") ;;
+    *)
+      echo "[ERROR] transferred target payload has an unexpected file: $payload_file" >&2
+      exit 1
+      ;;
+  esac
+done < <(find "$payload_dir" -mindepth 1 -maxdepth 1 -printf '%f\n')
+if [[ "$payload_release_version" != "$release_version" || "$payload_release_digest" != "$expected_release_sha256" || "$payload_checksums_digest" != "$expected_checksums_sha256" ]]; then
+  echo "[ERROR] transferred target payload identity does not match Release" >&2
+  exit 1
+fi
+if ! (cd "$payload_dir" && sha256sum --check --strict checksums.sha256 >/dev/null); then
+  echo "[ERROR] Target payload checksum validation failed" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "$payload_dir/checksums.sha256")" -ne 1 || ! "$(awk 'NF == 2 { print $1 " " $2 }' "$payload_dir/checksums.sha256")" =~ ^[a-f0-9]{64}\ {1,2}${payload_archive}$ ]]; then
+  echo "[ERROR] Target payload checksum manifest is invalid" >&2
+  exit 1
+fi
+while IFS= read -r payload_entry; do
+  if [[ -z "$payload_entry" || "$payload_entry" == /* || "/$payload_entry/" == */../* || "$payload_entry" != cache/* || "$payload_entry" == cache/images/* || "$payload_entry" == cache/qdrant-snapshots/* || "$payload_entry" == *credential* || "$payload_entry" == *secret* || "$payload_entry" == *token* ]]; then
+    echo "[ERROR] unsafe target payload archive entry: $payload_entry" >&2
+    exit 1
+  fi
+done < <(tar -tzf "$payload_dir/$payload_archive")
+if tar -tvzf "$payload_dir/$payload_archive" | awk '$1 !~ /^[-d]/ { exit 1 }'; then :; else
+  echo "[ERROR] target payload archive contains a link or special file" >&2
+  exit 1
+fi
+payload_manifest_sha256="$(sha256sum "$payload_dir/manifest.yaml" | awk '{print $1}')"
 
 for required_path in \
   "$target_staging/release.yaml" \
@@ -411,6 +528,7 @@ schema_version: v1
 release_version: $release_version
 release_yaml_sha256: $actual_release_sha256
 checksums_sha256: $actual_checksums_sha256
+payload_manifest_sha256: $payload_manifest_sha256
 MARKER
 
 chmod 0644 "$target_staging/.eva-remote-release"
@@ -430,6 +548,7 @@ if [[ -d "$target_final" ]]; then
   fi
 
   if [[ "$existing_release_sha256" == "$actual_release_sha256" ]] &&
+     [[ "$(awk -F': *' '/^payload_manifest_sha256:/ { print $2; exit }' "$target_final/.eva-remote-release")" == "$payload_manifest_sha256" ]] &&
      cmp -s \
        "$target_final/checksums.sha256" \
        "$target_staging/checksums.sha256"; then

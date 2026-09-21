@@ -1,21 +1,89 @@
 # EVA Remote Repository Runbook
 
-> 작성 중
+Remote mode installs EVA on a Target that uses Main Harbor and the installation
+assets prepared by the Main server. This document is for the Target installation
+operator.
 
-이 문서는 `repository.mode: remote` 환경의 전체 설치 절차를 제공할 예정입니다.
+> Status: Remote Target installation is not yet approved for live deployment.
+> Live Main Harbor and Target E2E validation is still required before production use.
 
-Remote Target은 외부 Registry, AWS, Hugging Face 및 외부 Helm Repository에 직접 접근하지 않습니다. Main Harbor와 Main 서버가 준비한 설치 자산만 사용합니다.
+## 1. Prerequisites
 
-Main 준비 완료 확인, Workspace 작성, Target 설치, 공급 경로 검증, 재실행 및 장애 조치를 이 문서 하나에 포함합니다.
+Before starting, confirm that the Main preparation and Release publication have
+been completed by the approved release process. Work from the published original
+Release directory on the Target, and use a Workspace configured for `remote`
+repository mode.
 
-구현 설계는 ../architecture/remote-mode-implementation-design.md을 참고합니다.
+The Target must be able to reach its approved Main Harbor endpoint. It must not
+use public registries, AWS, S3, Hugging Face, or external Helm repositories for
+the installation.
 
-Main 서버에서는 Target 전달 전에 준비 결과를 확인합니다.
+## 2. Workspace
 
-```bash
-sudo eva remote prepare . --registry <main-harbor>
-sudo eva remote verify . --registry <main-harbor>
-sudo eva remote publish . --target <user@target>
+Create the normal EVA Workspace and set the repository inputs in
+`site-values/site.yaml`.
+
+```yaml
+site:
+  id: <site-id>
+
+repository:
+  mode: remote
+  registry: <main-harbor-host:port>
+  project: eva
+
+components:
+  infra: true
+  iam: true
+  agent: true
+  vision: true
+  app: true
+  n8n: false
 ```
 
-이 검증은 local preparation evidence를 대상으로 하며, Main Harbor live availability는 E2E에서 확인합니다.
+Keep site-specific inventory, TLS material, and approved secrets in the normal
+Workspace locations. Do not put them in the Release directory.
+
+## 3. Validate and install
+
+Run the following commands from the published Release directory.
+
+```bash
+cd /var/lib/eva/inbox/releases/<version>
+
+sudo eva workspace validate \
+  --workspace <workspace>
+
+sudo eva preflight gpu
+
+sudo eva preflight argocd \
+  --workspace <workspace>
+
+sudo eva install . \
+  --workspace <workspace> \
+  --yes
+
+sudo eva check --verbose
+sudo eva status
+```
+
+`eva preflight argocd` is required when an existing Argo CD management handoff
+must be checked before installation. Follow its approval prompts rather than
+editing Argo CD state directly.
+
+## 4. Re-run and troubleshooting
+
+If an EVA operation fails after making a safe correction, inspect its status and
+use the normal retry flow.
+
+```bash
+sudo eva status
+sudo eva retry --yes
+```
+
+For a Workspace error, correct the Workspace input and run `eva workspace
+validate` again. For a Release integrity error, stop and obtain the approved
+published Release again; do not modify artifact files in place.
+
+Main-side asset preparation is described in
+[Remote Asset Preparation](../preparation/remote-asset-preparation.md).

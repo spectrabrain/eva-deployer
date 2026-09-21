@@ -1,26 +1,72 @@
 # EVA Remote Asset Preparation
 
-> 작성 중
+This guide is for the Main operator who prepares Remote repository assets and
+publishes the original Release to a Target.
 
-이 문서는 Remote Repository 설치를 위해 Main 서버에서 수행하는 자산 준비 절차를 제공할 예정입니다.
+## 1. Purpose
 
-대상 범위:
+`eva remote prepare` prepares the Remote assets for one verified original
+Release. `eva remote verify` validates the resulting local preparation evidence.
+`eva remote publish` sends the verified original Release to the Target.
 
-- Release 및 version 검증
-- Container image 다운로드와 Main Harbor publish
-- EVA Agent 및 vLLM model cache 준비
-- Qdrant snapshot OCI artifact publish
-- Runtime 및 OS package payload 준비
-- 준비 결과 manifest와 무결성 검증
+Before any download or publish, `eva remote prepare` checks the Main server's
+required tools, Docker daemon, AWS credentials, Main Harbor, and preparation
+storage. A failed check stops preparation without downloading or publishing.
 
-Target 설치 절차는 [Remote Repository Runbook](../installation/remote-repository-runbook.md)을 사용합니다.
+## 2. Prerequisites
 
-정상 준비 흐름은 다음과 같습니다.
+Use an original EVA Release on a Main server that can reach the required source
+services. The Release must include its normal checksum manifest and required
+offline artifact. Use an approved Main Harbor endpoint.
+
+Current implementation status: Remote preparation and Release publication CLI
+commands are implemented. Live Main Harbor and Target E2E validation remains
+required before deployment.
+
+## 3. Verify the Release
+
+From the original Release directory, verify its integrity before preparation.
 
 ```bash
-sudo eva remote prepare . --registry <main-harbor>
-sudo eva remote verify . --registry <main-harbor>
-sudo eva remote publish . --target <user@target>
+eva verify .
 ```
 
-`remote verify`는 준비 디렉터리의 local evidence만 읽어 검증합니다. Main Harbor의 현재 가용성은 별도 E2E 절차에서 확인합니다.
+Do not use a prepared Release or an imported Airgap Bundle as this command's
+input.
+
+## 4. Prepare Remote assets
+
+Prepare all supported Remote assets for the Main Harbor project.
+
+```bash
+sudo eva remote prepare . \
+  --registry <main-harbor>
+```
+
+The command records the preparation result. If it fails, inspect the reported
+manifest path and the CLI error before attempting a later approved recovery
+procedure.
+
+## 5. Verify the preparation result
+
+```bash
+sudo eva remote verify . \
+  --registry <main-harbor>
+```
+
+This command verifies local preparation evidence. It does not download, publish,
+or query live Harbor availability.
+
+## 6. Publish the Release to the Target
+
+After successful preparation verification, publish the original Release.
+
+```bash
+sudo eva remote publish . \
+  --target <user@target>
+```
+
+## 7. Next step
+
+Continue on the Target with the
+[Remote Repository Runbook](../installation/remote-repository-runbook.md).

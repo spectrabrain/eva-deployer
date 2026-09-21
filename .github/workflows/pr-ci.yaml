@@ -113,6 +113,9 @@ jobs:
       - name: Test Remote Release transport contract
         run: scripts/test/test_remote_release_transport.sh
 
+      - name: Test Remote E2E static readiness contract
+        run: scripts/test/test_remote_e2e_readiness_contract.sh
+
       - name: Test EVA Tool archive layout and installer contract
         run: scripts/test/test_eva_tool_archive_layout.sh
 

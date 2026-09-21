@@ -281,12 +281,13 @@ preparation manifest schema, Release version, digest 정합성
 
 ### 4.3 `eva remote publish`
 
-검증된 원본 Release를 Target으로 전달한다.
+검증된 원본 Release와 Release identity에 결합된 non-Harbor payload를 Target으로 함께 전달한다.
 
 필수 계약:
 
 ```text
 Source Release checksum 검증
+payload manifest, checksum, Release identity와 archive entry 재검증
 정확히 하나의 eva-offline artifact 요구
 symlink와 unsafe path 거부
 Target staging directory로 전송
@@ -964,17 +965,12 @@ backend 대상 script의 source/exec reference 수집
 
 ### 13.2 `eva-offline` 생성 주체
 
-`eva remote prepare`가 최종 Target에 제공할 Runtime/package/model payload를 어떤 Release artifact에 materialize할지 명확히 해야 한다.
-
-현재 Release builder는 `--offline-root`가 제공될 때만 `eva-offline`을 만든다. 따라서 다음 중 하나로 계약을 확정해야 한다.
-
-```text
-A. Main preparation이 offline-root를 완성한 뒤 Remote Release를 build
-B. 배포된 Base Release에 이미 eva-offline이 포함되고 prepare는 외부 자산만 게시
-C. preparation이 versioned Remote payload artifact를 별도로 생성하고 Release manifest에 연결
-```
-
-첫 구현에서 이 결정을 숨긴 채 기존 script만 호출하지 않는다. `remote publish`는 원본 Release에 정확히 하나의 `eva-offline` artifact가 있어야 한다는 기존 계약을 유지한다.
+결정: original Release의 `eva-offline`은 Runtime bootstrap용으로 유지하고,
+`eva remote prepare`는 versioned Remote Target payload를 별도로 생성한다. payload는
+Release manifest를 변경하지 않으며 publish staging에서 original Release와 함께
+검증·게시된다. Target은 설치 전에 payload를 기존 cache consumer가 읽는 managed
+cache로 materialize한다. 따라서 `remote publish`의 original Release에 정확히 하나의
+`eva-offline`이 필요하다는 계약도 유지된다.
 
 ### 13.3 Runtime tool dependency
 
@@ -1017,6 +1013,57 @@ root 실행이 불필요한 단계와 필요한 단계를 분리
 
 credential 값을 CLI argument, log, manifest에 노출하지 않는다.
 
+### 13.6 R8-6 E2E readiness audit 결과
+
+R8-6의 static contract는 코드와 문서의 교차 계약만 점검한다. 실제
+Release, Main host, Harbor, Target readiness는 개발 검증 문서
+[`remote-live-e2e-readiness.md`](../development/remote-live-e2e-readiness.md)에
+별도로 기록한다.
+
+#### [DECISION] R8-8 Main preparation preflight
+
+`eva remote prepare`는 첫 download backend 전에 `main-preflight` manifest step을
+실행한다. 이 단계는 host tool executable/version probe, Docker daemon의 amd64 및 data
+root, 현재 실행 주체의 AWS STS credential, registry protocol·matching Docker credential,
+preparation/Docker storage, 그리고 현재 backend source의 bounded TCP probe를 확인한다.
+probe는 pull, login, push, project 생성 또는 credential 복사를 수행하지 않는다.
+
+성공 결과는 credential-free `reports/main-preflight.yaml`에만 기록한다. 실패는
+sanitized error로 manifest를 failed 처리하고 모든 download/push backend 실행 전에
+중단한다. succeeded preparation 재사용은 이미 검증된 local evidence만 재검증하며,
+새 live preflight를 수행하지 않는다. 실제 live readiness 자체는 여전히 E2E evidence가
+필요하다.
+
+#### [DECISION] R8-7 Target payload supply contract
+
+Remote prepare는 managed preparation root에서 별도 versioned payload archive를
+생성한다. original Release의 checksum 또는 `eva-offline`은 사후 변경하지 않는다.
+이 선택은 Cloud Release와 registry별 Remote preparation 결과를 분리하면서 기존
+`eva_cache_root` consumer를 그대로 재사용한다.
+
+payload identity는 schema version, Release version, `release.yaml` 및
+`checksums.sha256` SHA-256, registry/project, platform을 결합한 digest다. archive와
+content digest, category는 payload manifest와 checksum manifest로 검증한다. 같은
+Release version이라도 다른 registry/project identity는 같은 Target final Release를
+덮어쓰지 않는다.
+
+포함 범위는 offline package/host asset, chart·plugin·helper, Agent/vLLM model cache와
+그 consumer metadata다. container image archive와 Qdrant snapshot file은 포함하지
+않으며 Main Harbor OCI 경로를 유지한다. credential, workspace, inventory, site values,
+log, temporary work 및 secret-like path는 payload 생성과 검증에서 거부한다.
+
+`remote prepare`가 archive를 만들고 `remote verify`가 read-only로 재검증한다.
+`remote publish`는 original Release와 payload를 하나의 Target staging area에서 모두
+검증한 뒤 atomic rename한다. Target `eva install`은 Remote mode에서만 archive를
+staging extract·재검증 후 versioned managed cache로 atomic materialize하고, 그 cache를
+기존 `eva_cache_root`와 Agent cache 변수로 전달한다. 동일 identity는 재사용하며,
+손상 또는 다른 identity의 기존 cache/final Release는 삭제하거나 덮어쓰지 않는다.
+
+Airgap은 향후 동일한 cache consumer를 사용하되, bundle import가 producer가 된다.
+Remote payload의 source는 Main preparation이며 Target은 외부 APT, S3, Hugging Face,
+Docker Hub 또는 외부 Chart repository로 fallback하지 않는다. 실제 Main/Harbor/Target
+live E2E는 여전히 수행 전이다.
+
 ---
 
 ## 14. 구현 순서와 완료 marker
@@ -1028,7 +1075,7 @@ R8-3  preparation manifest와 step runner
 R8-4  eva remote prepare
 R8-5  eva remote verify
 R8-6  Remote preparation/runbook 정리
-R8-7  외부 차단 Remote E2E
+R8-7  Remote Target payload supply contract
 A1    동일 consumer 기반 Airgap 전환
 ```
 

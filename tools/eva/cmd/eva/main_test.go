@@ -22,7 +22,7 @@ import (
 )
 
 func TestRunRemoteHelpAndUnknownCommand(t *testing.T) {
-	for _, arguments := range [][]string{{"remote"}, {"remote", "help"}, {"remote", "--help"}, {"remote", "publish", "--help"}} {
+	for _, arguments := range [][]string{{"remote"}, {"remote", "help"}, {"remote", "--help"}, {"remote", "publish", "--help"}, {"remote", "prepare", "--help"}, {"remote", "verify", "--help"}} {
 		if err := run(arguments); err != nil {
 			t.Fatalf("run(%q) error = %v", arguments, err)
 		}
@@ -112,6 +112,40 @@ func TestNormalizeRemotePrepareArgsAcceptsBothPositionalPlacements(t *testing.T)
 		if _, err := normalizeRemotePrepareArgs(input); err == nil {
 			t.Fatalf("normalizeRemotePrepareArgs(%q) succeeded", input)
 		}
+	}
+}
+
+func TestNormalizeRemoteVerifyArgsMatchesPrepareContract(t *testing.T) {
+	for _, input := range [][]string{{"/release", "--registry", "harbor.example.internal:32080"}, {"--registry", "harbor.example.internal:32080", "/release"}} {
+		prepare, prepareErr := normalizeRemotePrepareArgs(input)
+		verify, verifyErr := normalizeRemoteRepositoryArgs(input, "verify")
+		if prepareErr != nil || verifyErr != nil || !reflect.DeepEqual(prepare, verify) {
+			t.Fatalf("normalization mismatch for %q: prepare=%q/%v verify=%q/%v", input, prepare, prepareErr, verify, verifyErr)
+		}
+	}
+	for _, input := range [][]string{{"--registry"}, {"--unknown", "x"}, {"one", "two", "--registry", "registry"}} {
+		if _, err := normalizeRemoteRepositoryArgs(input, "verify"); err == nil {
+			t.Fatalf("verify normalization accepted %q", input)
+		}
+	}
+}
+
+func TestRunRemoteVerifyForwardsResolvedReleaseWithoutBackend(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	previous := newRemoteVerifyService
+	defer func() { newRemoteVerifyService = previous }()
+	var received remotecommand.VerifyOptions
+	newRemoteVerifyService = func() remotecommand.VerifyService {
+		return remotecommand.VerifyService{VerifyFunc: func(options remotecommand.VerifyOptions) (remotecommand.VerifyResult, error) {
+			received = options
+			return remotecommand.VerifyResult{ReleaseVersion: options.Release.Metadata.Version, Registry: options.Registry, Project: "eva", ManifestPath: "/fixture/manifest.yaml"}, nil
+		}}
+	}
+	if err := run([]string{"remote", "verify", "--registry", "harbor.example.internal:32080", releaseRoot}); err != nil {
+		t.Fatalf("run(remote verify) error = %v", err)
+	}
+	if received.Release.Root != releaseRoot || received.Registry != "harbor.example.internal:32080" {
+		t.Fatalf("verify options = %#v", received)
 	}
 }
 

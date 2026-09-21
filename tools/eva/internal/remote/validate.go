@@ -3,6 +3,7 @@ package remote
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,7 +17,8 @@ import (
 var imageReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@-]*$`)
 
 // ValidatePreparation is intentionally read-only. It is shared by prepare's
-// final step and the later verify command.
+// final step and the later verify command. The completed-manifest wrapper adds
+// the final verification report after it has been written by prepare.
 func ValidatePreparation(root string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
 	if err := EnsureIdentity(manifest, identity); err != nil {
 		return err
@@ -31,6 +33,50 @@ func ValidatePreparation(root string, resolved release.Resolved, identity Prepar
 	if err := release.ValidateRemotePublish(resolved); err != nil {
 		return err
 	}
+	if err := validateReleaseReport(root, resolved, identity); err != nil {
+		return fmt.Errorf("release report: %w", err)
+	}
+	if err := validatePreparationAssets(root, identity); err != nil {
+		return err
+	}
+	if err := validateSummaryReport(root, identity); err != nil {
+		return fmt.Errorf("preparation summary: %w", err)
+	}
+	return nil
+}
+
+// ValidatePreparationAssets is the same read-only domain validator used while
+// prepare is assembling its summary. It deliberately does not require the
+// summary or final verification report to exist yet.
+func ValidatePreparationAssets(root string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+	if err := EnsureIdentity(manifest, identity); err != nil {
+		return err
+	}
+	if err := release.ValidateRemotePublish(resolved); err != nil {
+		return err
+	}
+	if err := validateReleaseReport(root, resolved, identity); err != nil {
+		return fmt.Errorf("release report: %w", err)
+	}
+	return validatePreparationAssets(root, identity)
+}
+
+// ValidateCompletedPreparation is the read-only contract for a previously
+// completed preparation. It never writes the manifest or reports.
+func ValidateCompletedPreparation(root string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+	if err := validateCompletedManifest(manifest, identity); err != nil {
+		return err
+	}
+	if err := ValidatePreparation(root, resolved, identity, manifest); err != nil {
+		return err
+	}
+	if err := validateVerificationReport(root, identity); err != nil {
+		return fmt.Errorf("verification report: %w", err)
+	}
+	return nil
+}
+
+func validatePreparationAssets(root string, identity PreparationIdentity) error {
 	if err := ValidateOfflineAssets(root); err != nil {
 		return err
 	}
@@ -56,6 +102,115 @@ func ValidatePreparation(root string, resolved release.Resolved, identity Prepar
 		return err
 	}
 	return nil
+}
+
+func validateCompletedManifest(manifest Manifest, identity PreparationIdentity) error {
+	if err := EnsureIdentity(manifest, identity); err != nil {
+		return err
+	}
+	if manifest.Status != ManifestSucceeded {
+		if manifest.Status == ManifestFailed {
+			for _, step := range manifest.Steps {
+				if step.Status == StepFailed {
+					return fmt.Errorf("preparation failed at step %q", step.Name)
+				}
+			}
+		}
+		return fmt.Errorf("preparation manifest is %q, not succeeded", manifest.Status)
+	}
+	if manifest.CompletedAt.IsZero() {
+		return errors.New("succeeded preparation manifest is missing completed_at")
+	}
+	if len(manifest.Steps) != len(DefaultStepNames) {
+		return errors.New("preparation manifest step list does not match current contract")
+	}
+	for index, step := range manifest.Steps {
+		if step.Name != DefaultStepNames[index] || step.Status != StepSucceeded {
+			return fmt.Errorf("preparation step %q is not succeeded", step.Name)
+		}
+		if len(step.Evidence) == 0 {
+			return fmt.Errorf("preparation step %q has no evidence", step.Name)
+		}
+	}
+	return nil
+}
+
+func validateReleaseReport(root string, resolved release.Resolved, identity PreparationIdentity) error {
+	report, err := readReport(root, "reports/release-validation.yaml")
+	if err != nil {
+		return err
+	}
+	want := map[string]string{"release_version": identity.ReleaseVersion, "release_yaml_sha256": identity.ReleaseYAMLSHA256, "checksums_sha256": identity.ChecksumsSHA256, "platform": resolved.Metadata.Platform.OS + "/" + resolved.Metadata.Platform.Arch, "offline_artifact": offlineArtifactName(resolved), "offline_artifact_sha256": offlineArtifactSHA256(resolved)}
+	for key, value := range want {
+		if report[key] != value {
+			return fmt.Errorf("%s does not match preparation identity", key)
+		}
+	}
+	return nil
+}
+func validateSummaryReport(root string, identity PreparationIdentity) error {
+	report, err := readReport(root, "reports/preparation-summary.yaml")
+	if err != nil {
+		return err
+	}
+	if report["release_version"] != identity.ReleaseVersion || report["repository"] != identity.RepositoryRegistry+"/"+identity.RepositoryProject {
+		return errors.New("summary identity does not match preparation identity")
+	}
+	assets, ok := report["assets"].([]any)
+	if !ok || len(assets) != 5 {
+		return errors.New("summary asset status is incomplete")
+	}
+	want := map[string]bool{"offline": true, "product-images": true, "infra-images": true, "models": true, "qdrant-snapshots": true}
+	for _, asset := range assets {
+		value, ok := asset.(string)
+		if !ok || !want[value] {
+			return errors.New("summary asset status is invalid")
+		}
+		delete(want, value)
+	}
+	if len(want) != 0 {
+		return errors.New("summary asset status is incomplete")
+	}
+	return nil
+}
+func validateVerificationReport(root string, identity PreparationIdentity) error {
+	report, err := readReport(root, "reports/verification.yaml")
+	if err != nil {
+		return err
+	}
+	if report["release_version"] != identity.ReleaseVersion || report["repository"] != identity.RepositoryRegistry+"/"+identity.RepositoryProject || report["status"] != "validated" {
+		return errors.New("verification report does not match preparation identity")
+	}
+	return nil
+}
+func readReport(root, relative string) (map[string]any, error) {
+	if err := nonEmptyRegular(root, relative); err != nil {
+		return nil, err
+	}
+	contents, err := os.ReadFile(filepath.Join(root, relative))
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectSecretContent(strings.Split(string(contents), "\n")); err != nil {
+		return nil, err
+	}
+	var report map[string]any
+	decoder := yaml.NewDecoder(strings.NewReader(string(contents)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&report); err != nil {
+		return nil, fmt.Errorf("parse report: %w", err)
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("report must contain exactly one YAML document")
+		}
+		return nil, fmt.Errorf("parse trailing report content: %w", err)
+	}
+	if len(report) == 0 {
+		return nil, errors.New("report is empty")
+	}
+	return report, nil
 }
 
 func ValidateOfflineAssets(root string) error {
@@ -117,6 +272,9 @@ func ValidateRepositoryMapping(root, listRelative, mappingRelative, registry, pr
 	mapped := make(map[string]string, len(lines))
 	prefix := registry + "/" + project + "/"
 	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			return fmt.Errorf("invalid repository mapping line %q", line)
@@ -221,6 +379,9 @@ func ValidateQdrantArtifacts(root, registry, project string) error {
 	seenFiles, seenTags := map[string]bool{}, map[string]bool{}
 	prefix := registry + "/" + project + "/qdrant-snapshots:"
 	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		parts := strings.Split(line, "|")
 		if len(parts) != 3 || !strings.HasPrefix(parts[0], prefix) || parts[1] == "" || parts[2] == "" {
 			return fmt.Errorf("invalid Qdrant artifact mapping %q", line)

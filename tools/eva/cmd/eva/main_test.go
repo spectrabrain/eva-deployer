@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	gort "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +17,131 @@ import (
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/release"
+	remotecommand "eva-deployer/tools/eva/internal/remote"
 	"eva-deployer/tools/eva/internal/runtime"
 )
+
+func TestRunRemoteHelpAndUnknownCommand(t *testing.T) {
+	for _, arguments := range [][]string{{"remote"}, {"remote", "help"}, {"remote", "--help"}, {"remote", "publish", "--help"}} {
+		if err := run(arguments); err != nil {
+			t.Fatalf("run(%q) error = %v", arguments, err)
+		}
+	}
+	if err := run([]string{"remote", "unknown"}); err == nil || !strings.Contains(err.Error(), "unknown remote command") {
+		t.Fatalf("run(remote unknown) error = %v", err)
+	}
+}
+
+func TestRunRemotePublishForwardsPositionalReleasePath(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	var gotArguments []string
+	restore := replaceRemoteService(t, func() remotecommand.Service {
+		return remotecommand.Service{
+			ResolveBackend: func() (string, error) { return "/fixture/publish", nil },
+			Run: func(_ string, arguments []string, _ remotecommand.Streams) error {
+				gotArguments = append([]string(nil), arguments...)
+				return nil
+			},
+		}
+	})
+	defer restore()
+
+	if err := run([]string{"remote", "publish", releaseRoot, "--target", "eva@target.example.internal"}); err != nil {
+		t.Fatalf("run(remote publish) error = %v", err)
+	}
+	want := []string{"--release-dir", releaseRoot, "--target", "eva@target.example.internal"}
+	if !reflect.DeepEqual(gotArguments, want) {
+		t.Fatalf("forwarded arguments = %#v, want %#v", gotArguments, want)
+	}
+}
+
+func TestRunRemotePublishAcceptsPathAfterTargetAndDefaultsToCurrentDirectory(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	restore := replaceRemoteService(t, func() remotecommand.Service {
+		return remotecommand.Service{
+			ResolveBackend: func() (string, error) { return "/fixture/publish", nil },
+			Run:            func(string, []string, remotecommand.Streams) error { return nil },
+		}
+	})
+	defer restore()
+
+	if err := run([]string{"remote", "publish", "--target", "10.159.56.196", releaseRoot}); err != nil {
+		t.Fatalf("run(remote publish path after target) error = %v", err)
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(releaseRoot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+	if err := run([]string{"remote", "publish", "--target", "target.example.internal"}); err != nil {
+		t.Fatalf("run(remote publish default path) error = %v", err)
+	}
+}
+
+func TestRunRemotePublishRejectsInvalidArguments(t *testing.T) {
+	for _, arguments := range [][]string{
+		{"remote", "publish"},
+		{"remote", "publish", "--target"},
+		{"remote", "publish", "--unknown", "value"},
+		{"remote", "publish", "one", "two", "--target", "target"},
+	} {
+		if err := run(arguments); err == nil {
+			t.Fatalf("run(%q) succeeded", arguments)
+		}
+	}
+}
+
+func replaceRemoteService(t *testing.T, factory func() remotecommand.Service) func() {
+	t.Helper()
+	previous := newRemoteService
+	newRemoteService = factory
+	return func() { newRemoteService = previous }
+}
+
+func writeRemotePublishRelease(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	files := map[string]string{
+		"eva-tool.tar.gz":     "tool",
+		"eva-infra.tar.gz":    "infra",
+		"eva-solution.tar.gz": "solution",
+		"eva-offline.tar.gz":  "offline",
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metadata := fmt.Sprintf(`version: 3.2.0
+platform:
+  os: %s
+  arch: %s
+artifacts:
+  - name: eva-tool
+    file: eva-tool.tar.gz
+    sha256: %x
+  - name: eva-infra
+    file: eva-infra.tar.gz
+    sha256: %x
+  - name: eva-solution
+    file: eva-solution.tar.gz
+    sha256: %x
+  - name: eva-offline
+    file: eva-offline.tar.gz
+    sha256: %x
+`, gort.GOOS, gort.GOARCH,
+		sha256.Sum256([]byte(files["eva-tool.tar.gz"])),
+		sha256.Sum256([]byte(files["eva-infra.tar.gz"])),
+		sha256.Sum256([]byte(files["eva-solution.tar.gz"])),
+		sha256.Sum256([]byte(files["eva-offline.tar.gz"])))
+	if err := os.WriteFile(filepath.Join(root, "release.yaml"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
 
 func TestReleaseEnvironmentUsesExpectedPreparedRoot(t *testing.T) {
 	resolved := release.Resolved{Root: "/tmp/eva-base-release", Metadata: release.Metadata{Version: "v3.2.0"}}

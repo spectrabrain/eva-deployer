@@ -120,6 +120,7 @@ for directory in \
   assert_mode "$directory" 755
   [[ "$("${sudo_cmd[@]}" stat -c '%U:%G' "$directory")" == root:root ]]
 done
+"$install_root/bin/eva" remote --help >/dev/null
 "$install_root/opt/eva/tool/libexec/remote-root/scripts/remote/publish_release_to_target.sh" --help >/dev/null
 VERSIONS_QUIET=1 bash -c '
   source "$1"

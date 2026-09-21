@@ -20,6 +20,7 @@ import (
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/release"
+	"eva-deployer/tools/eva/internal/remote"
 	"eva-deployer/tools/eva/internal/runtime"
 	"eva-deployer/tools/eva/internal/workspace"
 )
@@ -34,6 +35,7 @@ var (
 		output, err := exec.Command("nvidia-smi", args...).CombinedOutput()
 		return string(output), err
 	}
+	newRemoteService = remote.NewService
 )
 
 type displayedError struct {
@@ -53,6 +55,7 @@ func usage() {
 	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
+	fmt.Println("  remote publish [RELEASE_PATH] --target USER@HOST")
 	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
@@ -101,6 +104,8 @@ func run(args []string) error {
 		return runWorkspace(args[1:])
 	case "release":
 		return runRelease(args[1:])
+	case "remote":
+		return runRemote(args[1:])
 	case "install":
 		return runInstall(args[1:])
 	case "plan":
@@ -128,6 +133,105 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runRemote(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		remoteUsage()
+		return nil
+	}
+	switch args[0] {
+	case "publish":
+		return runRemotePublish(args[1:])
+	default:
+		return fmt.Errorf("unknown remote command %q", args[0])
+	}
+}
+
+func remoteUsage() {
+	fmt.Println("Usage: eva remote publish [RELEASE_PATH] --target USER@HOST")
+	fmt.Println("")
+	fmt.Println("Publishes a verified original EVA Release to a Remote Target.")
+}
+
+func remotePublishUsage() {
+	fmt.Println("Usage: eva remote publish [RELEASE_PATH] --target USER@HOST")
+	fmt.Println("")
+	fmt.Println("RELEASE_PATH defaults to the current directory.")
+}
+
+func runRemotePublish(args []string) error {
+	for _, argument := range args {
+		if argument == "help" || argument == "--help" || argument == "-h" {
+			remotePublishUsage()
+			return nil
+		}
+	}
+	normalizedArgs, err := normalizeRemotePublishArgs(args)
+	if err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("remote publish", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	target := flags.String("target", "", "Remote Target in USER@HOST form")
+	if err := flags.Parse(normalizedArgs); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected remote publish arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *target == "" {
+		return errors.New("remote publish requires --target USER@HOST")
+	}
+	releaseInput := "."
+	if flags.NArg() == 1 {
+		releaseInput = flags.Arg(0)
+	}
+	if release.IsArchiveInput(releaseInput) {
+		return errors.New("remote publish requires an original Release directory, not an Airgap Bundle archive")
+	}
+	resolved, err := release.Resolve(releaseInput)
+	if err != nil {
+		return err
+	}
+	return newRemoteService().Publish(remote.PublishOptions{
+		Release: resolved,
+		Target:  *target,
+		Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr},
+	})
+}
+
+func normalizeRemotePublishArgs(args []string) ([]string, error) {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, 1)
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			positionals = append(positionals, args[index+1:]...)
+			break
+		}
+		if !strings.HasPrefix(argument, "-") {
+			positionals = append(positionals, argument)
+			continue
+		}
+		if argument == "--target" {
+			if index+1 == len(args) {
+				return nil, errors.New("--target requires a value")
+			}
+			flags = append(flags, argument, args[index+1])
+			index++
+			continue
+		}
+		if strings.HasPrefix(argument, "--target=") {
+			flags = append(flags, argument)
+			continue
+		}
+		return nil, fmt.Errorf("unknown remote publish option %q", argument)
+	}
+	if len(positionals) > 1 {
+		return nil, fmt.Errorf("unexpected remote publish arguments: %s", strings.Join(positionals, " "))
+	}
+	return append(flags, positionals...), nil
 }
 
 func runWorkspace(args []string) error {

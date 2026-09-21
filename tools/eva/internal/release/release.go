@@ -61,6 +61,34 @@ type Prepared struct {
 	Metadata Metadata
 }
 
+// ValidateRemotePublish verifies the original-Release constraints required
+// before a Release may be sent to a Remote Target. Transport performs its own
+// source and target validation at a separate trust boundary.
+func ValidateRemotePublish(resolved Resolved) error {
+	if resolved.Prepared {
+		return errors.New("Remote publish requires an original Release, not a prepared Release")
+	}
+	if _, err := os.Lstat(filepath.Join(resolved.Root, airgapMarkerName)); err == nil {
+		return errors.New("Remote publish requires an original Release, not an imported Airgap Bundle")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read Airgap Bundle marker: %w", err)
+	}
+
+	offlineCount := 0
+	for _, artifact := range resolved.Metadata.Artifacts {
+		if artifact.Name == "eva-offline" {
+			offlineCount++
+		}
+	}
+	if offlineCount != 1 {
+		return fmt.Errorf("Remote publish requires exactly one eva-offline artifact; found %d", offlineCount)
+	}
+	if _, err := resolved.ArtifactPath("eva-offline"); err != nil {
+		return fmt.Errorf("Remote publish eva-offline artifact: %w", err)
+	}
+	return nil
+}
+
 func Resolve(input string) (Resolved, error) {
 	if input == "" {
 		input = "."

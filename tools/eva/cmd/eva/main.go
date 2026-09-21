@@ -374,15 +374,15 @@ func runInstall(args []string) error {
 func ensureInstallRuntime(root string, releaseResolved release.Resolved, repositoryMode string) error {
 	if _, err := runtime.Resolve(root); err == nil {
 		return nil
-	} else if !strings.EqualFold(repositoryMode, "local") {
+	} else if !offlineRepositoryMode(repositoryMode) {
 		return err
 	}
 	if releaseResolved.Prepared {
-		return errors.New("local install needs eva-offline from the original Release or Airgap Bundle when the managed Runtime is absent")
+		return errors.New("remote/local install needs eva-offline from the original Release or Airgap Bundle when the managed Runtime is absent")
 	}
 	offlinePayload, err := releaseResolved.ArtifactPath("eva-offline")
 	if err != nil {
-		return fmt.Errorf("local install requires an eva-offline artifact: %w", err)
+		return fmt.Errorf("remote/local install requires an eva-offline artifact: %w", err)
 	}
 	installed, err := runtime.BootstrapOffline(offlinePayload, root)
 	if err != nil {
@@ -390,6 +390,13 @@ func ensureInstallRuntime(root string, releaseResolved release.Resolved, reposit
 	}
 	fmt.Printf("runtime bootstrapped: %s (version=%s)\n", installed.Root, installed.Descriptor.Version)
 	return nil
+}
+
+func offlineRepositoryMode(repositoryMode string) bool {
+	return strings.EqualFold(repositoryMode, "remote") ||
+		strings.EqualFold(repositoryMode, "local") ||
+		strings.EqualFold(repositoryMode, "remote_repository") ||
+		strings.EqualFold(repositoryMode, "local_repository")
 }
 
 func normalizeInstallArgs(args []string) ([]string, error) {
@@ -904,7 +911,7 @@ func aptPrerequisite(document plan.Document) error {
 }
 
 func requiresAPTPriorToInfra(document plan.Document) bool {
-	if document.RepositoryMode == "local_repository" {
+	if offlineRepositoryMode(document.RepositoryMode) {
 		return false
 	}
 	for _, step := range document.Steps {

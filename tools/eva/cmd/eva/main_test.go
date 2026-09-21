@@ -94,6 +94,27 @@ func TestRunRemotePublishRejectsInvalidArguments(t *testing.T) {
 	}
 }
 
+func TestNormalizeRemotePrepareArgsAcceptsBothPositionalPlacements(t *testing.T) {
+	for _, input := range [][]string{
+		{"/release", "--registry", "harbor.example.internal:32080"},
+		{"--registry", "harbor.example.internal:32080", "/release"},
+	} {
+		got, err := normalizeRemotePrepareArgs(input)
+		if err != nil {
+			t.Fatalf("normalizeRemotePrepareArgs(%q) error = %v", input, err)
+		}
+		want := []string{"--registry", "harbor.example.internal:32080", "/release"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("normalizeRemotePrepareArgs(%q) = %q, want %q", input, got, want)
+		}
+	}
+	for _, input := range [][]string{{"--registry"}, {"--unknown", "x"}, {"one", "two", "--registry", "registry"}} {
+		if _, err := normalizeRemotePrepareArgs(input); err == nil {
+			t.Fatalf("normalizeRemotePrepareArgs(%q) succeeded", input)
+		}
+	}
+}
+
 func replaceRemoteService(t *testing.T, factory func() remotecommand.Service) func() {
 	t.Helper()
 	previous := newRemoteService

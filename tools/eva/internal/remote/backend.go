@@ -14,36 +14,51 @@ const libexecRootOverrideEnv = "EVA_REMOTE_LIBEXEC_ROOT"
 // ResolvePublishBackend locates the installed, versioned Remote publish
 // backend. It intentionally has no repository or working-directory fallback.
 func ResolvePublishBackend() (string, error) {
+	return ResolveBackend(publishBackendRelativePath)
+}
+
+// ResolveBackend locates an executable backend packaged with the installed EVA
+// Tool. relativePath is deliberately relative to the versioned libexec root;
+// this prevents a caller from selecting a repository, CWD, or PATH backend.
+func ResolveBackend(relativePath string) (string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("locate EVA executable: %w", err)
 	}
-	return resolvePublishBackend(executable, os.Getenv(libexecRootOverrideEnv))
+	return resolveBackend(executable, os.Getenv(libexecRootOverrideEnv), relativePath)
 }
 
 func resolvePublishBackend(executable, override string) (string, error) {
+	return resolveBackend(executable, override, publishBackendRelativePath)
+}
+
+func resolveBackend(executable, override, relativePath string) (string, error) {
+	if relativePath == "" || filepath.IsAbs(relativePath) || filepath.Clean(relativePath) != relativePath ||
+		relativePath == "." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) || relativePath == ".." {
+		return "", fmt.Errorf("unsafe Remote backend path %q", relativePath)
+	}
 	backendRoot, err := resolveBackendRoot(executable, override)
 	if err != nil {
 		return "", err
 	}
-	backend := filepath.Join(backendRoot, filepath.FromSlash(publishBackendRelativePath))
+	backend := filepath.Join(backendRoot, filepath.FromSlash(relativePath))
 	info, err := os.Lstat(backend)
 	if err != nil {
-		return "", fmt.Errorf("Remote publish backend is missing: %w", err)
+		return "", fmt.Errorf("Remote backend is missing: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", errors.New("Remote publish backend must be a regular non-symlink file")
+		return "", errors.New("Remote backend must be a regular non-symlink file")
 	}
 	if info.Mode().Perm()&0o111 == 0 {
-		return "", errors.New("Remote publish backend is not executable")
+		return "", errors.New("Remote backend is not executable")
 	}
 
 	resolvedBackend, err := filepath.EvalSymlinks(backend)
 	if err != nil {
-		return "", fmt.Errorf("resolve Remote publish backend: %w", err)
+		return "", fmt.Errorf("resolve Remote backend: %w", err)
 	}
 	if !isWithin(backendRoot, resolvedBackend) {
-		return "", errors.New("Remote publish backend escapes the backend root")
+		return "", errors.New("Remote backend escapes the backend root")
 	}
 	return resolvedBackend, nil
 }

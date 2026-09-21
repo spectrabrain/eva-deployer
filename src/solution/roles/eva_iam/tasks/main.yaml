@@ -265,6 +265,12 @@
       {{ eva_iam_effective_user_values.config.publicPort | default(eva_iam_public_port) }}
     eva_iam_effective_public_url: >-
       {{ eva_iam_effective_user_values.config.publicUrl | default(eva_iam_public_url) }}
+    eva_iam_effective_tls_enabled: >-
+      {{
+        eva_iam_effective_user_values.ingress.tls.enabled
+        | default(true)
+        | bool
+      }}
 
 - name: Resolve eva-iam generated config for eva-app
   ansible.builtin.set_fact:
@@ -276,13 +282,14 @@
     # app.sso.baseUrl — keycloak 이 서비스되는 주소. ingress.path 가 '/' 면 호스트만.
     # 차트 3.1.4+ 의 eva-iam.baseUrl 헬퍼와 우선순위를 맞춰야 합니다. 어긋나면 eva-app 이
     # 토큰 issuer 와 다른 주소로 discovery 를 호출해 invalid_grant 로 실패합니다.
-    #   publicUrl > host:publicPort + path > host + path
+    #   publicUrl > ingress TLS scheme + host:publicPort + path
     eva_iam_app_sso_base_url: >-
       {{
         (eva_iam_effective_public_url | regex_replace('/$', ''))
         if (eva_iam_effective_public_url | length > 0)
         else (
-          'https://' ~ eva_iam_effective_host
+          ('https://' if (eva_iam_effective_tls_enabled | bool) else 'http://')
+          ~ eva_iam_effective_host
           ~ ((':' ~ eva_iam_effective_public_port) if (eva_iam_effective_public_port | length > 0) else '')
           ~ (eva_iam_effective_ingress_path | regex_replace('/$', ''))
         )

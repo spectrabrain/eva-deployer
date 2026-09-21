@@ -71,8 +71,6 @@ fi
 {
   echo "Generated: $(date -Iseconds)"
   echo "bucket: ${EVA_QDRANT_SNAPSHOT_BUCKET}"
-  echo "aws_profile: ${AWS_PROFILE}"
-  echo "aws_region: ${AWS_REGION}"
   echo "snapshot_specs:"
   echo "${snapshot_specs}"
   echo "files:"

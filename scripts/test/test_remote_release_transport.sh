@@ -20,8 +20,10 @@ fi
 
 bash -n "$transport"
 
+# shellcheck disable=SC2016 # Literal shell text is the contract under test.
 required_contracts=(
   '--release-dir'
+	'--payload-dir'
   '--target'
   '/var/lib/eva/inbox/releases'
   'eva-offline'
@@ -33,6 +35,10 @@ required_contracts=(
   'different Remote Release already exists'
   'Release directory contains a symbolic link'
   'transferred Release contains a symbolic link'
+	'transferred target payload identity does not match Release'
+  'target payload archive contains a link or special file'
+	'target payload has an unexpected file'
+  'payload_manifest_sha256'
 )
 
 for required_contract in "${required_contracts[@]}"; do
@@ -55,6 +61,7 @@ for forbidden_contract in \
   fi
 done
 
+# shellcheck disable=SC2016 # The expression intentionally matches literal script text.
 if grep -Eq 'rm[[:space:]]+-rf[[:space:]]+--?[[:space:]]*"\$target_final"' "$transport"; then
   echo "[ERROR] transport destructively removes an existing published Release" >&2
   exit 1

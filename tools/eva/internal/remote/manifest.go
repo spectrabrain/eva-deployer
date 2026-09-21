@@ -27,6 +27,7 @@ const manifestSchemaVersion = "v1"
 var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var registryHostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*$`)
 var projectPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var platformPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 type ManifestStatus string
 
@@ -49,6 +50,7 @@ const (
 
 var DefaultStepNames = []string{
 	"validate-release",
+	"main-preflight",
 	"prepare-offline-assets",
 	"download-product-images",
 	"download-infra-images",
@@ -63,6 +65,7 @@ var DefaultStepNames = []string{
 
 type PreparationIdentity struct {
 	ReleaseVersion     string `yaml:"version"`
+	Platform           string `yaml:"platform"`
 	ReleaseYAMLSHA256  string `yaml:"release_yaml_sha256"`
 	ChecksumsSHA256    string `yaml:"checksums_sha256"`
 	RepositoryRegistry string `yaml:"-"`
@@ -134,6 +137,7 @@ func BuildPreparationIdentity(resolved release.Resolved, registry, project strin
 	}
 	return PreparationIdentity{
 		ReleaseVersion:     resolved.Metadata.Version,
+		Platform:           resolved.Metadata.Platform.OS + "/" + resolved.Metadata.Platform.Arch,
 		ReleaseYAMLSHA256:  releaseDigest,
 		ChecksumsSHA256:    checksumsDigest,
 		RepositoryRegistry: registry,
@@ -479,6 +483,9 @@ func ValidateEvidence(evidence []string) error {
 func validateIdentity(identity PreparationIdentity) error {
 	if identity.ReleaseVersion == "" || filepath.Base(identity.ReleaseVersion) != identity.ReleaseVersion {
 		return errors.New("preparation identity release version is invalid")
+	}
+	if !platformPattern.MatchString(identity.Platform) {
+		return errors.New("preparation identity platform is invalid")
 	}
 	if !sha256Pattern.MatchString(identity.ReleaseYAMLSHA256) || !sha256Pattern.MatchString(identity.ChecksumsSHA256) {
 		return errors.New("preparation identity requires SHA-256 digests")

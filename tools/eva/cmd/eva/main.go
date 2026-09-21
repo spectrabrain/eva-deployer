@@ -36,9 +36,10 @@ var (
 		output, err := exec.Command("nvidia-smi", args...).CombinedOutput()
 		return string(output), err
 	}
-	newRemoteService        = remote.NewService
-	newRemotePrepareService = remote.NewPrepareService
-	newRemoteVerifyService  = remote.NewVerifyService
+	newRemoteService         = remote.NewService
+	newRemotePrepareService  = remote.NewPrepareService
+	newRemoteVerifyService   = remote.NewVerifyService
+	materializeRemotePayload = remote.MaterializeTargetPayload
 )
 
 type displayedError struct {
@@ -589,6 +590,10 @@ func runInstall(args []string) error {
 			return err
 		}
 	}
+	remoteCacheRoot, err := materializedRemoteCache(releaseResolved, workspaceResolved)
+	if err != nil {
+		return fmt.Errorf("materialize Remote Target payload: %w", err)
+	}
 	if err := ensureInstallRuntime(*runtimeRoot, releaseResolved, workspaceResolved.Config.Repository.Mode); err != nil {
 		return err
 	}
@@ -605,6 +610,12 @@ func runInstall(args []string) error {
 	}
 	now := time.Now()
 	document := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, now)
+	if remoteCacheRoot != "" {
+		document.AnsibleExtraVars = append(document.AnsibleExtraVars,
+			"eva_cache_root="+remoteCacheRoot,
+			"eva_agent_cache_root="+remoteCacheRoot,
+		)
+	}
 	record, err := operation.Create(*stateRoot, document, now)
 	if err != nil {
 		return err
@@ -615,6 +626,22 @@ func runInstall(args []string) error {
 	}, record)
 	printOperation(completed)
 	return err
+}
+
+// materializedRemoteCache provides the existing offline cache contract only
+// for Remote repository installs. Cloud and Local modes retain their current
+// release and Airgap supply paths without touching Remote Target storage.
+func materializedRemoteCache(releaseResolved release.Resolved, workspaceResolved workspace.Resolved) (string, error) {
+	mode := strings.ToLower(workspaceResolved.Config.Repository.Mode)
+	if mode != "remote" && mode != "remote_repository" {
+		return "", nil
+	}
+	return materializeRemotePayload(
+		releaseResolved,
+		workspaceResolved.Config.Repository.Registry,
+		workspaceResolved.Config.Repository.Project,
+		"",
+	)
 }
 
 func ensureInstallRuntime(root string, releaseResolved release.Resolved, repositoryMode string) error {

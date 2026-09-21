@@ -25,6 +25,15 @@ app_install_line="$(grep -n -m1 'Install EVA App from online Helm repo' "$app_ta
 [[ -n "$iam_include_line" && -n "$iam_install_line" && "$iam_include_line" -lt "$iam_install_line" ]]
 [[ -n "$app_include_line" && -n "$app_install_line" && "$app_include_line" -lt "$app_install_line" ]]
 grep -Fq 'eva_app_effective_values.app.backendHost' "$app_tasks"
+
+# IAM-to-App handoff must follow the same public URL contract as the IAM chart:
+# explicit publicUrl wins, otherwise the scheme follows effective ingress TLS.
+grep -Fq 'eva_iam_effective_tls_enabled: >-' "$iam_tasks"
+grep -Fq 'eva_iam_effective_user_values.ingress.tls.enabled' "$iam_tasks"
+grep -Fq '| default(true)' "$iam_tasks"
+grep -Fq "'https://' if (eva_iam_effective_tls_enabled | bool) else 'http://'" "$iam_tasks"
+grep -Fq '(eva_iam_effective_public_url | regex_replace' "$iam_tasks"
+
 grep -Fq 'eva-tls-for-traefik' "$tls_tasks"
 grep -Fq 'kind: TLSStore' "$tls_tasks"
 grep -Fq 'namespace: kube-system' "$tls_tasks"

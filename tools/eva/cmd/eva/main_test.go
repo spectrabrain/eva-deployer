@@ -231,22 +231,64 @@ func TestAPTPriorToInfraRequiresSeparateInteractiveApproval(t *testing.T) {
 	}
 }
 
-func TestAPTPriorToInfraSkipsLocalRepository(t *testing.T) {
-	called := false
-	previousService := newAPTService
-	t.Cleanup(func() { newAPTService = previousService })
-	newAPTService = func() apt.Service {
-		called = true
-		return apt.Service{}
+func TestAPTPriorToInfraSkipsOfflineRepositories(t *testing.T) {
+	for _, repositoryMode := range []string{
+		"remote_repository",
+		"local_repository",
+	} {
+		t.Run(repositoryMode, func(t *testing.T) {
+			called := false
+			previousService := newAPTService
+			t.Cleanup(func() { newAPTService = previousService })
+			newAPTService = func() apt.Service {
+				called = true
+				return apt.Service{}
+			}
+			if err := aptPrerequisite(plan.Document{
+				RepositoryMode: repositoryMode,
+				Steps:          []plan.Step{{Component: "infra"}},
+			}); err != nil {
+				t.Fatalf("aptPrerequisite() error = %v", err)
+			}
+			if called {
+				t.Fatalf("%s unexpectedly ran APT diagnostic", repositoryMode)
+			}
+		})
 	}
-	if err := aptPrerequisite(plan.Document{
-		RepositoryMode: "local_repository",
-		Steps:          []plan.Step{{Component: "infra"}},
-	}); err != nil {
-		t.Fatalf("aptPrerequisite() error = %v", err)
+}
+
+func TestOfflineRepositoryModeAcceptsWorkspaceAndAnsibleModes(t *testing.T) {
+	for _, repositoryMode := range []string{
+		"remote",
+		"local",
+		"remote_repository",
+		"local_repository",
+	} {
+		if !offlineRepositoryMode(repositoryMode) {
+			t.Fatalf("offlineRepositoryMode(%q) = false", repositoryMode)
+		}
 	}
-	if called {
-		t.Fatal("local repository unexpectedly ran APT diagnostic")
+	if offlineRepositoryMode("cloud") ||
+		offlineRepositoryMode("cloud_repository") {
+		t.Fatal("cloud mode was classified as offline")
+	}
+}
+
+func TestEnsureInstallRuntimeRequiresOriginalOfflineReleaseForRemote(t *testing.T) {
+	releaseResolved := release.Resolved{
+		Prepared: true,
+		Metadata: release.Metadata{
+			Version: "3.2.0",
+		},
+	}
+	err := ensureInstallRuntime(
+		filepath.Join(t.TempDir(), "runtime"),
+		releaseResolved,
+		"remote",
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "original Release or Airgap Bundle") {
+		t.Fatalf("ensureInstallRuntime() error = %v", err)
 	}
 }
 

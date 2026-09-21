@@ -110,6 +110,12 @@ jobs:
       - name: Test Config GPU CDI contract
         run: bash -x scripts/test/test_config_gpu_cdi.sh
 
+      - name: Test Remote Release transport contract
+        run: scripts/test/test_remote_release_transport.sh
+
+      - name: Test EVA Tool archive layout and installer contract
+        run: scripts/test/test_eva_tool_archive_layout.sh
+
       - name: Smoke test Base Release builder
         run: |
           git config user.name eva-ci

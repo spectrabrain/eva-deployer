@@ -113,6 +113,98 @@ assert_regular_tree() {
   fi
 }
 
+remote_backend_paths=(
+  scripts/download/build_nvidia_driver_repo.sh
+  scripts/download/download_ansible_wheels.sh
+  scripts/download/download_display_mode_selector.sh
+  scripts/download/download_eva_images.sh
+  scripts/download/download_eva_models.sh
+  scripts/download/download_infra_images.sh
+  scripts/download/download_n8n_images.sh
+  scripts/download/download_offline_assets.sh
+  scripts/download/download_python_venv_debs.sh
+  scripts/download/download_qdrant_snapshots.sh
+  scripts/lib/load_versions.sh
+  scripts/publish/push_images_to_repository.sh
+  scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/remote/publish_release_to_target.sh
+  scripts/install/requirements-airgap.txt
+  src/infra/version.yaml
+  src/solution/version.yaml
+)
+
+remote_backend_shell_paths=(
+  scripts/download/build_nvidia_driver_repo.sh
+  scripts/download/download_ansible_wheels.sh
+  scripts/download/download_display_mode_selector.sh
+  scripts/download/download_eva_images.sh
+  scripts/download/download_eva_models.sh
+  scripts/download/download_infra_images.sh
+  scripts/download/download_n8n_images.sh
+  scripts/download/download_offline_assets.sh
+  scripts/download/download_python_venv_debs.sh
+  scripts/download/download_qdrant_snapshots.sh
+  scripts/lib/load_versions.sh
+  scripts/publish/push_images_to_repository.sh
+  scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/remote/publish_release_to_target.sh
+)
+
+assert_remote_backend_source() {
+  local path
+  for path in "${remote_backend_paths[@]}"; do
+    if [[ ! -f "$repo_root/$path" || -L "$repo_root/$path" ]]; then
+      echo "[error] required Remote backend file is missing or is not regular: $path" >&2
+      exit 1
+    fi
+  done
+}
+
+assert_tool_archive_layout() {
+  local archive="$1"
+  local entry path
+  local -a entries
+
+  mapfile -t entries < <(tar -tzf "$archive")
+  for entry in "${entries[@]}"; do
+    if [[ "$entry" == /* || "/$entry/" == */../* ]]; then
+      echo "[error] EVA Tool archive contains an unsafe path: $entry" >&2
+      exit 1
+    fi
+  done
+  if [[ "$(printf '%s\n' "${entries[@]}" | grep -Fxc 'bin/eva')" != 1 ]]; then
+    echo "[error] EVA Tool archive must contain exactly one bin/eva" >&2
+    exit 1
+  fi
+  for path in "${remote_backend_paths[@]}"; do
+    if ! printf '%s\n' "${entries[@]}" | grep -Fqx "libexec/remote-root/$path"; then
+      echo "[error] EVA Tool archive is missing Remote backend file: $path" >&2
+      exit 1
+    fi
+  done
+  for path in bin/eva "${remote_backend_shell_paths[@]/#/libexec/remote-root/}"; do
+    if ! tar -tvzf "$archive" | awk -v expected="$path" '
+      $NF == expected {
+        matches += 1
+        executable = (substr($1, 1, 1) == "-" && substr($1, 4, 1) == "x")
+      }
+      END { exit !(matches == 1 && executable) }
+    '; then
+      echo "[error] EVA Tool archive executable is missing its executable mode: $path" >&2
+      exit 1
+    fi
+  done
+  while IFS= read -r entry; do
+    case "${entry:0:1}" in
+      -|d) ;;
+      *)
+        echo "[error] EVA Tool archive contains a non-regular entry" >&2
+        exit 1
+        ;;
+    esac
+  done < <(tar -tvzf "$archive")
+}
+
 assert_safe_offline_tree() {
   local root="$1"
   local path
@@ -187,6 +279,7 @@ if [[ ! -f "$installer_source" || -L "$installer_source" ]]; then
   echo "[error] required EVA Tool installer is missing or is not a regular file: $installer_source" >&2
   exit 1
 fi
+assert_remote_backend_source
 
 build_root="$(mktemp -d)"
 installer_smoke_group=""
@@ -201,7 +294,7 @@ trap cleanup EXIT
 staging_dist="$build_root/dist"
 build_output_dir="$repo_root/out/work/build"
 tool_binary="$build_output_dir/eva"
-mkdir -p "$staging_dist" "$build_root/tool/bin" "$build_output_dir"
+mkdir -p "$staging_dist" "$build_root/tool/bin" "$build_root/tool/libexec/remote-root" "$build_output_dir"
 
 echo "[info] downloading Go modules"
 (
@@ -214,12 +307,23 @@ echo "[info] downloading Go modules"
 )
 chmod 0755 "$tool_binary"
 install -m 0755 "$tool_binary" "$build_root/tool/bin/eva"
+for path in "${remote_backend_paths[@]}"; do
+  mode=0644
+  for shell_path in "${remote_backend_shell_paths[@]}"; do
+    if [[ "$path" == "$shell_path" ]]; then
+      mode=0755
+      break
+    fi
+  done
+  install -D -m "$mode" "$repo_root/$path" "$build_root/tool/libexec/remote-root/$path"
+done
 
 tool_file="eva-tool_${artifact_tag}_linux_amd64.tar.gz"
 installer_file="eva-tool-installer.sh"
 infra_file="eva-infra_${artifact_tag}.tar.gz"
 solution_file="eva-solution_${artifact_tag}.tar.gz"
-make_archive "$build_root/tool" "$staging_dist/$tool_file" bin/eva
+make_archive "$build_root/tool" "$staging_dist/$tool_file" bin libexec
+assert_tool_archive_layout "$staging_dist/$tool_file"
 install -m 0755 "$installer_source" "$staging_dist/$installer_file"
 make_archive "$repo_root" "$staging_dist/$infra_file" ansible.cfg src/playbook-preflight.yaml src/playbook-vars.yaml src/infra
 make_archive "$repo_root" "$staging_dist/$solution_file" src/solution

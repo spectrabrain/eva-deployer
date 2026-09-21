@@ -38,7 +38,8 @@ REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY#http://}"
 REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY#https://}"
 REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY%/}"
 TARGET_PREFIX="${REPOSITORY_REGISTRY}/${REPOSITORY_PROJECT}"
-MAPPING_FILE="$IMAGE_DIR/repository-mapping.txt"
+MAPPING_FILE="${REPOSITORY_MAPPING_FILE:-$IMAGE_DIR/repository-mapping.txt}"
+REPOSITORY_MIRROR_PATH_IMAGES="${REPOSITORY_MIRROR_PATH_IMAGES:-true}"
 
 read_matching_local_harbor_password() {
   python3 - "$LOCAL_HARBOR_YML" "$REPOSITORY_REGISTRY" <<'PY'
@@ -180,7 +181,7 @@ has_registry_host() {
 # registries.yaml 의 docker.io mirror 를 타게 됩니다. mirror 는 host 만 치환하고 경로는
 # 그대로 보내기 때문에 Harbor 에도 원본 경로가 필요합니다. 어느 차트가 그럴지 미리 알 수
 # 없으므로, 목록에서 주소 없는 이미지를 전부 대상으로 삼습니다 (사본 몇 개가 늘 뿐입니다).
-if [[ -z "$MIRROR_PATH_IMAGES" ]]; then
+if [[ "$REPOSITORY_MIRROR_PATH_IMAGES" == "true" && -z "$MIRROR_PATH_IMAGES" ]]; then
   while IFS= read -r image; do
     [[ -z "$image" ]] && continue
     has_registry_host "$image" || MIRROR_PATH_IMAGES+="$image "
@@ -216,6 +217,10 @@ ensure_harbor_project() {
     *)   echo "[warn] project 확인 실패(HTTP ${code:-?}): $project — push 가 실패하면 수동 생성하세요" ;;
   esac
 }
+
+if [[ "$REPOSITORY_MIRROR_PATH_IMAGES" != "true" ]]; then
+  MIRROR_PATH_IMAGES=""
+fi
 
 for source_image in $MIRROR_PATH_IMAGES; do
   [[ -z "$source_image" ]] && continue

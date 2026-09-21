@@ -34,8 +34,6 @@ Generated: $(date -Iseconds)
 bucket: ${EVA_MODEL_BUCKET}
 agent_prefix: ${AGENT_PREFIX}
 vllm_prefix: ${VLLM_PREFIX}
-aws_profile: ${AWS_PROFILE}
-aws_region: ${AWS_REGION}
 files:
 $(find "${MODEL_DIR}" -type f | sort)
 MANIFEST

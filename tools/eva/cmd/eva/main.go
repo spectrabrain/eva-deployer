@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,7 +36,8 @@ var (
 		output, err := exec.Command("nvidia-smi", args...).CombinedOutput()
 		return string(output), err
 	}
-	newRemoteService = remote.NewService
+	newRemoteService        = remote.NewService
+	newRemotePrepareService = remote.NewPrepareService
 )
 
 type displayedError struct {
@@ -56,6 +58,7 @@ func usage() {
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
 	fmt.Println("  remote publish [RELEASE_PATH] --target USER@HOST")
+	fmt.Println("  remote prepare [RELEASE_PATH] --registry HOST[:PORT]")
 	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
@@ -143,15 +146,94 @@ func runRemote(args []string) error {
 	switch args[0] {
 	case "publish":
 		return runRemotePublish(args[1:])
+	case "prepare":
+		return runRemotePrepare(args[1:])
 	default:
 		return fmt.Errorf("unknown remote command %q", args[0])
 	}
 }
 
 func remoteUsage() {
-	fmt.Println("Usage: eva remote publish [RELEASE_PATH] --target USER@HOST")
+	fmt.Println("Usage: eva remote <publish|prepare> [RELEASE_PATH] --target USER@HOST | --registry HOST[:PORT]")
 	fmt.Println("")
-	fmt.Println("Publishes a verified original EVA Release to a Remote Target.")
+	fmt.Println("Publishes a verified original EVA Release or prepares Remote repository assets.")
+}
+
+func remotePrepareUsage() {
+	fmt.Println("Usage: eva remote prepare [RELEASE_PATH] --registry HOST[:PORT]")
+	fmt.Println("")
+	fmt.Println("Prepares a verified original EVA Release for the Remote repository.")
+	fmt.Println("RELEASE_PATH defaults to the current directory.")
+}
+
+func runRemotePrepare(args []string) error {
+	for _, argument := range args {
+		if argument == "help" || argument == "--help" || argument == "-h" {
+			remotePrepareUsage()
+			return nil
+		}
+	}
+	normalizedArgs, err := normalizeRemotePrepareArgs(args)
+	if err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("remote prepare", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	registry := flags.String("registry", "", "repository registry")
+	if err := flags.Parse(normalizedArgs); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected remote prepare arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *registry == "" {
+		return errors.New("remote prepare requires --registry HOST[:PORT]")
+	}
+	releaseInput := "."
+	if flags.NArg() == 1 {
+		releaseInput = flags.Arg(0)
+	}
+	if release.IsArchiveInput(releaseInput) {
+		return errors.New("remote prepare requires an original Release directory, not an Airgap Bundle archive")
+	}
+	resolved, err := release.Resolve(releaseInput)
+	if err != nil {
+		return err
+	}
+	_, err = newRemotePrepareService().Prepare(context.Background(), remote.PrepareOptions{Release: resolved, Registry: *registry, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
+	return err
+}
+
+func normalizeRemotePrepareArgs(args []string) ([]string, error) {
+	flags, positionals := make([]string, 0, len(args)), make([]string, 0, 1)
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			positionals = append(positionals, args[index+1:]...)
+			break
+		}
+		if !strings.HasPrefix(argument, "-") {
+			positionals = append(positionals, argument)
+			continue
+		}
+		if argument == "--registry" {
+			if index+1 == len(args) {
+				return nil, errors.New("--registry requires a value")
+			}
+			flags = append(flags, argument, args[index+1])
+			index++
+			continue
+		}
+		if strings.HasPrefix(argument, "--registry=") {
+			flags = append(flags, argument)
+			continue
+		}
+		return nil, fmt.Errorf("unknown remote prepare option %q", argument)
+	}
+	if len(positionals) > 1 {
+		return nil, fmt.Errorf("unexpected remote prepare arguments: %s", strings.Join(positionals, " "))
+	}
+	return append(flags, positionals...), nil
 }
 
 func remotePublishUsage() {

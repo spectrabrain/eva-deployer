@@ -79,7 +79,7 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 	if !created {
 		switch manifest.Status {
 		case ManifestSucceeded:
-			if err := ValidatePreparation(root, options.Release, identity, manifest); err != nil {
+			if err := ValidateCompletedPreparation(root, options.Release, identity, manifest); err != nil {
 				return manifestPath, fmt.Errorf("existing Remote preparation failed validation: %w", err)
 			}
 			fmt.Fprintf(options.Streams.Stdout, "[OK] Remote preparation already completed\n[INFO] manifest=%s\n", manifestPath)
@@ -184,7 +184,7 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			return ValidateQdrantArtifacts(root, identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
 		{Name: "write-manifest", Run: func(context.Context) (StepResult, error) {
-			if err := ValidatePreparation(root, resolved, identity, *manifest); err != nil {
+			if err := ValidatePreparationAssets(root, resolved, identity, *manifest); err != nil {
 				return StepResult{}, err
 			}
 			summary := map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots"}}

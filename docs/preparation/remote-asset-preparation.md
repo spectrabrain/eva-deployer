@@ -14,3 +14,13 @@
 - 준비 결과 manifest와 무결성 검증
 
 Target 설치 절차는 [Remote Repository Runbook](../installation/remote-repository-runbook.md)을 사용합니다.
+
+정상 준비 흐름은 다음과 같습니다.
+
+```bash
+sudo eva remote prepare . --registry <main-harbor>
+sudo eva remote verify . --registry <main-harbor>
+sudo eva remote publish . --target <user@target>
+```
+
+`remote verify`는 준비 디렉터리의 local evidence만 읽어 검증합니다. Main Harbor의 현재 가용성은 별도 E2E 절차에서 확인합니다.

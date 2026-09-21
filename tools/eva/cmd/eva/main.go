@@ -38,6 +38,7 @@ var (
 	}
 	newRemoteService        = remote.NewService
 	newRemotePrepareService = remote.NewPrepareService
+	newRemoteVerifyService  = remote.NewVerifyService
 )
 
 type displayedError struct {
@@ -59,6 +60,7 @@ func usage() {
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
 	fmt.Println("  remote publish [RELEASE_PATH] --target USER@HOST")
 	fmt.Println("  remote prepare [RELEASE_PATH] --registry HOST[:PORT]")
+	fmt.Println("  remote verify [RELEASE_PATH] --registry HOST[:PORT]")
 	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
@@ -148,21 +150,30 @@ func runRemote(args []string) error {
 		return runRemotePublish(args[1:])
 	case "prepare":
 		return runRemotePrepare(args[1:])
+	case "verify":
+		return runRemoteVerify(args[1:])
 	default:
 		return fmt.Errorf("unknown remote command %q", args[0])
 	}
 }
 
 func remoteUsage() {
-	fmt.Println("Usage: eva remote <publish|prepare> [RELEASE_PATH] --target USER@HOST | --registry HOST[:PORT]")
+	fmt.Println("Usage: eva remote <publish|prepare|verify> [RELEASE_PATH] --target USER@HOST | --registry HOST[:PORT]")
 	fmt.Println("")
-	fmt.Println("Publishes a verified original EVA Release or prepares Remote repository assets.")
+	fmt.Println("Publishes a verified original EVA Release or prepares and verifies Remote repository assets.")
 }
 
 func remotePrepareUsage() {
 	fmt.Println("Usage: eva remote prepare [RELEASE_PATH] --registry HOST[:PORT]")
 	fmt.Println("")
 	fmt.Println("Prepares a verified original EVA Release for the Remote repository.")
+	fmt.Println("RELEASE_PATH defaults to the current directory.")
+}
+
+func remoteVerifyUsage() {
+	fmt.Println("Usage: eva remote verify [RELEASE_PATH] --registry HOST[:PORT]")
+	fmt.Println("")
+	fmt.Println("Verifies local evidence for a completed Remote preparation.")
 	fmt.Println("RELEASE_PATH defaults to the current directory.")
 }
 
@@ -205,6 +216,55 @@ func runRemotePrepare(args []string) error {
 }
 
 func normalizeRemotePrepareArgs(args []string) ([]string, error) {
+	return normalizeRemoteRepositoryArgs(args, "prepare")
+}
+
+func runRemoteVerify(args []string) error {
+	for _, argument := range args {
+		if argument == "help" || argument == "--help" || argument == "-h" {
+			remoteVerifyUsage()
+			return nil
+		}
+	}
+	normalizedArgs, err := normalizeRemoteRepositoryArgs(args, "verify")
+	if err != nil {
+		return err
+	}
+	flags := flag.NewFlagSet("remote verify", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	registry := flags.String("registry", "", "repository registry")
+	if err := flags.Parse(normalizedArgs); err != nil {
+		return err
+	}
+	if flags.NArg() > 1 {
+		return fmt.Errorf("unexpected remote verify arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *registry == "" {
+		return errors.New("remote verify requires --registry HOST[:PORT]")
+	}
+	releaseInput := "."
+	if flags.NArg() == 1 {
+		releaseInput = flags.Arg(0)
+	}
+	if release.IsArchiveInput(releaseInput) {
+		return errors.New("remote verify requires an original Release directory, not an Airgap Bundle archive")
+	}
+	resolved, err := release.Resolve(releaseInput)
+	if err != nil {
+		return err
+	}
+	result, err := newRemoteVerifyService().Verify(remote.VerifyOptions{Release: resolved, Registry: *registry})
+	if err != nil {
+		return err
+	}
+	fmt.Println("[OK] Remote preparation verified")
+	fmt.Printf("[INFO] release=%s\n", result.ReleaseVersion)
+	fmt.Printf("[INFO] repository=%s/%s\n", result.Registry, result.Project)
+	fmt.Printf("[INFO] manifest=%s\n", result.ManifestPath)
+	return nil
+}
+
+func normalizeRemoteRepositoryArgs(args []string, command string) ([]string, error) {
 	flags, positionals := make([]string, 0, len(args)), make([]string, 0, 1)
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
@@ -228,10 +288,10 @@ func normalizeRemotePrepareArgs(args []string) ([]string, error) {
 			flags = append(flags, argument)
 			continue
 		}
-		return nil, fmt.Errorf("unknown remote prepare option %q", argument)
+		return nil, fmt.Errorf("unknown remote %s option %q", command, argument)
 	}
 	if len(positionals) > 1 {
-		return nil, fmt.Errorf("unexpected remote prepare arguments: %s", strings.Join(positionals, " "))
+		return nil, fmt.Errorf("unexpected remote %s arguments: %s", command, strings.Join(positionals, " "))
 	}
 	return append(flags, positionals...), nil
 }

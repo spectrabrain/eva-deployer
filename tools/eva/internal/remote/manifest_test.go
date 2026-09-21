@@ -147,7 +147,7 @@ func TestBuildPreparationIdentityUsesReleaseAndChecksumDigests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPreparationIdentity() error = %v", err)
 	}
-	if identity.ReleaseVersion != resolved.Metadata.Version || identity.RepositoryProject != "eva" || identity.RepositoryRegistry != "harbor.main.internal:443" || len(identity.ReleaseYAMLSHA256) != 64 || len(identity.ChecksumsSHA256) != 64 {
+	if identity.ReleaseVersion != resolved.Metadata.Version || identity.Platform != resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch || identity.RepositoryProject != "eva" || identity.RepositoryRegistry != "harbor.main.internal:443" || len(identity.ReleaseYAMLSHA256) != 64 || len(identity.ChecksumsSHA256) != 64 {
 		t.Fatalf("identity = %#v", identity)
 	}
 }
@@ -174,6 +174,7 @@ func testManifest(t *testing.T, clock Clock, names []string) Manifest {
 	t.Helper()
 	manifest, err := NewManifest(PreparationIdentity{
 		ReleaseVersion:     "3.2.0",
+		Platform:           "linux/amd64",
 		ReleaseYAMLSHA256:  strings.Repeat("a", 64),
 		ChecksumsSHA256:    strings.Repeat("b", 64),
 		RepositoryRegistry: "harbor.main.internal:443",

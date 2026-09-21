@@ -41,13 +41,16 @@ func TestPublishRejectsPreparedAndOfflineMissingReleases(t *testing.T) {
 	}
 }
 
-func TestPublishForwardsOnlyReleaseAndTarget(t *testing.T) {
+func TestPublishForwardsReleaseAndVerifiedPayload(t *testing.T) {
 	resolved := writeOriginalRelease(t, true)
 	var gotPath string
 	var gotArguments []string
 	service := Service{
 		ResolveBackend: func() (string, error) {
 			return "/tool/libexec/remote-root/scripts/remote/publish_release_to_target.sh", nil
+		},
+		ResolvePayload: func(release.Resolved) (PayloadSource, error) {
+			return PayloadSource{Directory: "/preparation/target-payload"}, nil
 		},
 		Run: func(path string, arguments []string, _ Streams) error {
 			gotPath = path
@@ -61,7 +64,7 @@ func TestPublishForwardsOnlyReleaseAndTarget(t *testing.T) {
 	if gotPath == "" {
 		t.Fatal("backend was not invoked")
 	}
-	want := []string{"--release-dir", resolved.Root, "--target", "eva@target.example.internal"}
+	want := []string{"--release-dir", resolved.Root, "--payload-dir", "/preparation/target-payload", "--target", "eva@target.example.internal"}
 	if strings.Join(gotArguments, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("arguments = %#v, want %#v", gotArguments, want)
 	}
@@ -71,6 +74,7 @@ func TestPublishPreservesBackendFailure(t *testing.T) {
 	backendFailure := errors.New("backend failed")
 	service := Service{
 		ResolveBackend: func() (string, error) { return "/backend", nil },
+		ResolvePayload: func(release.Resolved) (PayloadSource, error) { return PayloadSource{Directory: "/payload"}, nil },
 		Run:            func(string, []string, Streams) error { return backendFailure },
 	}
 	err := service.Publish(PublishOptions{Release: writeOriginalRelease(t, true), Target: "target.example.internal"})

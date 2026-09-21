@@ -3,11 +3,14 @@ package remote
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
@@ -26,6 +29,7 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 			}
 			return errors.New("intentional backend failure")
 		},
+		Preflight: readyPreflight(t),
 	}
 	_, err := service.Prepare(context.Background(), PrepareOptions{Release: resolved, Registry: "harbor.example.internal:32080"})
 	if err == nil {
@@ -36,8 +40,47 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 	}
 	store := NewManifestStore(service.PreparationRoot, nil)
 	manifest, loadErr := store.Load(resolved.Metadata.Version)
-	if loadErr != nil || manifest.Status != ManifestFailed || manifest.Steps[1].Status != StepFailed {
+	if loadErr != nil || manifest.Status != ManifestFailed || manifest.Steps[2].Status != StepFailed {
 		t.Fatalf("failed manifest = %#v, error = %v", manifest, loadErr)
+	}
+}
+
+func TestPrepareRecordsPreflightFailureBeforeBackends(t *testing.T) {
+	resolved := writeOriginalRelease(t, true)
+	if err := os.WriteFile(filepath.Join(resolved.Root, "checksums.sha256"), []byte("release checksums\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	preflight := readyPreflight(t)
+	preflight.LookPath = func(name string) (string, error) { return "", errors.New("missing " + name) }
+	service := PrepareService{PreparationRoot: t.TempDir(), ResolveBackend: func(relative string) (string, error) { return "/installed/" + relative, nil }, Run: func(context.Context, ProcessOptions) error { called = true; return nil }, Preflight: preflight}
+	_, err := service.Prepare(context.Background(), PrepareOptions{Release: resolved, Registry: "harbor.example.internal:32080"})
+	if err == nil || !strings.Contains(err.Error(), "Main preparation preflight failed") || called {
+		t.Fatalf("Prepare() error=%v backend=%v", err, called)
+	}
+	manifest, loadErr := NewManifestStore(service.PreparationRoot, nil).Load(resolved.Metadata.Version)
+	if loadErr != nil || manifest.Status != ManifestFailed || manifest.Steps[1].Status != StepFailed || strings.Contains(strings.ToLower(manifest.Steps[1].Error), "missing") {
+		t.Fatalf("preflight manifest=%#v error=%v", manifest, loadErr)
+	}
+}
+
+func readyPreflight(t *testing.T) Preflight {
+	t.Helper()
+	return Preflight{
+		LookPath: func(string) (string, error) { return "/bin/tool", nil },
+		Run:      func(context.Context, string, ...string) error { return nil },
+		Version:  func(context.Context, string, ...string) (string, error) { return "test 1.0", nil },
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			left, right := net.Pipe()
+			right.Close()
+			return left, nil
+		},
+		HTTP: func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody}, nil
+		},
+		Credential: func(string) bool { return true },
+		Docker:     func(context.Context) (string, string, error) { return "amd64", t.TempDir(), nil },
+		DockerRoot: t.TempDir(), Timeout: time.Second, ExternalSources: nil,
 	}
 }
 

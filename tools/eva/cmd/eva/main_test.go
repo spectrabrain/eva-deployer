@@ -19,6 +19,7 @@ import (
 	"eva-deployer/tools/eva/internal/release"
 	remotecommand "eva-deployer/tools/eva/internal/remote"
 	"eva-deployer/tools/eva/internal/runtime"
+	"eva-deployer/tools/eva/internal/workspace"
 )
 
 func TestRunRemoteHelpAndUnknownCommand(t *testing.T) {
@@ -38,6 +39,9 @@ func TestRunRemotePublishForwardsPositionalReleasePath(t *testing.T) {
 	restore := replaceRemoteService(t, func() remotecommand.Service {
 		return remotecommand.Service{
 			ResolveBackend: func() (string, error) { return "/fixture/publish", nil },
+			ResolvePayload: func(release.Resolved) (remotecommand.PayloadSource, error) {
+				return remotecommand.PayloadSource{Directory: "/fixture/payload"}, nil
+			},
 			Run: func(_ string, arguments []string, _ remotecommand.Streams) error {
 				gotArguments = append([]string(nil), arguments...)
 				return nil
@@ -49,7 +53,7 @@ func TestRunRemotePublishForwardsPositionalReleasePath(t *testing.T) {
 	if err := run([]string{"remote", "publish", releaseRoot, "--target", "eva@target.example.internal"}); err != nil {
 		t.Fatalf("run(remote publish) error = %v", err)
 	}
-	want := []string{"--release-dir", releaseRoot, "--target", "eva@target.example.internal"}
+	want := []string{"--release-dir", releaseRoot, "--payload-dir", "/fixture/payload", "--target", "eva@target.example.internal"}
 	if !reflect.DeepEqual(gotArguments, want) {
 		t.Fatalf("forwarded arguments = %#v, want %#v", gotArguments, want)
 	}
@@ -60,7 +64,10 @@ func TestRunRemotePublishAcceptsPathAfterTargetAndDefaultsToCurrentDirectory(t *
 	restore := replaceRemoteService(t, func() remotecommand.Service {
 		return remotecommand.Service{
 			ResolveBackend: func() (string, error) { return "/fixture/publish", nil },
-			Run:            func(string, []string, remotecommand.Streams) error { return nil },
+			ResolvePayload: func(release.Resolved) (remotecommand.PayloadSource, error) {
+				return remotecommand.PayloadSource{Directory: "/fixture/payload"}, nil
+			},
+			Run: func(string, []string, remotecommand.Streams) error { return nil },
 		}
 	})
 	defer restore()
@@ -452,6 +459,36 @@ func TestOfflineRepositoryModeAcceptsWorkspaceAndAnsibleModes(t *testing.T) {
 	if offlineRepositoryMode("cloud") ||
 		offlineRepositoryMode("cloud_repository") {
 		t.Fatal("cloud mode was classified as offline")
+	}
+}
+
+func TestMaterializedRemoteCacheOnlyUsesRemoteRepository(t *testing.T) {
+	previous := materializeRemotePayload
+	defer func() { materializeRemotePayload = previous }()
+	calls := 0
+	materializeRemotePayload = func(resolved release.Resolved, registry, project, artifactRoot string) (string, error) {
+		calls++
+		if registry != "harbor.example.internal:32080" || project != "eva" || artifactRoot != "" {
+			t.Fatalf("materialize arguments = %q, %q, %q", registry, project, artifactRoot)
+		}
+		return "/var/lib/eva/artifacts/remote/3.2.0/identity/cache", nil
+	}
+	resolved := release.Resolved{Metadata: release.Metadata{Version: "3.2.0"}}
+	remoteWorkspace := workspace.Resolved{}
+	remoteWorkspace.Config.Repository.Mode = "remote"
+	remoteWorkspace.Config.Repository.Registry = "harbor.example.internal:32080"
+	remoteWorkspace.Config.Repository.Project = "eva"
+	cache, err := materializedRemoteCache(resolved, remoteWorkspace)
+	if err != nil || cache == "" || calls != 1 {
+		t.Fatalf("remote materialization = %q, %v, calls=%d", cache, err, calls)
+	}
+	for _, mode := range []string{"cloud", "local"} {
+		workspaceResolved := remoteWorkspace
+		workspaceResolved.Config.Repository.Mode = mode
+		cache, err := materializedRemoteCache(resolved, workspaceResolved)
+		if err != nil || cache != "" || calls != 1 {
+			t.Fatalf("%s materialization = %q, %v, calls=%d", mode, cache, err, calls)
+		}
 	}
 }
 

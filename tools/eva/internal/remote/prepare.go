@@ -39,6 +39,7 @@ type PrepareService struct {
 	PreparationRoot string
 	ResolveBackend  func(string) (string, error)
 	Run             ProcessRunner
+	Preflight       Preflight
 	Clock           Clock
 }
 type PrepareOptions struct {
@@ -49,7 +50,7 @@ type PrepareOptions struct {
 }
 
 func NewPrepareService() PrepareService {
-	return PrepareService{PreparationRoot: DefaultPreparationRoot, ResolveBackend: ResolveBackend, Run: runProcess}
+	return PrepareService{PreparationRoot: DefaultPreparationRoot, ResolveBackend: ResolveBackend, Run: runProcess, Preflight: NewPreflight()}
 }
 
 func (service PrepareService) Prepare(ctx context.Context, options PrepareOptions) (string, error) {
@@ -92,7 +93,7 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 			return manifestPath, errors.New("Remote preparation has a pending manifest; resume is not implemented")
 		}
 	}
-	if service.ResolveBackend == nil || service.Run == nil {
+	if service.ResolveBackend == nil || service.Run == nil || service.Preflight.Run == nil {
 		return manifestPath, errors.New("Remote prepare service is not configured")
 	}
 	steps, err := service.steps(root, options.Release, identity, &manifest, options.Streams)
@@ -165,6 +166,21 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			}
 			return StepResult{Evidence: []string{"reports/release-validation.yaml"}}, nil
 		}, ValidateEvidence: func(context.Context, []string) error { return nonEmptyRegular(root, "reports/release-validation.yaml") }},
+		{Name: "main-preflight", Run: func(ctx context.Context) (StepResult, error) {
+			fmt.Fprintln(streams.Stdout, "[INFO] Checking Main preparation prerequisites")
+			report, err := service.Preflight.Check(ctx, PreflightOptions{ReleaseRoot: resolved.Root, PreparationRoot: root, Registry: identity.RepositoryRegistry, Project: identity.RepositoryProject})
+			if err != nil {
+				return StepResult{}, fmt.Errorf("Main preparation preflight failed: %w", err)
+			}
+			if err := writeYAMLReport(root, "reports/main-preflight.yaml", report); err != nil {
+				return StepResult{}, err
+			}
+			for _, category := range report.Categories {
+				fmt.Fprintf(streams.Stdout, "[OK] %s\n", category)
+			}
+			fmt.Fprintln(streams.Stdout, "[OK] Main preparation prerequisites")
+			return StepResult{Evidence: []string{"reports/main-preflight.yaml"}}, nil
+		}, ValidateEvidence: func(context.Context, []string) error { return nonEmptyRegular(root, "reports/main-preflight.yaml") }},
 		command("prepare-offline-assets", env(nil), []string{"cache/apt/debs/manifest.txt", "cache/docker/debs/manifest.txt", "cache/manifest.txt", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/tools/oras"}, func() error { return ValidateOfflineAssets(root) }),
 		command("download-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"cache/images/images-all.txt", "cache/images/images-missing.txt", "cache/images/images-pulled.txt"}, func() error {
 			return ValidateImageLists(root, "images-all.txt", "images-pulled.txt", "images-missing.txt")
@@ -187,11 +203,15 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			if err := ValidatePreparationAssets(root, resolved, identity, *manifest); err != nil {
 				return StepResult{}, err
 			}
-			summary := map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots"}}
+			payload, err := BuildTargetPayload(root, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
+			if err != nil {
+				return StepResult{}, err
+			}
+			summary := map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "target-payload"}}
 			if err := writeYAMLReport(root, "reports/preparation-summary.yaml", summary); err != nil {
 				return StepResult{}, err
 			}
-			return StepResult{Evidence: []string{"reports/preparation-summary.yaml"}}, nil
+			return StepResult{Evidence: stableEvidence([]string{"reports/preparation-summary.yaml", filepath.ToSlash(filepath.Join(targetPayloadDirectory, payload.Manifest.Identity, "manifest.yaml"))})}, nil
 		}, ValidateEvidence: func(context.Context, []string) error {
 			return nonEmptyRegular(root, "reports/preparation-summary.yaml")
 		}},

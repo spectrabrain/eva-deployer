@@ -89,6 +89,10 @@ func TestLoadAndMaterializeTargetPayloadFailClosedAndReuse(t *testing.T) {
 	if err := copyPayloadDirectory(payloadPath, filepath.Join(resolved.Root, targetPayloadDirectory)); err != nil {
 		t.Fatal(err)
 	}
+	if err := copyPayloadDirectory(RuntimeArtifactPath(preparationRoot, identity), filepath.Join(resolved.Root, "remote-runtime")); err != nil {
+		t.Fatal(err)
+	}
+	writeRemoteDeliveryMarker(t, resolved.Root, identity)
 	artifactRoot := t.TempDir()
 	cacheRoot, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot)
 	if err != nil {

@@ -200,7 +200,7 @@ func MaterializeTargetPayload(releaseResolved release.Resolved, registry, projec
 	if err != nil {
 		return "", err
 	}
-	payload, err := LoadTargetPayload(filepath.Join(releaseResolved.Root, targetPayloadDirectory), identity)
+	_, payload, err := ValidatePublishedRemoteDelivery(releaseResolved, registry, project)
 	if err != nil {
 		return "", err
 	}

@@ -30,7 +30,7 @@ func ValidatePreparation(root string, resolved release.Resolved, identity Prepar
 			}
 		}
 	}
-	if err := release.ValidateRemotePublish(resolved); err != nil {
+	if err := release.ValidateRemotePreparationInput(resolved); err != nil {
 		return err
 	}
 	if err := validateReleaseReport(root, resolved, identity); err != nil {
@@ -45,6 +45,9 @@ func ValidatePreparation(root string, resolved release.Resolved, identity Prepar
 	if _, err := LoadTargetPayload(TargetPayloadPath(root, identity), identity); err != nil {
 		return fmt.Errorf("target payload: %w", err)
 	}
+	if _, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity); err != nil {
+		return fmt.Errorf("Runtime artifact: %w", err)
+	}
 	if err := validateSummaryReport(root, identity); err != nil {
 		return fmt.Errorf("preparation summary: %w", err)
 	}
@@ -58,7 +61,7 @@ func ValidatePreparationAssets(root string, resolved release.Resolved, identity 
 	if err := EnsureIdentity(manifest, identity); err != nil {
 		return err
 	}
-	if err := release.ValidateRemotePublish(resolved); err != nil {
+	if err := release.ValidateRemotePreparationInput(resolved); err != nil {
 		return err
 	}
 	if err := validateReleaseReport(root, resolved, identity); err != nil {
@@ -188,10 +191,10 @@ func validateSummaryReport(root string, identity PreparationIdentity) error {
 		return errors.New("summary identity does not match preparation identity")
 	}
 	assets, ok := report["assets"].([]any)
-	if !ok || len(assets) != 6 {
+	if !ok || len(assets) != 7 {
 		return errors.New("summary asset status is incomplete")
 	}
-	want := map[string]bool{"offline": true, "product-images": true, "infra-images": true, "models": true, "qdrant-snapshots": true, "target-payload": true}
+	want := map[string]bool{"offline": true, "product-images": true, "infra-images": true, "models": true, "qdrant-snapshots": true, "runtime-artifact": true, "target-payload": true}
 	for _, asset := range assets {
 		value, ok := asset.(string)
 		if !ok || !want[value] {
@@ -201,6 +204,9 @@ func validateSummaryReport(root string, identity PreparationIdentity) error {
 	}
 	if len(want) != 0 {
 		return errors.New("summary asset status is incomplete")
+	}
+	if report["runtime_artifact"] != "prepared" || report["runtime_version"] == "" || !sha256Pattern.MatchString(fmt.Sprint(report["runtime_archive_sha256"])) || report["runtime_manifest"] != filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml")) {
+		return errors.New("summary Runtime artifact is incomplete")
 	}
 	return nil
 }

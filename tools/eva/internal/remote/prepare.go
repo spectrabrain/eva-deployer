@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"eva-deployer/tools/eva/internal/release"
+	"eva-deployer/tools/eva/internal/runtime"
 )
 
 const defaultRemoteProject = "eva"
@@ -41,6 +42,7 @@ type PrepareService struct {
 	Run             ProcessRunner
 	Preflight       Preflight
 	Clock           Clock
+	RuntimeRoot     string
 }
 type PrepareOptions struct {
 	Release  release.Resolved
@@ -50,7 +52,7 @@ type PrepareOptions struct {
 }
 
 func NewPrepareService() PrepareService {
-	return PrepareService{PreparationRoot: DefaultPreparationRoot, ResolveBackend: ResolveBackend, Run: runProcess, Preflight: NewPreflight()}
+	return PrepareService{PreparationRoot: DefaultPreparationRoot, ResolveBackend: ResolveBackend, Run: runProcess, Preflight: NewPreflight(), RuntimeRoot: runtime.DefaultRoot}
 }
 
 func (service PrepareService) Prepare(ctx context.Context, options PrepareOptions) (string, error) {
@@ -157,7 +159,7 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 	}
 	steps := []PreparationStep{
 		{Name: "validate-release", Run: func(context.Context) (StepResult, error) {
-			if err := release.ValidateRemotePublish(resolved); err != nil {
+			if err := release.ValidateRemotePreparationInput(resolved); err != nil {
 				return StepResult{}, err
 			}
 			report := map[string]string{"release_version": identity.ReleaseVersion, "release_yaml_sha256": identity.ReleaseYAMLSHA256, "checksums_sha256": identity.ChecksumsSHA256, "platform": resolved.Metadata.Platform.OS + "/" + resolved.Metadata.Platform.Arch, "offline_artifact": offlineArtifactName(resolved), "offline_artifact_sha256": offlineArtifactSHA256(resolved)}
@@ -181,6 +183,17 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			fmt.Fprintln(streams.Stdout, "[OK] Main preparation prerequisites")
 			return StepResult{Evidence: []string{"reports/main-preflight.yaml"}}, nil
 		}, ValidateEvidence: func(context.Context, []string) error { return nonEmptyRegular(root, "reports/main-preflight.yaml") }},
+		{Name: "build-runtime-artifact", Run: func(context.Context) (StepResult, error) {
+			artifact, err := BuildRuntimeArtifact(root, identity, service.RuntimeRoot)
+			if err != nil {
+				return StepResult{}, err
+			}
+			relative := filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity)))
+			return StepResult{Evidence: stableEvidence([]string{relative + "/manifest.yaml", relative + "/checksums.sha256", relative + "/" + artifact.Manifest.Runtime.Archive})}, nil
+		}, ValidateEvidence: func(context.Context, []string) error {
+			_, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
+			return err
+		}},
 		command("prepare-offline-assets", env(nil), []string{"cache/apt/debs/manifest.txt", "cache/docker/debs/manifest.txt", "cache/manifest.txt", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/tools/oras"}, func() error { return ValidateOfflineAssets(root) }),
 		command("download-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"cache/images/images-all.txt", "cache/images/images-missing.txt", "cache/images/images-pulled.txt"}, func() error {
 			return ValidateImageLists(root, "images-all.txt", "images-pulled.txt", "images-missing.txt")
@@ -207,7 +220,11 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			if err != nil {
 				return StepResult{}, err
 			}
-			summary := map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "target-payload"}}
+			runtimeArtifact, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
+			if err != nil {
+				return StepResult{}, err
+			}
+			summary := map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "runtime-artifact", "target-payload"}, "runtime_artifact": "prepared", "runtime_version": runtimeArtifact.Manifest.Runtime.Version, "runtime_archive_sha256": runtimeArtifact.Manifest.Runtime.ArchiveSHA256, "runtime_manifest": filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml"))}
 			if err := writeYAMLReport(root, "reports/preparation-summary.yaml", summary); err != nil {
 				return StepResult{}, err
 			}

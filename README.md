@@ -6,6 +6,18 @@ EVA Deployer는 Ansible로 EVA 설치 환경과 서비스를 구성하는 배포
 
 EVA는 고객마다 Network와 Security 환경이 다르므로, 하나의 설치 Package를 모든 환경에 동일한 배포 모드로 전달하기 어렵습니다. EVA Deployer는 고객별 Helm Chart나 제품 이미지를 따로 만들지 않고, **동일한 EVA Release에서 이미지 Repository의 공급 경로만 변경하여** 다양한 환경에 EVA를 배포합니다.
 
+## 공식 설치 가이드
+
+설치자는 Repository mode에 맞는 단일 Runbook을 사용합니다.
+
+- [Cloud Repository 설치 가이드](docs/installation/cloud-repository-runbook.md)
+- [Remote Repository 설치 가이드](docs/installation/remote-repository-runbook.md)
+- [Local Repository 설치 가이드](docs/installation/local-repository-runbook.md)
+
+특히 Remote의 정상 경로는 통합 Runbook에 있는 `eva remote bootstrap`, `prepare`,
+`verify`, `publish`와 Target `eva install`입니다. 아래의 직접 Docker/Harbor/download,
+Ansible 실행 예시는 source 개발·이관 참고용이며 Remote 운영 절차로 사용하지 않습니다.
+
 ### Repository 기반 배포 모드
 
 설치 시 이미지 출처는 `repository_mode`로 결정하며, 기본값은 `cloud_repository`입니다.
@@ -72,9 +84,11 @@ Installer는 계정이나 group membership을 변경하지 않습니다. Tool, R
 
 ---
 
-## 1. 사전 준비 및 Repository 준비
+## 1. 개발·이관 참고: 사전 준비 및 Repository 준비
 
-이 섹션에서는 설치 전에 필요한 패키지·asset·이미지·Harbor를 준비합니다. 먼저 아래에서 하나의 Repository 모드를 선택하고, 해당 모드의 절차만 진행하세요. 실제 Ansible 설치 명령은 이후 `인프라 설치`, `EVA IAM 설치`, `EVA 배포`, `n8n 설치` 섹션에서 같은 모드로 실행합니다.
+이후 섹션은 source 개발·이관을 위한 package, asset, image와 Harbor 참고 자료입니다.
+공식 설치자는 위 Runbook을 사용하며, 특히 Remote 운영에서 아래 직접 Docker/Harbor,
+download 또는 Ansible 명령을 정상 절차로 실행하지 않습니다.
 
 > **설치 사용자 계정은 `eva` 사용을 권장합니다.**
 > 

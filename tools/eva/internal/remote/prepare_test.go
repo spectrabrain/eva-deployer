@@ -29,7 +29,8 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 			}
 			return errors.New("intentional backend failure")
 		},
-		Preflight: readyPreflight(t),
+		Preflight:   readyPreflight(t),
+		RuntimeRoot: writeRuntimeFixture(t),
 	}
 	_, err := service.Prepare(context.Background(), PrepareOptions{Release: resolved, Registry: "harbor.example.internal:32080"})
 	if err == nil {
@@ -40,7 +41,7 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 	}
 	store := NewManifestStore(service.PreparationRoot, nil)
 	manifest, loadErr := store.Load(resolved.Metadata.Version)
-	if loadErr != nil || manifest.Status != ManifestFailed || manifest.Steps[2].Status != StepFailed {
+	if loadErr != nil || manifest.Status != ManifestFailed || manifest.Steps[3].Status != StepFailed {
 		t.Fatalf("failed manifest = %#v, error = %v", manifest, loadErr)
 	}
 }
@@ -53,7 +54,7 @@ func TestPrepareRecordsPreflightFailureBeforeBackends(t *testing.T) {
 	called := false
 	preflight := readyPreflight(t)
 	preflight.LookPath = func(name string) (string, error) { return "", errors.New("missing " + name) }
-	service := PrepareService{PreparationRoot: t.TempDir(), ResolveBackend: func(relative string) (string, error) { return "/installed/" + relative, nil }, Run: func(context.Context, ProcessOptions) error { called = true; return nil }, Preflight: preflight}
+	service := PrepareService{PreparationRoot: t.TempDir(), ResolveBackend: func(relative string) (string, error) { return "/installed/" + relative, nil }, Run: func(context.Context, ProcessOptions) error { called = true; return nil }, Preflight: preflight, RuntimeRoot: writeRuntimeFixture(t)}
 	_, err := service.Prepare(context.Background(), PrepareOptions{Release: resolved, Registry: "harbor.example.internal:32080"})
 	if err == nil || !strings.Contains(err.Error(), "Main preparation preflight failed") || called {
 		t.Fatalf("Prepare() error=%v backend=%v", err, called)
@@ -80,6 +81,7 @@ func readyPreflight(t *testing.T) Preflight {
 		},
 		Credential: func(string) bool { return true },
 		Docker:     func(context.Context) (string, string, error) { return "amd64", t.TempDir(), nil },
+		PlaneReady: func(string, string) error { return nil },
 		DockerRoot: t.TempDir(), Timeout: time.Second, ExternalSources: nil,
 	}
 }

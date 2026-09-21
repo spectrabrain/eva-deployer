@@ -18,12 +18,14 @@ require_text() {
 main_go="$repo_root/tools/eva/cmd/eva/main.go"
 backend_go="$repo_root/tools/eva/internal/remote/backend.go"
 prepare_go="$repo_root/tools/eva/internal/remote/prepare.go"
+runtime_artifact_go="$repo_root/tools/eva/internal/remote/runtime_artifact.go"
 preflight_go="$repo_root/tools/eva/internal/remote/preflight.go"
 verify_go="$repo_root/tools/eva/internal/remote/verify.go"
 verify_test="$repo_root/tools/eva/internal/remote/verify_test.go"
 installer="$repo_root/scripts/install/install_eva_tool.sh"
 transport="$repo_root/scripts/remote/publish_release_to_target.sh"
-architecture="$repo_root/docs/architecture/remote-mode-implementation-design.md"
+remote_runbook="$repo_root/docs/installation/remote-repository-runbook.md"
+installation_index="$repo_root/docs/installation/README.md"
 pr_ci="$repo_root/.github/workflows/pr-ci.yaml"
 tag_ci="$repo_root/.github/workflows/tag-release.yaml"
 atomic_rename="mv -- \"\$target_staging\" \"\$target_final\""
@@ -35,7 +37,7 @@ done
 for command_line in \
   'remote prepare [RELEASE_PATH] --registry HOST[:PORT]' \
   'remote verify [RELEASE_PATH] --registry HOST[:PORT]' \
-  'remote publish [RELEASE_PATH] --target USER@HOST'; do
+  'remote publish [RELEASE_PATH] --registry HOST[:PORT] --target USER@HOST'; do
   require_text "$main_go" "$command_line" "CLI $command_line"
 done
 require_text "$prepare_go" 'defaultRemoteProject = "eva"' 'default repository project'
@@ -54,6 +56,8 @@ for backend in \
   scripts/download/download_qdrant_snapshots.sh \
   scripts/publish/push_images_to_repository.sh \
   scripts/publish/push_qdrant_snapshots_to_harbor.sh \
+  scripts/install/install_docker.sh \
+  scripts/install/setup_harbor.sh \
   scripts/lib/load_versions.sh \
   scripts/remote/publish_release_to_target.sh; do
   require_text "$installer" "$backend" "packaged backend $backend"
@@ -61,6 +65,8 @@ done
 
 require_text "$prepare_go" 'EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor"' 'Qdrant Harbor source'
 require_text "$prepare_go" 'Name: "main-preflight"' 'Main preflight ordered step'
+require_text "$prepare_go" 'Name: "build-runtime-artifact"' 'Runtime artifact ordered step'
+require_text "$runtime_artifact_go" 'BootstrapTargetRuntime' 'Remote Runtime bootstrap contract'
 require_text "$preflight_go" 'aws", "sts", "get-caller-identity"' 'AWS credential probe'
 require_text "$preflight_go" 'Docker credential for registry is unavailable' 'Harbor credential fail-closed'
 require_text "$preflight_go" 'DefaultExternalSources' 'bounded external source contract'
@@ -69,9 +75,19 @@ require_text "$prepare_go" 'repository-mapping-product.txt' 'product mapping rep
 require_text "$prepare_go" 'repository-mapping-infra.txt' 'infra mapping report'
 require_text "$transport" "$atomic_rename" 'atomic Target publish'
 require_text "$transport" 'different Remote Release already exists' 'different same-version Release rejection'
-require_text "$architecture" '[DECISION] R8-8 Main preparation preflight' 'Main preflight decision'
-require_text "$architecture" '[DECISION] R8-7 Target payload supply contract' 'Target payload decision'
-require_text "$architecture" 'staging extract·재검증 후 versioned managed cache로 atomic materialize' 'Target payload materialization'
+require_text "$remote_runbook" '# EVA Remote Repository 설치 가이드' 'integrated Remote Runbook title'
+require_text "$remote_runbook" 'eva-base-release-<version>.zip' 'Remote Base Release input'
+require_text "$remote_runbook" 'sudo eva remote bootstrap' 'Remote bootstrap command'
+require_text "$remote_runbook" 'sudo eva remote prepare .' 'Remote prepare command'
+require_text "$remote_runbook" 'sudo eva remote verify .' 'Remote verify command'
+require_text "$remote_runbook" 'sudo eva remote publish .' 'Remote publish command'
+# shellcheck disable=SC2016 # Literal documentation contract.
+require_text "$remote_runbook" '--registry "$MAIN_HARBOR"' 'Remote publish registry contract'
+require_text "$remote_runbook" '[Main]' 'Main work location'
+require_text "$remote_runbook" '[Target]' 'Target work location'
+# shellcheck disable=SC2016 # Literal documentation contract.
+require_text "$remote_runbook" 'Remote Base Release에는 `eva-offline`이 필수가 아닙니다.' 'Remote Base Release offline contract'
+require_text "$installation_index" '[Remote Repository Runbook](remote-repository-runbook.md)' 'Remote Runbook index'
 
 bash -n "$transport"
 echo '[OK] Remote E2E static readiness contracts passed'

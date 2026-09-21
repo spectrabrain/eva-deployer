@@ -51,6 +51,7 @@ const (
 var DefaultStepNames = []string{
 	"validate-release",
 	"main-preflight",
+	"build-runtime-artifact",
 	"prepare-offline-assets",
 	"download-product-images",
 	"download-infra-images",
@@ -116,7 +117,7 @@ func NewManifestStore(root string, clock Clock) ManifestStore {
 }
 
 func BuildPreparationIdentity(resolved release.Resolved, registry, project string) (PreparationIdentity, error) {
-	if err := release.ValidateRemotePublish(resolved); err != nil {
+	if err := release.ValidateRemotePreparationInput(resolved); err != nil {
 		return PreparationIdentity{}, err
 	}
 	registry, err := ValidateRegistry(registry)

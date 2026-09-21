@@ -24,9 +24,9 @@ bash -n "$transport"
 required_contracts=(
   '--release-dir'
 	'--payload-dir'
+  '--runtime-dir'
   '--target'
   '/var/lib/eva/inbox/releases'
-  'eva-offline'
   'sha256sum --check --strict checksums.sha256'
   '.eva-remote-release'
   '.incoming-'
@@ -39,6 +39,9 @@ required_contracts=(
   'target payload archive contains a link or special file'
 	'target payload has an unexpected file'
   'payload_manifest_sha256'
+  'runtime_manifest_sha256'
+  'remote-runtime'
+  'Runtime artifact'
 )
 
 for required_contract in "${required_contracts[@]}"; do

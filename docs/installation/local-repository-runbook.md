@@ -1,4 +1,4 @@
-# EVA Airgap Runbook
+# EVA Local Repository Runbook
 
 인터넷이 닫힌 k3s 노드에 EVA 스택(iam · app · agent · vision)을 올리는 절차입니다.
 **iam · app 및 Agent/Qdrant의 Harbor snapshot 경로는 실제 서버에서 검증**했고,
@@ -692,8 +692,7 @@ ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.
   -e repository_mode=local_repository \
   -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e eva_agent_vllm_profile=PRO6000-MIGx4 \
-  -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
-  -e eva_agent_qdrant_snapshot_source=harbor
+
 ```
 
 - 모델 캐시(`out/cache/models/agent/hf`, `out/cache/models/vllm/hf`)가 대상 서버에 있어야 합니다
@@ -722,8 +721,7 @@ ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_agent.yaml \
   -e repository_mode=remote_repository \
   -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
   -e harbor_admin_password='<Harbor 관리자 비밀번호>' \
-  -e eva_agent_qdrant_values_file=values-k3s.harbor.yaml \
-  -e eva_agent_qdrant_snapshot_source=harbor
+
 ```
 
 Pod 내부의 `localhost`는 Harbor host가 아니라 그 Pod 자신입니다. snapshot sidecar에는 metadata에 기록된

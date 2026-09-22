@@ -43,6 +43,62 @@ func TestBootstrapFailsWithoutConfirmationOrOnConflict(t *testing.T) {
 		t.Fatal("conflicting receipt accepted")
 	}
 }
+
+func TestBootstrapRevalidatesReceiptWithoutRegistryAndReplacesOnlyAfterChecks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "harbor.yaml")
+	if err := WriteHarborReceipt(path, testReceipt()); err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	service := BootstrapService{
+		EnsureRuntime: func(context.Context) error { return nil },
+		EnsureDocker:  func(context.Context) error { return nil },
+		EnsureHarbor: func(_ context.Context, registry, project string, _ bool) (HarborReceipt, error) {
+			receipt := testReceipt()
+			receipt.Registry, receipt.Project = registry, project
+			return receipt, nil
+		},
+		CheckHarbor: func(context.Context, HarborReceipt) error { checks++; return nil },
+	}
+	if receipt, err := service.Bootstrap(context.Background(), BootstrapOptions{Yes: true, ReceiptPath: path}); err != nil || receipt.Registry != testReceipt().Registry || checks != 1 {
+		t.Fatalf("receipt revalidation = %#v, %v, checks=%d", receipt, err, checks)
+	}
+	if _, err := service.Bootstrap(context.Background(), BootstrapOptions{Registry: "other.example.internal:32080", ReceiptPath: path, Yes: true}); err == nil {
+		t.Fatal("registry conflict accepted without replacement")
+	}
+	if _, err := service.Bootstrap(context.Background(), BootstrapOptions{Registry: "other.example.internal:32080", ReceiptPath: path}); err == nil {
+		t.Fatal("replacement accepted without confirmation")
+	}
+	if receipt, err := service.Bootstrap(context.Background(), BootstrapOptions{Registry: "other.example.internal:32080", ReceiptPath: path, Yes: true, ReplaceRegistry: true}); err != nil || receipt.Registry != "other.example.internal:32080" {
+		t.Fatalf("replacement = %#v, %v", receipt, err)
+	}
+	stored, err := LoadHarborReceipt(path)
+	if err != nil || stored.Registry != "other.example.internal:32080" {
+		t.Fatalf("stored replacement = %#v, %v", stored, err)
+	}
+}
+
+func TestBootstrapReplacementFailurePreservesExistingReceipt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "harbor.yaml")
+	if err := WriteHarborReceipt(path, testReceipt()); err != nil {
+		t.Fatal(err)
+	}
+	service := BootstrapService{
+		EnsureRuntime: func(context.Context) error { return nil },
+		EnsureDocker:  func(context.Context) error { return nil },
+		EnsureHarbor: func(context.Context, string, string, bool) (HarborReceipt, error) {
+			return HarborReceipt{}, errors.New("new registry is unavailable")
+		},
+		CheckHarbor: func(context.Context, HarborReceipt) error { return nil },
+	}
+	if _, err := service.Bootstrap(context.Background(), BootstrapOptions{Registry: "other.example.internal:32080", Yes: true, ReplaceRegistry: true, ReceiptPath: path}); err == nil {
+		t.Fatal("failed replacement succeeded")
+	}
+	stored, err := LoadHarborReceipt(path)
+	if err != nil || stored.Registry != testReceipt().Registry {
+		t.Fatalf("replacement failure changed receipt: %#v, %v", stored, err)
+	}
+}
 func TestHarborReceiptRejectsUnknownAndSensitiveFields(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "harbor.yaml")
 	if err := WriteHarborReceipt(path, testReceipt()); err != nil {

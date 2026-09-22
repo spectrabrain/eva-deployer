@@ -85,9 +85,54 @@ func TestPublishPreservesBackendFailure(t *testing.T) {
 		},
 		Run: func(string, []string, Streams) error { return backendFailure },
 	}
-	err := service.Publish(PublishOptions{Release: writeOriginalRelease(t, true), Target: "target.example.internal", Registry: "harbor.example.internal:32080"})
+	err := service.Publish(PublishOptions{Release: writeOriginalRelease(t, true), Target: "eva@target.example.internal", Registry: "harbor.example.internal:32080"})
 	if !errors.Is(err, backendFailure) {
 		t.Fatalf("Publish() error = %v, want wrapped backend failure", err)
+	}
+}
+
+func TestPublishMultipleTargetsContinuesAfterFailure(t *testing.T) {
+	var calls []string
+	backendCalls := 0
+	service := Service{
+		ResolveBackend: func() (string, error) { backendCalls++; return "/backend", nil },
+		ResolvePayload: func(release.Resolved, string, string) (PayloadSource, error) {
+			return PayloadSource{Directory: "/payload"}, nil
+		},
+		ResolveRuntime: func(release.Resolved, string, string) (RuntimeArtifactSource, error) {
+			return RuntimeArtifactSource{Directory: "/runtime"}, nil
+		},
+		Run: func(_ string, arguments []string, _ Streams) error {
+			target := arguments[len(arguments)-1]
+			calls = append(calls, target)
+			if target == "eva@second.example.internal" {
+				return errors.New("ssh key=private-value failed")
+			}
+			return nil
+		},
+	}
+	result, err := service.PublishWithResult(PublishOptions{Release: writeOriginalRelease(t, true), Targets: []string{"eva@first.example.internal", "eva@second.example.internal", "eva@third.example.internal"}, Registry: "harbor.example.internal:32080"})
+	if err == nil || result.Succeeded != 2 || result.Failed != 1 || backendCalls != 1 {
+		t.Fatalf("result=%#v err=%v backendCalls=%d", result, err, backendCalls)
+	}
+	if got, want := strings.Join(calls, ","), "eva@first.example.internal,eva@second.example.internal,eva@third.example.internal"; got != want {
+		t.Fatalf("calls=%s, want %s", got, want)
+	}
+	if result.Targets[1].Err == nil || strings.Contains(result.Targets[1].Err.Error(), "private-value") {
+		t.Fatalf("target error is not sanitized: %v", result.Targets[1].Err)
+	}
+}
+
+func TestPublishValidatesAllTargetsBeforeBackend(t *testing.T) {
+	calls := 0
+	service := Service{ResolveBackend: func() (string, error) { calls++; return "/backend", nil }}
+	for _, targets := range [][]string{{"eva@one.example.internal", "eva@ONE.example.internal"}, {"eva@one.example.internal", "not a target"}} {
+		if _, err := service.PublishWithResult(PublishOptions{Release: writeOriginalRelease(t, true), Targets: targets, Registry: "harbor.example.internal:32080"}); err == nil {
+			t.Fatalf("invalid targets accepted: %q", targets)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("backend resolved after invalid target: %d", calls)
 	}
 }
 

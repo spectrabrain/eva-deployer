@@ -57,7 +57,7 @@ eva verify .
 직접 지정합니다.
 
 ```text
-harbor.main.internal:32080
+10.159.57.172:32080
 ```
 
 Main Harbor endpoint에는 URL scheme을 넣지 않으며 `localhost` 또는 loopback 주소를
@@ -77,12 +77,15 @@ Main의 preparation plane을 준비하거나 기존 상태를 검증합니다.
 
 ```bash
 sudo eva remote bootstrap \
-  --registry harbor.main.internal:32080 \
+  --registry 10.159.57.172:32080 \
   --yes
 ```
 
 이 명령은 Managed Runtime, Docker Engine/Compose, Harbor 및 `eva` project를 준비하거나
-검증하고 Harbor receipt를 기록합니다. Target의 k3s, GPU, NFS 또는 EVA component를
+검증하고, 같은 `sudo` 실행 identity의 Docker registry credential까지 확인한 뒤 Harbor
+receipt를 기록합니다. 별도의 `docker login`은 정상 절차에 필요하지 않습니다. credential
+오류가 발생하면 수동 login 대신 `sudo eva remote bootstrap --yes`를 다시 실행합니다.
+Target의 k3s, GPU, NFS 또는 EVA component를
 Main에 설치하지 않습니다. 이미 승인된 외부 Harbor를 쓸 때만 advanced
 `--external-harbor` option을 사용합니다.
 
@@ -140,14 +143,14 @@ sudo eva remote publish . \
 ```
 
 bootstrap receipt와 같은 registry를 명시적으로 확인하려면 모든 Remote 명령에
-`--registry harbor.main.internal:32080`를 붙일 수 있습니다. 다른 registry는 조용히
+`--registry 10.159.57.172:32080`를 붙일 수 있습니다. 다른 registry는 조용히
 override되지 않습니다. 변경이 필요한 경우 새 endpoint가 정상인지 확인한 후 다음처럼
 receipt를 교체합니다. 기존 Harbor data, preparation 결과와 Target Release는 삭제하지
 않습니다.
 
 ```bash
 sudo eva remote bootstrap \
-  --registry harbor.next.internal:32080 \
+  --registry 10.159.57.173:32080 \
   --replace-registry \
   --yes
 ```
@@ -192,7 +195,7 @@ site:
 
 repository:
   mode: remote
-  registry: harbor.main.internal:32080
+  registry: 10.159.57.172:32080
   project: eva
 
 components:

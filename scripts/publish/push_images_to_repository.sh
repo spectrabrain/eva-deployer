@@ -72,16 +72,23 @@ PY
 has_docker_credential() {
   python3 - "$REPOSITORY_REGISTRY" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
-path = Path.home() / '.docker' / 'config.json'
+config_root = os.environ.get('DOCKER_CONFIG', '').strip()
+if config_root:
+    path = Path(config_root) / 'config.json'
+else:
+    path = Path.home() / '.docker' / 'config.json'
 try:
     config = json.loads(path.read_text())
-except (FileNotFoundError, json.JSONDecodeError):
+except (FileNotFoundError, json.JSONDecodeError, OSError):
     raise SystemExit(1)
 
-raise SystemExit(0 if sys.argv[1] in config.get('auths', {}) else 1)
+auths = config.get('auths', {})
+registry = sys.argv[1]
+raise SystemExit(0 if registry in auths or f'https://{registry}' in auths else 1)
 PY
 }
 

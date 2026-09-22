@@ -140,9 +140,6 @@ func BuildRuntimeArtifact(root string, identity PreparationIdentity, runtimeRoot
 	if err != nil {
 		return RuntimeArtifactSource{}, fmt.Errorf("validate managed Runtime: %w", err)
 	}
-	if err := validateRuntimeSource(resolved.Root); err != nil {
-		return RuntimeArtifactSource{}, err
-	}
 
 	final := RuntimeArtifactPath(root, identity)
 	if _, err := os.Lstat(final); err == nil {
@@ -293,17 +290,6 @@ func validateRuntimeArtifactManifest(manifest RuntimeArtifactManifest, identity 
 	return nil
 }
 
-func validateRuntimeSource(root string) error {
-	entries, err := runtimeEntries(root)
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
-		return errors.New("Runtime source is empty")
-	}
-	return nil
-}
-
 func writeRuntimeArchive(root, archive string) (resultErr error) {
 	entries, err := runtimeEntries(root)
 	if err != nil {
@@ -332,7 +318,19 @@ func writeRuntimeArchive(root, archive string) (resultErr error) {
 			gz.Close()
 			return err
 		}
-		header := &tar.Header{Name: path.Join("runtime", filepath.ToSlash(relative)), Mode: int64(info.Mode().Perm()), ModTime: time.Unix(0, 0), Format: tar.FormatPAX}
+		archiveInfo := info
+		if info.Mode()&os.ModeSymlink != 0 {
+			archiveInfo, err = runtimePythonLauncherInfo(
+				root,
+				relative,
+			)
+			if err != nil {
+				tw.Close()
+				gz.Close()
+				return err
+			}
+		}
+		header := &tar.Header{Name: path.Join("runtime", filepath.ToSlash(relative)), Mode: int64(archiveInfo.Mode().Perm()), ModTime: time.Unix(0, 0), Format: tar.FormatPAX}
 		if info.IsDir() {
 			header.Typeflag, header.Name = tar.TypeDir, header.Name+"/"
 			if err := tw.WriteHeader(header); err != nil {
@@ -342,7 +340,7 @@ func writeRuntimeArchive(root, archive string) (resultErr error) {
 			}
 			continue
 		}
-		header.Typeflag, header.Size = tar.TypeReg, info.Size()
+		header.Typeflag, header.Size = tar.TypeReg, archiveInfo.Size()
 		if err := tw.WriteHeader(header); err != nil {
 			tw.Close()
 			gz.Close()
@@ -396,8 +394,25 @@ func runtimeEntries(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if !runtimeAllowedPath(relative) || isSecretLikePath(relative) || info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
-			return fmt.Errorf("unsafe Runtime source: %s", relative)
+		if !runtimeAllowedPath(relative) ||
+			(!info.IsDir() &&
+				!info.Mode().IsRegular() &&
+				info.Mode()&os.ModeSymlink == 0) {
+			return fmt.Errorf(
+				"unsafe Runtime source: %s",
+				relative,
+			)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if _, err := runtimePythonLauncherInfo(
+				root,
+				relative,
+			); err != nil {
+				return fmt.Errorf(
+					"unsafe Runtime source: %s",
+					relative,
+				)
+			}
 		}
 		if stat, ok := info.Sys().(*syscall.Stat_t); ok && info.Mode().IsRegular() && stat.Nlink > 1 {
 			return fmt.Errorf("hard-linked Runtime source: %s", relative)
@@ -409,8 +424,122 @@ func runtimeEntries(root string) ([]string, error) {
 	return entries, err
 }
 
+func runtimePythonLauncherInfo(
+	root string,
+	relative string,
+) (os.FileInfo, error) {
+	relative = filepath.ToSlash(relative)
+	if !runtimePythonLauncherPath(relative) {
+		return nil, errors.New(
+			"Runtime symlink is not an allowed Python launcher",
+		)
+	}
+
+	launcher := filepath.Join(
+		root,
+		filepath.FromSlash(relative),
+	)
+	resolved, err := filepath.EvalSymlinks(launcher)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if !runtimeSystemPythonPath(resolved) {
+		return nil, errors.New(
+			"Runtime Python launcher resolves outside " +
+				"the approved system Python path",
+		)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() ||
+		info.Mode().Perm()&0o111 == 0 {
+		return nil, errors.New(
+			"Runtime Python launcher target must be " +
+				"an executable regular file",
+		)
+	}
+	return info, nil
+}
+
+func runtimePythonLauncherPath(relative string) bool {
+	parts := strings.Split(
+		filepath.ToSlash(relative),
+		"/",
+	)
+	if len(parts) != 3 ||
+		parts[0] != "venv" ||
+		parts[1] != "bin" {
+		return false
+	}
+
+	name := parts[2]
+	if name == "python" || name == "python3" {
+		return true
+	}
+	if !strings.HasPrefix(name, "python3.") {
+		return false
+	}
+
+	version := strings.TrimPrefix(name, "python3.")
+	if version == "" {
+		return false
+	}
+	for _, character := range version {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func runtimeSystemPythonPath(resolved string) bool {
+	resolved = filepath.Clean(resolved)
+	prefix := filepath.Clean("/usr/bin/python3")
+	if resolved == prefix {
+		return true
+	}
+	if !strings.HasPrefix(resolved, prefix+".") {
+		return false
+	}
+
+	version := strings.TrimPrefix(resolved, prefix+".")
+	if version == "" {
+		return false
+	}
+	for _, character := range version {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func runtimeExcludedPath(relative string) bool {
-	parts := strings.Split(filepath.ToSlash(relative), "/")
+	relative = filepath.ToSlash(relative)
+	if relative == "venv/lib64" {
+		return true
+	}
+	parts := strings.Split(relative, "/")
+
+	for _, part := range parts {
+		if part == "__pycache__" {
+			return true
+		}
+	}
+
+	base := path.Base(relative)
+	if strings.HasSuffix(base, ".pyc") ||
+		strings.HasSuffix(base, ".pyo") {
+		return true
+	}
+
 	return len(parts) >= 5 &&
 		parts[0] == "collections" &&
 		parts[1] == "ansible_collections" &&
@@ -482,5 +611,7 @@ func safeRuntimeArchiveName(name string) bool {
 	if !strings.HasPrefix(name, "runtime/") || strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
 		return false
 	}
-	return runtimeAllowedPath(strings.TrimPrefix(name, "runtime/")) && !isSecretLikePath(name)
+	return runtimeAllowedPath(
+		strings.TrimPrefix(name, "runtime/"),
+	)
 }

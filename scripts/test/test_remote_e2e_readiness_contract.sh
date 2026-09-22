@@ -31,6 +31,7 @@ installer="$repo_root/scripts/install/install_eva_tool.sh"
 transport="$repo_root/scripts/remote/publish_release_to_target.sh"
 remote_runbook="$repo_root/docs/installation/remote-repository-runbook.md"
 image_publish_backend="$repo_root/scripts/publish/push_images_to_repository.sh"
+qdrant_publish_backend="$repo_root/scripts/publish/push_qdrant_snapshots_to_harbor.sh"
 installation_index="$repo_root/docs/installation/README.md"
 pr_ci="$repo_root/.github/workflows/pr-ci.yaml"
 tag_ci="$repo_root/.github/workflows/tag-release.yaml"
@@ -99,6 +100,10 @@ require_text "$prepare_go" 'repository-mapping-infra.txt' 'infra mapping report'
 require_text "$manifest_go" 'DefaultRemoteCacheRoot = "/var/lib/eva/cache/remote"' 'shared Remote cache default'
 require_text "$prepare_go" 'CacheRoot' 'PrepareService shared cache root'
 require_text "$prepare_go" '"EVA_CACHE_ROOT": cacheRoot' 'backend shared cache environment'
+require_text "$prepare_go" 'defaultManagedHarborConfig = "/opt/eva/harbor/harbor/harbor.yml"' 'Managed Harbor configuration path'
+require_text "$prepare_go" '"LOCAL_HARBOR_YML":         harborConfigPath' 'Qdrant Managed Harbor config handoff'
+require_text "$qdrant_publish_backend" 'registry == f'"'"'{hostname}:32080'"'"'' 'Qdrant Harbor registry identity check'
+require_text "$qdrant_publish_backend" '--password-stdin' 'Qdrant Harbor password stdin'
 require_text "$payload_go" 'func BuildTargetPayload(preparationRoot, cacheRoot string' 'payload explicit cache root'
 require_text "$transport" "$atomic_rename" 'atomic Target publish'
 require_text "$transport" 'different Remote Release already exists' 'different same-version Release rejection'

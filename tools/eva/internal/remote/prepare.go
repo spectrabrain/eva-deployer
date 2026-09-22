@@ -15,6 +15,7 @@ import (
 )
 
 const defaultRemoteProject = "eva"
+const defaultManagedHarborConfig = "/opt/eva/harbor/harbor/harbor.yml"
 
 var remoteBackendPaths = map[string]string{
 	"prepare-offline-assets":    "scripts/download/download_offline_assets.sh",
@@ -37,14 +38,15 @@ type ProcessOptions struct {
 type ProcessRunner func(context.Context, ProcessOptions) error
 
 type PrepareService struct {
-	PreparationRoot string
-	CacheRoot       string
-	ResolveBackend  func(string) (string, error)
-	Run             ProcessRunner
-	Preflight       Preflight
-	Clock           Clock
-	RuntimeRoot     string
-	PrepareFunc     func(context.Context, PrepareOptions) (string, error) // test boundary; nil uses the production implementation
+	PreparationRoot  string
+	CacheRoot        string
+	HarborConfigPath string
+	ResolveBackend   func(string) (string, error)
+	Run              ProcessRunner
+	Preflight        Preflight
+	Clock            Clock
+	RuntimeRoot      string
+	PrepareFunc      func(context.Context, PrepareOptions) (string, error) // test boundary; nil uses the production implementation
 }
 type PrepareOptions struct {
 	Release       release.Resolved
@@ -55,7 +57,15 @@ type PrepareOptions struct {
 }
 
 func NewPrepareService() PrepareService {
-	return PrepareService{PreparationRoot: DefaultPreparationRoot, CacheRoot: DefaultRemoteCacheRoot, ResolveBackend: ResolveBackend, Run: runProcess, Preflight: NewPreflight(), RuntimeRoot: runtime.DefaultRoot}
+	return PrepareService{
+		PreparationRoot:  DefaultPreparationRoot,
+		CacheRoot:        DefaultRemoteCacheRoot,
+		HarborConfigPath: defaultManagedHarborConfig,
+		ResolveBackend:   ResolveBackend,
+		Run:              runProcess,
+		Preflight:        NewPreflight(),
+		RuntimeRoot:      runtime.DefaultRoot,
+	}
 }
 
 func (service PrepareService) Prepare(ctx context.Context, options PrepareOptions) (string, error) {
@@ -73,6 +83,9 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 	}
 	if service.CacheRoot == "" {
 		service.CacheRoot = DefaultRemoteCacheRoot
+	}
+	if service.HarborConfigPath == "" {
+		service.HarborConfigPath = defaultManagedHarborConfig
 	}
 	if err := ensureRemoteCacheRoot(service.PreparationRoot, service.CacheRoot); err != nil {
 		return "", err
@@ -113,7 +126,16 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 	if service.ResolveBackend == nil || service.Run == nil || service.Preflight.Run == nil {
 		return manifestPath, errors.New("Remote prepare service is not configured")
 	}
-	steps, err := service.steps(root, service.CacheRoot, options.Release, identity, &manifest, options.Streams, options.AWSCredential)
+	steps, err := service.steps(
+		root,
+		service.CacheRoot,
+		service.HarborConfigPath,
+		options.Release,
+		identity,
+		&manifest,
+		options.Streams,
+		options.AWSCredential,
+	)
 	if err != nil {
 		return manifestPath, err
 	}
@@ -160,7 +182,16 @@ func ensureRemoteCacheRoot(preparationRoot, cacheRoot string) error {
 	return os.Chmod(cache, 0o750)
 }
 
-func (service PrepareService) steps(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest *Manifest, streams Streams, awsCredential AWSCredential) ([]PreparationStep, error) {
+func (service PrepareService) steps(
+	root string,
+	cacheRoot string,
+	harborConfigPath string,
+	resolved release.Resolved,
+	identity PreparationIdentity,
+	manifest *Manifest,
+	streams Streams,
+	awsCredential AWSCredential,
+) ([]PreparationStep, error) {
 	if streams.Stdout == nil {
 		streams.Stdout = io.Discard
 	}
@@ -271,7 +302,11 @@ func (service PrepareService) steps(root, cacheRoot string, resolved release.Res
 		command("publish-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(cacheRoot, "images/infra-images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-infra.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-infra.txt"}, func() error {
 			return ValidateRepositoryMapping(cacheRoot, root, "images/infra-images-pulled.txt", "reports/repository-mapping-infra.txt", identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
-		command("publish-qdrant-snapshots", env(map[string]string{"SNAPSHOT_DIR": filepath.Join(cacheRoot, "qdrant-snapshots"), "HARBOR_ARTIFACT_MANIFEST": filepath.Join(root, "reports/qdrant-artifacts.txt")}), []string{"reports/qdrant-artifacts.txt"}, func() error {
+		command("publish-qdrant-snapshots", env(map[string]string{
+			"SNAPSHOT_DIR":             filepath.Join(cacheRoot, "qdrant-snapshots"),
+			"HARBOR_ARTIFACT_MANIFEST": filepath.Join(root, "reports/qdrant-artifacts.txt"),
+			"LOCAL_HARBOR_YML":         harborConfigPath,
+		}), []string{"reports/qdrant-artifacts.txt"}, func() error {
 			return ValidateQdrantArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
 		{Name: "write-manifest", Run: func(context.Context) (StepResult, error) {

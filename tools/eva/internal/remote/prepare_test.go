@@ -49,8 +49,15 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 
 func TestPrepareServiceUsesSeparateManagedCacheRoot(t *testing.T) {
 	service := NewPrepareService()
-	if service.PreparationRoot != DefaultPreparationRoot || service.CacheRoot != DefaultRemoteCacheRoot {
-		t.Fatalf("defaults preparation=%q cache=%q", service.PreparationRoot, service.CacheRoot)
+	if service.PreparationRoot != DefaultPreparationRoot ||
+		service.CacheRoot != DefaultRemoteCacheRoot ||
+		service.HarborConfigPath != defaultManagedHarborConfig {
+		t.Fatalf(
+			"defaults preparation=%q cache=%q harbor=%q",
+			service.PreparationRoot,
+			service.CacheRoot,
+			service.HarborConfigPath,
+		)
 	}
 	preparation := t.TempDir()
 	for _, cache := range []string{preparation, filepath.Join(preparation, "cache")} {

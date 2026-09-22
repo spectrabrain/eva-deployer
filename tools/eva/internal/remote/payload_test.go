@@ -23,7 +23,7 @@ func TestBuildTargetPayloadIsDeterministicAndExcludesHarborAssets(t *testing.T) 
 	if err := os.RemoveAll(first); err != nil {
 		t.Fatal(err)
 	}
-	payload, err := BuildTargetPayload(root, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
+	payload, err := BuildTargetPayload(root, filepath.Join(root, "cache"), identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
 	if err != nil {
 		t.Fatalf("BuildTargetPayload() error = %v", err)
 	}
@@ -76,7 +76,7 @@ func TestBuildTargetPayloadRejectsUnsafeOrIncompleteSource(t *testing.T) {
 			root, resolved, identity := writeCompletedPreparation(t)
 			mustRemove(t, TargetPayloadPath(root, identity))
 			testCase.mutate(t, root)
-			if _, err := BuildTargetPayload(root, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch); err == nil {
+			if _, err := BuildTargetPayload(root, filepath.Join(root, "cache"), identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch); err == nil {
 				t.Fatal("BuildTargetPayload() succeeded with invalid source")
 			}
 		})

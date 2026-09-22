@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,17 +23,31 @@ type BootstrapOptions struct {
 	Streams                              Streams
 }
 type BootstrapService struct {
-	EnsureRuntime func(context.Context) error
-	EnsureDocker  func(context.Context) error
-	EnsureHarbor  func(context.Context, string, string, bool) (HarborReceipt, error)
-	CheckHarbor   func(context.Context, HarborReceipt) error
-	Login         func(context.Context, string, string, string) error
-	Credential    func(string) bool
-	Password      func(HarborReceipt) (string, error)
+	EnsureRuntime           func(context.Context) error
+	EnsureDocker            func(context.Context) error
+	EnsureRegistryTransport func(context.Context, string) error
+	ProbeManagedHarbor      func(context.Context, HarborReceipt, time.Duration) error
+	RecoverManagedHarbor    func(context.Context, HarborReceipt) error
+	EnsureHarbor            func(context.Context, string, string, bool) (HarborReceipt, error)
+	CheckHarbor             func(context.Context, HarborReceipt) error
+	Login                   func(context.Context, string, string, string) error
+	Credential              func(string) bool
+	Password                func(HarborReceipt) (string, error)
 }
 
 func NewBootstrapService() BootstrapService {
-	return BootstrapService{EnsureRuntime: ensureManagedRuntime, EnsureDocker: ensureManagedDocker, EnsureHarbor: ensureManagedHarbor, CheckHarbor: checkManagedHarbor, Login: dockerLogin, Credential: dockerCredentialPresent, Password: managedHarborPassword}
+	return BootstrapService{
+		EnsureRuntime:           ensureManagedRuntime,
+		EnsureDocker:            ensureManagedDocker,
+		EnsureRegistryTransport: ensureManagedRegistryTransport,
+		ProbeManagedHarbor:      waitForManagedHarborAPI,
+		RecoverManagedHarbor:    recoverManagedHarbor,
+		EnsureHarbor:            ensureManagedHarbor,
+		CheckHarbor:             checkManagedHarbor,
+		Login:                   dockerLogin,
+		Credential:              dockerCredentialPresent,
+		Password:                managedHarborPassword,
+	}
 }
 func ensureManagedRuntime(context.Context) error {
 	if _, err := runtime.Resolve(runtime.DefaultRoot); err == nil {
@@ -123,12 +138,45 @@ func checkManagedHarbor(ctx context.Context, receipt HarborReceipt) error {
 }
 
 func dockerLogin(ctx context.Context, registry, username, password string) error {
-	command := exec.CommandContext(ctx, "docker", "login", registry, "--username", username, "--password-stdin")
+	command := exec.CommandContext(
+		ctx,
+		"docker",
+		"login",
+		registry,
+		"--username",
+		username,
+		"--password-stdin",
+	)
 	command.Stdin = strings.NewReader(password)
+
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("docker login failed for %s", registry)
+		detail := sanitizeDockerDiagnostic(stderr.String(), password)
+		if detail == "" {
+			return fmt.Errorf("docker login failed for %s", registry)
+		}
+		return fmt.Errorf(
+			"docker login failed for %s: %s",
+			registry,
+			detail,
+		)
 	}
 	return nil
+}
+
+func sanitizeDockerDiagnostic(value, password string) string {
+	if password != "" {
+		value = strings.ReplaceAll(value, password, "[REDACTED]")
+	}
+
+	value = strings.Join(strings.Fields(value), " ")
+
+	const maximumLength = 512
+	if len(value) > maximumLength {
+		value = value[:maximumLength] + "..."
+	}
+	return value
 }
 
 func managedHarborPassword(receipt HarborReceipt) (string, error) {
@@ -219,6 +267,44 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 			if s.CheckHarbor == nil {
 				return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")
 			}
+			if existing.ManagedBy == "eva" &&
+				existing.Protocol == "http" &&
+				s.EnsureRegistryTransport != nil {
+				if err := s.EnsureRegistryTransport(
+					ctx,
+					existing.Registry,
+				); err != nil {
+					return HarborReceipt{}, fmt.Errorf(
+						"prepare Managed Harbor registry transport: %w",
+						err,
+					)
+				}
+				if s.ProbeManagedHarbor == nil {
+					return HarborReceipt{}, errors.New(
+						"Managed Harbor readiness probe is not configured",
+					)
+				}
+				if err := s.ProbeManagedHarbor(
+					ctx,
+					existing,
+					10*time.Second,
+				); err != nil {
+					if s.RecoverManagedHarbor == nil {
+						return HarborReceipt{}, errors.New(
+							"Managed Harbor recovery service is not configured",
+						)
+					}
+					if err := s.RecoverManagedHarbor(
+						ctx,
+						existing,
+					); err != nil {
+						return HarborReceipt{}, fmt.Errorf(
+							"recover Managed Harbor after Docker restart: %w",
+							err,
+						)
+					}
+				}
+			}
 			if err := s.prepareCredential(ctx, existing); err != nil {
 				return HarborReceipt{}, err
 			}
@@ -249,6 +335,18 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 	}
 	if err := s.EnsureDocker(ctx); err != nil {
 		return HarborReceipt{}, fmt.Errorf("prepare Docker: %w", err)
+	}
+	if !options.ExternalHarbor &&
+		s.EnsureRegistryTransport != nil {
+		if err := s.EnsureRegistryTransport(
+			ctx,
+			options.Registry,
+		); err != nil {
+			return HarborReceipt{}, fmt.Errorf(
+				"prepare Managed Harbor registry transport: %w",
+				err,
+			)
+		}
 	}
 	receipt, err := s.EnsureHarbor(ctx, options.Registry, options.Project, options.ExternalHarbor)
 	if err != nil {

@@ -109,3 +109,37 @@ func TestRuntimeArtifactFailsClosedForUnsafeSourceAndIdentity(t *testing.T) {
 		t.Fatal("LoadRuntimeArtifact() accepted corrupt archive")
 	}
 }
+func TestRuntimeAllowedPathIncludesCollections(
+	t *testing.T,
+) {
+	allowed := []string{
+		"collections",
+		"collections/ansible_collections",
+		"collections/ansible_collections/ansible/posix/MANIFEST.json",
+	}
+
+	for _, relative := range allowed {
+		if !runtimeAllowedPath(relative) {
+			t.Fatalf(
+				"Runtime path was rejected: %s",
+				relative,
+			)
+		}
+	}
+
+	rejected := []string{
+		"collection",
+		"collections-backup",
+		"workspace",
+		"workspace.yaml",
+	}
+
+	for _, relative := range rejected {
+		if runtimeAllowedPath(relative) {
+			t.Fatalf(
+				"unexpected Runtime path was accepted: %s",
+				relative,
+			)
+		}
+	}
+}

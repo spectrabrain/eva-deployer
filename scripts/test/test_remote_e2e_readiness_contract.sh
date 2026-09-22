@@ -18,6 +18,7 @@ require_text() {
 main_go="$repo_root/tools/eva/cmd/eva/main.go"
 backend_go="$repo_root/tools/eva/internal/remote/backend.go"
 bootstrap_go="$repo_root/tools/eva/internal/remote/bootstrap.go"
+docker_registry_go="$repo_root/tools/eva/internal/remote/docker_registry.go"
 prepare_go="$repo_root/tools/eva/internal/remote/prepare.go"
 runtime_artifact_go="$repo_root/tools/eva/internal/remote/runtime_artifact.go"
 preflight_go="$repo_root/tools/eva/internal/remote/preflight.go"
@@ -72,10 +73,19 @@ require_text "$prepare_go" 'Name: "build-runtime-artifact"' 'Runtime artifact or
 require_text "$runtime_artifact_go" 'BootstrapTargetRuntime' 'Remote Runtime bootstrap contract'
 require_text "$preflight_go" 'aws", "sts", "get-caller-identity"' 'AWS credential probe'
 require_text "$preflight_go" 'Docker credential for registry is unavailable' 'Harbor credential fail-closed'
-require_text "$bootstrap_go" 'docker", "login"' 'Managed Harbor Docker login'
+require_text "$bootstrap_go" 'func dockerLogin(' 'Managed Harbor Docker login'
 require_text "$bootstrap_go" '"--password-stdin"' 'Managed Harbor password stdin'
 require_text "$bootstrap_go" 'prepareCredential' 'Managed Harbor credential lifecycle'
 require_text "$bootstrap_go" 'WriteHarborReceipt' 'receipt write after credential validation'
+require_text "$bootstrap_go" 'EnsureRegistryTransport' 'Managed Harbor registry transport lifecycle'
+require_text "$docker_registry_go" 'insecure-registries' 'Managed HTTP Harbor Docker transport'
+require_text "$docker_registry_go" 'func validateDockerDaemonConfig(' 'Docker daemon config validation helper'
+require_text "$docker_registry_go" '"--validate"' 'dockerd config validation option'
+require_text "$docker_registry_go" 'previous configuration restored' 'Docker config rollback contract'
+require_text "$bootstrap_go" 'RecoverManagedHarbor' 'Managed Harbor recovery lifecycle'
+require_text "$docker_registry_go" 'func recoverManagedHarbor(' 'Managed Harbor compose recovery'
+require_text "$docker_registry_go" '"compose"' 'Managed Harbor Docker Compose recovery'
+require_text "$docker_registry_go" '"up"' 'Managed Harbor non-destructive startup'
 require_text "$image_publish_backend" "os.environ.get('DOCKER_CONFIG', '').strip()" 'image publish DOCKER_CONFIG override'
 require_text "$image_publish_backend" "Path(config_root) / 'config.json'" 'image publish Docker config path'
 require_text "$image_publish_backend" "f'https://{registry}'" 'image publish HTTPS registry credential key'

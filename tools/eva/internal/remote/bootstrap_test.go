@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testReceipt() HarborReceipt {
@@ -212,5 +213,244 @@ func TestHarborReceiptRejectsUnknownAndSensitiveFields(t *testing.T) {
 	}
 	if _, err := LoadHarborReceipt(path); err == nil {
 		t.Fatal("sensitive receipt accepted")
+	}
+}
+
+func TestSanitizeDockerDiagnosticRedactsAndBounds(
+	t *testing.T,
+) {
+	password := "credential-not-logged"
+	input := "login rejected " + password + " " +
+		strings.Repeat("x", 700)
+
+	actual := sanitizeDockerDiagnostic(input, password)
+
+	if strings.Contains(actual, password) {
+		t.Fatal("Docker diagnostic exposed password")
+	}
+	if !strings.Contains(actual, "[REDACTED]") {
+		t.Fatal("Docker diagnostic did not redact password")
+	}
+	if len(actual) > 515 {
+		t.Fatalf(
+			"Docker diagnostic is not bounded: %d",
+			len(actual),
+		)
+	}
+}
+
+func TestBootstrapPreparesManagedRegistryTransport(
+	t *testing.T,
+) {
+	path := filepath.Join(t.TempDir(), "harbor.yaml")
+	calls := []string{}
+
+	service := withTestCredentialHooks(BootstrapService{
+		EnsureRuntime: func(context.Context) error {
+			calls = append(calls, "runtime")
+			return nil
+		},
+		EnsureDocker: func(context.Context) error {
+			calls = append(calls, "docker")
+			return nil
+		},
+		EnsureRegistryTransport: func(
+			_ context.Context,
+			registry string,
+		) error {
+			calls = append(calls, "transport:"+registry)
+			return nil
+		},
+		EnsureHarbor: func(
+			context.Context,
+			string,
+			string,
+			bool,
+		) (HarborReceipt, error) {
+			calls = append(calls, "harbor")
+			return testReceipt(), nil
+		},
+		CheckHarbor: func(
+			context.Context,
+			HarborReceipt,
+		) error {
+			calls = append(calls, "check")
+			return nil
+		},
+	})
+
+	service.Login = func(
+		context.Context,
+		string,
+		string,
+		string,
+	) error {
+		calls = append(calls, "login")
+		return nil
+	}
+
+	_, err := service.Bootstrap(
+		context.Background(),
+		BootstrapOptions{
+			Registry:    testReceipt().Registry,
+			Yes:         true,
+			ReceiptPath: path,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := []string{
+		"runtime",
+		"docker",
+		"transport:" + testReceipt().Registry,
+		"harbor",
+		"login",
+		"check",
+	}
+	if strings.Join(calls, ",") != strings.Join(expected, ",") {
+		t.Fatalf("bootstrap calls=%v expected=%v", calls, expected)
+	}
+}
+
+func TestBootstrapDoesNotConfigureExternalRegistryTransport(
+	t *testing.T,
+) {
+	path := filepath.Join(t.TempDir(), "harbor.yaml")
+	transportCalled := false
+
+	receipt := testReceipt()
+	receipt.ManagedBy = "external"
+	receipt.HarborVersion = "external"
+
+	service := BootstrapService{
+		EnsureRuntime: func(context.Context) error {
+			return nil
+		},
+		EnsureDocker: func(context.Context) error {
+			return nil
+		},
+		EnsureRegistryTransport: func(
+			context.Context,
+			string,
+		) error {
+			transportCalled = true
+			return nil
+		},
+		EnsureHarbor: func(
+			context.Context,
+			string,
+			string,
+			bool,
+		) (HarborReceipt, error) {
+			return receipt, nil
+		},
+		CheckHarbor: func(
+			context.Context,
+			HarborReceipt,
+		) error {
+			return nil
+		},
+		Credential: func(string) bool {
+			return true
+		},
+	}
+
+	_, err := service.Bootstrap(
+		context.Background(),
+		BootstrapOptions{
+			Registry:       receipt.Registry,
+			ExternalHarbor: true,
+			Yes:            true,
+			ReceiptPath:    path,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transportCalled {
+		t.Fatal("External Harbor changed Docker registry transport")
+	}
+}
+
+func TestBootstrapRecoversManagedHarborAfterTransportRestart(
+	t *testing.T,
+) {
+	receipt := testReceipt()
+
+	path := filepath.Join(t.TempDir(), "harbor.yaml")
+	if err := WriteHarborReceipt(path, receipt); err != nil {
+		t.Fatal(err)
+	}
+
+	transportCalled := false
+	probeCalled := false
+	recoveryCalled := false
+	loginCalled := false
+
+	service := withTestCredentialHooks(BootstrapService{
+		EnsureRegistryTransport: func(
+			context.Context,
+			string,
+		) error {
+			transportCalled = true
+			return nil
+		},
+		ProbeManagedHarbor: func(
+			_ context.Context,
+			actual HarborReceipt,
+			timeout time.Duration,
+		) error {
+			probeCalled = actual == receipt &&
+				timeout == 10*time.Second
+			return context.DeadlineExceeded
+		},
+		RecoverManagedHarbor: func(
+			_ context.Context,
+			actual HarborReceipt,
+		) error {
+			recoveryCalled = actual == receipt
+			return nil
+		},
+		CheckHarbor: func(
+			context.Context,
+			HarborReceipt,
+		) error {
+			return nil
+		},
+	})
+
+	service.Login = func(
+		context.Context,
+		string,
+		string,
+		string,
+	) error {
+		loginCalled = true
+		return nil
+	}
+
+	if _, err := service.Bootstrap(
+		context.Background(),
+		BootstrapOptions{
+			Yes:         true,
+			ReceiptPath: path,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !transportCalled {
+		t.Fatal("registry transport was not checked")
+	}
+	if !probeCalled {
+		t.Fatal("Managed Harbor readiness was not checked")
+	}
+	if !recoveryCalled {
+		t.Fatal("Managed Harbor recovery was not called")
+	}
+	if !loginCalled {
+		t.Fatal("Docker login was not called after recovery")
 	}
 }

@@ -265,11 +265,15 @@ func probeDocker(ctx context.Context) (string, string, error) {
 	return strings.TrimSpace(string(architecture)), strings.TrimSpace(string(root)), nil
 }
 func dockerCredentialPresent(registry string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
+	configRoot := os.Getenv("DOCKER_CONFIG")
+	if configRoot == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		configRoot = filepath.Join(home, ".docker")
 	}
-	contents, err := os.ReadFile(filepath.Join(home, ".docker", "config.json"))
+	contents, err := os.ReadFile(filepath.Join(configRoot, "config.json"))
 	if err != nil {
 		return false
 	}

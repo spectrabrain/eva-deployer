@@ -17,6 +17,7 @@ require_text() {
 
 main_go="$repo_root/tools/eva/cmd/eva/main.go"
 backend_go="$repo_root/tools/eva/internal/remote/backend.go"
+bootstrap_go="$repo_root/tools/eva/internal/remote/bootstrap.go"
 prepare_go="$repo_root/tools/eva/internal/remote/prepare.go"
 runtime_artifact_go="$repo_root/tools/eva/internal/remote/runtime_artifact.go"
 preflight_go="$repo_root/tools/eva/internal/remote/preflight.go"
@@ -25,6 +26,7 @@ verify_test="$repo_root/tools/eva/internal/remote/verify_test.go"
 installer="$repo_root/scripts/install/install_eva_tool.sh"
 transport="$repo_root/scripts/remote/publish_release_to_target.sh"
 remote_runbook="$repo_root/docs/installation/remote-repository-runbook.md"
+image_publish_backend="$repo_root/scripts/publish/push_images_to_repository.sh"
 installation_index="$repo_root/docs/installation/README.md"
 pr_ci="$repo_root/.github/workflows/pr-ci.yaml"
 tag_ci="$repo_root/.github/workflows/tag-release.yaml"
@@ -70,6 +72,13 @@ require_text "$prepare_go" 'Name: "build-runtime-artifact"' 'Runtime artifact or
 require_text "$runtime_artifact_go" 'BootstrapTargetRuntime' 'Remote Runtime bootstrap contract'
 require_text "$preflight_go" 'aws", "sts", "get-caller-identity"' 'AWS credential probe'
 require_text "$preflight_go" 'Docker credential for registry is unavailable' 'Harbor credential fail-closed'
+require_text "$bootstrap_go" 'docker", "login"' 'Managed Harbor Docker login'
+require_text "$bootstrap_go" '"--password-stdin"' 'Managed Harbor password stdin'
+require_text "$bootstrap_go" 'prepareCredential' 'Managed Harbor credential lifecycle'
+require_text "$bootstrap_go" 'WriteHarborReceipt' 'receipt write after credential validation'
+require_text "$image_publish_backend" "os.environ.get('DOCKER_CONFIG', '').strip()" 'image publish DOCKER_CONFIG override'
+require_text "$image_publish_backend" "Path(config_root) / 'config.json'" 'image publish Docker config path'
+require_text "$image_publish_backend" "f'https://{registry}'" 'image publish HTTPS registry credential key'
 require_text "$preflight_go" 'DefaultExternalSources' 'bounded external source contract'
 require_text "$prepare_go" 'EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml"' 'Qdrant Harbor values'
 require_text "$prepare_go" 'repository-mapping-product.txt' 'product mapping report'

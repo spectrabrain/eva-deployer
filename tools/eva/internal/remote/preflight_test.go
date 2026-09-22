@@ -4,10 +4,26 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDockerCredentialPresentUsesDockerConfigOverride(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("DOCKER_CONFIG", configRoot)
+	for _, key := range []string{"10.159.57.172:32080", "https://10.159.57.172:32080"} {
+		contents := []byte(`{"auths":{"` + key + `":{}}}`)
+		if err := os.WriteFile(filepath.Join(configRoot, "config.json"), contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !dockerCredentialPresent("10.159.57.172:32080") {
+			t.Fatalf("credential key %q in DOCKER_CONFIG was not found", key)
+		}
+	}
+}
 
 func TestPreflightChecksAllCategoriesWithoutSensitiveReport(t *testing.T) {
 	p := readyPreflight(t)

@@ -21,6 +21,7 @@ import (
 )
 
 const DefaultPreparationRoot = "/var/lib/eva/preparation/remote"
+const DefaultRemoteCacheRoot = "/var/lib/eva/cache/remote"
 const manifestFileName = "manifest.yaml"
 const manifestSchemaVersion = "v1"
 

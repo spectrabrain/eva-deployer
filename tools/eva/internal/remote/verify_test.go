@@ -187,6 +187,28 @@ func writeRuntimeFixture(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(root, "runtime.yaml"), []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	collectionPath := filepath.Join(
+		root,
+		"collections",
+		"ansible_collections",
+		"ansible",
+		"posix",
+		"MANIFEST.json",
+	)
+	if err := os.MkdirAll(
+		filepath.Dir(collectionPath),
+		0o755,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		collectionPath,
+		[]byte("{}\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
 	return root
 }
 

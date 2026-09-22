@@ -48,6 +48,127 @@ func TestBuildTargetPayloadIsDeterministicAndExcludesHarborAssets(t *testing.T) 
 	}
 }
 
+func TestBuildTargetPayloadAllowsProductOwnedNames(
+	t *testing.T,
+) {
+	root, resolved, identity := writeCompletedPreparation(t)
+	mustRemove(t, TargetPayloadPath(root, identity))
+
+	productFiles := map[string]string{
+		"cache/eva-agent/release/3.2.0/" +
+			"eva-agent/values-secret.yaml": "existingSecret: eva-agent-secret\n",
+		"cache/eva-agent/release/3.2.0/" +
+			"eva-agent/token-template.yaml": "tokenTemplate: placeholder\n",
+		"cache/eva-agent/release/3.2.0/" +
+			"eva-agent/private-values.yaml": "privateValues: placeholder\n",
+		"cache/models/agent/hf/tokenizer.json": "{\"model\": \"tokenizer\"}\n",
+	}
+
+	for relative, contents := range productFiles {
+		mustWrite(
+			t,
+			filepath.Join(root, relative),
+			contents,
+		)
+	}
+
+	payload, err := BuildTargetPayload(
+		root,
+		filepath.Join(root, "cache"),
+		identity,
+		resolved.Metadata.Platform.OS+
+			"/"+
+			resolved.Metadata.Platform.Arch,
+	)
+	if err != nil {
+		t.Fatalf(
+			"BuildTargetPayload() error = %v",
+			err,
+		)
+	}
+
+	entries := payloadArchiveEntries(
+		t,
+		filepath.Join(
+			payload.Directory,
+			payload.Manifest.Archive,
+		),
+	)
+
+	included := map[string]bool{}
+	for _, entry := range entries {
+		included[entry] = true
+	}
+
+	for relative := range productFiles {
+		if !included[filepath.ToSlash(relative)] {
+			t.Fatalf(
+				"product-owned file was excluded: %s",
+				relative,
+			)
+		}
+	}
+}
+
+func TestBuildTargetPayloadExcludesUnapprovedCacheRoots(
+	t *testing.T,
+) {
+	root, resolved, identity := writeCompletedPreparation(t)
+	mustRemove(t, TargetPayloadPath(root, identity))
+
+	excluded := map[string]string{
+		"cache/credentials/aws_key.ini": "not-a-real-key",
+		"cache/aws/credentials":         "not-a-real-key",
+		"cache/images/private.key":      "not-a-real-key",
+		"cache/qdrant-snapshots/token":  "not-a-real-token",
+	}
+
+	for relative, contents := range excluded {
+		mustWrite(
+			t,
+			filepath.Join(root, relative),
+			contents,
+		)
+	}
+
+	payload, err := BuildTargetPayload(
+		root,
+		filepath.Join(root, "cache"),
+		identity,
+		resolved.Metadata.Platform.OS+
+			"/"+
+			resolved.Metadata.Platform.Arch,
+	)
+	if err != nil {
+		t.Fatalf(
+			"BuildTargetPayload() error = %v",
+			err,
+		)
+	}
+
+	entries := payloadArchiveEntries(
+		t,
+		filepath.Join(
+			payload.Directory,
+			payload.Manifest.Archive,
+		),
+	)
+
+	included := map[string]bool{}
+	for _, entry := range entries {
+		included[entry] = true
+	}
+
+	for relative := range excluded {
+		if included[filepath.ToSlash(relative)] {
+			t.Fatalf(
+				"unapproved cache root was included: %s",
+				relative,
+			)
+		}
+	}
+}
+
 func TestBuildTargetPayloadRejectsUnsafeOrIncompleteSource(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string
@@ -55,9 +176,6 @@ func TestBuildTargetPayloadRejectsUnsafeOrIncompleteSource(t *testing.T) {
 	}{
 		{"missing package", func(t *testing.T, root string) { mustRemove(t, filepath.Join(root, "cache/apt/debs/a.deb")) }},
 		{"missing model", func(t *testing.T, root string) { mustRemove(t, filepath.Join(root, "cache/models/agent/hf/model.bin")) }},
-		{"sensitive path", func(t *testing.T, root string) {
-			mustWrite(t, filepath.Join(root, "cache/models/credentials/token"), "no")
-		}},
 		{"protected manifest content", func(t *testing.T, root string) {
 			mustWrite(t, filepath.Join(root, "cache/models/manifest.txt"), "files:\nauthorization: forbidden\n")
 		}},
@@ -144,7 +262,7 @@ func TestPayloadArchiveRejectsTraversalAndSpecialEntries(t *testing.T) {
 		{"traversal", tar.Header{Name: "cache/../secret", Typeflag: tar.TypeReg, Mode: 0o600, Size: 1}},
 		{"absolute", tar.Header{Name: "/cache/file", Typeflag: tar.TypeReg, Mode: 0o600, Size: 1}},
 		{"link", tar.Header{Name: "cache/file", Typeflag: tar.TypeSymlink, Mode: 0o777}},
-		{"secret", tar.Header{Name: "cache/models/token", Typeflag: tar.TypeReg, Mode: 0o600, Size: 1}},
+		{"outside-cache", tar.Header{Name: "credentials/aws_key.ini", Typeflag: tar.TypeReg, Mode: 0o600, Size: 1}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			archive := filepath.Join(t.TempDir(), "unsafe.tar.gz")

@@ -52,8 +52,8 @@ func TestRunRemoteBootstrapRequiresRegistryAndConfirmation(t *testing.T) {
 	if !called {
 		t.Fatal("bootstrap Harbor service was not called")
 	}
-	if err := run([]string{"remote", "bootstrap", "--yes"}); err == nil {
-		t.Fatal("bootstrap accepted missing registry")
+	if err := run([]string{"remote", "bootstrap", "--yes"}); err != nil {
+		t.Fatalf("bootstrap did not revalidate configured receipt: %v", err)
 	}
 	if err := run([]string{"remote", "bootstrap", "--registry", "harbor.example.internal:32080"}); err == nil {
 		t.Fatal("bootstrap accepted missing confirmation")
@@ -105,7 +105,7 @@ func TestRunRemotePublishAcceptsPathAfterTargetAndDefaultsToCurrentDirectory(t *
 	})
 	defer restore()
 
-	if err := run([]string{"remote", "publish", "--registry", "harbor.example.internal:32080", "--target", "10.159.56.196", releaseRoot}); err != nil {
+	if err := run([]string{"remote", "publish", "--registry", "harbor.example.internal:32080", "--target", "eva@10.159.56.196", releaseRoot}); err != nil {
 		t.Fatalf("run(remote publish path after target) error = %v", err)
 	}
 	previousDirectory, err := os.Getwd()
@@ -116,8 +116,35 @@ func TestRunRemotePublishAcceptsPathAfterTargetAndDefaultsToCurrentDirectory(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
-	if err := run([]string{"remote", "publish", "--registry", "harbor.example.internal:32080", "--target", "target.example.internal"}); err != nil {
+	if err := run([]string{"remote", "publish", "--registry", "harbor.example.internal:32080", "--target", "eva@target.example.internal"}); err != nil {
 		t.Fatalf("run(remote publish default path) error = %v", err)
+	}
+}
+
+func TestRunRemotePublishAcceptsRepeatedTargets(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	var targets []string
+	restore := replaceRemoteService(t, func() remotecommand.Service {
+		return remotecommand.Service{
+			ResolveBackend: func() (string, error) { return "/fixture/publish", nil },
+			ResolvePayload: func(release.Resolved, string, string) (remotecommand.PayloadSource, error) {
+				return remotecommand.PayloadSource{Directory: "/fixture/payload"}, nil
+			},
+			ResolveRuntime: func(release.Resolved, string, string) (remotecommand.RuntimeArtifactSource, error) {
+				return remotecommand.RuntimeArtifactSource{Directory: "/fixture/runtime"}, nil
+			},
+			Run: func(_ string, arguments []string, _ remotecommand.Streams) error {
+				targets = append(targets, arguments[len(arguments)-1])
+				return nil
+			},
+		}
+	})
+	defer restore()
+	if err := run([]string{"remote", "publish", releaseRoot, "--registry", "harbor.example.internal:32080", "--target", "eva@first.example.internal", "--target", "eva@second.example.internal"}); err != nil {
+		t.Fatalf("run(remote publish repeated targets) error = %v", err)
+	}
+	if got, want := strings.Join(targets, ","), "eva@first.example.internal,eva@second.example.internal"; got != want {
+		t.Fatalf("targets=%s, want %s", got, want)
 	}
 }
 
@@ -186,6 +213,37 @@ func TestRunRemoteVerifyForwardsResolvedReleaseWithoutBackend(t *testing.T) {
 	}
 	if received.Release.Root != releaseRoot || received.Registry != "harbor.example.internal:32080" {
 		t.Fatalf("verify options = %#v", received)
+	}
+}
+
+func TestRemoteCommandsResolveRegistryFromBootstrapReceipt(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	previousReceiptPath := defaultRemoteBootstrapReceiptPath
+	previousVerify := newRemoteVerifyService
+	defer func() {
+		defaultRemoteBootstrapReceiptPath = previousReceiptPath
+		newRemoteVerifyService = previousVerify
+	}()
+	defaultRemoteBootstrapReceiptPath = filepath.Join(t.TempDir(), "harbor.yaml")
+	receipt := remotecommand.HarborReceipt{SchemaVersion: "v1", ManagedBy: "eva", Registry: "harbor.example.internal:32080", Project: "eva", HarborVersion: "2.15.2", InstallRoot: "/opt/eva/harbor", DataRoot: "/var/lib/eva/harbor", Protocol: "http"}
+	if err := remotecommand.WriteHarborReceipt(defaultRemoteBootstrapReceiptPath, receipt); err != nil {
+		t.Fatal(err)
+	}
+	var received remotecommand.VerifyOptions
+	newRemoteVerifyService = func() remotecommand.VerifyService {
+		return remotecommand.VerifyService{VerifyFunc: func(options remotecommand.VerifyOptions) (remotecommand.VerifyResult, error) {
+			received = options
+			return remotecommand.VerifyResult{ReleaseVersion: options.Release.Metadata.Version, Registry: options.Registry, Project: options.Project}, nil
+		}}
+	}
+	if err := run([]string{"remote", "verify", releaseRoot}); err != nil {
+		t.Fatalf("verify using receipt: %v", err)
+	}
+	if received.Registry != receipt.Registry || received.Project != receipt.Project {
+		t.Fatalf("verify context = %#v", received)
+	}
+	if err := run([]string{"remote", "verify", releaseRoot, "--registry", "other.example.internal:32080"}); err == nil {
+		t.Fatal("verify accepted conflicting registry")
 	}
 }
 

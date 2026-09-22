@@ -62,9 +62,10 @@ func usage() {
 	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
-	fmt.Println("  remote publish [RELEASE_PATH] --registry HOST[:PORT] --target USER@HOST")
-	fmt.Println("  remote prepare [RELEASE_PATH] --registry HOST[:PORT]")
-	fmt.Println("  remote verify [RELEASE_PATH] --registry HOST[:PORT]")
+	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
+	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]")
+	fmt.Println("  remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]")
+	fmt.Println("  remote verify [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
@@ -164,13 +165,13 @@ func runRemote(args []string) error {
 }
 
 func remoteUsage() {
-	fmt.Println("Usage: eva remote <bootstrap|publish|prepare|verify> [RELEASE_PATH] --target USER@HOST | --registry HOST[:PORT]")
+	fmt.Println("Usage: eva remote <bootstrap|publish|prepare|verify> [RELEASE_PATH]")
 	fmt.Println("")
 	fmt.Println("Publishes a verified original EVA Release or prepares and verifies Remote repository assets.")
 }
 
 func remoteBootstrapUsage() {
-	fmt.Println("Usage: eva remote bootstrap --registry HOST[:PORT] --yes")
+	fmt.Println("Usage: eva remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
 	fmt.Println("")
 	fmt.Println("Configures the Remote Main Preparation Plane.")
 }
@@ -186,18 +187,16 @@ func runRemoteBootstrap(args []string) error {
 	registry := flags.String("registry", "", "repository registry")
 	yes := flags.Bool("yes", false, "confirm Main Preparation Plane changes")
 	external := flags.Bool("external-harbor", false, "use an existing external Harbor")
+	replaceRegistry := flags.Bool("replace-registry", false, "replace the configured registry after validation")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
 		return errors.New("remote bootstrap does not accept a Release path")
 	}
-	if *registry == "" {
-		return errors.New("remote bootstrap requires --registry HOST[:PORT]")
-	}
-	receipt, err := newRemoteBootstrapService().Bootstrap(context.Background(), remote.BootstrapOptions{Registry: *registry, Yes: *yes, ExternalHarbor: *external, ReceiptPath: defaultRemoteBootstrapReceiptPath, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
+	receipt, err := newRemoteBootstrapService().Bootstrap(context.Background(), remote.BootstrapOptions{Registry: *registry, Yes: *yes, ExternalHarbor: *external, ReplaceRegistry: *replaceRegistry, ReceiptPath: defaultRemoteBootstrapReceiptPath, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
 	if err != nil {
-		return err
+		return displayRemoteContextError(err)
 	}
 	fmt.Println("[OK] Remote Preparation Plane ready")
 	fmt.Printf("[INFO] registry=%s project=%s\n", receipt.Registry, receipt.Project)
@@ -205,14 +204,14 @@ func runRemoteBootstrap(args []string) error {
 }
 
 func remotePrepareUsage() {
-	fmt.Println("Usage: eva remote prepare [RELEASE_PATH] --registry HOST[:PORT]")
+	fmt.Println("Usage: eva remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("")
 	fmt.Println("Prepares a verified original EVA Release for the Remote repository.")
 	fmt.Println("RELEASE_PATH defaults to the current directory.")
 }
 
 func remoteVerifyUsage() {
-	fmt.Println("Usage: eva remote verify [RELEASE_PATH] --registry HOST[:PORT]")
+	fmt.Println("Usage: eva remote verify [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("")
 	fmt.Println("Verifies local evidence for a completed Remote preparation.")
 	fmt.Println("RELEASE_PATH defaults to the current directory.")
@@ -238,8 +237,9 @@ func runRemotePrepare(args []string) error {
 	if flags.NArg() > 1 {
 		return fmt.Errorf("unexpected remote prepare arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if *registry == "" {
-		return errors.New("remote prepare requires --registry HOST[:PORT]")
+	registryContext, err := remote.ResolveRegistryContext(*registry, "", defaultRemoteBootstrapReceiptPath)
+	if err != nil {
+		return displayRemoteContextError(err)
 	}
 	releaseInput := "."
 	if flags.NArg() == 1 {
@@ -252,7 +252,8 @@ func runRemotePrepare(args []string) error {
 	if err != nil {
 		return err
 	}
-	_, err = newRemotePrepareService().Prepare(context.Background(), remote.PrepareOptions{Release: resolved, Registry: *registry, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
+	fmt.Printf("[INFO] repository=%s/%s\n", registryContext.Registry, registryContext.Project)
+	_, err = newRemotePrepareService().Prepare(context.Background(), remote.PrepareOptions{Release: resolved, Registry: registryContext.Registry, Project: registryContext.Project, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
 	return err
 }
 
@@ -280,8 +281,9 @@ func runRemoteVerify(args []string) error {
 	if flags.NArg() > 1 {
 		return fmt.Errorf("unexpected remote verify arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if *registry == "" {
-		return errors.New("remote verify requires --registry HOST[:PORT]")
+	registryContext, err := remote.ResolveRegistryContext(*registry, "", defaultRemoteBootstrapReceiptPath)
+	if err != nil {
+		return displayRemoteContextError(err)
 	}
 	releaseInput := "."
 	if flags.NArg() == 1 {
@@ -294,7 +296,8 @@ func runRemoteVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := newRemoteVerifyService().Verify(remote.VerifyOptions{Release: resolved, Registry: *registry})
+	fmt.Printf("[INFO] repository=%s/%s\n", registryContext.Registry, registryContext.Project)
+	result, err := newRemoteVerifyService().Verify(remote.VerifyOptions{Release: resolved, Registry: registryContext.Registry, Project: registryContext.Project})
 	if err != nil {
 		return err
 	}
@@ -338,7 +341,7 @@ func normalizeRemoteRepositoryArgs(args []string, command string) ([]string, err
 }
 
 func remotePublishUsage() {
-	fmt.Println("Usage: eva remote publish [RELEASE_PATH] --registry HOST[:PORT] --target USER@HOST")
+	fmt.Println("Usage: eva remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]")
 	fmt.Println("")
 	fmt.Println("RELEASE_PATH defaults to the current directory.")
 }
@@ -356,7 +359,8 @@ func runRemotePublish(args []string) error {
 	}
 	flags := flag.NewFlagSet("remote publish", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	target := flags.String("target", "", "Remote Target in USER@HOST form")
+	var targets stringList
+	flags.Var(&targets, "target", "Remote Target in USER@HOST form (repeatable)")
 	registry := flags.String("registry", "", "repository registry")
 	if err := flags.Parse(normalizedArgs); err != nil {
 		return err
@@ -364,11 +368,9 @@ func runRemotePublish(args []string) error {
 	if flags.NArg() > 1 {
 		return fmt.Errorf("unexpected remote publish arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if *target == "" {
-		return errors.New("remote publish requires --target USER@HOST")
-	}
-	if *registry == "" {
-		return errors.New("remote publish requires --registry HOST[:PORT]")
+	registryContext, err := remote.ResolveRegistryContext(*registry, "", defaultRemoteBootstrapReceiptPath)
+	if err != nil {
+		return displayRemoteContextError(err)
 	}
 	releaseInput := "."
 	if flags.NArg() == 1 {
@@ -381,12 +383,33 @@ func runRemotePublish(args []string) error {
 	if err != nil {
 		return err
 	}
-	return newRemoteService().Publish(remote.PublishOptions{
+	fmt.Printf("[INFO] repository=%s/%s\n", registryContext.Registry, registryContext.Project)
+	result, publishErr := newRemoteService().PublishWithResult(remote.PublishOptions{
 		Release:  resolved,
-		Target:   *target,
-		Registry: *registry,
+		Targets:  targets,
+		Registry: registryContext.Registry,
+		Project:  registryContext.Project,
 		Streams:  remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr},
 	})
+	for _, target := range result.Targets {
+		if target.Err != nil {
+			fmt.Printf("[ERROR] target=%s %v\n", target.Target, target.Err)
+		} else {
+			fmt.Printf("[OK] target=%s release=%s\n", target.Target, target.ReleaseVersion)
+		}
+	}
+	if result.Total > 0 {
+		fmt.Printf("[INFO] succeeded=%d failed=%d total=%d\n", result.Succeeded, result.Failed, result.Total)
+	}
+	return publishErr
+}
+
+func displayRemoteContextError(err error) error {
+	var conflict *remote.RegistryConflictError
+	if !errors.As(err, &conflict) {
+		return err
+	}
+	return &displayedError{message: fmt.Sprintf("[ERROR] %s\n[INFO] configured=%s/%s\n[INFO] requested=%s/%s\n[INFO] change it with: eva remote bootstrap --registry %s --replace-registry --yes", conflict.Error(), conflict.ConfiguredRegistry, conflict.ConfiguredProject, conflict.RequestedRegistry, conflict.RequestedProject, conflict.RequestedRegistry)}
 }
 
 func normalizeRemotePublishArgs(args []string) ([]string, error) {
@@ -404,7 +427,7 @@ func normalizeRemotePublishArgs(args []string) ([]string, error) {
 		}
 		if argument == "--target" || argument == "--registry" {
 			if index+1 == len(args) {
-				return nil, errors.New("--target requires a value")
+				return nil, fmt.Errorf("%s requires a value", argument)
 			}
 			flags = append(flags, argument, args[index+1])
 			index++

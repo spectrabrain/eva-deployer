@@ -169,6 +169,48 @@ func TestBuildTargetPayloadExcludesUnapprovedCacheRoots(
 	}
 }
 
+func TestBuildTargetPayloadReportsProgress(
+	t *testing.T,
+) {
+	root, resolved, identity := writeCompletedPreparation(t)
+	mustRemove(t, TargetPayloadPath(root, identity))
+
+	var progress bytes.Buffer
+	_, err := BuildTargetPayloadWithProgress(
+		root,
+		filepath.Join(root, "cache"),
+		identity,
+		resolved.Metadata.Platform.OS+
+			"/"+
+			resolved.Metadata.Platform.Arch,
+		&progress,
+	)
+	if err != nil {
+		t.Fatalf(
+			"BuildTargetPayloadWithProgress() error = %v",
+			err,
+		)
+	}
+
+	output := progress.String()
+	for _, expected := range []string{
+		"[INFO] Building Target payload:",
+		"compression=gzip-best-speed",
+		"[INFO] Target payload progress:",
+		"[OK] Target payload archive written:",
+		"[INFO] Validating Target payload archive",
+		"[OK] Target payload archive validated",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf(
+				"progress output is missing %q: %s",
+				expected,
+				output,
+			)
+		}
+	}
+}
+
 func TestBuildTargetPayloadRejectsUnsafeOrIncompleteSource(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string

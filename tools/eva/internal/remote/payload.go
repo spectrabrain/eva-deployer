@@ -51,7 +51,31 @@ type PayloadSource struct {
 // BuildTargetPayload creates a deterministic, verified archive from the
 // managed preparation cache. Image and Qdrant snapshot payloads deliberately
 // remain outside this archive because Main Harbor supplies them.
-func BuildTargetPayload(preparationRoot, cacheRoot string, identity PreparationIdentity, platform string) (PayloadSource, error) {
+func BuildTargetPayload(
+	preparationRoot string,
+	cacheRoot string,
+	identity PreparationIdentity,
+	platform string,
+) (PayloadSource, error) {
+	return BuildTargetPayloadWithProgress(
+		preparationRoot,
+		cacheRoot,
+		identity,
+		platform,
+		io.Discard,
+	)
+}
+
+func BuildTargetPayloadWithProgress(
+	preparationRoot string,
+	cacheRoot string,
+	identity PreparationIdentity,
+	platform string,
+	progress io.Writer,
+) (PayloadSource, error) {
+	if progress == nil {
+		progress = io.Discard
+	}
 	if err := validateIdentity(identity); err != nil {
 		return PayloadSource{}, err
 	}
@@ -86,10 +110,30 @@ func BuildTargetPayload(preparationRoot, cacheRoot string, identity PreparationI
 	defer os.RemoveAll(staging)
 	archiveName := fmt.Sprintf("remote-payload_%s_%s.tar.gz", identity.ReleaseVersion, key)
 	archivePath := filepath.Join(staging, archiveName)
-	contentDigest, err := writePayloadArchive(cacheRoot, archivePath)
+	contentDigest, err := writePayloadArchive(
+		cacheRoot,
+		archivePath,
+		progress,
+	)
 	if err != nil {
 		return PayloadSource{}, err
 	}
+	archiveInfo, err := os.Stat(archivePath)
+	if err != nil {
+		return PayloadSource{}, fmt.Errorf(
+			"inspect target payload archive: %w",
+			err,
+		)
+	}
+	fmt.Fprintf(
+		progress,
+		"[OK] Target payload archive written: bytes=%d\n",
+		archiveInfo.Size(),
+	)
+	fmt.Fprintln(
+		progress,
+		"[INFO] Validating Target payload archive",
+	)
 	archiveDigest, err := regularFileSHA256(archivePath)
 	if err != nil {
 		return PayloadSource{}, fmt.Errorf("digest target payload archive: %w", err)
@@ -102,8 +146,15 @@ func BuildTargetPayload(preparationRoot, cacheRoot string, identity PreparationI
 		return PayloadSource{}, err
 	}
 	if _, err := LoadTargetPayload(staging, identity); err != nil {
-		return PayloadSource{}, fmt.Errorf("validate staged target payload: %w", err)
+		return PayloadSource{}, fmt.Errorf(
+			"validate staged target payload: %w",
+			err,
+		)
 	}
+	fmt.Fprintln(
+		progress,
+		"[OK] Target payload archive validated",
+	)
 	if err := os.Rename(staging, final); err != nil {
 		return PayloadSource{}, fmt.Errorf("publish target payload: %w", err)
 	}
@@ -242,16 +293,53 @@ func payloadIdentityKey(identity PreparationIdentity) string {
 	return hex.EncodeToString(digest[:16])
 }
 
-func writePayloadArchive(cacheRoot, archivePath string) (string, error) {
+func writePayloadArchive(
+	cacheRoot string,
+	archivePath string,
+	progress io.Writer,
+) (string, error) {
 	entries, err := payloadEntries(cacheRoot)
 	if err != nil {
 		return "", err
 	}
-	file, err := os.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	if progress == nil {
+		progress = io.Discard
+	}
+
+	totalFiles := 0
+	var totalBytes int64
+	for _, entry := range entries {
+		info, err := os.Lstat(
+			filepath.Join(cacheRoot, entry),
+		)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode().IsRegular() {
+			totalFiles++
+			totalBytes += info.Size()
+		}
+	}
+
+	fmt.Fprintf(
+		progress,
+		"[INFO] Building Target payload: files=%d bytes=%d compression=gzip-best-speed\n",
+		totalFiles,
+		totalBytes,
+	)
+
+	file, err := os.OpenFile(
+		archivePath,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		0o640,
+	)
 	if err != nil {
 		return "", err
 	}
-	gzipWriter, err := gzip.NewWriterLevel(file, gzip.BestCompression)
+	gzipWriter, err := gzip.NewWriterLevel(
+		file,
+		gzip.BestSpeed,
+	)
 	if err != nil {
 		file.Close()
 		return "", err
@@ -260,12 +348,60 @@ func writePayloadArchive(cacheRoot, archivePath string) (string, error) {
 	gzipWriter.Header.OS = 255
 	tarWriter := tar.NewWriter(gzipWriter)
 	hash := sha256.New()
+	processedFiles := 0
+	var processedBytes int64
+	var lastReportedBytes int64
+	const progressByteInterval int64 = 1 << 30
+
 	for _, entry := range entries {
-		if err := writePayloadEntry(tarWriter, hash, cacheRoot, entry); err != nil {
+		info, err := os.Lstat(
+			filepath.Join(cacheRoot, entry),
+		)
+		if err != nil {
 			tarWriter.Close()
 			gzipWriter.Close()
 			file.Close()
 			return "", err
+		}
+
+		if err := writePayloadEntry(
+			tarWriter,
+			hash,
+			cacheRoot,
+			entry,
+		); err != nil {
+			tarWriter.Close()
+			gzipWriter.Close()
+			file.Close()
+			return "", err
+		}
+
+		if !info.Mode().IsRegular() {
+			continue
+		}
+
+		processedFiles++
+		processedBytes += info.Size()
+
+		if processedBytes-lastReportedBytes >=
+			progressByteInterval ||
+			processedFiles == totalFiles {
+			percent := float64(100)
+			if totalBytes > 0 {
+				percent = float64(processedBytes) *
+					100 /
+					float64(totalBytes)
+			}
+			fmt.Fprintf(
+				progress,
+				"[INFO] Target payload progress: files=%d/%d bytes=%d/%d percent=%.1f\n",
+				processedFiles,
+				totalFiles,
+				processedBytes,
+				totalBytes,
+				percent,
+			)
+			lastReportedBytes = processedBytes
 		}
 	}
 	if err := tarWriter.Close(); err != nil {

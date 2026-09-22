@@ -56,6 +56,36 @@ EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in src/solution/version.yaml)}"
 EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in src/solution/version.yaml)}"
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:?missing KUSTOMIZE_VERSION (set in src/infra/version.yaml)}"
+
+agent_release_major="${EVA_AGENT_RELEASE%%.*}"
+agent_release_remainder="${EVA_AGENT_RELEASE#*.}"
+agent_release_minor="${agent_release_remainder%%.*}"
+
+if [[ ! "$agent_release_major" =~ ^[0-9]+$ ||
+      ! "$agent_release_minor" =~ ^[0-9]+$ ]]; then
+  echo "[ERROR] invalid EVA_AGENT_RELEASE: ${EVA_AGENT_RELEASE}" >&2
+  exit 1
+fi
+
+if (( agent_release_major < 3 ||
+      agent_release_major == 3 &&
+      agent_release_minor <= 2 )); then
+  EVA_AGENT_CHART_BASE="${EVA_AGENT_CHART_BASE:-https://mellerikat.github.io/eva-agent}"
+  EVA_AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE:-https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/${EVA_AGENT_RELEASE}}"
+  EVA_AGENT_REPOSITORY_RAW_BASE="${EVA_AGENT_REPOSITORY_RAW_BASE:-https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum}"
+  EVA_AGENT_SOURCE_NAME="mellerikat/eva-agent"
+else
+  EVA_AGENT_CHART_BASE="${EVA_AGENT_CHART_BASE:-https://spectrabrain.github.io/eva-agent-chart}"
+  EVA_AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE:-https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/${EVA_AGENT_RELEASE}}"
+  EVA_AGENT_REPOSITORY_RAW_BASE="${EVA_AGENT_REPOSITORY_RAW_BASE:-https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum}"
+  EVA_AGENT_SOURCE_NAME="spectrabrain/eva-agent-chart"
+fi
+
+EVA_AGENT_QDRANT_VALUES_URL="${EVA_AGENT_QDRANT_VALUES_URL:-${EVA_AGENT_RELEASE_BASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}}"
+
+echo "[info] EVA Agent source=${EVA_AGENT_SOURCE_NAME}"
+echo "[info] EVA Agent chart base=${EVA_AGENT_CHART_BASE}"
+echo "[info] EVA Agent release base=${EVA_AGENT_RELEASE_BASE}"
 K3S_DEFAULT_VERSION="${K3S_DEFAULT_VERSION:?missing K3S_DEFAULT_VERSION (set in src/infra/version.yaml)}"
 ORAS_VERSION="${ORAS_VERSION:-1.3.3}"
 
@@ -161,6 +191,63 @@ prepare_display_mode_selector() {
     echo "       If needed, set DISPLAY_MODE_SELECTOR_URL and rerun this script."
   fi
 }
+
+check_required_url() {
+  local url="$1"
+  local status
+
+  status="$(
+    curl       --location       --silent       --output /dev/null       --write-out '%{http_code}'       --range 0-0       --connect-timeout 20       --max-time 60       "$url"
+  )"
+
+  if [[ "$status" == "200" ||
+        "$status" == "206" ]]; then
+    echo "[ok] required asset: $url"
+    return 0
+  fi
+
+  echo "[missing] status=${status} url=${url}" >&2
+  return 1
+}
+
+required_agent_urls=(
+  "${EVA_AGENT_CHART_BASE}/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
+  "${EVA_AGENT_CHART_BASE}/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
+  "${EVA_AGENT_CHART_BASE}/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
+  "${EVA_AGENT_RELEASE_BASE}/eva-agent/values-k3s.yaml"
+  "${EVA_AGENT_RELEASE_BASE}/eva-agent/values-secret.yaml"
+  "${EVA_AGENT_RELEASE_BASE}/eva-agent-init/values-k3s.yaml"
+  "${EVA_AGENT_QDRANT_VALUES_URL}"
+  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.A6000x1.yaml"
+  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.L40sx1.yaml"
+  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.PRO5000x3.yaml"
+  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.PRO6000-MIGx4.yaml"
+  "${EVA_AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/post-renderer.sh"
+  "${EVA_AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/plugin.yaml"
+  "${EVA_AGENT_REPOSITORY_RAW_BASE}/install_eva_agent.sh"
+  "${EVA_AGENT_REPOSITORY_RAW_BASE}/install_eva_agent_dependencies.sh"
+)
+
+echo "[info] validating required EVA Agent release assets"
+
+agent_assets_valid=true
+
+for required_url in "${required_agent_urls[@]}"
+do
+  if ! check_required_url "$required_url"; then
+    agent_assets_valid=false
+  fi
+done
+
+if [[ "$agent_assets_valid" != "true" ]]; then
+  echo "[ERROR] required EVA Agent release assets are incomplete." >&2
+  echo "        source: ${EVA_AGENT_SOURCE_NAME}" >&2
+  echo "        release: ${EVA_AGENT_RELEASE}" >&2
+  echo "        no preparation downloads were started." >&2
+  exit 1
+fi
+
+echo "[ok] required EVA Agent release assets are available"
 
 # Direct URLs used by current Ansible infra roles
 fetch "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" "$EVA_CACHE_ROOT/aws/awscli-exe-linux-x86_64.zip"
@@ -378,14 +465,13 @@ fi
 fetch "https://mellerikat.github.io/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
 fetch "https://mellerikat.github.io/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
 fetch "https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/eva-vision-${EVA_VISION_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-vision/eva-vision-${EVA_VISION_CHART_VERSION}.tgz"
-fetch "https://spectrabrain.github.io/eva-agent-chart/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
-fetch "https://spectrabrain.github.io/eva-agent-chart/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
-fetch "https://spectrabrain.github.io/eva-agent-chart/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
+fetch "${EVA_AGENT_CHART_BASE}/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
+fetch "${EVA_AGENT_CHART_BASE}/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
+fetch "${EVA_AGENT_CHART_BASE}/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
 fetch "https://github.com/qdrant/qdrant-helm/releases/download/qdrant-${QDRANT_CHART_VERSION}/qdrant-${QDRANT_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/qdrant/qdrant-${QDRANT_CHART_VERSION}.tgz"
 
 # EVA Agent release values/templates/scripts
-AGENT_RELEASE_BASE="https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/${EVA_AGENT_RELEASE}"
-EVA_AGENT_QDRANT_VALUES_URL="${EVA_AGENT_QDRANT_VALUES_URL:-${AGENT_RELEASE_BASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}}"
+AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE}"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-k3s.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-k3s.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-secret.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-secret.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent-init/values-k3s.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-init/values-k3s.yaml"
@@ -413,8 +499,8 @@ for name in "${VLLM_K3S_VALUES_FILES[@]}"; do
 done
 fetch "${AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/post-renderer.sh" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/post-renderer.sh"
 fetch "${AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/plugin.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/plugin.yaml"
-fetch "https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/install_eva_agent.sh" "$EVA_CACHE_ROOT/eva-agent/install_eva_agent.sh"
-fetch "https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/install_eva_agent_dependencies.sh" "$EVA_CACHE_ROOT/eva-agent/install_eva_agent_dependencies.sh"
+fetch "${EVA_AGENT_REPOSITORY_RAW_BASE}/install_eva_agent.sh" "$EVA_CACHE_ROOT/eva-agent/install_eva_agent.sh"
+fetch "${EVA_AGENT_REPOSITORY_RAW_BASE}/install_eva_agent_dependencies.sh" "$EVA_CACHE_ROOT/eva-agent/install_eva_agent_dependencies.sh"
 chmod +x "$EVA_CACHE_ROOT/eva-agent/install_eva_agent.sh" "$EVA_CACHE_ROOT/eva-agent/install_eva_agent_dependencies.sh" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/post-renderer.sh"
 
 # kustomize offline binary

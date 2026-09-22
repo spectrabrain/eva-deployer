@@ -306,7 +306,7 @@ echo "[info] downloading Go modules"
   go mod download
   go test ./...
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
-    -ldflags "-s -w -buildid= -X main.version=$artifact_tag -X main.commit=$commit_short -X main.buildDate=$build_date" \
+    -ldflags "-s -w -buildid= -X main.version=$release_version -X main.commit=$commit_short -X main.buildDate=$build_date" \
     -o "$tool_binary" ./cmd/eva
 )
 chmod 0755 "$tool_binary"

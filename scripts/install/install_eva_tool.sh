@@ -26,7 +26,8 @@ bin_dir="/usr/local/bin"
 state_root="/var/lib/eva"
 log_root="/var/log/eva"
 force=false
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+installer_path="$(readlink -f "${BASH_SOURCE[0]}")"
+script_dir="$(dirname "$installer_path")"
 auto_artifact=false
 
 while (($#)); do
@@ -43,7 +44,7 @@ while (($#)); do
   esac
 done
 
-for command in awk find grep install mktemp mv readlink sha256sum tar; do
+for command in awk date dirname find grep install mktemp mv readlink sha256sum sync tar; do
   command -v "$command" >/dev/null 2>&1 || { echo "[error] missing command: $command" >&2; exit 1; }
 done
 if [[ $EUID -ne 0 ]]; then
@@ -51,20 +52,68 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-if [[ -z "$artifact" ]]; then
-  shopt -s nullglob
-  tool_archives=("$script_dir"/eva-tool_*_linux_amd64.tar.gz)
-  if [[ ${#tool_archives[@]} -ne 1 ]]; then
-    echo "[error] expected exactly one EVA Tool archive beside this installer; found ${#tool_archives[@]}" >&2
-    echo "        use --artifact PATH to select the archive explicitly" >&2
+# The installer itself is the release-context authority. Resolve its real
+# parent once; a launcher symlink is fine, but the resulting Release root and
+# its immutable descriptors must be regular filesystem objects.
+release_root="$script_dir"
+if [[ -L "$release_root" || ! -d "$release_root" ]]; then
+  echo "[error] Release root is not a non-symlink directory: $release_root" >&2
+  exit 1
+fi
+for release_file in release.yaml checksums.sha256; do
+  if [[ ! -f "$release_root/$release_file" || -L "$release_root/$release_file" ]]; then
+    echo "[error] Release is missing a regular $release_file: $release_root/$release_file" >&2
     exit 1
   fi
+done
+if [[ "$installer_path" != "$release_root/eva-tool-installer.sh" ]]; then
+  echo "[error] installer must be eva-tool-installer.sh directly inside its Release root" >&2
+  exit 1
+fi
+if ! awk '
+  NF != 2 { exit 1 }
+  $1 !~ /^[a-fA-F0-9]{64}$/ { exit 1 }
+  {
+    name = $2
+    sub(/^\*/, "", name)
+    if (name == "" || name ~ /^\// || name ~ /(^|\/)\.\.($|\/)/) exit 1
+  }
+  END { if (NR == 0) exit 1 }
+' "$release_root/checksums.sha256"; then
+  echo "[error] checksums.sha256 has an unsafe or invalid entry" >&2
+  exit 1
+fi
+if ! (cd "$release_root" && sha256sum --check --strict checksums.sha256 >/dev/null); then
+  echo "[error] Release checksum verification failed" >&2
+  exit 1
+fi
+release_version="$(awk '/^version:[[:space:]]*/ { value=$0; sub(/^[^:]*:[[:space:]]*/, "", value); gsub(/[[:space:]]+$/, "", value); print value; exit }' "$release_root/release.yaml")"
+if [[ ! "$release_version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.]+)?$ ]]; then
+  echo "[error] release.yaml has no valid semantic version" >&2
+  exit 1
+fi
+
+shopt -s nullglob
+tool_archives=("$script_dir"/eva-tool_*_linux_amd64.tar.gz)
+if [[ ${#tool_archives[@]} -ne 1 ]]; then
+  echo "[error] expected exactly one EVA Tool archive beside this installer; found ${#tool_archives[@]}" >&2
+  exit 1
+fi
+if [[ -z "$artifact" ]]; then
   artifact="${tool_archives[0]}"
   auto_artifact=true
+fi
+if [[ -L "$artifact" ]]; then
+  echo "[error] EVA Tool archive must not be a symlink: $artifact" >&2
+  exit 1
 fi
 artifact="$(readlink -f "$artifact")"
 if [[ ! -f "$artifact" ]]; then
   echo "[error] EVA Tool archive is not a regular file: $artifact" >&2
+  exit 1
+fi
+if [[ "$(dirname "$artifact")" != "$release_root" ]]; then
+  echo "[error] EVA Tool archive must be directly inside the installer Release root" >&2
   exit 1
 fi
 if [[ -z "$expected_sha256" && -f "$script_dir/checksums.sha256" ]]; then
@@ -83,6 +132,11 @@ if [[ -n "$expected_sha256" ]]; then
     echo "[error] EVA Tool archive checksum mismatch" >&2
     exit 1
   fi
+fi
+
+if ! awk -v file="${artifact##*/}" '$2 == file || $2 == "*" file { matches += 1 } END { exit matches != 1 }' "$release_root/checksums.sha256"; then
+  echo "[error] checksums.sha256 must contain exactly one EVA Tool archive digest" >&2
+  exit 1
 fi
 
 remote_backend_paths=(
@@ -275,7 +329,15 @@ for path in "${remote_backend_shell_paths[@]}"; do
     exit 1
   fi
 done
-"$staging_dir/bin/eva" version >/dev/null
+staged_tool_version="$("$staging_dir/bin/eva" version | awk 'NR == 1 { print $1; exit }')"
+if [[ "$staged_tool_version" != "$release_version" ]]; then
+  echo "[error] EVA Tool version $staged_tool_version does not match Release version $release_version" >&2
+  exit 1
+fi
+if ! "$staging_dir/bin/eva" verify "$release_root" >/dev/null; then
+  echo "[error] EVA Tool could not validate its installer Release" >&2
+  exit 1
+fi
 
 if [[ -e "$tool_dir" || -L "$tool_dir" ]]; then
   if [[ -L "$tool_dir" || ! -d "$tool_dir" ]]; then
@@ -304,10 +366,47 @@ if [[ -n "$backup_dir" ]]; then
   rm -rf "$backup_dir"
 fi
 
+installed_tool_version="$("$command_link" version | awk 'NR == 1 { print $1; exit }')"
+if [[ "$installed_tool_version" != "$release_version" ]]; then
+  echo "[error] installed EVA Tool version $installed_tool_version does not match Release version $release_version" >&2
+  exit 1
+fi
+
+current_release_dir="$state_root/releases"
+setup_directory "$current_release_dir" 0750
+release_yaml_sha256="$(sha256sum "$release_root/release.yaml" | awk '{print $1}')"
+checksums_sha256="$(sha256sum "$release_root/checksums.sha256" | awk '{print $1}')"
+release_identity="$(printf '%s:%s' "$release_yaml_sha256" "$checksums_sha256" | sha256sum | awk '{print $1}')"
+current_receipt="$current_release_dir/current.yaml"
+receipt_temporary="$(mktemp "$current_release_dir/.current.yaml-XXXXXX")"
+receipt_cleanup() {
+  rm -f "$receipt_temporary"
+}
+if ! {
+  printf 'schema_version: v1\n'
+  printf 'release_root: %s\n' "$release_root"
+  printf 'release_version: %s\n' "$release_version"
+  printf 'release_identity: %s\n' "$release_identity"
+  printf 'selected_by: eva-tool-installer\n'
+  printf 'selected_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$receipt_temporary"; then
+  receipt_cleanup
+  echo "[error] could not write Current Release receipt" >&2
+  exit 1
+fi
+chmod 0640 "$receipt_temporary"
+chown root:root "$receipt_temporary"
+if ! sync -f "$receipt_temporary" || ! mv -f "$receipt_temporary" "$current_receipt" || ! sync -d "$current_release_dir"; then
+  receipt_cleanup
+  echo "[error] could not publish Current Release receipt" >&2
+  exit 1
+fi
+
 echo "[done] EVA Tool installed"
 if resolved_command="$(command -v eva 2>/dev/null)"; then
   echo "[done] eva command: $resolved_command"
 else
   echo "[done] eva command: $command_link"
 fi
-"$command_link" version
+echo "[done] current release: $release_version"
+echo "[done] release root: $release_root"

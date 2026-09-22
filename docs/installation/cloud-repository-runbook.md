@@ -27,12 +27,14 @@ Tag Base Release artifact의 압축을 풀고 Release root에서 포함된 insta
 unzip -q eva-base-release-*.zip -d eva-base-release
 cd eva-base-release
 sudo bash ./eva-tool-installer.sh
-eva verify .
+sudo eva verify
 ```
 
-installer는 하나의 `eva-tool_*_linux_amd64.tar.gz` archive를 `checksums.sha256`로
-검증합니다. 이후 `eva install`이 검증된 Release를 `/opt/eva/releases/<version>/`에
-준비하므로 Release version 변수를 따로 설정할 필요가 없습니다.
+installer는 하나의 `eva-tool_*_linux_amd64.tar.gz` archive와 Release checksum을
+검증한 뒤, 실행한 Release를 root 관리 Current Release로 등록합니다. 이후 새 shell에서도
+`sudo eva verify`와 `sudo eva install`은 이 Release를 사용하므로 Release version 변수를
+따로 설정할 필요가 없습니다. 다른 Release가 필요할 때만 `--release /path/to/release`를
+명시합니다.
 
 ## 3. Managed Runtime 준비
 
@@ -219,8 +221,8 @@ Git-backed handoff에는 이 다섯 metadata가 모두 필요하며, 이전 형�
 receipt 복구는 `registration`이 target Secret을 원하지 않고 live Secret/Application이 안정적으로
 계속 부재한 경우에만 허용됩니다. 그렇지 않으면 full Git-backed preflight가 필요합니다.
 거절하면 설치를 시작하지 않으므로, 필요한 경우 현재 상태를 그대로 둔 채 직접 조치할 수 있습니다.
-명령은 검증한 Release root에서 실행하며 현재 디렉터리의 Release를 자동으로
-`/opt/eva/releases`에 준비합니다. 별도의 `--release` 또는 `--install-root` 입력은 필요하지 않습니다.
+명령은 installer가 등록한 Current Release를 사용해 `/opt/eva/releases`에 준비합니다.
+별도의 `--release` 또는 `--install-root` 입력은 필요하지 않습니다.
 관리 서버 SSH host key는 `/home/eva/.ssh/known_hosts`에서 검증합니다.
 파일이 없으면 생성하며, 처음 보는 host key는 SHA256 fingerprint를 표시하고 별도 승인을 받습니다.
 
@@ -229,10 +231,18 @@ preflight 명령을 안내하며 Solution 설치 전에 중단합니다. `--yes`
 
 ## 7. 설치
 
-검증된 Release root에서 명령 하나를 실행합니다.
+installer가 등록한 Current Release로 명령 하나를 실행합니다.
 
 ```bash
-sudo eva install . --workspace /home/eva/site-dev-196 --yes
+sudo eva install --workspace /home/eva/site-dev-196 --yes
+```
+
+다른 검증된 Release를 사용할 때만 다음처럼 명시적으로 override합니다. 이 override는
+Current Release를 변경하지 않습니다.
+
+```bash
+sudo eva verify --release /path/to/another/release
+sudo eva install --release /path/to/another/release --workspace /home/eva/site-dev-196 --yes
 ```
 
 Plan 순서는 항상 다음과 같습니다.

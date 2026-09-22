@@ -44,12 +44,14 @@ Target payload는 이후 Main preparation 결과로 생성됩니다.
 unzip -q eva-base-release-*.zip -d eva-base-release
 cd eva-base-release
 sudo bash ./eva-tool-installer.sh
-eva verify .
+sudo eva verify
 ```
 
-현재 디렉터리가 Base Release root입니다. 이후 Main 명령은 모두 `.`을
-`RELEASE_PATH`로 사용합니다. installer는 Tool archive를 `checksums.sha256`로
-검증하고, `eva verify .`는 Base Release 무결성을 확인합니다.
+installer는 Tool archive와 Base Release checksum을 검증하고, 실행한 Release를
+Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에서도 이 Base Release의
+무결성을 확인합니다. 다른 Release를 확인할 때만 `sudo eva verify --release <path-or-version>`를
+명시합니다. 아래 Main preparation/verify/publish도 인자 없이 같은 Current Release를
+사용합니다. 다른 Release가 필요한 경우에만 해당 Remote 명령에 `RELEASE_PATH`를 명시합니다.
 
 ## 3. [Main] AWS와 Harbor 입력 확인
 
@@ -69,7 +71,7 @@ Managed Harbor의 초기 계정은 `admin`이며 초기 비밀번호 기본값�
 option은 없고, receipt와 로그에 비밀번호를 기록하지 않습니다.
 
 Remote preparation에는 Main 서버에서 사용할 AWS credential이 필요합니다.
-`sudo eva remote prepare .`는 EVA managed credential을 확인하며, credential이 없고
+`sudo eva remote prepare`는 EVA managed credential을 확인하며, credential이 없고
 대화형 terminal에서 실행 중이면 AWS Access Key ID, AWS Secret Access Key 및 AWS Region을
 입력받습니다. Region의 기본값은 `ap-northeast-2`입니다.
 
@@ -109,7 +111,7 @@ Main에 설치하지 않습니다. 이미 승인된 외부 Harbor를 쓸 때만 
 해석됩니다.
 
 ```bash
-sudo eva remote prepare .
+sudo eva remote prepare
 ```
 
 성공하면 Remote Runtime artifact, Target package/host/chart/helper/model payload, Main
@@ -122,7 +124,7 @@ Harbor의 product/infra image 및 Qdrant snapshot OCI artifact와 preparation ev
 게시 전에 Main에 남은 preparation evidence를 read-only로 검증합니다.
 
 ```bash
-sudo eva remote verify .
+sudo eva remote verify
 ```
 
 이 명령은 preparation manifest, Runtime artifact, Target payload 및 local preparation
@@ -134,7 +136,7 @@ evidence를 확인합니다. 자산을 다시 다운로드하거나 게시하지
 검증한 Base Release와 생성된 delivery artifact를 Target으로 게시합니다.
 
 ```bash
-sudo eva remote publish . \
+sudo eva remote publish \
   --target eva@10.159.56.196
 ```
 
@@ -150,7 +152,7 @@ inventory와 AWS credential은 전송하지 않습니다. 동일 identity의 재
 실패하면 명령은 non-zero로 끝납니다.
 
 ```bash
-sudo eva remote publish . \
+sudo eva remote publish \
   --target eva@10.159.56.196 \
   --target eva@10.159.56.197 \
   --target eva@10.159.56.198
@@ -169,18 +171,23 @@ sudo eva remote bootstrap \
   --yes
 ```
 
-## 8. [Target] 게시된 Release 확인
+## 8. [Target] EVA Tool 설치 및 게시된 Release 확인
 
-게시된 Release root에서 설치를 시작합니다.
+Target에는 Tool이 없으므로 최초 한 번만 게시된 installer의 절대 경로를 실행합니다.
 
 ```bash
-cd /var/lib/eva/inbox/releases/<version>
-eva verify .
+release_version=<version>
+release_root="/var/lib/eva/inbox/releases/$release_version"
+
+sudo bash "$release_root/eva-tool-installer.sh"
+sudo eva verify
 ```
 
-`eva verify .`는 Base Release 무결성을 확인합니다. Remote Runtime, payload 및 delivery
-marker의 전체 검증은 다음 `eva install`의 선행 검증에서 수행됩니다. 게시된 파일을
-수정하지 말고 검증에 실패하면 Main에서 다시 준비·게시합니다.
+installer는 checksum과 Tool version을 검증한 뒤 이 게시 Release를 Current Release로
+등록합니다. `sudo eva verify`는 Base Release 무결성을 확인합니다. Remote Runtime, payload
+및 delivery marker의 전체 검증은 다음 `eva install`의 선행 검증에서 수행됩니다. 게시된
+파일을 수정하거나 일반 사용자가 inbox Release directory로 이동할 필요가 없습니다. 검증에
+실패하면 Main에서 다시 준비·게시합니다.
 
 ## 9. [Target] Workspace 입력 준비
 
@@ -260,7 +267,17 @@ Workspace와 게시된 Release를 검증한 뒤 설치를 실행합니다.
 sudo eva workspace validate \
   --workspace /home/eva/site-remote-196
 
-sudo eva install . \
+sudo eva install \
+  --workspace /home/eva/site-remote-196 \
+  --yes
+```
+
+다른 Release를 사용해야 할 때만 `--release`로 명시적으로 override합니다. 이 override는
+Current Release를 변경하지 않습니다.
+
+```bash
+sudo eva verify --release /var/lib/eva/inbox/releases/<another-version>
+sudo eva install --release /var/lib/eva/inbox/releases/<another-version> \
   --workspace /home/eva/site-remote-196 \
   --yes
 ```
@@ -289,7 +306,7 @@ Plugin readiness 및 workload의 할당 상태도 확인합니다. workload imag
 재시도합니다.
 
 ```bash
-sudo eva install . \
+sudo eva install \
   --workspace /home/eva/site-remote-196 \
   --yes
 

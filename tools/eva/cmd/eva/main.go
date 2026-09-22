@@ -47,6 +47,8 @@ var (
 	validateRemoteAWSCredential       = remote.ValidateAWSCredential
 	materializeRemotePayload          = remote.MaterializeTargetPayload
 	bootstrapRemoteRuntime            = remote.BootstrapTargetRuntime
+	defaultCurrentReleaseReceiptPath  = release.DefaultCurrentReceiptPath
+	defaultRemoteInboxRoot            = release.DefaultRemoteInboxRoot
 )
 
 type displayedError struct {
@@ -70,7 +72,7 @@ func usage() {
 	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]")
 	fmt.Println("  remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("  remote verify [RELEASE_PATH] [--registry HOST[:PORT]]")
-	fmt.Println("  install [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
+	fmt.Println("  install [--release PATH|RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
 	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
@@ -214,14 +216,14 @@ func remotePrepareUsage() {
 	fmt.Println("Usage: eva remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("")
 	fmt.Println("Prepares a verified original EVA Release for the Remote repository.")
-	fmt.Println("RELEASE_PATH defaults to the current directory.")
+	fmt.Println("Without RELEASE_PATH, uses the Current Release receipt, then a valid current directory.")
 }
 
 func remoteVerifyUsage() {
 	fmt.Println("Usage: eva remote verify [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("")
 	fmt.Println("Verifies local evidence for a completed Remote preparation.")
-	fmt.Println("RELEASE_PATH defaults to the current directory.")
+	fmt.Println("Without RELEASE_PATH, uses the Current Release receipt, then a valid current directory.")
 }
 
 func runRemotePrepare(args []string) error {
@@ -248,17 +250,19 @@ func runRemotePrepare(args []string) error {
 	if err != nil {
 		return displayRemoteContextError(err)
 	}
-	releaseInput := "."
+	releaseInput := ""
 	if flags.NArg() == 1 {
 		releaseInput = flags.Arg(0)
 	}
 	if release.IsArchiveInput(releaseInput) {
 		return errors.New("remote prepare requires an original Release directory, not an Airgap Bundle archive")
 	}
-	resolved, err := release.Resolve(releaseInput)
+	selected, err := selectRelease(releaseInput)
 	if err != nil {
 		return err
 	}
+	resolved := selected.Resolved
+	printSelectedRelease(resolved, selected.Source)
 	credential, err := resolveRemoteAWSCredential(context.Background())
 	if err != nil {
 		return err
@@ -350,17 +354,19 @@ func runRemoteVerify(args []string) error {
 	if err != nil {
 		return displayRemoteContextError(err)
 	}
-	releaseInput := "."
+	releaseInput := ""
 	if flags.NArg() == 1 {
 		releaseInput = flags.Arg(0)
 	}
 	if release.IsArchiveInput(releaseInput) {
 		return errors.New("remote verify requires an original Release directory, not an Airgap Bundle archive")
 	}
-	resolved, err := release.Resolve(releaseInput)
+	selected, err := selectRelease(releaseInput)
 	if err != nil {
 		return err
 	}
+	resolved := selected.Resolved
+	printSelectedRelease(resolved, selected.Source)
 	fmt.Printf("[INFO] repository=%s/%s\n", registryContext.Registry, registryContext.Project)
 	result, err := newRemoteVerifyService().Verify(remote.VerifyOptions{Release: resolved, Registry: registryContext.Registry, Project: registryContext.Project})
 	if err != nil {
@@ -408,7 +414,7 @@ func normalizeRemoteRepositoryArgs(args []string, command string) ([]string, err
 func remotePublishUsage() {
 	fmt.Println("Usage: eva remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]")
 	fmt.Println("")
-	fmt.Println("RELEASE_PATH defaults to the current directory.")
+	fmt.Println("Without RELEASE_PATH, uses the Current Release receipt, then a valid current directory.")
 }
 
 func runRemotePublish(args []string) error {
@@ -437,17 +443,19 @@ func runRemotePublish(args []string) error {
 	if err != nil {
 		return displayRemoteContextError(err)
 	}
-	releaseInput := "."
+	releaseInput := ""
 	if flags.NArg() == 1 {
 		releaseInput = flags.Arg(0)
 	}
 	if release.IsArchiveInput(releaseInput) {
 		return errors.New("remote publish requires an original Release directory, not an Airgap Bundle archive")
 	}
-	resolved, err := release.Resolve(releaseInput)
+	selected, err := selectRelease(releaseInput)
 	if err != nil {
 		return err
 	}
+	resolved := selected.Resolved
+	printSelectedRelease(resolved, selected.Source)
 	fmt.Printf("[INFO] repository=%s/%s\n", registryContext.Registry, registryContext.Project)
 	result, publishErr := newRemoteService().PublishWithResult(remote.PublishOptions{
 		Release:  resolved,
@@ -708,13 +716,21 @@ func runInstall(args []string) error {
 		return err
 	}
 	var releaseResolved release.Resolved
+	var releaseSource release.SelectionSource
 	if release.IsArchiveInput(*releaseInput) {
 		releaseResolved, err = release.ImportAirgapBundle(*releaseInput, *artifactRoot)
 	} else {
-		releaseResolved, err = release.Resolve(*releaseInput)
+		selected, selectErr := selectRelease(*releaseInput)
+		if selectErr != nil {
+			return selectErr
+		}
+		releaseResolved, releaseSource = selected.Resolved, selected.Source
 	}
 	if err != nil {
 		return err
+	}
+	if releaseSource != "" {
+		printSelectedRelease(releaseResolved, releaseSource)
 	}
 	draft := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, time.Now())
 	printInstallSummary(draft)
@@ -1406,12 +1422,26 @@ func runVerify(args []string) error {
 		fmt.Printf("Airgap Bundle is valid: %s (version=%s, platform=%s/%s)\n", *input, metadata.Version, metadata.Platform.OS, metadata.Platform.Arch)
 		return nil
 	}
-	resolved, err := release.Resolve(*input)
+	selected, err := selectRelease(*input)
 	if err != nil {
 		return err
 	}
+	resolved := selected.Resolved
+	printSelectedRelease(resolved, selected.Source)
 	fmt.Printf("release is valid: %s (version=%s, platform=%s/%s)\n", resolved.Root, resolved.Metadata.Version, resolved.Metadata.Platform.OS, resolved.Metadata.Platform.Arch)
 	return nil
+}
+
+func selectRelease(input string) (release.Selected, error) {
+	return release.Select(release.SelectionOptions{
+		Explicit: input, ReceiptPath: defaultCurrentReleaseReceiptPath, InboxRoot: defaultRemoteInboxRoot,
+	})
+}
+
+func printSelectedRelease(resolved release.Resolved, source release.SelectionSource) {
+	fmt.Printf("[INFO] release=%s\n", resolved.Metadata.Version)
+	fmt.Printf("[INFO] release_root=%s\n", resolved.Root)
+	fmt.Printf("[INFO] release_source=%s\n", source)
 }
 
 func runApply(args []string) error {

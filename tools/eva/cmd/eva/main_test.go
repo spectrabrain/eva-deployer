@@ -216,6 +216,67 @@ func TestRunRemoteVerifyForwardsResolvedReleaseWithoutBackend(t *testing.T) {
 	}
 }
 
+func TestRunRemoteVerifyUsesCurrentReleaseWithoutPath(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	directory := t.TempDir()
+	previousBootstrapReceipt, previousCurrentReceipt := defaultRemoteBootstrapReceiptPath, defaultCurrentReleaseReceiptPath
+	previousVerify := newRemoteVerifyService
+	defer func() {
+		defaultRemoteBootstrapReceiptPath, defaultCurrentReleaseReceiptPath = previousBootstrapReceipt, previousCurrentReceipt
+		newRemoteVerifyService = previousVerify
+	}()
+	defaultRemoteBootstrapReceiptPath = filepath.Join(directory, "harbor.yaml")
+	defaultCurrentReleaseReceiptPath = filepath.Join(directory, "releases", "current.yaml")
+	if err := remotecommand.WriteHarborReceipt(defaultRemoteBootstrapReceiptPath, remotecommand.HarborReceipt{SchemaVersion: "v1", ManagedBy: "eva", Registry: "harbor.example.internal:32080", Project: "eva", HarborVersion: "2.15.2", InstallRoot: "/opt/eva/harbor", DataRoot: "/var/lib/eva/harbor", Protocol: "http"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := release.Resolve(releaseRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release.WriteCurrentReceipt(defaultCurrentReleaseReceiptPath, resolved, "eva-tool-installer", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var received remotecommand.VerifyOptions
+	newRemoteVerifyService = func() remotecommand.VerifyService {
+		return remotecommand.VerifyService{VerifyFunc: func(options remotecommand.VerifyOptions) (remotecommand.VerifyResult, error) {
+			received = options
+			return remotecommand.VerifyResult{ReleaseVersion: options.Release.Metadata.Version, Registry: options.Registry, Project: options.Project, ManifestPath: "/fixture/manifest.yaml"}, nil
+		}}
+	}
+	if err := run([]string{"remote", "verify"}); err != nil {
+		t.Fatalf("remote verify with Current Release: %v", err)
+	}
+	if received.Release.Root != releaseRoot {
+		t.Fatalf("remote verify resolved %q, want Current Release %q", received.Release.Root, releaseRoot)
+	}
+}
+
+func TestRunVerifyUsesCurrentReleaseReceiptAndExplicitOverride(t *testing.T) {
+	currentRoot := writeRemotePublishRelease(t)
+	overrideRoot := writeRemotePublishRelease(t)
+	previousReceiptPath := defaultCurrentReleaseReceiptPath
+	defer func() { defaultCurrentReleaseReceiptPath = previousReceiptPath }()
+	defaultCurrentReleaseReceiptPath = filepath.Join(t.TempDir(), "releases", "current.yaml")
+	current, err := release.Resolve(currentRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release.WriteCurrentReceipt(defaultCurrentReleaseReceiptPath, current, "eva-tool-installer", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"verify"}); err != nil {
+		t.Fatalf("verify with Current Release: %v", err)
+	}
+	if err := run([]string{"verify", "--release", overrideRoot}); err != nil {
+		t.Fatalf("verify with explicit Release: %v", err)
+	}
+	receipt, err := release.LoadCurrentReceipt(defaultCurrentReleaseReceiptPath)
+	if err != nil || receipt.ReleaseRoot != currentRoot {
+		t.Fatalf("explicit verify altered Current Release: %#v, %v", receipt, err)
+	}
+}
+
 func TestRemoteCommandsResolveRegistryFromBootstrapReceipt(t *testing.T) {
 	releaseRoot := writeRemotePublishRelease(t)
 	previousReceiptPath := defaultRemoteBootstrapReceiptPath
@@ -322,6 +383,9 @@ artifacts:
 		sha256.Sum256([]byte(files["eva-solution.tar.gz"])),
 		sha256.Sum256([]byte(files["eva-offline.tar.gz"])))
 	if err := os.WriteFile(filepath.Join(root, "release.yaml"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "checksums.sha256"), []byte("release checksums\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return root

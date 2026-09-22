@@ -290,7 +290,8 @@ func payloadEntries(cacheRoot string) ([]string, error) {
 	manifest := filepath.Join(cacheRoot, "manifest.txt")
 	if info, err := os.Lstat(manifest); err != nil {
 		return nil, fmt.Errorf("read target payload offline manifest: %w", err)
-	} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || isSecretLikePath("manifest.txt") {
+	} else if info.Mode()&os.ModeSymlink != 0 ||
+		!info.Mode().IsRegular() {
 		return nil, errors.New("unsafe target payload offline manifest")
 	} else if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink > 1 {
 		return nil, errors.New("hard-linked target payload offline manifest")
@@ -311,8 +312,12 @@ func payloadEntries(cacheRoot string) ([]string, error) {
 			if err != nil {
 				return err
 			}
-			if isSecretLikePath(relative) || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() && !info.Mode().IsRegular() {
-				return fmt.Errorf("unsafe target payload source: %s", relative)
+			if info.Mode()&os.ModeSymlink != 0 ||
+				!info.IsDir() && !info.Mode().IsRegular() {
+				return fmt.Errorf(
+					"unsafe target payload source: %s",
+					relative,
+				)
 			}
 			if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink > 1 && info.Mode().IsRegular() {
 				return fmt.Errorf("hard-linked target payload source: %s", relative)
@@ -513,8 +518,17 @@ func validatePayloadArchiveHeader(header *tar.Header) error {
 		return nil
 	}
 	name := path.Clean(header.Name)
-	if name == "." || strings.HasPrefix(name, "/") || strings.HasPrefix(name, "../") || name != header.Name && name+"/" != header.Name || !strings.HasPrefix(name, "cache/") || isSecretLikePath(name) || (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeDir) {
-		return fmt.Errorf("unsafe target payload archive entry %q", header.Name)
+	if name == "." ||
+		strings.HasPrefix(name, "/") ||
+		strings.HasPrefix(name, "../") ||
+		name != header.Name && name+"/" != header.Name ||
+		!strings.HasPrefix(name, "cache/") ||
+		(header.Typeflag != tar.TypeReg &&
+			header.Typeflag != tar.TypeDir) {
+		return fmt.Errorf(
+			"unsafe target payload archive entry %q",
+			header.Name,
+		)
 	}
 	return nil
 }

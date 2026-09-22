@@ -310,10 +310,24 @@ func (service PrepareService) steps(
 			return ValidateQdrantArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
 		{Name: "write-manifest", Run: func(context.Context) (StepResult, error) {
+			fmt.Fprintf(
+				streams.Stdout,
+				"[INFO] Step %d/%d write-manifest\n",
+				stepIndex("write-manifest"),
+				len(DefaultStepNames),
+			)
 			if err := ValidatePreparationAssets(root, cacheRoot, resolved, identity, *manifest); err != nil {
 				return StepResult{}, err
 			}
-			payload, err := BuildTargetPayload(root, cacheRoot, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
+			payload, err := BuildTargetPayloadWithProgress(
+				root,
+				cacheRoot,
+				identity,
+				resolved.Metadata.Platform.OS+
+					"/"+
+					resolved.Metadata.Platform.Arch,
+				streams.Stdout,
+			)
 			if err != nil {
 				return StepResult{}, err
 			}

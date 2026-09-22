@@ -405,7 +405,13 @@ func runtimeEntries(root string) ([]string, error) {
 
 func runtimeAllowedPath(relative string) bool {
 	relative = filepath.ToSlash(relative)
-	return relative == "runtime.yaml" || relative == "bin" || relative == "venv" || strings.HasPrefix(relative, "bin/") || strings.HasPrefix(relative, "venv/")
+	return relative == "runtime.yaml" ||
+		relative == "bin" ||
+		relative == "venv" ||
+		relative == "collections" ||
+		strings.HasPrefix(relative, "bin/") ||
+		strings.HasPrefix(relative, "venv/") ||
+		strings.HasPrefix(relative, "collections/")
 }
 
 func validateRuntimeArchive(archive, descriptorDigest string) error {

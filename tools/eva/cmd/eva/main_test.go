@@ -44,7 +44,7 @@ func TestRunRemoteBootstrapRequiresRegistryAndConfirmation(t *testing.T) {
 		return remotecommand.BootstrapService{EnsureRuntime: func(context.Context) error { return nil }, EnsureDocker: func(context.Context) error { return nil }, EnsureHarbor: func(context.Context, string, string, bool) (remotecommand.HarborReceipt, error) {
 			called = true
 			return remotecommand.HarborReceipt{SchemaVersion: "v1", ManagedBy: "eva", Registry: "harbor.example.internal:32080", Project: "eva", HarborVersion: "2.15.2", InstallRoot: "/opt/eva/harbor", DataRoot: "/var/lib/eva/harbor", Protocol: "http"}, nil
-		}, CheckHarbor: func(context.Context, remotecommand.HarborReceipt) error { return nil }}
+		}, CheckHarbor: func(context.Context, remotecommand.HarborReceipt) error { return nil }, Login: func(context.Context, string, string, string) error { return nil }, Credential: func(string) bool { return true }, Password: func(remotecommand.HarborReceipt) (string, error) { return "test-password", nil }}
 	}
 	if err := run([]string{"remote", "bootstrap", "--registry", "harbor.example.internal:32080", "--yes"}); err != nil {
 		t.Fatalf("bootstrap error = %v", err)

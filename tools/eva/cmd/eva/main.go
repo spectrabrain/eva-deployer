@@ -198,6 +198,9 @@ func runRemoteBootstrap(args []string) error {
 	if err != nil {
 		return displayRemoteContextError(err)
 	}
+	if receipt.ManagedBy == "eva" {
+		fmt.Printf("[INFO] Managed Harbor credential ready: registry=%s\n", receipt.Registry)
+	}
 	fmt.Println("[OK] Remote Preparation Plane ready")
 	fmt.Printf("[INFO] registry=%s project=%s\n", receipt.Registry, receipt.Project)
 	return nil

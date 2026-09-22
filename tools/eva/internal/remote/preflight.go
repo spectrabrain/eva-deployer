@@ -47,7 +47,10 @@ type PreflightReport struct {
 	Tools         []string  `yaml:"tools"`
 	CheckedAt     time.Time `yaml:"checked_at"`
 }
-type PreflightOptions struct{ ReleaseRoot, PreparationRoot, Registry, Project string }
+type PreflightOptions struct {
+	ReleaseRoot, PreparationRoot, Registry, Project string
+	AWSCredential                                   AWSCredential
+}
 type CommandProbe func(context.Context, string, ...string) error
 type VersionProbe func(context.Context, string, ...string) (string, error)
 type DockerProbe func(context.Context) (architecture, dataRoot string, err error)
@@ -63,6 +66,7 @@ type Preflight struct {
 	DockerRoot      string
 	Timeout         time.Duration
 	ExternalSources []string
+	AWSValidate     func(context.Context, AWSCredential) error
 }
 
 func NewPreflight() Preflight {
@@ -73,6 +77,7 @@ func NewPreflight() Preflight {
 	p.Dial = dialer.DialContext
 	p.HTTP = (&http.Client{Timeout: 5 * time.Second}).Do
 	p.Credential = dockerCredentialPresent
+	p.AWSValidate = ValidateAWSCredential
 	p.Docker = probeDocker
 	p.PlaneReady = func(registry, project string) error {
 		receipt, err := LoadHarborReceipt(DefaultHarborReceiptPath)
@@ -113,7 +118,7 @@ func (p Preflight) Check(ctx context.Context, options PreflightOptions) (Preflig
 	if err != nil {
 		return PreflightReport{}, fmt.Errorf("Docker daemon is unavailable: %w", err)
 	}
-	if err := p.checkAWS(ctx); err != nil {
+	if err := p.checkAWS(ctx, options.AWSCredential); err != nil {
 		return PreflightReport{}, fmt.Errorf("AWS credentials are unavailable: %w", err)
 	}
 	if err := p.checkHarbor(ctx, options.Registry); err != nil {
@@ -180,8 +185,13 @@ func (p Preflight) checkDocker(ctx context.Context) (string, error) {
 	}
 	return root, nil
 }
-func (p Preflight) checkAWS(ctx context.Context) error {
-	return p.probe(ctx, "aws", "sts", "get-caller-identity", "--output", "json")
+func (p Preflight) checkAWS(ctx context.Context, credential AWSCredential) error {
+	if p.AWSValidate == nil {
+		return errors.New("AWS credential validator is not configured")
+	}
+	c, cancel := context.WithTimeout(ctx, p.Timeout)
+	defer cancel()
+	return p.AWSValidate(c, credential)
 }
 func (p Preflight) checkHarbor(ctx context.Context, registry string) error {
 	host, port := registry, "443"

@@ -43,12 +43,14 @@ type PrepareService struct {
 	Preflight       Preflight
 	Clock           Clock
 	RuntimeRoot     string
+	PrepareFunc     func(context.Context, PrepareOptions) (string, error) // test boundary; nil uses the production implementation
 }
 type PrepareOptions struct {
-	Release  release.Resolved
-	Registry string
-	Project  string
-	Streams  Streams
+	Release       release.Resolved
+	Registry      string
+	Project       string
+	AWSCredential AWSCredential
+	Streams       Streams
 }
 
 func NewPrepareService() PrepareService {
@@ -56,6 +58,9 @@ func NewPrepareService() PrepareService {
 }
 
 func (service PrepareService) Prepare(ctx context.Context, options PrepareOptions) (string, error) {
+	if service.PrepareFunc != nil {
+		return service.PrepareFunc(ctx, options)
+	}
 	if options.Streams.Stdout == nil {
 		options.Streams.Stdout = io.Discard
 	}
@@ -98,7 +103,7 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 	if service.ResolveBackend == nil || service.Run == nil || service.Preflight.Run == nil {
 		return manifestPath, errors.New("Remote prepare service is not configured")
 	}
-	steps, err := service.steps(root, options.Release, identity, &manifest, options.Streams)
+	steps, err := service.steps(root, options.Release, identity, &manifest, options.Streams, options.AWSCredential)
 	if err != nil {
 		return manifestPath, err
 	}
@@ -119,7 +124,7 @@ func makePreparationLayout(root string) error {
 	return nil
 }
 
-func (service PrepareService) steps(root string, resolved release.Resolved, identity PreparationIdentity, manifest *Manifest, streams Streams) ([]PreparationStep, error) {
+func (service PrepareService) steps(root string, resolved release.Resolved, identity PreparationIdentity, manifest *Manifest, streams Streams, awsCredential AWSCredential) ([]PreparationStep, error) {
 	if streams.Stdout == nil {
 		streams.Stdout = io.Discard
 	}
@@ -157,6 +162,16 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 		}
 		return copy
 	}
+	awsEnv := func(values map[string]string) map[string]string {
+		result := env(values)
+		if awsCredential.AccessKeyID != "" {
+			result["AWS_ACCESS_KEY_ID"] = awsCredential.AccessKeyID
+			result["AWS_SECRET_ACCESS_KEY"] = awsCredential.SecretAccessKey
+			result["AWS_DEFAULT_REGION"] = awsCredential.Region
+			result["AWS_REGION"] = awsCredential.Region
+		}
+		return result
+	}
 	steps := []PreparationStep{
 		{Name: "validate-release", Run: func(context.Context) (StepResult, error) {
 			if err := release.ValidateRemotePreparationInput(resolved); err != nil {
@@ -170,7 +185,7 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 		}, ValidateEvidence: func(context.Context, []string) error { return nonEmptyRegular(root, "reports/release-validation.yaml") }},
 		{Name: "main-preflight", Run: func(ctx context.Context) (StepResult, error) {
 			fmt.Fprintln(streams.Stdout, "[INFO] Checking Main preparation prerequisites")
-			report, err := service.Preflight.Check(ctx, PreflightOptions{ReleaseRoot: resolved.Root, PreparationRoot: root, Registry: identity.RepositoryRegistry, Project: identity.RepositoryProject})
+			report, err := service.Preflight.Check(ctx, PreflightOptions{ReleaseRoot: resolved.Root, PreparationRoot: root, Registry: identity.RepositoryRegistry, Project: identity.RepositoryProject, AWSCredential: awsCredential})
 			if err != nil {
 				return StepResult{}, fmt.Errorf("Main preparation preflight failed: %w", err)
 			}
@@ -194,15 +209,15 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			_, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
 			return err
 		}},
-		command("prepare-offline-assets", env(nil), []string{"cache/apt/debs/manifest.txt", "cache/docker/debs/manifest.txt", "cache/manifest.txt", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/tools/oras"}, func() error { return ValidateOfflineAssets(root) }),
-		command("download-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"cache/images/images-all.txt", "cache/images/images-missing.txt", "cache/images/images-pulled.txt"}, func() error {
+		command("prepare-offline-assets", awsEnv(nil), []string{"cache/apt/debs/manifest.txt", "cache/docker/debs/manifest.txt", "cache/manifest.txt", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/tools/oras"}, func() error { return ValidateOfflineAssets(root) }),
+		command("download-product-images", awsEnv(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"cache/images/images-all.txt", "cache/images/images-missing.txt", "cache/images/images-pulled.txt"}, func() error {
 			return ValidateImageLists(root, "images-all.txt", "images-pulled.txt", "images-missing.txt")
 		}),
 		command("download-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"cache/images/infra-images-all.txt", "cache/images/infra-images-missing.txt", "cache/images/infra-images-pulled.txt"}, func() error {
 			return ValidateImageLists(root, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt")
 		}),
-		command("download-models", env(nil), []string{"cache/models/manifest.txt"}, func() error { return ValidateModels(root) }),
-		command("download-qdrant-snapshots", env(nil), []string{"cache/qdrant-snapshots/manifest.txt"}, func() error { return ValidateQdrantSnapshots(root) }),
+		command("download-models", awsEnv(nil), []string{"cache/models/manifest.txt"}, func() error { return ValidateModels(root) }),
+		command("download-qdrant-snapshots", awsEnv(nil), []string{"cache/qdrant-snapshots/manifest.txt"}, func() error { return ValidateQdrantSnapshots(root) }),
 		command("publish-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(root, "cache/images/images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-product.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-product.txt"}, func() error {
 			return ValidateRepositoryMapping(root, "cache/images/images-pulled.txt", "reports/repository-mapping-product.txt", identity.RepositoryRegistry, identity.RepositoryProject)
 		}),

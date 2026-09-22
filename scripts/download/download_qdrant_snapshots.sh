@@ -9,6 +9,12 @@ AWS_PROFILE="${AWS_PROFILE:-default}"
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
 EVA_QDRANT_SNAPSHOT_BUCKET="${EVA_QDRANT_SNAPSHOT_BUCKET:-s3-an2-mellerikat-release-eva-agent}"
 
+AWS_ARGS=(--region "${AWS_REGION}")
+if [[ -z "${AWS_ACCESS_KEY_ID:-}" ||
+      -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+  AWS_ARGS+=(--profile "${AWS_PROFILE}")
+fi
+
 source "$REPO_ROOT/scripts/lib/load_versions.sh"
 load_deploy_versions
 
@@ -90,7 +96,7 @@ while IFS='|' read -r s3_directory snapshot_file logical_collection _ignored; do
   dest="${SNAPSHOT_DIR}/${snapshot_file}"
   remote="s3://${EVA_QDRANT_SNAPSHOT_BUCKET}/agent/qdrant/${s3_directory}/${snapshot_file}"
   echo "[download] ${remote} -> ${dest}"
-  aws --profile "${AWS_PROFILE}" --region "${AWS_REGION}" s3 cp "${remote}" "${dest}"
+  aws "${AWS_ARGS[@]}" s3 cp "${remote}" "${dest}"
 done <<< "$snapshot_specs"
 
 find "$SNAPSHOT_DIR" -maxdepth 1 -type f ! -name manifest.txt | sort >> "$SNAPSHOT_DIR/manifest.txt"

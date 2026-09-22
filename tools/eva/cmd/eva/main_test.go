@@ -247,6 +247,32 @@ func TestRemoteCommandsResolveRegistryFromBootstrapReceipt(t *testing.T) {
 	}
 }
 
+func TestRemotePrepareFailsBeforeServiceWithoutManagedAWSCredentialInNonInteractiveMode(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	previousReceiptPath, previousCredentialPath := defaultRemoteBootstrapReceiptPath, defaultRemoteAWSCredentialPath
+	previousPrepare, previousStat := newRemotePrepareService, stdinStat
+	defer func() {
+		defaultRemoteBootstrapReceiptPath, defaultRemoteAWSCredentialPath = previousReceiptPath, previousCredentialPath
+		newRemotePrepareService, stdinStat = previousPrepare, previousStat
+	}()
+	directory := t.TempDir()
+	defaultRemoteBootstrapReceiptPath = filepath.Join(directory, "harbor.yaml")
+	defaultRemoteAWSCredentialPath = filepath.Join(directory, "credentials", "aws_key.ini")
+	receipt := remotecommand.HarborReceipt{SchemaVersion: "v1", ManagedBy: "eva", Registry: "harbor.example.internal:32080", Project: "eva", HarborVersion: "2.15.2", InstallRoot: "/opt/eva/harbor", DataRoot: "/var/lib/eva/harbor", Protocol: "http"}
+	if err := remotecommand.WriteHarborReceipt(defaultRemoteBootstrapReceiptPath, receipt); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	newRemotePrepareService = func() remotecommand.PrepareService {
+		return remotecommand.PrepareService{PrepareFunc: func(context.Context, remotecommand.PrepareOptions) (string, error) { called = true; return "", nil }}
+	}
+	stdinStat = func() (os.FileInfo, error) { return os.Stat(filepath.Join(directory, "harbor.yaml")) }
+	err := run([]string{"remote", "prepare", releaseRoot})
+	if err == nil || !strings.Contains(err.Error(), defaultRemoteAWSCredentialPath) || called {
+		t.Fatalf("prepare error=%v called=%v", err, called)
+	}
+}
+
 func replaceRemoteService(t *testing.T, factory func() remotecommand.Service) func() {
 	t.Helper()
 	previous := newRemoteService

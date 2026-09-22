@@ -79,10 +79,11 @@ func readyPreflight(t *testing.T) Preflight {
 		HTTP: func(*http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusUnauthorized, Body: http.NoBody}, nil
 		},
-		Credential: func(string) bool { return true },
-		Docker:     func(context.Context) (string, string, error) { return "amd64", t.TempDir(), nil },
-		PlaneReady: func(string, string) error { return nil },
-		DockerRoot: t.TempDir(), Timeout: time.Second, ExternalSources: nil,
+		Credential:  func(string) bool { return true },
+		AWSValidate: func(context.Context, AWSCredential) error { return nil },
+		Docker:      func(context.Context) (string, string, error) { return "amd64", t.TempDir(), nil },
+		PlaneReady:  func(string, string) error { return nil },
+		DockerRoot:  t.TempDir(), Timeout: time.Second, ExternalSources: nil,
 	}
 }
 

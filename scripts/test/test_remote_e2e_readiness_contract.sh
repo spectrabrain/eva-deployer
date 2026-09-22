@@ -16,6 +16,7 @@ require_text() {
 }
 
 main_go="$repo_root/tools/eva/cmd/eva/main.go"
+current_release_go="$repo_root/tools/eva/internal/release/current.go"
 backend_go="$repo_root/tools/eva/internal/remote/backend.go"
 bootstrap_go="$repo_root/tools/eva/internal/remote/bootstrap.go"
 docker_registry_go="$repo_root/tools/eva/internal/remote/docker_registry.go"
@@ -30,6 +31,7 @@ verify_test="$repo_root/tools/eva/internal/remote/verify_test.go"
 installer="$repo_root/scripts/install/install_eva_tool.sh"
 transport="$repo_root/scripts/remote/publish_release_to_target.sh"
 remote_runbook="$repo_root/docs/installation/remote-repository-runbook.md"
+cloud_runbook="$repo_root/docs/installation/cloud-repository-runbook.md"
 image_publish_backend="$repo_root/scripts/publish/push_images_to_repository.sh"
 qdrant_publish_backend="$repo_root/scripts/publish/push_qdrant_snapshots_to_harbor.sh"
 installation_index="$repo_root/docs/installation/README.md"
@@ -110,16 +112,26 @@ require_text "$payload_go" 'cacheRoot string' 'payload explicit cache root'
 require_text "$payload_go" 'progress io.Writer' 'payload progress writer'
 require_text "$transport" "$atomic_rename" 'atomic Target publish'
 require_text "$transport" 'different Remote Release already exists' 'different same-version Release rejection'
+require_text "$current_release_go" 'DefaultCurrentReceiptPath = "/var/lib/eva/releases/current.yaml"' 'Current Release receipt path'
+require_text "$current_release_go" 'SelectionCurrent' 'Current Release selector'
+require_text "$main_go" 'release_source=%s' 'selected Release source output'
 require_text "$remote_runbook" '# EVA Remote Repository 설치 가이드' 'integrated Remote Runbook title'
 require_text "$remote_runbook" 'eva-base-release-<version>.zip' 'Remote Base Release input'
 require_text "$remote_runbook" 'sudo eva remote bootstrap' 'Remote bootstrap command'
-require_text "$remote_runbook" 'sudo eva remote prepare .' 'Remote prepare command'
-require_text "$remote_runbook" 'sudo eva remote verify .' 'Remote verify command'
-require_text "$remote_runbook" 'sudo eva remote publish .' 'Remote publish command'
+require_text "$remote_runbook" 'sudo eva remote prepare' 'Remote prepare command'
+require_text "$remote_runbook" 'sudo eva remote verify' 'Remote verify command'
+require_text "$remote_runbook" 'sudo eva remote publish' 'Remote publish command'
 require_text "$remote_runbook" '--replace-registry' 'registry replacement contract'
 require_text "$remote_runbook" '### 여러 Target에 순차 게시' 'multi-target publish contract'
 require_text "$remote_runbook" '[Main]' 'Main work location'
 require_text "$remote_runbook" '[Target]' 'Target work location'
+# shellcheck disable=SC2016 # Literal Runbook command contract.
+require_text "$remote_runbook" 'sudo bash "$release_root/eva-tool-installer.sh"' 'Target installer registers Current Release'
+require_text "$remote_runbook" 'sudo eva verify' 'Target Current Release verify command'
+require_text "$remote_runbook" 'sudo eva install --release /var/lib/eva/inbox/releases/<another-version>' 'Target explicit Release override'
+require_text "$cloud_runbook" 'sudo eva verify' 'Cloud Current Release verify command'
+require_text "$cloud_runbook" 'sudo eva install --workspace /home/eva/site-dev-196 --yes' 'Cloud Current Release install command'
+require_text "$cloud_runbook" 'sudo eva verify --release /path/to/another/release' 'Cloud explicit Release override'
 # shellcheck disable=SC2016 # Literal documentation contract.
 require_text "$remote_runbook" 'Remote Base Release에는 `eva-offline`이 필수가 아닙니다.' 'Remote Base Release offline contract'
 require_text "$installation_index" '[Remote Repository Runbook](remote-repository-runbook.md)' 'Remote Runbook index'

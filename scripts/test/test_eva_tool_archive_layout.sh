@@ -82,15 +82,42 @@ for path in "${remote_backend_shell_paths[@]}"; do
   chmod 0755 "$fixture_root/libexec/remote-root/$path"
 done
 
-archive="$work_root/eva-tool.tar.gz"
+release_root="$work_root/release"
+mkdir -p "$release_root"
+archive="$release_root/eva-tool_0.1.0-migration_linux_amd64.tar.gz"
 (
   cd "$fixture_root"
   tar -czf "$archive" bin libexec
 )
+install -m 0755 "$installer" "$release_root/eva-tool-installer.sh"
+printf 'infra fixture\n' > "$release_root/eva-infra_0.1.0-migration.tar.gz"
+printf 'solution fixture\n' > "$release_root/eva-solution_0.1.0-migration.tar.gz"
+cat > "$release_root/release.yaml" <<EOF
+version: 0.1.0-migration
+platform:
+  os: linux
+  arch: amd64
+artifacts:
+  - name: eva-tool
+    file: $(basename "$archive")
+    sha256: $(sha256sum "$archive" | awk '{print $1}')
+  - name: eva-tool-installer
+    file: eva-tool-installer.sh
+    sha256: $(sha256sum "$release_root/eva-tool-installer.sh" | awk '{print $1}')
+  - name: eva-infra
+    file: eva-infra_0.1.0-migration.tar.gz
+    sha256: $(sha256sum "$release_root/eva-infra_0.1.0-migration.tar.gz" | awk '{print $1}')
+  - name: eva-solution
+    file: eva-solution_0.1.0-migration.tar.gz
+    sha256: $(sha256sum "$release_root/eva-solution_0.1.0-migration.tar.gz" | awk '{print $1}')
+EOF
+(
+  cd "$release_root"
+  sha256sum "$(basename "$archive")" eva-tool-installer.sh eva-infra_0.1.0-migration.tar.gz eva-solution_0.1.0-migration.tar.gz > checksums.sha256
+)
 
 install_root="$work_root/installed"
-"${sudo_cmd[@]}" "$installer" \
-  --artifact "$archive" \
+"${sudo_cmd[@]}" "$release_root/eva-tool-installer.sh" \
   --root "$install_root/opt/eva" \
   --bin-dir "$install_root/bin" \
   --state-root "$install_root/var/lib/eva" \
@@ -110,6 +137,9 @@ assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/remote/publi
 assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/install/install_docker.sh" 755
 assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/install/setup_harbor.sh" 755
 assert_mode "$install_root/opt/eva/tool/libexec/remote-root/src/infra/version.yaml" 644
+assert_mode "$install_root/var/lib/eva/releases" 750
+assert_mode "$install_root/var/lib/eva/releases/current.yaml" 640
+grep -Fq "release_root: $release_root" "$install_root/var/lib/eva/releases/current.yaml"
 for directory in \
   "$install_root/opt/eva/tool" \
   "$install_root/opt/eva/tool/bin" \

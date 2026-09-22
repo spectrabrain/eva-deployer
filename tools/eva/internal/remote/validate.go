@@ -19,7 +19,7 @@ var imageReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@-]*$`
 // ValidatePreparation is intentionally read-only. It is shared by prepare's
 // final step and the later verify command. The completed-manifest wrapper adds
 // the final verification report after it has been written by prepare.
-func ValidatePreparation(root string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+func ValidatePreparation(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
 	if err := EnsureIdentity(manifest, identity); err != nil {
 		return err
 	}
@@ -39,7 +39,7 @@ func ValidatePreparation(root string, resolved release.Resolved, identity Prepar
 	if err := validatePreflightReport(root, identity); err != nil {
 		return fmt.Errorf("main preflight report: %w", err)
 	}
-	if err := validatePreparationAssets(root, identity); err != nil {
+	if err := validatePreparationAssets(root, cacheRoot, identity); err != nil {
 		return err
 	}
 	if _, err := LoadTargetPayload(TargetPayloadPath(root, identity), identity); err != nil {
@@ -57,7 +57,7 @@ func ValidatePreparation(root string, resolved release.Resolved, identity Prepar
 // ValidatePreparationAssets is the same read-only domain validator used while
 // prepare is assembling its summary. It deliberately does not require the
 // summary or final verification report to exist yet.
-func ValidatePreparationAssets(root string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+func ValidatePreparationAssets(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
 	if err := EnsureIdentity(manifest, identity); err != nil {
 		return err
 	}
@@ -67,16 +67,16 @@ func ValidatePreparationAssets(root string, resolved release.Resolved, identity 
 	if err := validateReleaseReport(root, resolved, identity); err != nil {
 		return fmt.Errorf("release report: %w", err)
 	}
-	return validatePreparationAssets(root, identity)
+	return validatePreparationAssets(root, cacheRoot, identity)
 }
 
 // ValidateCompletedPreparation is the read-only contract for a previously
 // completed preparation. It never writes the manifest or reports.
-func ValidateCompletedPreparation(root string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+func ValidateCompletedPreparation(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
 	if err := validateCompletedManifest(manifest, identity); err != nil {
 		return err
 	}
-	if err := ValidatePreparation(root, resolved, identity, manifest); err != nil {
+	if err := ValidatePreparation(root, cacheRoot, resolved, identity, manifest); err != nil {
 		return err
 	}
 	if err := validateVerificationReport(root, identity); err != nil {
@@ -85,29 +85,29 @@ func ValidateCompletedPreparation(root string, resolved release.Resolved, identi
 	return nil
 }
 
-func validatePreparationAssets(root string, identity PreparationIdentity) error {
-	if err := ValidateOfflineAssets(root); err != nil {
+func validatePreparationAssets(root, cacheRoot string, identity PreparationIdentity) error {
+	if err := ValidateOfflineAssets(cacheRoot); err != nil {
 		return err
 	}
-	if err := ValidateImageLists(root, "images-all.txt", "images-pulled.txt", "images-missing.txt"); err != nil {
+	if err := ValidateImageLists(cacheRoot, "images-all.txt", "images-pulled.txt", "images-missing.txt"); err != nil {
 		return fmt.Errorf("product images: %w", err)
 	}
-	if err := ValidateImageLists(root, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt"); err != nil {
+	if err := ValidateImageLists(cacheRoot, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt"); err != nil {
 		return fmt.Errorf("infra images: %w", err)
 	}
-	if err := ValidateRepositoryMapping(root, "cache/images/images-pulled.txt", "reports/repository-mapping-product.txt", identity.RepositoryRegistry, identity.RepositoryProject); err != nil {
+	if err := ValidateRepositoryMapping(cacheRoot, root, "images/images-pulled.txt", "reports/repository-mapping-product.txt", identity.RepositoryRegistry, identity.RepositoryProject); err != nil {
 		return fmt.Errorf("product mapping: %w", err)
 	}
-	if err := ValidateRepositoryMapping(root, "cache/images/infra-images-pulled.txt", "reports/repository-mapping-infra.txt", identity.RepositoryRegistry, identity.RepositoryProject); err != nil {
+	if err := ValidateRepositoryMapping(cacheRoot, root, "images/infra-images-pulled.txt", "reports/repository-mapping-infra.txt", identity.RepositoryRegistry, identity.RepositoryProject); err != nil {
 		return fmt.Errorf("infra mapping: %w", err)
 	}
-	if err := ValidateModels(root); err != nil {
+	if err := ValidateModels(cacheRoot); err != nil {
 		return err
 	}
-	if err := ValidateQdrantSnapshots(root); err != nil {
+	if err := ValidateQdrantSnapshots(cacheRoot); err != nil {
 		return err
 	}
-	if err := ValidateQdrantArtifacts(root, identity.RepositoryRegistry, identity.RepositoryProject); err != nil {
+	if err := ValidateQdrantArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject); err != nil {
 		return err
 	}
 	return nil
@@ -251,17 +251,17 @@ func readReport(root, relative string) (map[string]any, error) {
 }
 
 func ValidateOfflineAssets(root string) error {
-	for _, relative := range []string{"cache/manifest.txt", "cache/apt/debs/manifest.txt", "cache/docker/debs/manifest.txt", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/tools/oras"} {
+	for _, relative := range []string{"manifest.txt", "apt/debs/manifest.txt", "docker/debs/manifest.txt", "nvidia/container-toolkit-debs/manifest.txt", "tools/oras"} {
 		if err := nonEmptyRegular(root, relative); err != nil {
 			return err
 		}
 	}
-	for _, pattern := range []string{"cache/apt/debs/*.deb", "cache/docker/debs/*.deb", "cache/nvidia/container-toolkit-debs/*.deb", "cache/k3s/k3s-*-linux-amd64"} {
+	for _, pattern := range []string{"apt/debs/*.deb", "docker/debs/*.deb", "nvidia/container-toolkit-debs/*.deb", "k3s/k3s-*-linux-amd64"} {
 		if err := requireRegularGlob(root, pattern); err != nil {
 			return err
 		}
 	}
-	for _, pattern := range []string{"cache/eva-app/*.tgz", "cache/eva-vision/*.tgz", "cache/eva-agent/*.tgz", "cache/eva-agent/release/*/plugins/eva-agent-qdrant/post-renderer.sh", "cache/eva-agent/release/*/plugins/eva-agent-qdrant/plugin.yaml"} {
+	for _, pattern := range []string{"eva-app/*.tgz", "eva-vision/*.tgz", "eva-agent/*.tgz", "eva-agent/release/*/plugins/eva-agent-qdrant/post-renderer.sh", "eva-agent/release/*/plugins/eva-agent-qdrant/plugin.yaml"} {
 		matches, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil || len(matches) == 0 {
 			return fmt.Errorf("required offline asset is missing: %s", pattern)
@@ -276,15 +276,15 @@ func ValidateOfflineAssets(root string) error {
 }
 
 func ValidateImageLists(root, allName, pulledName, missingName string) error {
-	all, err := imageList(root, filepath.Join("cache/images", allName), true)
+	all, err := imageList(root, filepath.Join("images", allName), true)
 	if err != nil {
 		return err
 	}
-	pulled, err := imageList(root, filepath.Join("cache/images", pulledName), true)
+	pulled, err := imageList(root, filepath.Join("images", pulledName), true)
 	if err != nil {
 		return err
 	}
-	missing, err := imageList(root, filepath.Join("cache/images", missingName), false)
+	missing, err := imageList(root, filepath.Join("images", missingName), false)
 	if err != nil {
 		return err
 	}
@@ -297,12 +297,12 @@ func ValidateImageLists(root, allName, pulledName, missingName string) error {
 	return nil
 }
 
-func ValidateRepositoryMapping(root, listRelative, mappingRelative, registry, project string) error {
-	sources, err := imageList(root, listRelative, true)
+func ValidateRepositoryMapping(cacheRoot, preparationRoot, listRelative, mappingRelative, registry, project string) error {
+	sources, err := imageList(cacheRoot, listRelative, true)
 	if err != nil {
 		return err
 	}
-	lines, err := readLines(root, mappingRelative, true)
+	lines, err := readLines(preparationRoot, mappingRelative, true)
 	if err != nil {
 		return err
 	}
@@ -339,7 +339,7 @@ func ValidateRepositoryMapping(root, listRelative, mappingRelative, registry, pr
 }
 
 func ValidateModels(root string) error {
-	manifest := "cache/models/manifest.txt"
+	manifest := "models/manifest.txt"
 	lines, err := readLines(root, manifest, true)
 	if err != nil {
 		return err
@@ -347,7 +347,7 @@ func ValidateModels(root string) error {
 	if err := rejectSecretContent(lines); err != nil {
 		return err
 	}
-	for _, tree := range []string{"cache/models/agent", "cache/models/vllm"} {
+	for _, tree := range []string{"models/agent", "models/vllm"} {
 		if err := secureNonEmptyTree(root, tree); err != nil {
 			return err
 		}
@@ -361,6 +361,9 @@ func ValidateModels(root string) error {
 		if err != nil {
 			return fmt.Errorf("invalid model manifest file: %w", err)
 		}
+		if filepath.Base(root) == "cache" && strings.HasPrefix(filepath.ToSlash(relative), "cache/") {
+			relative = strings.TrimPrefix(filepath.ToSlash(relative), "cache/")
+		}
 		if err := nonEmptyRegular(root, relative); err != nil {
 			return err
 		}
@@ -369,7 +372,7 @@ func ValidateModels(root string) error {
 }
 
 func ValidateQdrantSnapshots(root string) error {
-	lines, err := readLines(root, "cache/qdrant-snapshots/manifest.txt", true)
+	lines, err := readLines(root, "qdrant-snapshots/manifest.txt", true)
 	if err != nil {
 		return err
 	}
@@ -386,22 +389,22 @@ func ValidateQdrantSnapshots(root string) error {
 			return fmt.Errorf("invalid or duplicate snapshot file %q", spec.file)
 		}
 		seen[spec.file] = true
-		if err := nonEmptyRegular(root, filepath.Join("cache/qdrant-snapshots", spec.file)); err != nil {
+		if err := nonEmptyRegular(root, filepath.Join("qdrant-snapshots", spec.file)); err != nil {
 			return err
 		}
 	}
-	return secureTree(root, "cache/qdrant-snapshots")
+	return secureTree(root, "qdrant-snapshots")
 }
 
-func ValidateQdrantArtifacts(root, registry, project string) error {
-	lines, err := readLines(root, "reports/qdrant-artifacts.txt", true)
+func ValidateQdrantArtifacts(cacheRoot, preparationRoot, registry, project string) error {
+	lines, err := readLines(preparationRoot, "reports/qdrant-artifacts.txt", true)
 	if err != nil {
 		return err
 	}
 	if err := rejectSecretContent(lines); err != nil {
 		return err
 	}
-	manifest, err := readLines(root, "cache/qdrant-snapshots/manifest.txt", true)
+	manifest, err := readLines(cacheRoot, "qdrant-snapshots/manifest.txt", true)
 	if err != nil {
 		return err
 	}

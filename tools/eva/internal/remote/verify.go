@@ -27,12 +27,13 @@ type VerifyResult struct {
 
 type VerifyService struct {
 	PreparationRoot string
+	CacheRoot       string
 	Clock           Clock
 	VerifyFunc      func(VerifyOptions) (VerifyResult, error) // test boundary; nil uses the read-only implementation
 }
 
 func NewVerifyService() VerifyService {
-	return VerifyService{PreparationRoot: DefaultPreparationRoot}
+	return VerifyService{PreparationRoot: DefaultPreparationRoot, CacheRoot: DefaultRemoteCacheRoot}
 }
 
 // Verify performs no backend resolution, process invocation, network access,
@@ -59,7 +60,11 @@ func (service VerifyService) Verify(options VerifyOptions) (VerifyResult, error)
 	if err != nil {
 		return VerifyResult{ManifestPath: manifestPath}, safeVerifyError(fmt.Errorf("load preparation manifest: %w", err))
 	}
-	if err := ValidateCompletedPreparation(filepath.Dir(manifestPath), options.Release, identity, manifest); err != nil {
+	cacheRoot := service.CacheRoot
+	if cacheRoot == "" {
+		cacheRoot = DefaultRemoteCacheRoot
+	}
+	if err := ValidateCompletedPreparation(filepath.Dir(manifestPath), cacheRoot, options.Release, identity, manifest); err != nil {
 		return VerifyResult{ManifestPath: manifestPath}, safeVerifyError(fmt.Errorf("verify Remote preparation: %w", err))
 	}
 	return VerifyResult{

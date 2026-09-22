@@ -21,6 +21,7 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 	var called []string
 	service := PrepareService{
 		PreparationRoot: t.TempDir(),
+		CacheRoot:       t.TempDir(),
 		ResolveBackend:  func(relative string) (string, error) { return "/installed/" + relative, nil },
 		Run: func(_ context.Context, options ProcessOptions) error {
 			called = append(called, filepath.Base(options.Path))
@@ -46,6 +47,29 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 	}
 }
 
+func TestPrepareServiceUsesSeparateManagedCacheRoot(t *testing.T) {
+	service := NewPrepareService()
+	if service.PreparationRoot != DefaultPreparationRoot || service.CacheRoot != DefaultRemoteCacheRoot {
+		t.Fatalf("defaults preparation=%q cache=%q", service.PreparationRoot, service.CacheRoot)
+	}
+	preparation := t.TempDir()
+	for _, cache := range []string{preparation, filepath.Join(preparation, "cache")} {
+		if err := ensureRemoteCacheRoot(preparation, cache); err == nil {
+			t.Fatalf("overlapping cache accepted: %s", cache)
+		}
+	}
+	cache := t.TempDir()
+	if err := ensureRemoteCacheRoot(preparation, cache); err != nil {
+		t.Fatal(err)
+	}
+	if err := makePreparationLayout(preparation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(preparation, "cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("release preparation cache directory exists: %v", err)
+	}
+}
+
 func TestPrepareRecordsPreflightFailureBeforeBackends(t *testing.T) {
 	resolved := writeOriginalRelease(t, true)
 	if err := os.WriteFile(filepath.Join(resolved.Root, "checksums.sha256"), []byte("release checksums\n"), 0o600); err != nil {
@@ -54,7 +78,7 @@ func TestPrepareRecordsPreflightFailureBeforeBackends(t *testing.T) {
 	called := false
 	preflight := readyPreflight(t)
 	preflight.LookPath = func(name string) (string, error) { return "", errors.New("missing " + name) }
-	service := PrepareService{PreparationRoot: t.TempDir(), ResolveBackend: func(relative string) (string, error) { return "/installed/" + relative, nil }, Run: func(context.Context, ProcessOptions) error { called = true; return nil }, Preflight: preflight, RuntimeRoot: writeRuntimeFixture(t)}
+	service := PrepareService{PreparationRoot: t.TempDir(), CacheRoot: t.TempDir(), ResolveBackend: func(relative string) (string, error) { return "/installed/" + relative, nil }, Run: func(context.Context, ProcessOptions) error { called = true; return nil }, Preflight: preflight, RuntimeRoot: writeRuntimeFixture(t)}
 	_, err := service.Prepare(context.Background(), PrepareOptions{Release: resolved, Registry: "harbor.example.internal:32080"})
 	if err == nil || !strings.Contains(err.Error(), "Main preparation preflight failed") || called {
 		t.Fatalf("Prepare() error=%v backend=%v", err, called)

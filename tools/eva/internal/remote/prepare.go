@@ -38,6 +38,7 @@ type ProcessRunner func(context.Context, ProcessOptions) error
 
 type PrepareService struct {
 	PreparationRoot string
+	CacheRoot       string
 	ResolveBackend  func(string) (string, error)
 	Run             ProcessRunner
 	Preflight       Preflight
@@ -54,7 +55,7 @@ type PrepareOptions struct {
 }
 
 func NewPrepareService() PrepareService {
-	return PrepareService{PreparationRoot: DefaultPreparationRoot, ResolveBackend: ResolveBackend, Run: runProcess, Preflight: NewPreflight(), RuntimeRoot: runtime.DefaultRoot}
+	return PrepareService{PreparationRoot: DefaultPreparationRoot, CacheRoot: DefaultRemoteCacheRoot, ResolveBackend: ResolveBackend, Run: runProcess, Preflight: NewPreflight(), RuntimeRoot: runtime.DefaultRoot}
 }
 
 func (service PrepareService) Prepare(ctx context.Context, options PrepareOptions) (string, error) {
@@ -66,6 +67,15 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 	}
 	if options.Project == "" {
 		options.Project = defaultRemoteProject
+	}
+	if service.PreparationRoot == "" {
+		service.PreparationRoot = DefaultPreparationRoot
+	}
+	if service.CacheRoot == "" {
+		service.CacheRoot = DefaultRemoteCacheRoot
+	}
+	if err := ensureRemoteCacheRoot(service.PreparationRoot, service.CacheRoot); err != nil {
+		return "", err
 	}
 	identity, err := BuildPreparationIdentity(options.Release, options.Registry, options.Project)
 	if err != nil {
@@ -87,7 +97,7 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 	if !created {
 		switch manifest.Status {
 		case ManifestSucceeded:
-			if err := ValidateCompletedPreparation(root, options.Release, identity, manifest); err != nil {
+			if err := ValidateCompletedPreparation(root, service.CacheRoot, options.Release, identity, manifest); err != nil {
 				return manifestPath, fmt.Errorf("existing Remote preparation failed validation: %w", err)
 			}
 			fmt.Fprintf(options.Streams.Stdout, "[OK] Remote preparation already completed\n[INFO] manifest=%s\n", manifestPath)
@@ -103,7 +113,7 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 	if service.ResolveBackend == nil || service.Run == nil || service.Preflight.Run == nil {
 		return manifestPath, errors.New("Remote prepare service is not configured")
 	}
-	steps, err := service.steps(root, options.Release, identity, &manifest, options.Streams, options.AWSCredential)
+	steps, err := service.steps(root, service.CacheRoot, options.Release, identity, &manifest, options.Streams, options.AWSCredential)
 	if err != nil {
 		return manifestPath, err
 	}
@@ -116,7 +126,7 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 }
 
 func makePreparationLayout(root string) error {
-	for _, name := range []string{"cache", "reports", "work"} {
+	for _, name := range []string{"reports", "work"} {
 		if err := os.MkdirAll(filepath.Join(root, name), 0o750); err != nil {
 			return fmt.Errorf("create preparation %s: %w", name, err)
 		}
@@ -124,7 +134,33 @@ func makePreparationLayout(root string) error {
 	return nil
 }
 
-func (service PrepareService) steps(root string, resolved release.Resolved, identity PreparationIdentity, manifest *Manifest, streams Streams, awsCredential AWSCredential) ([]PreparationStep, error) {
+func ensureRemoteCacheRoot(preparationRoot, cacheRoot string) error {
+	preparation, err := filepath.Abs(preparationRoot)
+	if err != nil {
+		return err
+	}
+	cache, err := filepath.Abs(cacheRoot)
+	if err != nil {
+		return err
+	}
+	if preparation == cache || strings.HasPrefix(cache+string(os.PathSeparator), preparation+string(os.PathSeparator)) || strings.HasPrefix(preparation+string(os.PathSeparator), cache+string(os.PathSeparator)) {
+		return errors.New("Remote preparation root and cache root must not overlap")
+	}
+	if info, err := os.Lstat(cache); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("Remote cache root must be a directory and not a symlink")
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(cache, 0o750); err != nil {
+		return err
+	}
+	return os.Chmod(cache, 0o750)
+}
+
+func (service PrepareService) steps(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest *Manifest, streams Streams, awsCredential AWSCredential) ([]PreparationStep, error) {
 	if streams.Stdout == nil {
 		streams.Stdout = io.Discard
 	}
@@ -142,8 +178,19 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			if err := service.Run(ctx, ProcessOptions{Path: backend[step], Env: environment, Dir: filepath.Join(root, "work"), Streams: streams}); err != nil {
 				return StepResult{}, fmt.Errorf("run %s: %w", step, err)
 			}
+			if len(evidence) == 1 && strings.HasPrefix(evidence[0], "reports/cache-") {
+				if err := validate(); err != nil {
+					return StepResult{}, err
+				}
+				if err := writeYAMLReport(root, evidence[0], map[string]string{"schema_version": "v1", "cache_scope": "remote", "asset_type": step, "status": "validated"}); err != nil {
+					return StepResult{}, err
+				}
+			}
 			return StepResult{Evidence: evidence}, nil
 		}, ValidateEvidence: func(context.Context, []string) error {
+			if len(evidence) == 1 && strings.HasPrefix(evidence[0], "reports/cache-") {
+				return nonEmptyRegular(root, evidence[0])
+			}
 			if err := validate(); err != nil {
 				return err
 			}
@@ -151,7 +198,7 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			return nil
 		}}
 	}
-	base := map[string]string{"EVA_CACHE_ROOT": filepath.Join(root, "cache"), "COMPONENTS": "all", "EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor", "EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "PULL_PLATFORM": "linux/amd64", "REPOSITORY_REGISTRY": identity.RepositoryRegistry, "REPOSITORY_PROJECT": identity.RepositoryProject}
+	base := map[string]string{"EVA_CACHE_ROOT": cacheRoot, "COMPONENTS": "all", "EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor", "EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "PULL_PLATFORM": "linux/amd64", "REPOSITORY_REGISTRY": identity.RepositoryRegistry, "REPOSITORY_PROJECT": identity.RepositoryProject}
 	env := func(values map[string]string) map[string]string {
 		copy := map[string]string{}
 		for k, v := range base {
@@ -209,29 +256,29 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			_, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
 			return err
 		}},
-		command("prepare-offline-assets", awsEnv(nil), []string{"cache/apt/debs/manifest.txt", "cache/docker/debs/manifest.txt", "cache/manifest.txt", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/tools/oras"}, func() error { return ValidateOfflineAssets(root) }),
-		command("download-product-images", awsEnv(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"cache/images/images-all.txt", "cache/images/images-missing.txt", "cache/images/images-pulled.txt"}, func() error {
-			return ValidateImageLists(root, "images-all.txt", "images-pulled.txt", "images-missing.txt")
+		command("prepare-offline-assets", awsEnv(nil), []string{"reports/cache-offline-assets.yaml"}, func() error { return ValidateOfflineAssets(cacheRoot) }),
+		command("download-product-images", awsEnv(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"reports/cache-product-images.yaml"}, func() error {
+			return ValidateImageLists(cacheRoot, "images-all.txt", "images-pulled.txt", "images-missing.txt")
 		}),
-		command("download-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"cache/images/infra-images-all.txt", "cache/images/infra-images-missing.txt", "cache/images/infra-images-pulled.txt"}, func() error {
-			return ValidateImageLists(root, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt")
+		command("download-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"reports/cache-infra-images.yaml"}, func() error {
+			return ValidateImageLists(cacheRoot, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt")
 		}),
-		command("download-models", awsEnv(nil), []string{"cache/models/manifest.txt"}, func() error { return ValidateModels(root) }),
-		command("download-qdrant-snapshots", awsEnv(nil), []string{"cache/qdrant-snapshots/manifest.txt"}, func() error { return ValidateQdrantSnapshots(root) }),
-		command("publish-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(root, "cache/images/images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-product.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-product.txt"}, func() error {
-			return ValidateRepositoryMapping(root, "cache/images/images-pulled.txt", "reports/repository-mapping-product.txt", identity.RepositoryRegistry, identity.RepositoryProject)
+		command("download-models", awsEnv(nil), []string{"reports/cache-models.yaml"}, func() error { return ValidateModels(cacheRoot) }),
+		command("download-qdrant-snapshots", awsEnv(nil), []string{"reports/cache-qdrant-snapshots.yaml"}, func() error { return ValidateQdrantSnapshots(cacheRoot) }),
+		command("publish-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(cacheRoot, "images/images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-product.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-product.txt"}, func() error {
+			return ValidateRepositoryMapping(cacheRoot, root, "images/images-pulled.txt", "reports/repository-mapping-product.txt", identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
-		command("publish-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(root, "cache/images/infra-images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-infra.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-infra.txt"}, func() error {
-			return ValidateRepositoryMapping(root, "cache/images/infra-images-pulled.txt", "reports/repository-mapping-infra.txt", identity.RepositoryRegistry, identity.RepositoryProject)
+		command("publish-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(cacheRoot, "images/infra-images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-infra.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-infra.txt"}, func() error {
+			return ValidateRepositoryMapping(cacheRoot, root, "images/infra-images-pulled.txt", "reports/repository-mapping-infra.txt", identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
-		command("publish-qdrant-snapshots", env(map[string]string{"SNAPSHOT_DIR": filepath.Join(root, "cache/qdrant-snapshots"), "HARBOR_ARTIFACT_MANIFEST": filepath.Join(root, "reports/qdrant-artifacts.txt")}), []string{"reports/qdrant-artifacts.txt"}, func() error {
-			return ValidateQdrantArtifacts(root, identity.RepositoryRegistry, identity.RepositoryProject)
+		command("publish-qdrant-snapshots", env(map[string]string{"SNAPSHOT_DIR": filepath.Join(cacheRoot, "qdrant-snapshots"), "HARBOR_ARTIFACT_MANIFEST": filepath.Join(root, "reports/qdrant-artifacts.txt")}), []string{"reports/qdrant-artifacts.txt"}, func() error {
+			return ValidateQdrantArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
 		{Name: "write-manifest", Run: func(context.Context) (StepResult, error) {
-			if err := ValidatePreparationAssets(root, resolved, identity, *manifest); err != nil {
+			if err := ValidatePreparationAssets(root, cacheRoot, resolved, identity, *manifest); err != nil {
 				return StepResult{}, err
 			}
-			payload, err := BuildTargetPayload(root, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
+			payload, err := BuildTargetPayload(root, cacheRoot, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
 			if err != nil {
 				return StepResult{}, err
 			}
@@ -248,7 +295,7 @@ func (service PrepareService) steps(root string, resolved release.Resolved, iden
 			return nonEmptyRegular(root, "reports/preparation-summary.yaml")
 		}},
 		{Name: "verify", Run: func(context.Context) (StepResult, error) {
-			if err := ValidatePreparation(root, resolved, identity, *manifest); err != nil {
+			if err := ValidatePreparation(root, cacheRoot, resolved, identity, *manifest); err != nil {
 				return StepResult{}, err
 			}
 			if err := writeYAMLReport(root, "reports/verification.yaml", map[string]string{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "status": "validated"}); err != nil {

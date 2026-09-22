@@ -35,13 +35,34 @@ aws "${AWS_ARGS[@]}" s3 sync \
   "s3://${EVA_MODEL_BUCKET}/${VLLM_PREFIX}" \
   "${MODEL_DIR}/vllm/hf"
 
-cat > "${MODEL_DIR}/manifest.txt" <<MANIFEST
-Generated: $(date -Iseconds)
-bucket: ${EVA_MODEL_BUCKET}
-agent_prefix: ${AGENT_PREFIX}
-vllm_prefix: ${VLLM_PREFIX}
-files:
-$(find "${MODEL_DIR}" -type f | sort)
-MANIFEST
+manifest_path="${MODEL_DIR}/manifest.txt"
+manifest_temp="$(mktemp "${MODEL_DIR}/.manifest.XXXXXX")"
+
+cleanup_manifest_temp() {
+  rm -f "${manifest_temp}"
+}
+trap cleanup_manifest_temp EXIT
+
+mapfile -t model_files < <(
+  find "${MODEL_DIR}"     -type f     -size +0c     -print     | grep -Fvx "${manifest_path}"     | grep -Fv "${MODEL_DIR}/.manifest."     | sort
+)
+
+if [[ "${#model_files[@]}" -eq 0 ]]; then
+  echo "[ERROR] EVA model cache has no non-empty files" >&2
+  exit 1
+fi
+
+{
+  echo "Generated: $(date -Iseconds)"
+  echo "bucket: ${EVA_MODEL_BUCKET}"
+  echo "agent_prefix: ${AGENT_PREFIX}"
+  echo "vllm_prefix: ${VLLM_PREFIX}"
+  echo "files:"
+  printf '%s\n' "${model_files[@]}"
+} > "${manifest_temp}"
+
+chmod 0640 "${manifest_temp}"
+mv -f "${manifest_temp}" "${manifest_path}"
+trap - EXIT
 
 echo "[done] EVA model cache downloaded under ${MODEL_DIR}"

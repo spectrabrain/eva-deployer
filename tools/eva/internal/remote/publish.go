@@ -201,7 +201,7 @@ func resolveCompletedPreparationForPublish(resolved release.Resolved, registry, 
 		return "", PreparationIdentity{}, err
 	}
 	root := filepath.Dir(rootPath)
-	if err := ValidateCompletedPreparation(root, resolved, identity, manifest); err != nil {
+	if err := ValidateCompletedPreparation(root, DefaultRemoteCacheRoot, resolved, identity, manifest); err != nil {
 		return "", PreparationIdentity{}, err
 	}
 	return root, identity, nil

@@ -16,7 +16,7 @@ import (
 func TestVerifyValidatesCompletedPreparationWithoutMutation(t *testing.T) {
 	root, resolved, identity := writeCompletedPreparation(t)
 	before := preparationFingerprint(t, root)
-	result, err := (VerifyService{PreparationRoot: filepath.Dir(root)}).Verify(VerifyOptions{Release: resolved, Registry: identity.RepositoryRegistry})
+	result, err := (VerifyService{PreparationRoot: filepath.Dir(root), CacheRoot: filepath.Join(root, "cache")}).Verify(VerifyOptions{Release: resolved, Registry: identity.RepositoryRegistry})
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
@@ -121,7 +121,7 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 	if err := writeYAMLReport(root, "reports/main-preflight.yaml", PreflightReport{SchemaVersion: preflightSchemaVersion, Release: identity.ReleaseVersion, Registry: identity.RepositoryRegistry, Project: identity.RepositoryProject, Categories: []string{"host-tools", "docker", "aws", "harbor", "storage", "external-sources"}, CheckedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	payload, err := BuildTargetPayload(root, identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
+	payload, err := BuildTargetPayload(root, filepath.Join(root, "cache"), identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
 	if err != nil {
 		t.Fatal(err)
 	}

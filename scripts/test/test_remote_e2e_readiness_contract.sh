@@ -20,6 +20,8 @@ backend_go="$repo_root/tools/eva/internal/remote/backend.go"
 bootstrap_go="$repo_root/tools/eva/internal/remote/bootstrap.go"
 docker_registry_go="$repo_root/tools/eva/internal/remote/docker_registry.go"
 prepare_go="$repo_root/tools/eva/internal/remote/prepare.go"
+payload_go="$repo_root/tools/eva/internal/remote/payload.go"
+manifest_go="$repo_root/tools/eva/internal/remote/manifest.go"
 runtime_artifact_go="$repo_root/tools/eva/internal/remote/runtime_artifact.go"
 preflight_go="$repo_root/tools/eva/internal/remote/preflight.go"
 aws_credential_go="$repo_root/tools/eva/internal/remote/aws_credential.go"
@@ -94,6 +96,10 @@ require_text "$preflight_go" 'DefaultExternalSources' 'bounded external source c
 require_text "$prepare_go" 'EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml"' 'Qdrant Harbor values'
 require_text "$prepare_go" 'repository-mapping-product.txt' 'product mapping report'
 require_text "$prepare_go" 'repository-mapping-infra.txt' 'infra mapping report'
+require_text "$manifest_go" 'DefaultRemoteCacheRoot = "/var/lib/eva/cache/remote"' 'shared Remote cache default'
+require_text "$prepare_go" 'CacheRoot' 'PrepareService shared cache root'
+require_text "$prepare_go" '"EVA_CACHE_ROOT": cacheRoot' 'backend shared cache environment'
+require_text "$payload_go" 'func BuildTargetPayload(preparationRoot, cacheRoot string' 'payload explicit cache root'
 require_text "$transport" "$atomic_rename" 'atomic Target publish'
 require_text "$transport" 'different Remote Release already exists' 'different same-version Release rejection'
 require_text "$remote_runbook" '# EVA Remote Repository 설치 가이드' 'integrated Remote Runbook title'

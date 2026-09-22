@@ -51,18 +51,17 @@ type PayloadSource struct {
 // BuildTargetPayload creates a deterministic, verified archive from the
 // managed preparation cache. Image and Qdrant snapshot payloads deliberately
 // remain outside this archive because Main Harbor supplies them.
-func BuildTargetPayload(preparationRoot string, identity PreparationIdentity, platform string) (PayloadSource, error) {
+func BuildTargetPayload(preparationRoot, cacheRoot string, identity PreparationIdentity, platform string) (PayloadSource, error) {
 	if err := validateIdentity(identity); err != nil {
 		return PayloadSource{}, err
 	}
 	if platform == "" {
 		return PayloadSource{}, errors.New("payload platform is required")
 	}
-	cacheRoot := filepath.Join(preparationRoot, "cache")
-	if err := ValidateOfflineAssets(preparationRoot); err != nil {
+	if err := ValidateOfflineAssets(cacheRoot); err != nil {
 		return PayloadSource{}, fmt.Errorf("validate payload offline assets: %w", err)
 	}
-	if err := ValidateModels(preparationRoot); err != nil {
+	if err := ValidateModels(cacheRoot); err != nil {
 		return PayloadSource{}, fmt.Errorf("validate payload models: %w", err)
 	}
 	key := payloadIdentityKey(identity)
@@ -567,10 +566,11 @@ func extractPayloadArchive(archive, destination string) error {
 	return nil
 }
 func validateMaterializedCache(root string, manifest PayloadManifest) error {
-	if err := ValidateOfflineAssets(root); err != nil {
+	cacheRoot := filepath.Join(root, "cache")
+	if err := ValidateOfflineAssets(cacheRoot); err != nil {
 		return err
 	}
-	if err := ValidateModels(root); err != nil {
+	if err := ValidateModels(cacheRoot); err != nil {
 		return err
 	}
 	return nil

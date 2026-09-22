@@ -22,6 +22,7 @@ docker_registry_go="$repo_root/tools/eva/internal/remote/docker_registry.go"
 prepare_go="$repo_root/tools/eva/internal/remote/prepare.go"
 runtime_artifact_go="$repo_root/tools/eva/internal/remote/runtime_artifact.go"
 preflight_go="$repo_root/tools/eva/internal/remote/preflight.go"
+aws_credential_go="$repo_root/tools/eva/internal/remote/aws_credential.go"
 verify_go="$repo_root/tools/eva/internal/remote/verify.go"
 verify_test="$repo_root/tools/eva/internal/remote/verify_test.go"
 installer="$repo_root/scripts/install/install_eva_tool.sh"
@@ -71,7 +72,7 @@ require_text "$prepare_go" 'EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor"' 'Qdrant
 require_text "$prepare_go" 'Name: "main-preflight"' 'Main preflight ordered step'
 require_text "$prepare_go" 'Name: "build-runtime-artifact"' 'Runtime artifact ordered step'
 require_text "$runtime_artifact_go" 'BootstrapTargetRuntime' 'Remote Runtime bootstrap contract'
-require_text "$preflight_go" 'aws", "sts", "get-caller-identity"' 'AWS credential probe'
+require_text "$aws_credential_go" '"aws", "sts", "get-caller-identity"' 'AWS credential probe'
 require_text "$preflight_go" 'Docker credential for registry is unavailable' 'Harbor credential fail-closed'
 require_text "$bootstrap_go" 'func dockerLogin(' 'Managed Harbor Docker login'
 require_text "$bootstrap_go" '"--password-stdin"' 'Managed Harbor password stdin'

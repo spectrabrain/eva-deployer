@@ -390,6 +390,12 @@ func runtimeEntries(root string) ([]string, error) {
 		if relative == "." {
 			return nil
 		}
+		if runtimeExcludedPath(relative) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if !runtimeAllowedPath(relative) || isSecretLikePath(relative) || info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
 			return fmt.Errorf("unsafe Runtime source: %s", relative)
 		}
@@ -401,6 +407,16 @@ func runtimeEntries(root string) ([]string, error) {
 	})
 	sort.Strings(entries)
 	return entries, err
+}
+
+func runtimeExcludedPath(relative string) bool {
+	parts := strings.Split(filepath.ToSlash(relative), "/")
+	return len(parts) >= 5 &&
+		parts[0] == "collections" &&
+		parts[1] == "ansible_collections" &&
+		parts[2] != "" &&
+		parts[3] != "" &&
+		parts[4] == "tests"
 }
 
 func runtimeAllowedPath(relative string) bool {

@@ -147,7 +147,14 @@ if command -v aws >/dev/null 2>&1; then
     [[ -z "$host" ]] && continue
     region="$(echo "$host" | sed -E 's#^[0-9]+\.dkr\.ecr\.([^.]+)\.amazonaws\.com$#\1#')"
     echo "[auth] aws ecr login: $host ($region)"
-    aws ecr get-login-password --region "$region" --profile "${AWS_PROFILE:-default}" | $DOCKER_CMD login --username AWS --password-stdin "$host" || true
+    aws_ecr_args=(ecr get-login-password --region "$region")
+    if [[ -z "${AWS_ACCESS_KEY_ID:-}" ||
+          -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+      aws_ecr_args+=(--profile "${AWS_PROFILE:-default}")
+    fi
+    aws "${aws_ecr_args[@]}" |
+      $DOCKER_CMD login         --username AWS         --password-stdin         "$host" ||
+      true
   done < "$TMP_DIR/ecr-hosts.txt"
 fi
 

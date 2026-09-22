@@ -68,8 +68,22 @@ Managed Harbor의 초기 계정은 `admin`이며 초기 비밀번호 기본값�
 `EVA_HARBOR_ADMIN_PASSWORD`가 비어 있지 않으면 그 값을 우선합니다. 비밀번호 CLI
 option은 없고, receipt와 로그에 비밀번호를 기록하지 않습니다.
 
-AWS credential은 실제 `sudo eva remote prepare` 실행 주체가 사용할 수 있어야 합니다.
-credential 값을 명령행이나 Release에 넣지 않습니다.
+Remote preparation에는 Main 서버에서 사용할 AWS credential이 필요합니다.
+`sudo eva remote prepare .`는 EVA managed credential을 확인하며, credential이 없고
+대화형 terminal에서 실행 중이면 AWS Access Key ID, AWS Secret Access Key 및 AWS Region을
+입력받습니다. Region의 기본값은 `ap-northeast-2`입니다.
+
+검증된 credential은 `/var/lib/eva/credentials/aws_key.ini`에 권한 `0600`으로 안전하게
+저장됩니다. 다음 형식만 사용하며, credential을 명령행이나 Release에 넣지 않습니다.
+
+```ini
+aws_access_key_id = <AWS_ACCESS_KEY_ID>
+aws_secret_access_key = <AWS_SECRET_ACCESS_KEY>
+region = ap-northeast-2
+```
+
+credential은 preparation evidence, Target payload, Remote publish 결과에 포함되지 않으며
+Target 서버에 AWS credential을 준비하지 않습니다.
 
 ## 4. [Main] Preparation Plane bootstrap
 

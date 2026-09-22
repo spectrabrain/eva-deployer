@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/fieldoverride"
@@ -41,6 +43,8 @@ var (
 	newRemoteVerifyService            = remote.NewVerifyService
 	newRemoteBootstrapService         = remote.NewBootstrapService
 	defaultRemoteBootstrapReceiptPath = remote.DefaultHarborReceiptPath
+	defaultRemoteAWSCredentialPath    = remote.DefaultManagedAWSCredentialPath
+	validateRemoteAWSCredential       = remote.ValidateAWSCredential
 	materializeRemotePayload          = remote.MaterializeTargetPayload
 	bootstrapRemoteRuntime            = remote.BootstrapTargetRuntime
 )
@@ -255,9 +259,67 @@ func runRemotePrepare(args []string) error {
 	if err != nil {
 		return err
 	}
+	credential, err := resolveRemoteAWSCredential(context.Background())
+	if err != nil {
+		return err
+	}
 	fmt.Printf("[INFO] repository=%s/%s\n", registryContext.Registry, registryContext.Project)
-	_, err = newRemotePrepareService().Prepare(context.Background(), remote.PrepareOptions{Release: resolved, Registry: registryContext.Registry, Project: registryContext.Project, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
+	_, err = newRemotePrepareService().Prepare(context.Background(), remote.PrepareOptions{Release: resolved, Registry: registryContext.Registry, Project: registryContext.Project, AWSCredential: credential, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
 	return err
+}
+
+func resolveRemoteAWSCredential(ctx context.Context) (remote.AWSCredential, error) {
+	if credential, err := remote.LoadAWSCredential(defaultRemoteAWSCredentialPath); err == nil {
+		fmt.Fprintf(os.Stderr, "[INFO] AWS credential found: source=%s region=%s\n", defaultRemoteAWSCredentialPath, credential.Region)
+		fmt.Fprintln(os.Stderr, "[INFO] Validating AWS credential...")
+		if err := validateRemoteAWSCredential(ctx, credential); err == nil {
+			fmt.Fprintln(os.Stderr, "[OK] AWS credential validated")
+			return credential, nil
+		}
+	}
+	info, err := stdinStat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return remote.AWSCredential{}, fmt.Errorf("AWS credential is required for Remote preparation. No usable credential was found at: %s. Run from an interactive terminal to configure it, or provision the file through the approved secret-management process. Remote preparation was not started.", defaultRemoteAWSCredentialPath)
+	}
+	fmt.Fprintln(os.Stderr, "AWS credential is required for Remote preparation.")
+	fmt.Fprintf(os.Stderr, "No usable AWS credential was found at: %s\n", defaultRemoteAWSCredentialPath)
+	reader := bufio.NewReader(os.Stdin)
+	read := func(label string) (string, error) {
+		fmt.Fprint(os.Stderr, label)
+		value, readErr := reader.ReadString('\n')
+		if readErr != nil && len(value) == 0 {
+			return "", readErr
+		}
+		return strings.TrimSpace(value), nil
+	}
+	accessKey, err := read("AWS Access Key ID: ")
+	if err != nil || accessKey == "" {
+		return remote.AWSCredential{}, errors.New("AWS Access Key ID is required")
+	}
+	fmt.Fprint(os.Stderr, "AWS Secret Access Key: ")
+	secret, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil || strings.TrimSpace(string(secret)) == "" {
+		return remote.AWSCredential{}, errors.New("AWS Secret Access Key is required")
+	}
+	region, err := read("AWS Region [ap-northeast-2]: ")
+	if err != nil {
+		return remote.AWSCredential{}, errors.New("read AWS Region")
+	}
+	credential := remote.AWSCredential{AccessKeyID: accessKey, SecretAccessKey: strings.TrimSpace(string(secret)), Region: region}
+	if credential.Region == "" {
+		credential.Region = remote.DefaultAWSRegion
+	}
+	fmt.Fprintln(os.Stderr, "Validating AWS credential...")
+	if err := validateRemoteAWSCredential(ctx, credential); err != nil {
+		return remote.AWSCredential{}, errors.New("AWS credential validation failed")
+	}
+	if err := remote.WriteAWSCredential(defaultRemoteAWSCredentialPath, credential); err != nil {
+		return remote.AWSCredential{}, err
+	}
+	fmt.Fprintln(os.Stderr, "[OK] AWS credential validated")
+	fmt.Fprintln(os.Stderr, "[OK] Credential saved securely")
+	return credential, nil
 }
 
 func normalizeRemotePrepareArgs(args []string) ([]string, error) {

@@ -11,6 +11,12 @@ S3_PREFIX="${S3_PREFIX:-display_mode_selector}"
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
 AWS_PROFILE="${AWS_PROFILE:-default}"
 
+AWS_ARGS=(--region "${AWS_REGION}")
+if [[ -z "${AWS_ACCESS_KEY_ID:-}" ||
+      -z "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+  AWS_ARGS+=(--profile "${AWS_PROFILE}")
+fi
+
 if ! command -v aws >/dev/null 2>&1; then
   echo "[ERROR] aws CLI not found"
   exit 1
@@ -19,7 +25,7 @@ fi
 mkdir -p "$TARGET_DIR"
 
 echo "[sync] s3://${S3_BUCKET}/${S3_PREFIX} -> ${TARGET_DIR}"
-aws --region "$AWS_REGION" --profile "$AWS_PROFILE" s3 sync \
+aws "${AWS_ARGS[@]}" s3 sync \
   "s3://${S3_BUCKET}/${S3_PREFIX}" \
   "$TARGET_DIR"
 

@@ -53,14 +53,14 @@ eva verify .
 
 ## 3. [Main] AWS와 Harbor 입력 확인
 
-정상 작업에 사용할 Main Harbor endpoint와 Target SSH 주소를 설정합니다.
+정상 작업에 사용할 Main Harbor endpoint를 확인합니다. Target SSH 주소는 publish 명령에
+직접 지정합니다.
 
-```bash
-export MAIN_HARBOR=harbor.main.internal:32080
-export REMOTE_TARGET=eva@10.159.56.196
+```text
+harbor.main.internal:32080
 ```
 
-`MAIN_HARBOR`에는 URL scheme을 넣지 않으며 `localhost` 또는 loopback 주소를
+Main Harbor endpoint에는 URL scheme을 넣지 않으며 `localhost` 또는 loopback 주소를
 사용하지 않습니다. Target node와 Pod 모두 이 endpoint에 연결할 수 있어야 합니다.
 기본 project는 `eva`입니다.
 
@@ -77,7 +77,7 @@ Main의 preparation plane을 준비하거나 기존 상태를 검증합니다.
 
 ```bash
 sudo eva remote bootstrap \
-  --registry "$MAIN_HARBOR" \
+  --registry harbor.main.internal:32080 \
   --yes
 ```
 
@@ -88,11 +88,11 @@ Main에 설치하지 않습니다. 이미 승인된 외부 Harbor를 쓸 때만 
 
 ## 5. [Main] Remote 자산 준비
 
-검증한 Base Release와 Main Harbor를 사용해 Target delivery 자산을 준비합니다.
+검증한 Base Release를 준비합니다. registry/project는 bootstrap receipt에서 자동으로
+해석됩니다.
 
 ```bash
-sudo eva remote prepare . \
-  --registry "$MAIN_HARBOR"
+sudo eva remote prepare .
 ```
 
 성공하면 Remote Runtime artifact, Target package/host/chart/helper/model payload, Main
@@ -105,8 +105,7 @@ Harbor의 product/infra image 및 Qdrant snapshot OCI artifact와 preparation ev
 게시 전에 Main에 남은 preparation evidence를 read-only로 검증합니다.
 
 ```bash
-sudo eva remote verify . \
-  --registry "$MAIN_HARBOR"
+sudo eva remote verify .
 ```
 
 이 명령은 preparation manifest, Runtime artifact, Target payload 및 local preparation
@@ -119,14 +118,39 @@ evidence를 확인합니다. 자산을 다시 다운로드하거나 게시하지
 
 ```bash
 sudo eva remote publish . \
-  --registry "$MAIN_HARBOR" \
-  --target "$REMOTE_TARGET"
+  --target eva@10.159.56.196
 ```
 
 Base Release, Remote Runtime 및 Target payload는 하나의 Target staging area로 전달되고,
 Target에서 checksum과 identity를 재검증한 뒤 atomic publish됩니다. Workspace,
 inventory와 AWS credential은 전송하지 않습니다. 동일 identity의 재게시는 허용하지만,
 같은 version에 다른 identity를 덮어쓰지는 않습니다.
+
+### 여러 Target에 순차 게시
+
+`--target`은 반복할 수 있습니다. 각 Target은 독립 staging, 검증, atomic rename을
+수행하며 한 Target이 실패해도 이후 Target은 계속 시도합니다. 전체 결과 중 하나라도
+실패하면 명령은 non-zero로 끝납니다.
+
+```bash
+sudo eva remote publish . \
+  --target eva@10.159.56.196 \
+  --target eva@10.159.56.197 \
+  --target eva@10.159.56.198
+```
+
+bootstrap receipt와 같은 registry를 명시적으로 확인하려면 모든 Remote 명령에
+`--registry harbor.main.internal:32080`를 붙일 수 있습니다. 다른 registry는 조용히
+override되지 않습니다. 변경이 필요한 경우 새 endpoint가 정상인지 확인한 후 다음처럼
+receipt를 교체합니다. 기존 Harbor data, preparation 결과와 Target Release는 삭제하지
+않습니다.
+
+```bash
+sudo eva remote bootstrap \
+  --registry harbor.next.internal:32080 \
+  --replace-registry \
+  --yes
+```
 
 ## 8. [Target] 게시된 Release 확인
 

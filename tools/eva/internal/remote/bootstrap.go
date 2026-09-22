@@ -12,10 +12,10 @@ import (
 )
 
 type BootstrapOptions struct {
-	Registry, Project   string
-	Yes, ExternalHarbor bool
-	ReceiptPath         string
-	Streams             Streams
+	Registry, Project                    string
+	Yes, ExternalHarbor, ReplaceRegistry bool
+	ReceiptPath                          string
+	Streams                              Streams
 }
 type BootstrapService struct {
 	EnsureRuntime func(context.Context) error
@@ -71,14 +71,8 @@ func checkManagedHarbor(ctx context.Context, receipt HarborReceipt) error {
 	return nil
 }
 func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOptions) (HarborReceipt, error) {
-	if _, err := ValidateRegistry(options.Registry); err != nil {
-		return HarborReceipt{}, err
-	}
 	if options.Project == "" {
 		options.Project = defaultRemoteProject
-	}
-	if _, err := ValidateProject(options.Project); err != nil {
-		return HarborReceipt{}, err
 	}
 	if !options.Yes {
 		return HarborReceipt{}, errors.New("remote bootstrap changes Main Preparation Plane state; rerun with --yes")
@@ -86,17 +80,46 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 	if options.ReceiptPath == "" {
 		options.ReceiptPath = DefaultHarborReceiptPath
 	}
-	if receipt, err := LoadHarborReceipt(options.ReceiptPath); err == nil {
-		if receipt.Registry != options.Registry || receipt.Project != options.Project {
-			return HarborReceipt{}, errors.New("existing Harbor receipt conflicts with requested registry or project")
+	existing, loadErr := LoadHarborReceipt(options.ReceiptPath)
+	if loadErr == nil {
+		if options.Registry == "" {
+			context, err := ResolveRegistryContext("", "", options.ReceiptPath)
+			if err != nil {
+				return HarborReceipt{}, err
+			}
+			options.Registry, options.Project = context.Registry, context.Project
+		} else if options.Registry == existing.Registry && options.Project == existing.Project {
+			if options.ReplaceRegistry {
+				return HarborReceipt{}, errors.New("--replace-registry requires a different registry or project")
+			}
+			if _, err := ResolveRegistryContext(options.Registry, options.Project, options.ReceiptPath); err != nil {
+				return HarborReceipt{}, err
+			}
+		} else if !options.ReplaceRegistry {
+			return HarborReceipt{}, &RegistryConflictError{ConfiguredRegistry: existing.Registry, ConfiguredProject: existing.Project, RequestedRegistry: options.Registry, RequestedProject: options.Project}
 		}
-		if s.CheckHarbor == nil {
-			return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")
+		if !options.ReplaceRegistry {
+			if s.CheckHarbor == nil {
+				return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")
+			}
+			if err := s.CheckHarbor(ctx, existing); err != nil {
+				return HarborReceipt{}, fmt.Errorf("validate managed Harbor: %w", err)
+			}
+			return existing, nil
 		}
-		if err := s.CheckHarbor(ctx, receipt); err != nil {
-			return HarborReceipt{}, fmt.Errorf("validate managed Harbor: %w", err)
-		}
-		return receipt, nil
+	} else if !errors.Is(loadErr, os.ErrNotExist) {
+		return HarborReceipt{}, fmt.Errorf("load configured Harbor receipt: %w", loadErr)
+	} else if options.ReplaceRegistry {
+		return HarborReceipt{}, errors.New("--replace-registry requires an existing configured registry")
+	}
+	if options.Registry == "" {
+		return HarborReceipt{}, errors.New("remote bootstrap requires --registry HOST[:PORT] when no Harbor receipt exists")
+	}
+	if _, err := ValidateRegistry(options.Registry); err != nil {
+		return HarborReceipt{}, err
+	}
+	if _, err := ValidateProject(options.Project); err != nil {
+		return HarborReceipt{}, err
 	}
 	if s.EnsureRuntime == nil || s.EnsureDocker == nil || s.EnsureHarbor == nil || s.CheckHarbor == nil {
 		return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")

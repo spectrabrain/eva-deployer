@@ -35,9 +35,10 @@ for command in bash grep; do
 done
 
 for command_line in \
-  'remote prepare [RELEASE_PATH] --registry HOST[:PORT]' \
-  'remote verify [RELEASE_PATH] --registry HOST[:PORT]' \
-  'remote publish [RELEASE_PATH] --registry HOST[:PORT] --target USER@HOST'; do
+  'remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]' \
+  'remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]' \
+  'remote verify [RELEASE_PATH] [--registry HOST[:PORT]]' \
+  'remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]'; do
   require_text "$main_go" "$command_line" "CLI $command_line"
 done
 require_text "$prepare_go" 'defaultRemoteProject = "eva"' 'default repository project'
@@ -81,8 +82,8 @@ require_text "$remote_runbook" 'sudo eva remote bootstrap' 'Remote bootstrap com
 require_text "$remote_runbook" 'sudo eva remote prepare .' 'Remote prepare command'
 require_text "$remote_runbook" 'sudo eva remote verify .' 'Remote verify command'
 require_text "$remote_runbook" 'sudo eva remote publish .' 'Remote publish command'
-# shellcheck disable=SC2016 # Literal documentation contract.
-require_text "$remote_runbook" '--registry "$MAIN_HARBOR"' 'Remote publish registry contract'
+require_text "$remote_runbook" '--replace-registry' 'registry replacement contract'
+require_text "$remote_runbook" '### 여러 Target에 순차 게시' 'multi-target publish contract'
 require_text "$remote_runbook" '[Main]' 'Main work location'
 require_text "$remote_runbook" '[Target]' 'Target work location'
 # shellcheck disable=SC2016 # Literal documentation contract.

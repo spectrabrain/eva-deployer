@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,6 +110,132 @@ func TestRuntimeArtifactFailsClosedForUnsafeSourceAndIdentity(t *testing.T) {
 		t.Fatal("LoadRuntimeArtifact() accepted corrupt archive")
 	}
 }
+func TestRuntimeEntriesExcludeCollectionTests(
+	t *testing.T,
+) {
+	runtimeRoot := writeRuntimeFixture(t)
+	collectionRoot := filepath.Join(
+		runtimeRoot,
+		"collections",
+		"ansible_collections",
+		"ansible",
+		"posix",
+	)
+
+	moduleRoot := filepath.Join(
+		collectionRoot,
+		"plugins",
+		"modules",
+	)
+	if err := os.MkdirAll(moduleRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(moduleRoot, "mount.py"),
+		[]byte("module"),
+		0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	testRoot := filepath.Join(
+		collectionRoot,
+		"tests",
+		"utils",
+		"shippable",
+	)
+	if err := os.MkdirAll(testRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(
+		"/not-part-of-runtime",
+		filepath.Join(testRoot, "aix.sh"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := runtimeEntries(runtimeRoot)
+	if err != nil {
+		t.Fatalf("runtimeEntries() error = %v", err)
+	}
+
+	included := map[string]bool{}
+	for _, relative := range entries {
+		included[filepath.ToSlash(relative)] = true
+	}
+
+	modulePath := "collections/ansible_collections/" +
+		"ansible/posix/plugins/modules/mount.py"
+	if !included[modulePath] {
+		t.Fatalf(
+			"Runtime collection module was excluded: %s",
+			modulePath,
+		)
+	}
+
+	testsPrefix := "collections/ansible_collections/" +
+		"ansible/posix/tests"
+	for relative := range included {
+		if strings.HasPrefix(relative, testsPrefix) {
+			t.Fatalf(
+				"Runtime collection test was included: %s",
+				relative,
+			)
+		}
+	}
+
+	if err := os.Symlink(
+		"/unsafe",
+		filepath.Join(moduleRoot, "unsafe.py"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeEntries(runtimeRoot); err == nil {
+		t.Fatal(
+			"runtimeEntries() accepted an unsafe " +
+				"non-test collection source",
+		)
+	}
+}
+
+func TestRuntimeExcludedPathMatchesCollectionTestsOnly(
+	t *testing.T,
+) {
+	excluded := []string{
+		"collections/ansible_collections/ansible/posix/tests",
+		"collections/ansible_collections/ansible/posix/" +
+			"tests/utils/shippable/aix.sh",
+	}
+	for _, relative := range excluded {
+		if !runtimeExcludedPath(relative) {
+			t.Fatalf(
+				"Runtime test path was not excluded: %s",
+				relative,
+			)
+		}
+	}
+
+	included := []string{
+		"tests",
+		"collections/tests",
+		"collections/ansible_collections/tests",
+		"collections/ansible_collections/ansible/tests",
+		"collections/ansible_collections/ansible/posix",
+		"collections/ansible_collections/ansible/posix/" +
+			"tests-backup/aix.sh",
+		"collections/ansible_collections/ansible/posix/" +
+			"plugins/tests.py",
+	}
+	for _, relative := range included {
+		if runtimeExcludedPath(relative) {
+			t.Fatalf(
+				"Runtime non-test path was excluded: %s",
+				relative,
+			)
+		}
+	}
+}
+
 func TestRuntimeAllowedPathIncludesCollections(
 	t *testing.T,
 ) {

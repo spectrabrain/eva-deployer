@@ -138,6 +138,53 @@ func TestWriteCurrentReceiptUsesSafeModes(t *testing.T) {
 	}
 }
 
+func TestWriteCurrentReceiptRoundTripsYAMLSpecialReleaseRoot(t *testing.T) {
+	for _, suffix := range []string{"release #1", "release key: value"} {
+		t.Run(suffix, func(t *testing.T) {
+			original := currentTestRelease(t)
+			root := filepath.Join(t.TempDir(), suffix)
+			if err := os.Rename(original, root); err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := Resolve(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "releases", "current.yaml")
+			if err := WriteCurrentReceipt(path, resolved, "eva-tool-installer", time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			receipt, loaded, err := LoadCurrentRelease(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if receipt.ReleaseRoot != root || loaded.Root != root {
+				t.Fatalf("receipt root=%q loaded root=%q, want %q", receipt.ReleaseRoot, loaded.Root, root)
+			}
+		})
+	}
+}
+
+func TestWriteCurrentReceiptRejectsReceiptSymlink(t *testing.T) {
+	root := currentTestRelease(t)
+	resolved, err := Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target.yaml")
+	path := filepath.Join(directory, "current.yaml")
+	if err := os.WriteFile(target, []byte("not a receipt\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCurrentReceipt(path, resolved, "eva-tool-installer", time.Now()); err == nil {
+		t.Fatal("WriteCurrentReceipt accepted a receipt symlink")
+	}
+}
+
 func currentTestRelease(t *testing.T) string {
 	t.Helper()
 	root := writeRelease(t, map[string]string{

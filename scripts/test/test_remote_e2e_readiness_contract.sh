@@ -35,6 +35,7 @@ cloud_runbook="$repo_root/docs/installation/cloud-repository-runbook.md"
 image_publish_backend="$repo_root/scripts/publish/push_images_to_repository.sh"
 qdrant_publish_backend="$repo_root/scripts/publish/push_qdrant_snapshots_to_harbor.sh"
 installation_index="$repo_root/docs/installation/README.md"
+root_readme="$repo_root/README.md"
 pr_ci="$repo_root/.github/workflows/pr-ci.yaml"
 tag_ci="$repo_root/.github/workflows/tag-release.yaml"
 atomic_rename="mv -- \"\$target_staging\" \"\$target_final\""
@@ -114,6 +115,29 @@ require_text "$transport" "$atomic_rename" 'atomic Target publish'
 require_text "$transport" 'different Remote Release already exists' 'different same-version Release rejection'
 require_text "$current_release_go" 'DefaultCurrentReceiptPath = "/var/lib/eva/releases/current.yaml"' 'Current Release receipt path'
 require_text "$current_release_go" 'SelectionCurrent' 'Current Release selector'
+require_text "$current_release_go" 'func RestoreCurrentReceipt(' 'Current Release receipt rollback helper'
+require_text "$main_go" 'register-current-release' 'installer Current Release registration command'
+require_text "$installer" 'internal register-current-release' 'installer uses Go receipt registration'
+require_text "$installer" 'rollback_installation()' 'installer transaction rollback helper'
+require_text "$installer" 'internal validate-current-release' 'installer final Current Release validation'
+require_text "$installer" 'tool-installer.lock' 'installer transaction lock path'
+require_text "$installer" 'flock -n 9' 'installer non-blocking exclusive lock'
+require_text "$installer" 'flock -u 9' 'installer explicit lock release'
+require_text "$installer" 'exec 9>&-' 'installer lock descriptor close'
+require_text "$installer" 'release_installer_lock' 'installer lock release helper'
+require_text "$installer" 'another EVA Tool installer transaction is running' 'installer lock contention error'
+require_text "$installer" 'transaction_started=false' 'installer transaction start state'
+require_text "$installer" 'transaction_committed=false' 'installer transaction commit state'
+require_text "$installer" 'trap on_exit EXIT' 'installer EXIT rollback handler'
+require_text "$installer" "trap 'on_signal INT 130' INT" 'installer INT handler'
+require_text "$installer" "trap 'on_signal TERM 143' TERM" 'installer TERM handler'
+require_text "$installer" "trap 'on_signal HUP 129' HUP" 'installer HUP handler'
+require_text "$installer" 'test_hook tool-published' 'installer tool publish failure hook'
+require_text "$installer" 'test_hook commit' 'installer commit failure hook'
+if grep -Fq 'release_root: %s' "$installer"; then
+  echo '[ERROR] installer must not construct Current Release YAML directly' >&2
+  exit 1
+fi
 require_text "$main_go" 'release_source=%s' 'selected Release source output'
 require_text "$remote_runbook" '# EVA Remote Repository 설치 가이드' 'integrated Remote Runbook title'
 require_text "$remote_runbook" 'eva-base-release-<version>.zip' 'Remote Base Release input'
@@ -132,6 +156,8 @@ require_text "$remote_runbook" 'sudo eva install --release /var/lib/eva/inbox/re
 require_text "$cloud_runbook" 'sudo eva verify' 'Cloud Current Release verify command'
 require_text "$cloud_runbook" 'sudo eva install --workspace /home/eva/site-dev-196 --yes' 'Cloud Current Release install command'
 require_text "$cloud_runbook" 'sudo eva verify --release /path/to/another/release' 'Cloud explicit Release override'
+require_text "$root_readme" 'sudo eva verify' 'README Current Release verify command'
+require_text "$root_readme" 'Current Release' 'README Current Release contract'
 # shellcheck disable=SC2016 # Literal documentation contract.
 require_text "$remote_runbook" 'Remote Base Release에는 `eva-offline`이 필수가 아닙니다.' 'Remote Base Release offline contract'
 require_text "$installation_index" '[Remote Repository Runbook](remote-repository-runbook.md)' 'Remote Runbook index'

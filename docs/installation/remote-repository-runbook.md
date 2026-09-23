@@ -55,8 +55,7 @@ Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에�
 
 ## 3. [Main] AWS와 Harbor 입력 확인
 
-정상 작업에 사용할 Main Harbor endpoint를 확인합니다. Target SSH 주소는 publish 명령에
-직접 지정합니다.
+정상 작업에 사용할 Main Harbor endpoint를 확인합니다.
 
 ```text
 10.159.57.172:32080
@@ -119,44 +118,37 @@ Harbor의 product/infra image 및 Qdrant snapshot OCI artifact와 preparation ev
 생성됩니다. Container image와 Qdrant snapshot 파일은 Target payload에 중복 저장하지
 않고 Main Harbor에서 공급합니다.
 
-## 6. [Main] 준비 결과 검증
+## 6. [Main] Managed Target 등록·검증 및 Release 게시
 
-게시 전에 Main에 남은 preparation evidence를 read-only로 검증합니다.
+Main의 Managed Target Registry는 publish 인증에만 사용하며 Target의 EVA installation
+workspace와 별개입니다. Target password를 command line에 기록하지 않습니다. 등록 시 Main의
+root 전용 credential store에 저장하고, 등록한 SSH host key가 바뀌면 자동 수락하지 않습니다.
+
+먼저 Target을 한 번 등록합니다. 대화형 입력에서 SSH 및 sudo password를 echo 없이 받으며,
+SSH·sudo 인증도 저장 전에 검증합니다.
 
 ```bash
-sudo eva remote verify
+sudo eva remote target add site-dev-196
 ```
 
-이 명령은 preparation manifest, Runtime artifact, Target payload 및 local preparation
-evidence를 확인합니다. 자산을 다시 다운로드하거나 게시하지 않으며, 성공해도 Target의
-실제 Harbor pull까지 증명하는 것은 아닙니다.
+게시 전에는 Target 연결과 권한, `linux/amd64`, storage 및 inbox parent를 다시 확인합니다.
+이 preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.
 
-## 7. [Main] Target으로 Release 게시
+```bash
+sudo eva remote target verify site-dev-196
+```
 
-검증한 Base Release와 생성된 delivery artifact를 Target으로 게시합니다.
+검증한 Base Release와 생성된 delivery artifact를 등록한 Target으로 게시합니다.
 
 ```bash
 sudo eva remote publish \
-  --target eva@10.159.56.196
+  --target site-dev-196
 ```
 
 Base Release, Remote Runtime 및 Target payload는 하나의 Target staging area로 전달되고,
 Target에서 checksum과 identity를 재검증한 뒤 atomic publish됩니다. Workspace,
 inventory와 AWS credential은 전송하지 않습니다. 동일 identity의 재게시는 허용하지만,
 같은 version에 다른 identity를 덮어쓰지는 않습니다.
-
-### 여러 Target에 순차 게시
-
-`--target`은 반복할 수 있습니다. 각 Target은 독립 staging, 검증, atomic rename을
-수행하며 한 Target이 실패해도 이후 Target은 계속 시도합니다. 전체 결과 중 하나라도
-실패하면 명령은 non-zero로 끝납니다.
-
-```bash
-sudo eva remote publish \
-  --target eva@10.159.56.196 \
-  --target eva@10.159.56.197 \
-  --target eva@10.159.56.198
-```
 
 bootstrap receipt와 같은 registry를 명시적으로 확인하려면 모든 Remote 명령에
 `--registry 10.159.57.172:32080`를 붙일 수 있습니다. 다른 registry는 조용히
@@ -171,7 +163,7 @@ sudo eva remote bootstrap \
   --yes
 ```
 
-## 8. [Target] EVA Tool 설치 및 게시된 Release 확인
+## 7. [Target] EVA Tool 설치 및 게시된 Release 확인
 
 Target에는 Tool이 없으므로 최초 한 번만 게시된 installer의 절대 경로를 실행합니다.
 
@@ -189,7 +181,7 @@ installer는 checksum과 Tool version을 검증한 뒤 이 게시 Release를 Cur
 파일을 수정하거나 일반 사용자가 inbox Release directory로 이동할 필요가 없습니다. 검증에
 실패하면 Main에서 다시 준비·게시합니다.
 
-## 9. [Target] Workspace 입력 준비
+## 8. [Target] Workspace 입력 준비
 
 Target의 site 입력은 Release 밖에 둡니다. Remote Target에는
 `credentials/aws_key.ini`를 만들지 않습니다.
@@ -234,7 +226,7 @@ components:
 추가합니다. Workspace에 repository-derived image override나 AWS/S3/ECR 설정을 넣지
 않습니다.
 
-## 10. [Target] GPU 사전 조건 확인
+## 9. [Target] GPU 사전 조건 확인
 
 설치 전에 NVIDIA driver와 감지된 GPU/MIG 상태를 확인합니다.
 
@@ -246,7 +238,7 @@ MIG를 사용할 site는 설치 전에 의도한 MIG 구성을 적용합니다. 
 k3s와 NVIDIA Device Plugin을 구성하며 이후 Config가 사용 가능한 GPU 또는 MIG resource를
 선택합니다.
 
-## 11. [Target] Argo CD 관리 연결 확인
+## 10. [Target] Argo CD 관리 연결 확인
 
 기존 Argo CD가 같은 site의 EVA resource를 관리했을 수 있으면 설치 전에 handoff를
 확인합니다.
@@ -259,7 +251,7 @@ sudo eva preflight argocd \
 발견된 관리 연결을 해제할지 묻는 경우 현재 상태와 승인 내용을 확인합니다. 거절하거나
 검증에 실패하면 설치를 시작하지 않습니다.
 
-## 12. [Target] EVA 설치
+## 11. [Target] EVA 설치
 
 Workspace와 게시된 Release를 검증한 뒤 설치를 실행합니다.
 
@@ -287,7 +279,7 @@ bootstrap합니다. online Runtime 또는 original `eva-offline` fallback은 사
 Target payload는 managed cache로 materialize되고 image와 Qdrant snapshot은 Main Harbor를
 사용합니다.
 
-## 13. 설치 결과 확인
+## 12. 설치 결과 확인
 
 설치 상태와 작업 결과를 확인합니다.
 
@@ -300,7 +292,7 @@ sudo eva status
 Plugin readiness 및 workload의 할당 상태도 확인합니다. workload image가 Main Harbor prefix를
 사용하는지, Target에 AWS credential이나 public source 설정이 남지 않았는지도 확인합니다.
 
-## 14. 재실행 및 문제 해결
+## 13. 재실행 및 문제 해결
 
 안전한 입력 수정 후에는 동일 Release와 Workspace로 설치를 다시 실행하거나 실패한 작업을
 재시도합니다.

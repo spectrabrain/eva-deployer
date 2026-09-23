@@ -120,7 +120,14 @@ jobs:
         run: scripts/test/test_docker_credential_store_contract.sh
 
       - name: Test EVA Tool archive layout and installer contract
-        run: scripts/test/test_eva_tool_archive_layout.sh
+        run: |
+          set -euo pipefail
+
+          log_path="$RUNNER_TEMP/eva-tool-archive-layout.log"
+
+          sudo --preserve-env=PATH             bash scripts/test/test_eva_tool_archive_layout.sh             2>&1             | tee "$log_path"
+
+          grep -Fqx             '[OK] EVA Tool archive layout and installer contract passed'             "$log_path"
 
       - name: Smoke test Base Release builder
         run: |

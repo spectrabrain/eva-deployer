@@ -27,6 +27,9 @@ runtime_artifact_go="$repo_root/tools/eva/internal/remote/runtime_artifact.go"
 preflight_go="$repo_root/tools/eva/internal/remote/preflight.go"
 aws_credential_go="$repo_root/tools/eva/internal/remote/aws_credential.go"
 verify_go="$repo_root/tools/eva/internal/remote/verify.go"
+target_go="$repo_root/tools/eva/internal/remote/target.go"
+target_verify_go="$repo_root/tools/eva/internal/remote/target_verify.go"
+publish_go="$repo_root/tools/eva/internal/remote/publish.go"
 verify_test="$repo_root/tools/eva/internal/remote/verify_test.go"
 installer="$repo_root/scripts/install/install_eva_tool.sh"
 transport="$repo_root/scripts/remote/publish_release_to_target.sh"
@@ -48,7 +51,8 @@ for command_line in \
   'remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]' \
   'remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]' \
   'remote verify [RELEASE_PATH] [--registry HOST[:PORT]]' \
-  'remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]'; do
+  'remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET' \
+  'remote target <add|verify> NAME'; do
   require_text "$main_go" "$command_line" "CLI $command_line"
 done
 require_text "$prepare_go" 'defaultRemoteProject = "eva"' 'default repository project'
@@ -113,6 +117,28 @@ require_text "$payload_go" 'cacheRoot string' 'payload explicit cache root'
 require_text "$payload_go" 'progress io.Writer' 'payload progress writer'
 require_text "$transport" "$atomic_rename" 'atomic Target publish'
 require_text "$transport" 'different Remote Release already exists' 'different same-version Release rejection'
+require_text "$target_go" 'DefaultTargetRegistryRoot = "/var/lib/eva/remote-targets"' 'managed Target config root'
+require_text "$target_go" 'DefaultTargetCredentialRoot = "/var/lib/eva/credentials/remote-targets"' 'managed Target credential root'
+require_text "$target_go" 'SSHPassword' 'separate SSH credential schema'
+require_text "$target_verify_go" 'StrictHostKeyChecking=yes' 'strict managed Target host key checking'
+require_text "$target_verify_go" 'ControlMaster=auto' 'managed Target SSH connection reuse'
+require_text "$target_verify_go" 'Target SSH host key changed' 'host key change fail-closed'
+require_text "$target_verify_go" 'Target sudo authentication failed' 'Target sudo preflight'
+require_text "$target_verify_go" 'TransportStreams(' 'managed Target sudo credential stream'
+require_text "$target_verify_go" 'SudoMode()' 'managed Target sudo mode'
+require_text "$publish_go" 'ExtraFiles []*os.File' 'transport secret file descriptors'
+require_text "$publish_go" '"--sudo-mode"' 'managed Target transport sudo mode'
+require_text "$publish_go" '"--sudo-password-fd"' 'managed Target sudo password file descriptor'
+# shellcheck disable=SC2016
+# The pattern intentionally matches a literal positional parameter in source.
+require_text "$transport" 'sudo_mode="$5"' 'remote prepare sudo mode binding'
+require_text "$transport" "sudo -S -p '' bash -s" 'password sudo privileged publish'
+require_text "$transport" 'sudo -n bash -s' 'passwordless privileged publish'
+require_text "$main_go" 'No Release files were transferred' 'managed preflight transport boundary'
+if grep -Fq -- '--ssh-password' "$main_go" || grep -Fq -- '--sudo-password' "$main_go"; then
+  echo '[ERROR] managed Target password command-line option must not exist' >&2
+  exit 1
+fi
 require_text "$current_release_go" 'DefaultCurrentReceiptPath = "/var/lib/eva/releases/current.yaml"' 'Current Release receipt path'
 require_text "$current_release_go" 'SelectionCurrent' 'Current Release selector'
 require_text "$current_release_go" 'func RestoreCurrentReceipt(' 'Current Release receipt rollback helper'
@@ -145,8 +171,11 @@ require_text "$remote_runbook" 'sudo eva remote bootstrap' 'Remote bootstrap com
 require_text "$remote_runbook" 'sudo eva remote prepare' 'Remote prepare command'
 require_text "$remote_runbook" 'sudo eva remote verify' 'Remote verify command'
 require_text "$remote_runbook" 'sudo eva remote publish' 'Remote publish command'
+require_text "$remote_runbook" 'sudo eva remote target add site-dev-196' 'managed Target registration command'
+require_text "$remote_runbook" 'sudo eva remote target verify site-dev-196' 'managed Target verification command'
 require_text "$remote_runbook" '--replace-registry' 'registry replacement contract'
-require_text "$remote_runbook" '### 여러 Target에 순차 게시' 'multi-target publish contract'
+require_text "$remote_runbook" 'Target password를 command line에 기록하지 않습니다.' 'managed Target credential contract'
+require_text "$remote_runbook" 'preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.' 'managed Target transfer boundary'
 require_text "$remote_runbook" '[Main]' 'Main work location'
 require_text "$remote_runbook" '[Target]' 'Target work location'
 # shellcheck disable=SC2016 # Literal Runbook command contract.

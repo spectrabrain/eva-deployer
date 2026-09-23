@@ -10,7 +10,9 @@ Usage:
     --payload-dir PATH \
     --target HOST \
     [--target-root PATH] \
-    [--ssh-option OPTION]
+    [--ssh-option OPTION] \
+    [--sudo-mode none|password|passwordless] \
+    [--sudo-password-fd FD]
 
 Publishes a verified original EVA Release directory to a Remote Target.
 
@@ -37,6 +39,11 @@ runtime_dir=""
 target=""
 target_root="/var/lib/eva/inbox/releases"
 ssh_options=()
+sudo_mode="none"
+sudo_password_fd=""
+sudo_password=""
+remote_staging_prepared=false
+remote_publish_committed=false
 
 while (($#)); do
   case "$1" in
@@ -62,6 +69,14 @@ while (($#)); do
       ;;
     --ssh-option)
       ssh_options+=("${2:-}")
+      shift 2
+      ;;
+    --sudo-mode)
+      sudo_mode="${2:-}"
+      shift 2
+      ;;
+    --sudo-password-fd)
+      sudo_password_fd="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -102,6 +117,37 @@ fi
 
 if [[ "$target_root" != /* || "$target_root" == "/" ]]; then
   echo "[ERROR] --target-root must be an absolute non-root path" >&2
+  exit 2
+fi
+
+case "$sudo_mode" in
+  none|password|passwordless)
+    ;;
+  *)
+    echo "[ERROR] invalid --sudo-mode: $sudo_mode" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$sudo_mode" == password ]]; then
+  if [[ ! "$sudo_password_fd" =~ ^[0-9]+$ ]] ||
+    [[ "$sudo_password_fd" -lt 3 ]]
+  then
+    echo "[ERROR] password sudo requires --sudo-password-fd" >&2
+    exit 2
+  fi
+
+  if ! IFS= read -r sudo_password <&"$sudo_password_fd"; then
+    echo "[ERROR] Target sudo credential is unavailable" >&2
+    exit 1
+  fi
+
+  if [[ -z "$sudo_password" ]]; then
+    echo "[ERROR] Target sudo credential is unavailable" >&2
+    exit 1
+  fi
+elif [[ -n "$sudo_password_fd" ]]; then
+  echo "[ERROR] --sudo-password-fd requires password sudo mode" >&2
   exit 2
 fi
 
@@ -367,18 +413,100 @@ remote_shell_text=""
 printf -v remote_shell_text '%q ' "${remote_shell[@]}"
 remote_shell_text="${remote_shell_text% }"
 
+run_remote_root_script() {
+  local remote_script
+
+  remote_script="$(cat)"
+
+  case "$sudo_mode" in
+    password)
+      {
+        printf '%s\n' "$sudo_password"
+        printf '%s\n' "$remote_script"
+      } |
+        "$SSH_CMD" "${ssh_options[@]}" "$target" \
+          sudo -S -p '' bash -s -- "$@"
+      ;;
+    passwordless)
+      printf '%s\n' "$remote_script" |
+        "$SSH_CMD" "${ssh_options[@]}" "$target" \
+          sudo -n bash -s -- "$@"
+      ;;
+    none)
+      printf '%s\n' "$remote_script" |
+        "$SSH_CMD" "${ssh_options[@]}" "$target" \
+          bash -s -- "$@"
+      ;;
+  esac
+}
+
+cleanup_remote_staging() {
+  local cleanup_status=0
+
+  if [[ "$remote_staging_prepared" != true ]] ||
+    [[ "$remote_publish_committed" == true ]]
+  then
+    return 0
+  fi
+
+  if ! run_remote_root_script "$target_staging" <<'REMOTE_CLEANUP'
+set -euo pipefail
+target_staging="$1"
+
+if [[ -e "$target_staging" ]]; then
+  rm -rf -- "$target_staging"
+fi
+REMOTE_CLEANUP
+  then
+    echo "[ERROR] Remote publish staging cleanup failed" >&2
+    cleanup_status=1
+  fi
+
+  return "$cleanup_status"
+}
+
+on_transport_exit() {
+  local status=$?
+
+  trap - EXIT
+
+  if ! cleanup_remote_staging; then
+    echo "[ERROR] Remote publish cleanup was incomplete" >&2
+  fi
+
+  return "$status"
+}
+
+trap on_transport_exit EXIT
+
 echo "[INFO] release_version=$release_version"
 echo "[INFO] source=$release_dir"
 echo "[INFO] target=$target"
 echo "[INFO] target_path=$target_final"
 
-"$SSH_CMD" "${ssh_options[@]}" "$target" \
-  bash -s -- "$target_root" "$target_staging" "$target_final" <<'REMOTE_PREPARE'
+run_remote_root_script \
+  "$target_root" \
+  "$target_staging" \
+  "$target_final" \
+  "$target" \
+  "$sudo_mode" <<'REMOTE_PREPARE'
 set -euo pipefail
 
 target_root="$1"
 target_staging="$2"
 target_final="$3"
+target_identity="$4"
+sudo_mode="$5"
+target_user="${target_identity%@*}"
+
+case "$sudo_mode" in
+  none|password|passwordless)
+    ;;
+  *)
+    echo "[ERROR] invalid Remote sudo mode" >&2
+    exit 1
+    ;;
+esac
 
 umask 027
 mkdir -p "$target_root"
@@ -394,11 +522,27 @@ fi
 
 mkdir -p "$target_staging"
 
+if [[ "$target_user" == "$target_identity" ]] ||
+  [[ -z "$target_user" ]]
+then
+  echo "[ERROR] Target SSH user is invalid" >&2
+  exit 1
+fi
+
+if [[ "$sudo_mode" != none ]]; then
+  target_group="$(id -gn "$target_user")"
+  chown "$target_user:$target_group" "$target_staging"
+fi
+
+chmod 0700 "$target_staging"
+
 if [[ -e "$target_final" && ! -d "$target_final" ]]; then
   echo "[ERROR] existing target Release is not a directory: $target_final" >&2
   exit 1
 fi
 REMOTE_PREPARE
+
+remote_staging_prepared=true
 
 "$RSYNC_CMD" \
   --archive \
@@ -425,8 +569,7 @@ REMOTE_PREPARE
   "$payload_dir/" \
   "$target:$target_staging/remote-payload/"
 
-"$SSH_CMD" "${ssh_options[@]}" "$target" \
-  bash -s -- \
+run_remote_root_script \
     "$target_staging" \
     "$target_final" \
     "$release_version" \
@@ -520,7 +663,12 @@ if [[ "$(wc -l < "$payload_dir/checksums.sha256")" -ne 1 || ! "$(awk 'NF == 2 { 
   exit 1
 fi
 while IFS= read -r payload_entry; do
-  if [[ -z "$payload_entry" || "$payload_entry" == /* || "/$payload_entry/" == */../* || "$payload_entry" != cache/* || "$payload_entry" == cache/images/* || "$payload_entry" == cache/qdrant-snapshots/* || "$payload_entry" == *credential* || "$payload_entry" == *secret* || "$payload_entry" == *token* ]]; then
+  if [[ -z "$payload_entry" ||
+        "$payload_entry" == /* ||
+        "/$payload_entry/" == */../* ||
+        "$payload_entry" != cache/* ||
+        "$payload_entry" == cache/images/* ||
+        "$payload_entry" == cache/qdrant-snapshots/* ]]; then
     echo "[ERROR] unsafe target payload archive entry: $payload_entry" >&2
     exit 1
   fi
@@ -636,6 +784,9 @@ if [[ -d "$target_final" ]]; then
   exit 1
 fi
 
+chown -R root:root "$target_staging"
+chmod 0755 "$target_staging"
+
 mv -- "$target_staging" "$target_final"
 trap - EXIT
 
@@ -643,3 +794,8 @@ echo "[OK] Remote Release published"
 echo "[INFO] path=$target_final"
 echo "[INFO] version=$release_version"
 REMOTE_PUBLISH
+
+remote_publish_committed=true
+remote_staging_prepared=false
+trap - EXIT
+sudo_password=""

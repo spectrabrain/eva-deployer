@@ -1,10 +1,12 @@
 package remote
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -14,18 +16,20 @@ import (
 )
 
 type Streams struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Stdin      io.Reader
+	Stdout     io.Writer
+	Stderr     io.Writer
+	ExtraFiles []*os.File
 }
 
 type Runner func(path string, args []string, streams Streams) error
 
 type Service struct {
-	ResolveBackend func() (string, error)
-	ResolvePayload func(release.Resolved, string, string) (PayloadSource, error)
-	ResolveRuntime func(release.Resolved, string, string) (RuntimeArtifactSource, error)
-	Run            Runner
+	ResolveBackend       func() (string, error)
+	ResolvePayload       func(release.Resolved, string, string) (PayloadSource, error)
+	ResolveRuntime       func(release.Resolved, string, string) (RuntimeArtifactSource, error)
+	ResolveManagedTarget func(string, int64) (TargetConnection, error)
+	Run                  Runner
 }
 
 type PublishOptions struct {
@@ -61,7 +65,15 @@ func NewService() Service {
 		ResolveBackend: ResolvePublishBackend,
 		ResolvePayload: ResolvePayloadForPublish,
 		ResolveRuntime: ResolveRuntimeArtifactForPublish,
-		Run:            runCommand,
+		ResolveManagedTarget: func(name string, requiredBytes int64) (TargetConnection, error) {
+			verifier := NewTargetVerifier(NewTargetStore("", ""))
+			config, credential, err := verifier.Store.Load(name)
+			if err != nil {
+				return TargetConnection{}, err
+			}
+			return verifier.VerifyConfiguration(context.Background(), config, credential, requiredBytes)
+		},
+		Run: runCommand,
 	}
 }
 
@@ -98,10 +110,6 @@ func (service Service) PublishWithResult(options PublishOptions) (PublishResult,
 	if service.ResolveBackend == nil || service.ResolvePayload == nil || service.ResolveRuntime == nil || service.Run == nil {
 		return PublishResult{}, errors.New("Remote publish service is not configured")
 	}
-	backend, err := service.ResolveBackend()
-	if err != nil {
-		return PublishResult{}, fmt.Errorf("resolve Remote publish backend: %w", err)
-	}
 	payload, err := service.ResolvePayload(options.Release, options.Registry, options.Project)
 	if err != nil {
 		return PublishResult{}, fmt.Errorf("resolve Remote target payload: %w", err)
@@ -110,21 +118,104 @@ func (service Service) PublishWithResult(options PublishOptions) (PublishResult,
 	if err != nil {
 		return PublishResult{}, fmt.Errorf("resolve Remote Runtime artifact: %w", err)
 	}
+	managedConnections := make(map[string]TargetConnection)
+	for _, target := range targets {
+		if strings.Contains(target, "@") {
+			continue
+		}
+		if service.ResolveManagedTarget == nil {
+			return PublishResult{}, errors.New("Remote managed Target service is not configured")
+		}
+		requiredBytes, sizeErr := TargetTransferSize(options.Release.Root, runtimeArtifact.Directory, payload.Directory)
+		if sizeErr != nil {
+			return PublishResult{}, fmt.Errorf("calculate Remote Target storage requirement: %w", sizeErr)
+		}
+		connection, verifyErr := service.ResolveManagedTarget(target, requiredBytes)
+		if verifyErr != nil {
+			return PublishResult{}, ManagedTargetPreflightError{Cause: verifyErr}
+		}
+		managedConnections[target] = connection
+	}
+	defer func() {
+		for _, connection := range managedConnections {
+			_ = connection.Cleanup()
+		}
+	}()
+	backend, err := service.ResolveBackend()
+	if err != nil {
+		return PublishResult{}, fmt.Errorf("resolve Remote publish backend: %w", err)
+	}
 	var failures []error
 	for _, target := range targets {
+		transportTarget := target
 		arguments := []string{
 			"--release-dir", options.Release.Root,
 			"--runtime-dir", runtimeArtifact.Directory,
 			"--payload-dir", payload.Directory,
-			"--target", target,
+			"--target", transportTarget,
 		}
-		targetResult := PublishTargetResult{Target: target, ReleaseVersion: options.Release.Metadata.Version}
-		if err := service.Run(backend, arguments, options.Streams); err != nil {
+		if connection, managed := managedConnections[target]; managed {
+			transportTarget = connection.Target
+			arguments[len(arguments)-1] = transportTarget
+			for _, option := range connection.SSHOptions {
+				arguments = append(arguments, "--ssh-option", option)
+			}
+		}
+		targetResult := PublishTargetResult{
+			Target:         target,
+			ReleaseVersion: options.Release.Metadata.Version,
+		}
+
+		transportStreams := options.Streams
+		transportCleanup := func() {}
+
+		if connection, managed := managedConnections[target]; managed {
+			var streamErr error
+			transportStreams, transportCleanup, streamErr =
+				connection.TransportStreams(options.Streams)
+			if streamErr != nil {
+				targetResult.Err = errors.New(
+					"Remote publish transport setup failed",
+				)
+				failures = append(failures, streamErr)
+				result.Failed++
+				result.Targets = append(
+					result.Targets,
+					targetResult,
+				)
+				continue
+			}
+
+			arguments = append(
+				arguments,
+				"--sudo-mode",
+				connection.SudoMode(),
+			)
+
+			if connection.SudoMode() == "password" {
+				arguments = append(
+					arguments,
+					"--sudo-password-fd",
+					"3",
+				)
+			}
+		}
+
+		runErr := service.Run(
+			backend,
+			arguments,
+			transportStreams,
+		)
+		transportCleanup()
+
+		if runErr != nil {
 			// Backend failures can include transport environment details. Keep the
 			// original error only for programmatic error inspection; CLI results
 			// deliberately expose a stable, credential-safe summary.
-			targetResult.Err = errors.New("Remote publish transport failed")
-			failures = append(failures, err)
+			targetResult.Err = errors.New(
+				"Remote publish transport failed",
+			)
+			failures = append(failures, runErr)
 			result.Failed++
 		} else {
 			result.Succeeded++
@@ -142,17 +233,63 @@ func validateTargets(targets []string) error {
 		return errors.New("Remote publish requires --target USER@HOST")
 	}
 	seen := make(map[string]struct{}, len(targets))
+	managedCount := 0
 	for _, target := range targets {
-		canonical, err := canonicalTarget(target)
-		if err != nil {
-			return err
+		canonical := target
+		if strings.Contains(target, "@") {
+			var err error
+			canonical, err = canonicalTarget(target)
+			if err != nil {
+				return err
+			}
+		} else if err := ValidateTargetName(target); err != nil {
+			return errors.New("Remote publish target must be a managed Target name or USER@HOST")
+		} else {
+			managedCount++
 		}
 		if _, exists := seen[canonical]; exists {
 			return fmt.Errorf("duplicate target: %s", target)
 		}
 		seen[canonical] = struct{}{}
 	}
+	if managedCount > 0 && len(targets) != 1 {
+		return errors.New("managed Remote publish supports exactly one Target")
+	}
 	return nil
+}
+
+// ManagedTargetPreflightError is intentionally credential-safe.  The CLI uses
+// it to state unequivocally that transport was never started.
+type ManagedTargetPreflightError struct{ Cause error }
+
+func (err ManagedTargetPreflightError) Error() string {
+	if err.Cause == nil {
+		return "Remote Target preflight failed"
+	}
+	return err.Cause.Error()
+}
+
+func (err ManagedTargetPreflightError) Unwrap() error { return err.Cause }
+
+// TargetTransferSize is the actual transferred input size used by managed
+// Target storage preflight. The verifier adds staging/materialization reserve.
+func TargetTransferSize(paths ...string) (int64, error) {
+	var total int64
+	for _, root := range paths {
+		err := filepath.Walk(root, func(_ string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if info.Mode().IsRegular() {
+				total += info.Size()
+			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
 }
 
 func canonicalTarget(target string) (string, error) {
@@ -253,5 +390,6 @@ func runCommand(path string, args []string, streams Streams) error {
 	command.Stdin = streams.Stdin
 	command.Stdout = streams.Stdout
 	command.Stderr = streams.Stderr
+	command.ExtraFiles = streams.ExtraFiles
 	return command.Run()
 }

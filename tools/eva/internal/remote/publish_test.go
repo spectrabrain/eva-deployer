@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -133,6 +134,334 @@ func TestPublishValidatesAllTargetsBeforeBackend(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("backend resolved after invalid target: %d", calls)
+	}
+}
+
+func TestManagedTargetPreflightPrecedesTransport(t *testing.T) {
+	resolved := writeOriginalRelease(t, true)
+	artifactRoot := t.TempDir()
+	payload := filepath.Join(artifactRoot, "payload")
+	runtimeArtifact := filepath.Join(artifactRoot, "runtime")
+	if err := os.Mkdir(payload, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(runtimeArtifact, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backendCalls := 0
+	service := Service{
+		ResolveBackend: func() (string, error) { return "/backend", nil },
+		ResolvePayload: func(release.Resolved, string, string) (PayloadSource, error) {
+			return PayloadSource{Directory: payload}, nil
+		},
+		ResolveRuntime: func(release.Resolved, string, string) (RuntimeArtifactSource, error) {
+			return RuntimeArtifactSource{Directory: runtimeArtifact}, nil
+		},
+		ResolveManagedTarget: func(string, int64) (TargetConnection, error) {
+			return TargetConnection{}, errors.New("Target sudo authentication failed")
+		},
+		Run: func(string, []string, Streams) error { backendCalls++; return nil },
+	}
+	err := service.Publish(PublishOptions{Release: resolved, Target: "site-dev-196", Registry: "harbor.example.internal:32080"})
+	var preflight ManagedTargetPreflightError
+	if !errors.As(err, &preflight) || backendCalls != 0 {
+		t.Fatalf("err=%v backendCalls=%d; preflight must prevent transport", err, backendCalls)
+	}
+}
+
+func TestManagedTargetPassesSudoPasswordByFileDescriptor(
+	t *testing.T,
+) {
+	resolved := writeOriginalRelease(t, true)
+	artifactRoot := t.TempDir()
+	payload := filepath.Join(artifactRoot, "payload")
+	runtimeArtifact := filepath.Join(artifactRoot, "runtime")
+
+	if err := os.Mkdir(payload, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(runtimeArtifact, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var arguments []string
+	var sudoPassword string
+
+	service := Service{
+		ResolveBackend: func() (string, error) {
+			return "/backend", nil
+		},
+		ResolvePayload: func(
+			release.Resolved,
+			string,
+			string,
+		) (PayloadSource, error) {
+			return PayloadSource{Directory: payload}, nil
+		},
+		ResolveRuntime: func(
+			release.Resolved,
+			string,
+			string,
+		) (RuntimeArtifactSource, error) {
+			return RuntimeArtifactSource{
+				Directory: runtimeArtifact,
+			}, nil
+		},
+		ResolveManagedTarget: func(
+			string,
+			int64,
+		) (TargetConnection, error) {
+			return TargetConnection{
+				Target:       "eva@10.159.56.197",
+				SSHOptions:   []string{"ControlPath=/run/eva/p/control"},
+				sudoMethod:   "password",
+				sudoPassword: "sudo-secret",
+			}, nil
+		},
+		Run: func(
+			_ string,
+			got []string,
+			streams Streams,
+		) error {
+			arguments = append([]string(nil), got...)
+
+			if len(streams.ExtraFiles) != 1 {
+				t.Fatalf(
+					"ExtraFiles=%d, want 1",
+					len(streams.ExtraFiles),
+				)
+			}
+
+			contents, err := io.ReadAll(
+				streams.ExtraFiles[0],
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			sudoPassword = strings.TrimSpace(
+				string(contents),
+			)
+			return nil
+		},
+	}
+
+	if err := service.Publish(PublishOptions{
+		Release:  resolved,
+		Target:   "site-dev-196",
+		Registry: "harbor.example.internal:32080",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(arguments, "\n")
+
+	for _, expected := range []string{
+		"--sudo-mode",
+		"password",
+		"--sudo-password-fd",
+		"3",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf(
+				"missing transport argument %q: %#v",
+				expected,
+				arguments,
+			)
+		}
+	}
+
+	if sudoPassword != "sudo-secret" {
+		t.Fatal(
+			"sudo password was not delivered through fd 3",
+		)
+	}
+
+	if strings.Contains(joined, "sudo-secret") {
+		t.Fatal("sudo password leaked into arguments")
+	}
+}
+
+func TestManagedPasswordlessTargetDoesNotPassSecretFile(
+	t *testing.T,
+) {
+	resolved := writeOriginalRelease(t, true)
+	artifactRoot := t.TempDir()
+	payload := filepath.Join(artifactRoot, "payload")
+	runtimeArtifact := filepath.Join(artifactRoot, "runtime")
+
+	if err := os.Mkdir(payload, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(runtimeArtifact, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var arguments []string
+
+	service := Service{
+		ResolveBackend: func() (string, error) {
+			return "/backend", nil
+		},
+		ResolvePayload: func(
+			release.Resolved,
+			string,
+			string,
+		) (PayloadSource, error) {
+			return PayloadSource{Directory: payload}, nil
+		},
+		ResolveRuntime: func(
+			release.Resolved,
+			string,
+			string,
+		) (RuntimeArtifactSource, error) {
+			return RuntimeArtifactSource{
+				Directory: runtimeArtifact,
+			}, nil
+		},
+		ResolveManagedTarget: func(
+			string,
+			int64,
+		) (TargetConnection, error) {
+			return TargetConnection{
+				Target:     "eva@10.159.56.197",
+				SSHOptions: []string{"ControlPath=/run/eva/p/control"},
+				sudoMethod: "passwordless",
+			}, nil
+		},
+		Run: func(
+			_ string,
+			got []string,
+			streams Streams,
+		) error {
+			arguments = append([]string(nil), got...)
+
+			if len(streams.ExtraFiles) != 0 {
+				t.Fatal(
+					"passwordless sudo received a secret fd",
+				)
+			}
+			return nil
+		},
+	}
+
+	if err := service.Publish(PublishOptions{
+		Release:  resolved,
+		Target:   "site-dev-196",
+		Registry: "harbor.example.internal:32080",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	joined := strings.Join(arguments, "\n")
+
+	if !strings.Contains(joined, "passwordless") {
+		t.Fatalf(
+			"passwordless sudo mode is missing: %#v",
+			arguments,
+		)
+	}
+	if strings.Contains(joined, "--sudo-password-fd") {
+		t.Fatalf(
+			"passwordless sudo received a password fd: %#v",
+			arguments,
+		)
+	}
+}
+
+func TestManagedTargetPassesStrictConnectionOptionsToTransport(t *testing.T) {
+	resolved := writeOriginalRelease(t, true)
+	artifactRoot := t.TempDir()
+	payload := filepath.Join(artifactRoot, "payload")
+	runtimeArtifact := filepath.Join(artifactRoot, "runtime")
+	if err := os.Mkdir(payload, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(runtimeArtifact, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var arguments []string
+	var extraFileCount int
+
+	service := Service{
+		ResolveBackend: func() (string, error) { return "/backend", nil },
+		ResolvePayload: func(release.Resolved, string, string) (PayloadSource, error) {
+			return PayloadSource{Directory: payload}, nil
+		},
+		ResolveRuntime: func(release.Resolved, string, string) (RuntimeArtifactSource, error) {
+			return RuntimeArtifactSource{Directory: runtimeArtifact}, nil
+		},
+		ResolveManagedTarget: func(string, int64) (TargetConnection, error) {
+			return TargetConnection{
+				Target: "eva@10.159.56.197",
+				SSHOptions: []string{
+					"Port=22",
+					"StrictHostKeyChecking=yes",
+					"ControlPath=/run/eva/p/control",
+				},
+				sudoMethod: "passwordless",
+			}, nil
+		},
+		Run: func(
+			_ string,
+			got []string,
+			streams Streams,
+		) error {
+			arguments = append(
+				[]string(nil),
+				got...,
+			)
+			extraFileCount = len(streams.ExtraFiles)
+			return nil
+		},
+	}
+	if err := service.Publish(PublishOptions{Release: resolved, Target: "site-dev-196", Registry: "harbor.example.internal:32080"}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(arguments, "\n")
+
+	required := []string{
+		"--target",
+		"eva@10.159.56.197",
+		"--ssh-option",
+		"Port=22",
+		"StrictHostKeyChecking=yes",
+		"ControlPath=/run/eva/p/control",
+		"--sudo-mode",
+		"passwordless",
+	}
+
+	for _, expected := range required {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf(
+				"managed connection argument %q is missing: %#v",
+				expected,
+				arguments,
+			)
+		}
+	}
+
+	forbidden := []string{
+		"--sudo-password-fd",
+		"ssh-secret",
+		"sudo-secret",
+	}
+
+	for _, value := range forbidden {
+		if strings.Contains(joined, value) {
+			t.Fatalf(
+				"managed connection arguments contain forbidden value %q: %#v",
+				value,
+				arguments,
+			)
+		}
+	}
+
+	if extraFileCount != 0 {
+		t.Fatalf(
+			"passwordless managed Target received %d secret file descriptors",
+			extraFileCount,
+		)
 	}
 }
 

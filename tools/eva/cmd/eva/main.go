@@ -42,6 +42,11 @@ var (
 	newRemotePrepareService           = remote.NewPrepareService
 	newRemoteVerifyService            = remote.NewVerifyService
 	newRemoteBootstrapService         = remote.NewBootstrapService
+	newRemoteTargetStore              = remote.NewTargetStore
+	newRemoteTargetVerifier           = remote.NewTargetVerifier
+	remoteTargetRegistryRoot          = remote.DefaultTargetRegistryRoot
+	remoteTargetCredentialRoot        = remote.DefaultTargetCredentialRoot
+	remoteTargetEffectiveUID          = os.Geteuid
 	defaultRemoteBootstrapReceiptPath = remote.DefaultHarborReceiptPath
 	defaultRemoteAWSCredentialPath    = remote.DefaultManagedAWSCredentialPath
 	validateRemoteAWSCredential       = remote.ValidateAWSCredential
@@ -70,7 +75,8 @@ func usage() {
 	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
 	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
-	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]")
+	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET")
+	fmt.Println("  remote target <add|verify> NAME")
 	fmt.Println("  remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("  remote verify [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("  install [--release PATH|RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
@@ -248,15 +254,219 @@ func runRemote(args []string) error {
 		return runRemotePrepare(args[1:])
 	case "verify":
 		return runRemoteVerify(args[1:])
+	case "target":
+		return runRemoteTarget(args[1:])
 	default:
 		return fmt.Errorf("unknown remote command %q", args[0])
 	}
 }
 
 func remoteUsage() {
-	fmt.Println("Usage: eva remote <bootstrap|publish|prepare|verify> [RELEASE_PATH]")
+	fmt.Println("Usage: eva remote <bootstrap|publish|prepare|verify|target> [RELEASE_PATH]")
 	fmt.Println("")
-	fmt.Println("Publishes a verified original EVA Release or prepares and verifies Remote repository assets.")
+	fmt.Println("target add registers a managed Remote Target; target verify checks SSH, sudo, platform, and storage.")
+	fmt.Println("Managed Target publish accepts --target NAME. Direct USER@HOST remains compatible for key/passwordless transport.")
+}
+
+func remoteTargetUsage() {
+	fmt.Println("Usage: eva remote target <add|verify> NAME")
+	fmt.Println("")
+	fmt.Println("add stores credentials only in the root-only Main Target registry. verify performs no registry writes.")
+}
+
+func runRemoteTarget(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		remoteTargetUsage()
+		return nil
+	}
+	if len(args) != 2 {
+		return errors.New("remote target requires an action and Target name")
+	}
+	if err := remote.ValidateTargetName(args[1]); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "add":
+		return runRemoteTargetAdd(args[1])
+	case "verify":
+		return runRemoteTargetVerify(args[1])
+	default:
+		return fmt.Errorf("unknown remote target command %q", args[0])
+	}
+}
+
+func requireRemoteTargetRootTTY() error {
+	if remoteTargetEffectiveUID() != 0 {
+		return errors.New("Remote Target management requires root; run with sudo")
+	}
+	info, err := stdinStat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return errors.New("Remote Target add requires an interactive TTY")
+	}
+	return nil
+}
+
+func runRemoteTargetAdd(name string) error {
+	if err := requireRemoteTargetRootTTY(); err != nil {
+		return err
+	}
+	store := newRemoteTargetStore(remoteTargetRegistryRoot, remoteTargetCredentialRoot)
+	configPath, _ := store.ConfigPath(name)
+	if _, err := os.Lstat(configPath); err == nil {
+		return errors.New("Remote Target already exists; replacement is not supported")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	reader := bufio.NewReader(os.Stdin)
+	read := func(label, fallback string) (string, error) {
+		fmt.Fprint(os.Stderr, label)
+		value, err := reader.ReadString('\n')
+		if err != nil && len(value) == 0 {
+			return "", err
+		}
+		value = strings.TrimSpace(value)
+		if value == "" {
+			value = fallback
+		}
+		return value, nil
+	}
+	host, err := read("Target host: ", "")
+	if err != nil || host == "" {
+		return errors.New("Target host is required")
+	}
+	portText, err := read("Target SSH port [22]: ", "22")
+	if err != nil {
+		return errors.New("read Target SSH port")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return errors.New("Target SSH port is invalid")
+	}
+	user, err := read("Target SSH user [eva]: ", "eva")
+	if err != nil {
+		return errors.New("read Target SSH user")
+	}
+	method, err := read("Authentication method [password/public-key] [password]: ", "password")
+	if err != nil || (method != "password" && method != "public-key") {
+		return errors.New("Target authentication method is invalid")
+	}
+	credential := remote.TargetCredential{SchemaVersion: "v1"}
+	identitySource := ""
+	if method == "public-key" {
+		identitySource, err = read("Target private identity file (0600): ", "")
+		if err != nil || identitySource == "" {
+			return errors.New("Target private identity file is required")
+		}
+		credential.IdentityFile = "id_ed25519"
+		fmt.Fprint(os.Stderr, "Target sudo password: ")
+		sudoPassword, readErr := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if readErr != nil || len(strings.TrimSpace(string(sudoPassword))) == 0 {
+			return errors.New("Target sudo password is required")
+		}
+		credential.SudoPassword = string(sudoPassword)
+	} else {
+		fmt.Fprint(os.Stderr, "Target SSH password: ")
+		sshPassword, readErr := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if readErr != nil || len(strings.TrimSpace(string(sshPassword))) == 0 {
+			return errors.New("Target SSH password is required")
+		}
+		fmt.Fprint(os.Stderr, "Target sudo password [Enter to reuse SSH password]: ")
+		sudoPassword, readErr := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if readErr != nil {
+			return errors.New("read Target sudo password")
+		}
+		if len(sudoPassword) == 0 {
+			sudoPassword = sshPassword
+		}
+		credential.SSHPassword = string(sshPassword)
+		credential.SudoPassword = string(sudoPassword)
+	}
+	verifier := newRemoteTargetVerifier(store)
+	hostKey, err := verifier.ScanHostKey(context.Background(), host, port)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "\nTarget SSH host key\n  algorithm: %s\n  fingerprint: %s\n", hostKey.Algorithm, hostKey.Fingerprint)
+	accepted, err := read("Accept this host key? [y/N]: ", "")
+	if err != nil || strings.ToLower(accepted) != "y" {
+		return errors.New("Target SSH host key was not accepted")
+	}
+	authMethod := "password"
+	identityCommitted := false
+	if method == "public-key" {
+		authMethod = "public_key"
+		if err := store.WriteIdentity(name, identitySource); err != nil {
+			return err
+		}
+		defer func() {
+			if !identityCommitted {
+				store.RemoveNewCredentialDirectory(name)
+			}
+		}()
+	}
+	config := remote.TargetConfiguration{SchemaVersion: "v1", Name: name, Host: host, Port: port, User: user, Authentication: remote.TargetAuthentication{Method: authMethod, CredentialRef: name}, Sudo: remote.TargetAuthentication{Method: "password", CredentialRef: name}, HostKey: hostKey}
+	connection, err := verifier.VerifyConfiguration(context.Background(), config, credential, 0)
+	if err != nil {
+		return err
+	}
+	defer connection.Cleanup()
+	if err := store.Write(config, credential); err != nil {
+		return err
+	}
+	identityCommitted = true
+	fmt.Println("[OK] Target configuration saved")
+	fmt.Println("[OK] Target credential saved")
+	fmt.Printf("[INFO] target=%s\n", name)
+	fmt.Printf("[INFO] Run: sudo eva remote target verify %s\n", name)
+	return nil
+}
+
+func runRemoteTargetVerify(name string) error {
+	if remoteTargetEffectiveUID() != 0 {
+		return errors.New("Remote Target management requires root; run with sudo")
+	}
+	registryContext, err := remote.ResolveRegistryContext("", "", defaultRemoteBootstrapReceiptPath)
+	if err != nil {
+		return displayRemoteContextError(err)
+	}
+	selected, err := selectRelease("")
+	if err != nil {
+		return err
+	}
+	payload, err := remote.ResolvePayloadForPublish(selected.Resolved, registryContext.Registry, registryContext.Project)
+	if err != nil {
+		return fmt.Errorf("resolve Remote target payload for storage preflight: %w", err)
+	}
+	runtimeArtifact, err := remote.ResolveRuntimeArtifactForPublish(selected.Resolved, registryContext.Registry, registryContext.Project)
+	if err != nil {
+		return fmt.Errorf("resolve Remote Runtime artifact for storage preflight: %w", err)
+	}
+	requiredBytes, err := remote.TargetTransferSize(selected.Resolved.Root, runtimeArtifact.Directory, payload.Directory)
+	if err != nil {
+		return fmt.Errorf("calculate Remote Target storage requirement: %w", err)
+	}
+	store := newRemoteTargetStore(remoteTargetRegistryRoot, remoteTargetCredentialRoot)
+	config, _, err := store.Load(name)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("[INFO] target=%s host=%s user=%s\n", config.Name, config.Host, config.User)
+	if err := newRemoteTargetVerifier(store).Verify(context.Background(), name, requiredBytes); err != nil {
+		return err
+	}
+	fmt.Println("[OK] Target configuration")
+	fmt.Println("[OK] Target credential")
+	fmt.Println("[OK] SSH host key")
+	fmt.Println("[OK] SSH authentication")
+	fmt.Println("[OK] Target sudo authentication")
+	fmt.Println("[OK] Target platform linux/amd64")
+	fmt.Println("[OK] Target storage")
+	fmt.Println("[OK] Target inbox parent")
+	fmt.Println("[OK] Remote Target is ready")
+	return nil
 }
 
 func remoteBootstrapUsage() {
@@ -495,8 +705,9 @@ func normalizeRemoteRepositoryArgs(args []string, command string) ([]string, err
 }
 
 func remotePublishUsage() {
-	fmt.Println("Usage: eva remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target USER@HOST [--target USER@HOST ...]")
+	fmt.Println("Usage: eva remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET")
 	fmt.Println("")
+	fmt.Println("TARGET is a managed Target name. Direct USER@HOST remains compatible for existing key/passwordless transport.")
 	fmt.Println("Without RELEASE_PATH, uses the Current Release receipt, then a valid current directory.")
 }
 
@@ -514,7 +725,7 @@ func runRemotePublish(args []string) error {
 	flags := flag.NewFlagSet("remote publish", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	var targets stringList
-	flags.Var(&targets, "target", "Remote Target in USER@HOST form (repeatable)")
+	flags.Var(&targets, "target", "managed Remote Target name (exactly one) or compatible USER@HOST")
 	registry := flags.String("registry", "", "repository registry")
 	if err := flags.Parse(normalizedArgs); err != nil {
 		return err
@@ -556,6 +767,10 @@ func runRemotePublish(args []string) error {
 	}
 	if result.Total > 0 {
 		fmt.Printf("[INFO] succeeded=%d failed=%d total=%d\n", result.Succeeded, result.Failed, result.Total)
+	}
+	var preflightErr remote.ManagedTargetPreflightError
+	if errors.As(publishErr, &preflightErr) {
+		return &displayedError{message: fmt.Sprintf("[ERROR] %s\n[INFO] No Release files were transferred", preflightErr.Error())}
 	}
 	return publishErr
 }

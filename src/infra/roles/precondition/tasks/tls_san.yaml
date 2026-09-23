@@ -1,0 +1,145 @@
+---
+- name: Resolve TLS SAN validation inputs
+  ansible.builtin.set_fact:
+    precondition_tls_target: "{{ ansible_host | default(inventory_hostname) }}"
+    precondition_iam_values_file: "{{ eva_site_values_root }}/iam.yaml"
+    precondition_app_values_file: "{{ eva_site_values_root }}/app.yaml"
+
+- name: Check Workspace TLS value files
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ precondition_iam_values_file }}"
+    - "{{ precondition_app_values_file }}"
+  register: precondition_tls_values_files
+  delegate_to: localhost
+  become: false
+
+- name: Load Workspace TLS value files
+  no_log: true
+  ansible.builtin.include_vars:
+    file: "{{ item.item }}"
+    name: "{{ item.item | basename | regex_replace('\\.yaml$', '') }}_precondition_values"
+  loop: "{{ precondition_tls_values_files.results }}"
+  when: item.stat.exists
+  delegate_to: localhost
+  become: false
+
+- name: Resolve external ingress addresses for certificate validation
+  no_log: true
+  ansible.builtin.set_fact:
+    precondition_iam_values: >-
+      {{ (iam_precondition_values | default({})).get(precondition_tls_target,
+         iam_precondition_values | default({})) }}
+    precondition_app_values: >-
+      {{ (app_precondition_values | default({})).get(precondition_tls_target, {}) }}
+
+- name: Build selected ingress certificate checks
+  no_log: true
+  ansible.builtin.set_fact:
+    precondition_tls_checks: >-
+      {{
+        ([]
+         + ((('iam' in (eva_enabled_components | default('')).split(','))
+             | ternary([{
+               'component': 'IAM',
+               'host': precondition_iam_values.config.host | default(precondition_tls_target),
+               'certificate': precondition_iam_values.ingress.tls.hostPath | default('/home/eva/certs') ~ '/tls.crt'
+             }], [])))
+         + ((('app' in (eva_enabled_components | default('')).split(','))
+             | ternary([{
+               'component': 'App',
+               'host': precondition_app_values.app.backendHost | default(precondition_tls_target),
+               'certificate': precondition_app_values.ingress.tls.hostPath | default('/home/eva/certs') ~ '/tls.crt'
+             }], [])))
+        )
+      }}
+
+- name: Check selected ingress certificate files
+  ansible.builtin.stat:
+    path: "{{ item.certificate }}"
+  loop: "{{ precondition_tls_checks }}"
+  register: precondition_tls_certificate_files
+
+- name: Require selected ingress certificate files
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+    fail_msg: >-
+      {{ item.item.component }} 외부 주소 {{ item.item.host }}의 인증서를 찾지 못했습니다:
+      {{ item.item.certificate }}. tls.crt 및 tls.key를 준비한 뒤 sudo eva retry --yes를 실행하세요.
+  loop: "{{ precondition_tls_certificate_files.results }}"
+
+- name: Validate selected ingress certificate SANs
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import ipaddress
+        import ssl
+        import sys
+
+        host = sys.argv[1]
+        certificate_path = sys.argv[2]
+        certificate = ssl._ssl._test_decode_cert(certificate_path)
+        subject_alt_names = certificate.get("subjectAltName", [])
+
+        def normalize_dns(value):
+            return value.rstrip(".").lower()
+
+        def matches_dns(pattern, hostname):
+            pattern = normalize_dns(pattern)
+            hostname = normalize_dns(hostname)
+
+            if "*" not in pattern:
+                return pattern == hostname
+
+            pattern_labels = pattern.split(".")
+            hostname_labels = hostname.split(".")
+
+            return (
+                len(pattern_labels) >= 2
+                and pattern_labels[0] == "*"
+                and all("*" not in label for label in pattern_labels[1:])
+                and len(pattern_labels) == len(hostname_labels)
+                and pattern_labels[1:] == hostname_labels[1:]
+            )
+
+        try:
+            expected_ip = ipaddress.ip_address(host)
+        except ValueError:
+            matched = any(
+                kind == "DNS" and matches_dns(value, host)
+                for kind, value in subject_alt_names
+            )
+        else:
+            matched = False
+            for kind, value in subject_alt_names:
+                if kind != "IP Address":
+                    continue
+                try:
+                    san_ip = ipaddress.ip_address(value)
+                except ValueError:
+                    continue
+                if san_ip == expected_ip:
+                    matched = True
+                    break
+
+        raise SystemExit(0 if matched else 1)
+      - "{{ item.item.host }}"
+      - "{{ item.item.certificate }}"
+  loop: "{{ precondition_tls_certificate_files.results }}"
+  register: precondition_tls_san_results
+  changed_when: false
+  failed_when: false
+
+- name: Require selected ingress addresses in certificate SANs
+  ansible.builtin.assert:
+    that:
+      - item.rc == 0
+    fail_msg: >-
+      {{ item.item.item.component }} 외부 주소 {{ item.item.item.host }}가 인증서 SAN과 일치하지 않습니다.
+      해당 주소를 SAN에 포함한 tls.crt 및 tls.key를 다시 준비한 뒤 sudo eva retry --yes를 실행하세요.
+  loop: "{{ precondition_tls_san_results.results }}"

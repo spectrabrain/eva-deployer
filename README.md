@@ -78,7 +78,14 @@ cd eva-base-release-v3.2.0
 sudo bash ./eva-tool-installer.sh
 command -v eva
 eva version
+sudo eva verify
 ```
+
+Installer는 Tool과 Release를 함께 검증한 뒤 해당 Release를 Current Release로 등록합니다. Tool,
+command link, Current Release 등록이 모두 성공해야 설치가 완료됩니다. 이후 `--release`를 생략한
+`sudo eva verify`, `sudo eva install` 및 Remote preparation 명령은 이 Current Release를 사용합니다.
+세부 설치 절차는 [Cloud Runbook](docs/installation/cloud-repository-runbook.md) 또는
+[Remote Runbook](docs/installation/remote-repository-runbook.md)을 따릅니다.
 
 Installer는 계정이나 group membership을 변경하지 않습니다. Tool, Runtime, Release는 바로 조회할 수 있고, Workspace의 Secret과 Operation 상태·로그를 다루는 명령은 `sudo eva ...`로 실행합니다. 따라서 `sudo` 권한이 있는 `eva` 또는 DevOps 계정은 재로그인 없이 바로 사용할 수 있습니다.
 

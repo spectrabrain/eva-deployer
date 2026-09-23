@@ -44,7 +44,7 @@ while (($#)); do
   esac
 done
 
-for command in awk date dirname find grep install mktemp mv readlink sha256sum sync tar; do
+for command in awk cp date dirname find flock grep install mkdir mktemp mv readlink sha256sum sleep sync tar; do
   command -v "$command" >/dev/null 2>&1 || { echo "[error] missing command: $command" >&2; exit 1; }
 done
 if [[ $EUID -ne 0 ]]; then
@@ -269,9 +269,34 @@ setup_directory "$state_root/state" 0700
 setup_directory "$log_root" 0700
 setup_directory "$log_root/operations" 0700
 
+lock_dir="$state_root/locks"
+installer_lock="$lock_dir/tool-installer.lock"
+if [[ -L "$lock_dir" || ( -e "$lock_dir" && ! -d "$lock_dir" ) ]]; then
+  echo "[error] EVA Tool installer lock root is not a directory: $lock_dir" >&2
+  exit 1
+fi
+setup_directory "$lock_dir" 0700
+if [[ -L "$installer_lock" || ( -e "$installer_lock" && ! -f "$installer_lock" ) ]]; then
+  echo "[error] EVA Tool installer lock is not a regular file: $installer_lock" >&2
+  exit 1
+fi
+installer_lock_acquired=false
+
+exec 9>"$installer_lock"
+chmod 0600 "$installer_lock"
+chown root:root "$installer_lock"
+
+if ! flock -n 9; then
+  echo "[error] another EVA Tool installer transaction is running" >&2
+  exit 1
+fi
+
+installer_lock_acquired=true
+
 tool_dir="$eva_root/tool"
 tool_binary="$tool_dir/bin/eva"
 command_link="$bin_dir/eva"
+current_receipt="$state_root/releases/current.yaml"
 if [[ -e "$command_link" || -L "$command_link" ]]; then
   existing_target="$(readlink -f "$command_link" 2>/dev/null || true)"
   if [[ "$existing_target" != "$tool_binary" && "$force" != true ]]; then
@@ -281,13 +306,147 @@ if [[ -e "$command_link" || -L "$command_link" ]]; then
 fi
 
 staging_dir="$(mktemp -d "$eva_root/.eva-tool-XXXXXX")"
-backup_dir=""
+transaction_started=false
+old_tool_backed_up=false
+new_tool_published=false
+old_link_backed_up=false
+new_link_published=false
+receipt_registration_started=false
+transaction_committed=false
+rollback_started=false
+rollback_completed=false
+old_tool_backup_dir=""
+old_tool_backup=""
+old_link_backup=""
+receipt_backup_dir=""
+receipt_backup=""
+had_current_receipt=false
+temporary_link=""
+
+release_installer_lock() {
+  local unlock_error=0
+
+  if [[ "$installer_lock_acquired" != true ]]; then
+    return 0
+  fi
+
+  if ! flock -u 9; then
+    echo "[error] could not release EVA Tool installer lock" >&2
+    unlock_error=1
+  fi
+
+  exec 9>&-
+  installer_lock_acquired=false
+
+  return "$unlock_error"
+}
+
 cleanup() {
-  if [[ -d "$staging_dir" ]]; then
-    rm -rf "$staging_dir"
+  if [[ -n "$temporary_link" ]]; then rm -f "$temporary_link" || true; fi
+  if [[ -d "$staging_dir" ]]; then rm -rf "$staging_dir" || true; fi
+  if [[ -d "$old_tool_backup_dir" ]]; then rm -rf "$old_tool_backup_dir" || true; fi
+  if [[ -d "$receipt_backup_dir" ]]; then rm -rf "$receipt_backup_dir" || true; fi
+  if [[ -n "$old_link_backup" ]]; then rm -f "$old_link_backup" || true; fi
+}
+
+test_hook() {
+  local stage="$1" marker continue_marker
+  if [[ -n "${EVA_INSTALLER_TEST_FAIL_AFTER:-}" && "${EVA_INSTALLER_TEST_FAIL_AFTER}" != tool-published && "${EVA_INSTALLER_TEST_FAIL_AFTER}" != link-published && "${EVA_INSTALLER_TEST_FAIL_AFTER}" != register-current && "${EVA_INSTALLER_TEST_FAIL_AFTER}" != receipt-published && "${EVA_INSTALLER_TEST_FAIL_AFTER}" != commit ]]; then
+    echo "[error] invalid EVA_INSTALLER_TEST_FAIL_AFTER stage" >&2
+    return 1
+  fi
+  if [[ "${EVA_INSTALLER_TEST_FAIL_AFTER:-}" == "$stage" ]]; then
+    echo "[error] installer test failure after $stage" >&2
+    return 1
+  fi
+  if [[ "${EVA_INSTALLER_TEST_WAIT_AFTER:-}" == "$stage" ]]; then
+    [[ -n "${EVA_INSTALLER_TEST_HOOK_DIR:-}" ]] || return 1
+    marker="$EVA_INSTALLER_TEST_HOOK_DIR/$stage.reached"
+    continue_marker="$EVA_INSTALLER_TEST_HOOK_DIR/$stage.continue"
+    mkdir -p "$EVA_INSTALLER_TEST_HOOK_DIR"
+    : > "$marker"
+    while [[ ! -e "$continue_marker" ]]; do
+      sleep 0.05
+    done
   fi
 }
-trap cleanup EXIT
+
+restore_receipt() {
+  local receipt_error=0
+  if [[ "$receipt_registration_started" != true ]]; then
+    return 0
+  fi
+  if [[ "$had_current_receipt" == true ]]; then
+    if ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$current_receipt" "$tool_binary" internal restore-current-release --backup "$receipt_backup"; then
+      echo "[error] rollback could not restore Current Release receipt" >&2
+      receipt_error=1
+    fi
+  elif ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$current_receipt" "$tool_binary" internal clear-current-release; then
+    echo "[error] rollback could not remove Current Release receipt" >&2
+    receipt_error=1
+  fi
+  return "$receipt_error"
+}
+
+rollback_installation() {
+  local rollback_error=0
+  restore_receipt || rollback_error=1
+  if [[ "$new_link_published" == true ]] && ! rm -f "$command_link"; then
+    echo "[error] rollback could not remove new EVA command link" >&2
+    rollback_error=1
+  fi
+  if [[ "$old_link_backed_up" == true ]] && ! mv "$old_link_backup" "$command_link"; then
+    echo "[error] rollback could not restore previous EVA command link" >&2
+    rollback_error=1
+  fi
+  if [[ "$new_tool_published" == true ]] && ! rm -rf "$tool_dir"; then
+    echo "[error] rollback could not remove new EVA Tool" >&2
+    rollback_error=1
+  fi
+  if [[ "$old_tool_backed_up" == true ]] && ! mv "$old_tool_backup" "$tool_dir"; then
+    echo "[error] rollback could not restore previous EVA Tool" >&2
+    rollback_error=1
+  fi
+  return "$rollback_error"
+}
+
+fail_transaction() {
+  local message="$1"
+  echo "[error] $message" >&2
+  exit 1
+}
+
+on_exit() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  if [[ "$transaction_started" == true && "$transaction_committed" != true && "$rollback_started" != true ]]; then
+    rollback_started=true
+    if rollback_installation; then
+      rollback_completed=true
+    fi
+  fi
+  if [[ "$rollback_started" == true && "$rollback_completed" != true ]]; then
+    echo "[error] installer rollback was incomplete" >&2
+  fi
+  cleanup
+
+  if ! release_installer_lock; then
+    echo "[error] EVA Tool installer lock release was incomplete" >&2
+  fi
+
+  return "$status"
+}
+
+on_signal() {
+  local signal_name="$1" status="$2"
+  echo "[error] EVA Tool installer interrupted by $signal_name" >&2
+  exit "$status"
+}
+
+trap on_exit EXIT
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal HUP 129' HUP
 mkdir -p "$staging_dir/bin"
 tar -xzf "$artifact" -C "$staging_dir" --no-same-owner --no-same-permissions
 if find "$staging_dir" -xdev \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit | grep -q .; then
@@ -339,68 +498,94 @@ if ! "$staging_dir/bin/eva" verify "$release_root" >/dev/null; then
   exit 1
 fi
 
+transaction_started=true
+if [[ -e "$current_receipt" || -L "$current_receipt" ]]; then
+  if [[ -L "$current_receipt" || ! -f "$current_receipt" ]]; then
+    echo "[error] existing Current Release receipt is not a regular file" >&2
+    exit 1
+  fi
+  receipt_backup_dir="$(mktemp -d "$eva_root/.eva-current-receipt-XXXXXX")"
+  receipt_backup="$receipt_backup_dir/current.yaml"
+  if ! cp -p "$current_receipt" "$receipt_backup"; then
+    echo "[error] could not back up Current Release receipt" >&2
+    exit 1
+  fi
+  if ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$receipt_backup" "$staging_dir/bin/eva" internal validate-current-release >/dev/null 2>&1; then
+    echo "[error] existing Current Release receipt cannot be validated" >&2
+    exit 1
+  fi
+  had_current_receipt=true
+fi
+
 if [[ -e "$tool_dir" || -L "$tool_dir" ]]; then
   if [[ -L "$tool_dir" || ! -d "$tool_dir" ]]; then
     echo "[error] existing EVA tool path is not a directory: $tool_dir" >&2
     exit 1
   fi
-  backup_dir="$eva_root/.eva-tool-backup-$(date +%s)"
-  mv "$tool_dir" "$backup_dir"
+  old_tool_backup_dir="$(mktemp -d "$eva_root/.eva-tool-backup-XXXXXX")"
+  old_tool_backup="$old_tool_backup_dir/tool"
+  if ! mv "$tool_dir" "$old_tool_backup"; then
+    echo "[error] could not back up existing EVA Tool" >&2
+    exit 1
+  fi
+  old_tool_backed_up=true
+fi
+if [[ -e "$command_link" || -L "$command_link" ]]; then
+  old_link_backup="$(mktemp "$bin_dir/.eva-backup-XXXXXX")"
+  rm -f "$old_link_backup"
+  if ! mv "$command_link" "$old_link_backup"; then
+    fail_transaction "could not back up existing EVA command link"
+  fi
+  old_link_backed_up=true
 fi
 if ! mv "$staging_dir" "$tool_dir"; then
-  [[ -n "$backup_dir" ]] && mv "$backup_dir" "$tool_dir"
-  echo "[error] could not publish EVA Tool" >&2
+  fail_transaction "could not publish EVA Tool"
+fi
+new_tool_published=true
+if ! test_hook tool-published; then
   exit 1
 fi
 
 temporary_link="$bin_dir/.eva-$RANDOM"
-ln -s "$tool_binary" "$temporary_link"
-if ! mv -Tf "$temporary_link" "$command_link"; then
-  rm -f "$temporary_link"
-  rm -rf "$tool_dir"
-  [[ -n "$backup_dir" ]] && mv "$backup_dir" "$tool_dir"
-  echo "[error] could not publish EVA command link" >&2
-  exit 1
+if ! ln -s "$tool_binary" "$temporary_link" || ! mv -Tf "$temporary_link" "$command_link"; then
+  fail_transaction "could not publish EVA command link"
 fi
-if [[ -n "$backup_dir" ]]; then
-  rm -rf "$backup_dir"
-fi
-
-installed_tool_version="$("$command_link" version | awk 'NR == 1 { print $1; exit }')"
-if [[ "$installed_tool_version" != "$release_version" ]]; then
-  echo "[error] installed EVA Tool version $installed_tool_version does not match Release version $release_version" >&2
+temporary_link=""
+new_link_published=true
+if ! test_hook link-published; then
   exit 1
 fi
 
-current_release_dir="$state_root/releases"
-setup_directory "$current_release_dir" 0750
-release_yaml_sha256="$(sha256sum "$release_root/release.yaml" | awk '{print $1}')"
-checksums_sha256="$(sha256sum "$release_root/checksums.sha256" | awk '{print $1}')"
-release_identity="$(printf '%s:%s' "$release_yaml_sha256" "$checksums_sha256" | sha256sum | awk '{print $1}')"
-current_receipt="$current_release_dir/current.yaml"
-receipt_temporary="$(mktemp "$current_release_dir/.current.yaml-XXXXXX")"
-receipt_cleanup() {
-  rm -f "$receipt_temporary"
-}
-if ! {
-  printf 'schema_version: v1\n'
-  printf 'release_root: %s\n' "$release_root"
-  printf 'release_version: %s\n' "$release_version"
-  printf 'release_identity: %s\n' "$release_identity"
-  printf 'selected_by: eva-tool-installer\n'
-  printf 'selected_at: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-} > "$receipt_temporary"; then
-  receipt_cleanup
-  echo "[error] could not write Current Release receipt" >&2
+if ! installed_tool_version="$("$command_link" version | awk 'NR == 1 { print $1; exit }')" || [[ "$installed_tool_version" != "$release_version" ]]; then
+  fail_transaction "installed EVA Tool version does not match Release version"
+fi
+
+receipt_registration_started=true
+if ! test_hook register-current || ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$current_receipt" "$tool_binary" internal register-current-release --release "$release_root" --selected-by eva-tool-installer; then
+  fail_transaction "could not register Current Release"
+fi
+if ! test_hook receipt-published; then
   exit 1
 fi
-chmod 0640 "$receipt_temporary"
-chown root:root "$receipt_temporary"
-if ! sync -f "$receipt_temporary" || ! mv -f "$receipt_temporary" "$current_receipt" || ! sync -d "$current_release_dir"; then
-  receipt_cleanup
-  echo "[error] could not publish Current Release receipt" >&2
+if ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$current_receipt" "$tool_binary" internal validate-current-release --release "$release_root"; then
+  fail_transaction "could not validate Current Release"
+fi
+if ! installed_tool_version="$("$command_link" version | awk 'NR == 1 { print $1; exit }')" || [[ "$installed_tool_version" != "$release_version" ]]; then
+  fail_transaction "installed EVA Tool and Current Release versions do not match"
+fi
+
+transaction_committed=true
+if [[ "$transaction_committed" != true ]]; then
+  fail_transaction "installer transaction did not commit"
+fi
+if ! test_hook commit; then
   exit 1
 fi
+rm -rf "$old_tool_backup_dir" "$receipt_backup_dir"
+old_tool_backup_dir=""
+receipt_backup_dir=""
+rm -f "$old_link_backup"
+old_link_backup=""
 
 echo "[done] EVA Tool installed"
 if resolved_command="$(command -v eva 2>/dev/null)"; then

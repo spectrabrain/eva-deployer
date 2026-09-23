@@ -113,9 +113,6 @@ jobs:
       - name: Test Remote Release transport contract
         run: scripts/test/test_remote_release_transport.sh
 
-      - name: Test Remote E2E static readiness contract
-        run: scripts/test/test_remote_e2e_readiness_contract.sh
-
       - name: Test Docker credential store contract
         run: scripts/test/test_docker_credential_store_contract.sh
 

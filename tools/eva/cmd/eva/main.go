@@ -49,6 +49,7 @@ var (
 	bootstrapRemoteRuntime            = remote.BootstrapTargetRuntime
 	defaultCurrentReleaseReceiptPath  = release.DefaultCurrentReceiptPath
 	defaultRemoteInboxRoot            = release.DefaultRemoteInboxRoot
+	currentReleaseNow                 = time.Now
 )
 
 type displayedError struct {
@@ -120,6 +121,8 @@ func run(args []string) error {
 		return runWorkspace(args[1:])
 	case "release":
 		return runRelease(args[1:])
+	case "internal":
+		return runInternal(args[1:])
 	case "remote":
 		return runRemote(args[1:])
 	case "install":
@@ -149,6 +152,86 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+// runInternal contains installer-only commands. They are deliberately absent
+// from normal help because receipt lifecycle is owned by eva-tool-installer.
+func runInternal(args []string) error {
+	if len(args) == 0 {
+		return errors.New("internal command is required")
+	}
+	flags := flag.NewFlagSet("internal "+args[0], flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	releaseRoot := flags.String("release", "", "Release directory")
+	selectedBy := flags.String("selected-by", "", "Current Release selector")
+	backup := flags.String("backup", "", "Current Release receipt backup")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected internal arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	switch args[0] {
+	case "register-current-release":
+		if *releaseRoot == "" || *selectedBy == "" || *backup != "" {
+			return errors.New("internal register-current-release requires --release and --selected-by")
+		}
+		resolved, err := release.Resolve(*releaseRoot)
+		if err != nil {
+			return err
+		}
+		receiptPath := internalCurrentReceiptPath()
+		if err := release.WriteCurrentReceipt(receiptPath, resolved, *selectedBy, currentReleaseNow()); err != nil {
+			return err
+		}
+		_, loaded, err := release.LoadCurrentRelease(receiptPath)
+		if err != nil {
+			return fmt.Errorf("verify registered Current Release: %w", err)
+		}
+		if loaded.Root != resolved.Root {
+			return errors.New("registered Current Release root does not match requested Release")
+		}
+		return nil
+	case "validate-current-release":
+		if *selectedBy != "" || *backup != "" {
+			return errors.New("internal validate-current-release accepts only optional --release")
+		}
+		_, loaded, err := release.LoadCurrentRelease(internalCurrentReceiptPath())
+		if err != nil {
+			return err
+		}
+		if *releaseRoot != "" {
+			expected, err := release.Resolve(*releaseRoot)
+			if err != nil {
+				return err
+			}
+			if loaded.Root != expected.Root || loaded.Metadata.Version != expected.Metadata.Version {
+				return errors.New("Current Release does not match requested Release")
+			}
+		}
+		return nil
+	case "restore-current-release":
+		if *backup == "" || *releaseRoot != "" || *selectedBy != "" {
+			return errors.New("internal restore-current-release requires --backup")
+		}
+		return release.RestoreCurrentReceipt(internalCurrentReceiptPath(), *backup)
+	case "clear-current-release":
+		if *releaseRoot != "" || *selectedBy != "" || *backup != "" {
+			return errors.New("internal clear-current-release accepts no options")
+		}
+		return release.ClearCurrentReceipt(internalCurrentReceiptPath())
+	default:
+		return fmt.Errorf("unknown internal command %q", args[0])
+	}
+}
+
+func internalCurrentReceiptPath() string {
+	// This is intentionally only consumed by hidden installer commands so the
+	// isolated installer contract test can avoid the production state root.
+	if path := os.Getenv("EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH"); path != "" {
+		return path
+	}
+	return defaultCurrentReleaseReceiptPath
 }
 
 func runRemote(args []string) error {

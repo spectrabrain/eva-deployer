@@ -86,6 +86,66 @@ func WriteCurrentReceipt(path string, resolved Resolved, selectedBy string, now 
 	if err != nil {
 		return fmt.Errorf("encode current Release receipt: %w", err)
 	}
+	return publishCurrentReceipt(path, contents)
+}
+
+// RestoreCurrentReceipt restores a previously validated receipt through the
+// same atomic writer used for new receipts. The backup contents are preserved
+// verbatim so a failed installer transaction returns to its exact receipt.
+func RestoreCurrentReceipt(path, backupPath string) error {
+	if _, _, err := LoadCurrentRelease(backupPath); err != nil {
+		return fmt.Errorf("validate Current Release receipt backup: %w", err)
+	}
+	contents, err := os.ReadFile(backupPath)
+	if err != nil {
+		return fmt.Errorf("read Current Release receipt backup: %w", err)
+	}
+	return publishCurrentReceipt(path, contents)
+}
+
+// ClearCurrentReceipt removes a receipt after a failed first installation.
+// It rejects links and special files rather than following an untrusted path.
+func ClearCurrentReceipt(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read Current Release receipt: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("current Release receipt is not a regular file")
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove Current Release receipt: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("sync Current Release receipt directory: %w", err)
+	}
+	return nil
+}
+
+// LoadCurrentRelease verifies both the receipt and the Release it names.
+func LoadCurrentRelease(path string) (CurrentReceipt, Resolved, error) {
+	receipt, err := LoadCurrentReceipt(path)
+	if err != nil {
+		return CurrentReceipt{}, Resolved{}, err
+	}
+	resolved, err := resolveCurrent(receipt)
+	if err != nil {
+		return CurrentReceipt{}, Resolved{}, err
+	}
+	return receipt, resolved, nil
+}
+
+func publishCurrentReceipt(path string, contents []byte) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return errors.New("current Release receipt is not a regular file")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read current Release receipt: %w", err)
+	}
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return fmt.Errorf("create current Release receipt directory: %w", err)

@@ -277,6 +277,29 @@ func TestRunVerifyUsesCurrentReleaseReceiptAndExplicitOverride(t *testing.T) {
 	}
 }
 
+func TestInternalRegisterCurrentReleaseUsesManagedReceipt(t *testing.T) {
+	releaseRoot := writeRemotePublishRelease(t)
+	previousReceiptPath, previousNow := defaultCurrentReleaseReceiptPath, currentReleaseNow
+	defer func() {
+		defaultCurrentReleaseReceiptPath, currentReleaseNow = previousReceiptPath, previousNow
+	}()
+	defaultCurrentReleaseReceiptPath = filepath.Join(t.TempDir(), "releases", "current.yaml")
+	currentReleaseNow = func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }
+	if err := run([]string{"internal", "register-current-release", "--release", releaseRoot, "--selected-by", "eva-tool-installer"}); err != nil {
+		t.Fatalf("register Current Release: %v", err)
+	}
+	receipt, resolved, err := release.LoadCurrentRelease(defaultCurrentReleaseReceiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.SelectedBy != "eva-tool-installer" || resolved.Root != releaseRoot {
+		t.Fatalf("registered receipt=%#v resolved=%#v", receipt, resolved)
+	}
+	if err := run([]string{"internal", "validate-current-release", "--release", releaseRoot}); err != nil {
+		t.Fatalf("validate Current Release: %v", err)
+	}
+}
+
 func TestRemoteCommandsResolveRegistryFromBootstrapReceipt(t *testing.T) {
 	releaseRoot := writeRemotePublishRelease(t)
 	previousReceiptPath := defaultRemoteBootstrapReceiptPath

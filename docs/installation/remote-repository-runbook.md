@@ -55,8 +55,7 @@ Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에�
 
 ## 3. [Main] AWS와 Harbor 입력 확인
 
-정상 작업에 사용할 Main Harbor endpoint를 확인합니다. Target SSH 주소는 publish 명령에
-직접 지정합니다.
+정상 작업에 사용할 Main Harbor endpoint를 확인합니다.
 
 ```text
 10.159.57.172:32080
@@ -131,32 +130,37 @@ sudo eva remote verify
 evidence를 확인합니다. 자산을 다시 다운로드하거나 게시하지 않으며, 성공해도 Target의
 실제 Harbor pull까지 증명하는 것은 아닙니다.
 
-## 7. [Main] Target으로 Release 게시
+## 7. [Main] Managed Target 등록·검증 및 Release 게시
 
-검증한 Base Release와 생성된 delivery artifact를 Target으로 게시합니다.
+Main의 Managed Target Registry는 publish 인증에만 사용하며 Target의 EVA installation
+workspace와 별개입니다. Target password를 command line에 기록하지 않습니다. 등록 시 Main의
+root 전용 credential store에 저장하고, 등록한 SSH host key가 바뀌면 자동 수락하지 않습니다.
+
+먼저 Target을 한 번 등록합니다. 대화형 입력에서 SSH 및 sudo password를 echo 없이 받으며,
+SSH·sudo 인증도 저장 전에 검증합니다.
+
+```bash
+sudo eva remote target add site-dev-196
+```
+
+게시 전에는 Target 연결과 권한, `linux/amd64`, storage 및 inbox parent를 다시 확인합니다.
+이 preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.
+
+```bash
+sudo eva remote target verify site-dev-196
+```
+
+검증한 Base Release와 생성된 delivery artifact를 등록한 Target으로 게시합니다.
 
 ```bash
 sudo eva remote publish \
-  --target eva@10.159.56.196
+  --target site-dev-196
 ```
 
 Base Release, Remote Runtime 및 Target payload는 하나의 Target staging area로 전달되고,
 Target에서 checksum과 identity를 재검증한 뒤 atomic publish됩니다. Workspace,
 inventory와 AWS credential은 전송하지 않습니다. 동일 identity의 재게시는 허용하지만,
 같은 version에 다른 identity를 덮어쓰지는 않습니다.
-
-### 여러 Target에 순차 게시
-
-`--target`은 반복할 수 있습니다. 각 Target은 독립 staging, 검증, atomic rename을
-수행하며 한 Target이 실패해도 이후 Target은 계속 시도합니다. 전체 결과 중 하나라도
-실패하면 명령은 non-zero로 끝납니다.
-
-```bash
-sudo eva remote publish \
-  --target eva@10.159.56.196 \
-  --target eva@10.159.56.197 \
-  --target eva@10.159.56.198
-```
 
 bootstrap receipt와 같은 registry를 명시적으로 확인하려면 모든 Remote 명령에
 `--registry 10.159.57.172:32080`를 붙일 수 있습니다. 다른 registry는 조용히

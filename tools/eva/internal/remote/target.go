@@ -241,6 +241,52 @@ func (store TargetStore) Load(name string) (TargetConfiguration, TargetCredentia
 	return config, credential, nil
 }
 
+// TargetListing is one registered Target name with its non-secret
+// configuration. Err reports why the Target is not usable; credentials are
+// loaded for that check but are never part of the listing.
+type TargetListing struct {
+	Name   string
+	Config TargetConfiguration
+	Err    error
+}
+
+// List returns every registered Target sorted by name. A missing registry is
+// an empty list. A damaged entry is reported in its listing instead of hiding
+// the remaining Targets.
+func (store TargetStore) List() ([]TargetListing, error) {
+	if err := validateTargetRoot(store.RegistryRoot, 0o750); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(store.RegistryRoot)
+	if err != nil {
+		return nil, err
+	}
+	listings := []TargetListing{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if ValidateTargetName(name) != nil {
+			listings = append(listings, TargetListing{Name: name, Err: errors.New("Remote Target name is invalid")})
+			continue
+		}
+		config, _, err := store.Load(name)
+		if err != nil {
+			// Keep the address visible when only the credential side is broken.
+			configPath, _ := store.ConfigPath(name)
+			var partial TargetConfiguration
+			if loadTargetYAML(configPath, 0o640, &partial) == nil && ValidateTargetConfiguration(partial) == nil && partial.Name == name {
+				config = partial
+			}
+		}
+		listings = append(listings, TargetListing{Name: name, Config: config, Err: err})
+	}
+	return listings, nil
+}
+
 func ensureTargetRoot(path string, mode os.FileMode) error {
 	if err := validateTargetRoot(path, mode); err == nil {
 		return nil

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"golang.org/x/term"
@@ -275,15 +276,22 @@ func remoteUsage() {
 }
 
 func remoteTargetUsage() {
-	fmt.Println("Usage: eva remote target <add|verify> NAME")
+	fmt.Println("Usage: eva remote target list")
+	fmt.Println("       eva remote target <add|verify> NAME")
 	fmt.Println("")
-	fmt.Println("add stores credentials only in the root-only Main Target registry. verify performs no registry writes.")
+	fmt.Println("list shows registered Targets without credentials. add stores credentials only in the root-only Main Target registry. verify performs no registry writes.")
 }
 
 func runRemoteTarget(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		remoteTargetUsage()
 		return nil
+	}
+	if args[0] == "list" {
+		if len(args) != 1 {
+			return errors.New("remote target list accepts no arguments")
+		}
+		return runRemoteTargetList()
 	}
 	if len(args) != 2 {
 		return errors.New("remote target requires an action and Target name")
@@ -428,6 +436,36 @@ func runRemoteTargetAdd(name string) error {
 	fmt.Printf("[INFO] target=%s\n", name)
 	fmt.Printf("[INFO] Run: sudo eva remote target verify %s\n", name)
 	return nil
+}
+
+func runRemoteTargetList() error {
+	if remoteTargetEffectiveUID() != 0 {
+		return errors.New("Remote Target management requires root; run with sudo")
+	}
+	listings, err := newRemoteTargetStore(remoteTargetRegistryRoot, remoteTargetCredentialRoot).List()
+	if err != nil {
+		return fmt.Errorf("list Remote Targets: %w", err)
+	}
+	if len(listings) == 0 {
+		fmt.Println("No Remote Targets are registered.")
+		fmt.Println("[INFO] Run: sudo eva remote target add NAME")
+		return nil
+	}
+	writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(writer, "NAME\tHOST\tPORT\tUSER\tAUTH\tSTATUS")
+	for _, listing := range listings {
+		status := "ok"
+		if listing.Err != nil {
+			status = "invalid: " + listing.Err.Error()
+		}
+		config := listing.Config
+		if config.Name == "" {
+			fmt.Fprintf(writer, "%s\t-\t-\t-\t-\t%s\n", listing.Name, status)
+			continue
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\t%s\n", config.Name, config.Host, config.Port, config.User, config.Authentication.Method, status)
+	}
+	return writer.Flush()
 }
 
 func runRemoteTargetVerify(name string) error {

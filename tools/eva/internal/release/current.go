@@ -89,11 +89,52 @@ func WriteCurrentReceipt(path string, resolved Resolved, selectedBy string, now 
 	return publishCurrentReceipt(path, contents)
 }
 
+// ValidateReplaceableCurrentReceipt decides whether an installer transaction
+// for targetRoot may replace the receipt at path. The receipt itself must
+// always be well formed. A receipt naming another root keeps the normal
+// Current Release policy: that Release must still validate. A receipt naming
+// targetRoot is a same-path upgrade: the operator has already replaced the
+// directory contents, so the old version cannot be revalidated there, and the
+// verified new Release is authoritative. Only an unchanged version with a
+// different identity is rejected, because that is content drift rather than
+// an upgrade.
+func ValidateReplaceableCurrentReceipt(path, targetRoot string) (CurrentReceipt, error) {
+	receipt, err := LoadCurrentReceipt(path)
+	if err != nil {
+		return CurrentReceipt{}, err
+	}
+	if err := validateCurrentRoot(targetRoot); err != nil {
+		return CurrentReceipt{}, err
+	}
+	target, err := Resolve(targetRoot)
+	if err != nil {
+		return CurrentReceipt{}, fmt.Errorf("validate installer Release: %w", err)
+	}
+	if receipt.ReleaseRoot != target.Root {
+		if _, err := resolveCurrent(receipt); err != nil {
+			return CurrentReceipt{}, fmt.Errorf("validate existing Current Release: %w", err)
+		}
+		return receipt, nil
+	}
+	if receipt.ReleaseVersion == target.Metadata.Version {
+		identity, err := ReleaseIdentity(target)
+		if err != nil {
+			return CurrentReceipt{}, err
+		}
+		if identity != receipt.ReleaseIdentity {
+			return CurrentReceipt{}, fmt.Errorf("receipt identity does not match Release identity for unchanged version %q", receipt.ReleaseVersion)
+		}
+	}
+	return receipt, nil
+}
+
 // RestoreCurrentReceipt restores a previously validated receipt through the
 // same atomic writer used for new receipts. The backup contents are preserved
-// verbatim so a failed installer transaction returns to its exact receipt.
-func RestoreCurrentReceipt(path, backupPath string) error {
-	if _, _, err := LoadCurrentRelease(backupPath); err != nil {
+// verbatim so a failed installer transaction returns to its exact receipt. The
+// backup is checked with the same replacement policy the installer applied
+// before the transaction, so a same-path upgrade can still roll back.
+func RestoreCurrentReceipt(path, backupPath, targetRoot string) error {
+	if _, err := ValidateReplaceableCurrentReceipt(backupPath, targetRoot); err != nil {
 		return fmt.Errorf("validate Current Release receipt backup: %w", err)
 	}
 	contents, err := os.ReadFile(backupPath)

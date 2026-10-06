@@ -377,7 +377,7 @@ restore_receipt() {
     return 0
   fi
   if [[ "$had_current_receipt" == true ]]; then
-    if ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$current_receipt" "$tool_binary" internal restore-current-release --backup "$receipt_backup"; then
+    if ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$current_receipt" "$tool_binary" internal restore-current-release --backup "$receipt_backup" --release "$release_root"; then
       echo "[error] rollback could not restore Current Release receipt" >&2
       receipt_error=1
     fi
@@ -510,8 +510,10 @@ if [[ -e "$current_receipt" || -L "$current_receipt" ]]; then
     echo "[error] could not back up Current Release receipt" >&2
     exit 1
   fi
-  if ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$receipt_backup" "$staging_dir/bin/eva" internal validate-current-release >/dev/null 2>&1; then
-    echo "[error] existing Current Release receipt cannot be validated" >&2
+  # A receipt for this same Release root is a same-path upgrade; any other
+  # root must still name a valid Release before it may be replaced.
+  if ! EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$receipt_backup" "$staging_dir/bin/eva" internal validate-replaceable-current-release --release "$release_root" >/dev/null; then
+    echo "[error] existing Current Release receipt cannot be replaced by this Release" >&2
     exit 1
   fi
   had_current_receipt=true

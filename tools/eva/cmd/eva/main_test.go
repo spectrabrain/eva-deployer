@@ -298,6 +298,26 @@ func TestInternalRegisterCurrentReleaseUsesManagedReceipt(t *testing.T) {
 	if err := run([]string{"internal", "validate-current-release", "--release", releaseRoot}); err != nil {
 		t.Fatalf("validate Current Release: %v", err)
 	}
+	if err := run([]string{"internal", "validate-replaceable-current-release", "--release", releaseRoot}); err != nil {
+		t.Fatalf("validate replaceable Current Release: %v", err)
+	}
+	if err := run([]string{"internal", "validate-replaceable-current-release"}); err == nil {
+		t.Fatal("validate-replaceable-current-release accepted a missing --release")
+	}
+	backup := filepath.Join(t.TempDir(), "current.yaml")
+	contents, err := os.ReadFile(defaultCurrentReleaseReceiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, contents, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"internal", "restore-current-release", "--backup", backup}); err == nil {
+		t.Fatal("restore-current-release accepted a missing --release")
+	}
+	if err := run([]string{"internal", "restore-current-release", "--backup", backup, "--release", releaseRoot}); err != nil {
+		t.Fatalf("restore Current Release: %v", err)
+	}
 }
 
 func TestRemoteCommandsResolveRegistryFromBootstrapReceipt(t *testing.T) {

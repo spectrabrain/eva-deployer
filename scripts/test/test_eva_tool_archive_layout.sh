@@ -348,6 +348,81 @@ set -e
 [[ "$status" -eq 143 ]]
 assert_current_release "$new_release_root" "$new_version"
 
+# The runbook re-extracts each Release into one fixed directory. Installing a
+# newer verified Release there is an upgrade, while every failed attempt must
+# leave the prior Tool, command link, and exact receipt in place.
+same_root="$work_root/same-path release"
+same_install="$work_root/same-path-installed"
+same_receipt="$same_install/var/lib/eva/releases/current.yaml"
+install_same_path() {
+  "${sudo_cmd[@]}" "$same_root/eva-tool-installer.sh" \
+    --root "$same_install/opt/eva" \
+    --bin-dir "$same_install/bin" \
+    --state-root "$same_install/var/lib/eva" \
+    --log-root "$same_install/var/log/eva"
+}
+extract_same_path() {
+  rm -rf "$same_root"
+  cp -a "$1" "$same_root"
+}
+same_receipt_contents() {
+  "${sudo_cmd[@]}" cat "$same_receipt"
+}
+same_receipt_field() {
+  same_receipt_contents | awk -F': ' -v field="$1" '$1 == field { print $2; exit }'
+}
+expect_same_path_rejected() {
+  local description="$1" before
+  before="$(same_receipt_contents)"
+  if install_same_path >"$work_root/same-path.log" 2>&1; then
+    echo "[error] same-path installer accepted $description" >&2
+    exit 1
+  fi
+  [[ "$(same_receipt_contents)" == "$before" ]] || {
+    echo "[error] same-path installer changed the receipt after $description" >&2
+    exit 1
+  }
+  [[ "$("$same_install/bin/eva" version | awk 'NR == 1 { print $1; exit }')" == "0.1.0-migration" ]]
+  [[ "$(readlink -f "$same_install/bin/eva")" == "$same_install/opt/eva/tool/bin/eva" ]]
+  if find "$same_install/opt/eva" "$same_install/bin" -mindepth 1 -maxdepth 1 -name '.eva-*' -print -quit | grep -q .; then
+    echo "[error] same-path installer left transaction state after $description" >&2
+    exit 1
+  fi
+}
+
+extract_same_path "$release_root"
+install_same_path >/dev/null
+old_identity="$(same_receipt_field release_identity)"
+
+extract_same_path "$new_release_root"
+printf 'tampered\n' >> "$same_root/eva-infra_${new_version}.tar.gz"
+expect_same_path_rejected "a Release with a checksum mismatch"
+
+extract_same_path "$release_root"
+printf '# rebuilt with different contents\n' >> "$same_root/release.yaml"
+expect_same_path_rejected "an unchanged version with a different identity"
+
+extract_same_path "$new_release_root"
+export EVA_INSTALLER_TEST_FAIL_AFTER=receipt-published
+expect_same_path_rejected "an injected failure after receipt publication"
+unset EVA_INSTALLER_TEST_FAIL_AFTER
+
+install_same_path >/dev/null
+[[ "$("$same_install/bin/eva" version | awk 'NR == 1 { print $1; exit }')" == "$new_version" ]]
+[[ "$(same_receipt_field release_version)" == "$new_version" ]]
+[[ "$(same_receipt_field release_root)" == "$same_root" ]]
+[[ "$(same_receipt_field release_identity)" != "$old_identity" ]]
+EVA_INTERNAL_CURRENT_RELEASE_RECEIPT_PATH="$same_receipt" \
+  "$same_install/bin/eva" internal validate-current-release --release "$same_root"
+
+# A malformed receipt is never silently replaced, even for the same root.
+printf 'schema_version: [v1\n' | "${sudo_cmd[@]}" tee "$same_receipt" >/dev/null
+if install_same_path >"$work_root/same-path.log" 2>&1; then
+  echo "[error] same-path installer replaced a malformed receipt" >&2
+  exit 1
+fi
+[[ "$(same_receipt_contents)" == 'schema_version: [v1' ]]
+
 expect_rejected() {
   local candidate="$1"
   if "${sudo_cmd[@]}" "$installer" \

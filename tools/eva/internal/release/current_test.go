@@ -205,3 +205,182 @@ func currentTestRelease(t *testing.T) string {
 	}
 	return root
 }
+
+func TestValidateReplaceableCurrentReceiptAllowsSamePathUpgrade(t *testing.T) {
+	root := t.TempDir()
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.96", "tool ci.96")
+	receiptPath := filepath.Join(t.TempDir(), "releases", "current.yaml")
+	writeCurrentTestReceipt(t, receiptPath, root)
+	previous, err := LoadCurrentReceipt(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.98", "tool ci.98")
+	if _, err := Select(SelectionOptions{ReceiptPath: receiptPath}); err == nil {
+		t.Fatal("stale receipt selected a replaced Release before reinstall")
+	}
+	if _, err := ValidateReplaceableCurrentReceipt(receiptPath, root); err != nil {
+		t.Fatalf("same-path upgrade rejected: %v", err)
+	}
+	writeCurrentTestReceipt(t, receiptPath, root)
+	selected, err := Select(SelectionOptions{ReceiptPath: receiptPath})
+	if err != nil {
+		t.Fatalf("select upgraded Current Release: %v", err)
+	}
+	upgraded, err := LoadCurrentReceipt(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := ReleaseIdentity(selected.Resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.ReleaseRoot != root || upgraded.ReleaseVersion != "0.1.0-ci.98" || upgraded.ReleaseIdentity != identity || upgraded.ReleaseIdentity == previous.ReleaseIdentity {
+		t.Fatalf("upgraded receipt = %#v, previous = %#v", upgraded, previous)
+	}
+}
+
+func TestValidateReplaceableCurrentReceiptRejectsCorruptSamePathRelease(t *testing.T) {
+	root := t.TempDir()
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.96", "tool ci.96")
+	receiptPath := filepath.Join(t.TempDir(), "current.yaml")
+	writeCurrentTestReceipt(t, receiptPath, root)
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.98", "tool ci.98")
+	if err := os.WriteFile(filepath.Join(root, "eva-tool.tar.gz"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateReplaceableCurrentReceipt(receiptPath, root); err == nil {
+		t.Fatal("same-path upgrade accepted a Release with a corrupted artifact")
+	}
+}
+
+func TestValidateReplaceableCurrentReceiptRejectsSameVersionIdentityDrift(t *testing.T) {
+	root := t.TempDir()
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.96", "tool ci.96")
+	receiptPath := filepath.Join(t.TempDir(), "current.yaml")
+	writeCurrentTestReceipt(t, receiptPath, root)
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.96", "rebuilt tool ci.96")
+	if _, err := Resolve(root); err != nil {
+		t.Fatalf("drifted fixture must itself be a valid Release: %v", err)
+	}
+	if _, err := ValidateReplaceableCurrentReceipt(receiptPath, root); err == nil {
+		t.Fatal("same version with a different identity was accepted")
+	}
+}
+
+func TestValidateReplaceableCurrentReceiptKeepsPolicyForOtherRoot(t *testing.T) {
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+	writeVersionedCurrentTestRelease(t, oldRoot, "0.1.0-ci.96", "tool ci.96")
+	writeVersionedCurrentTestRelease(t, newRoot, "0.1.0-ci.98", "tool ci.98")
+	receiptPath := filepath.Join(t.TempDir(), "current.yaml")
+	writeCurrentTestReceipt(t, receiptPath, oldRoot)
+	if _, err := ValidateReplaceableCurrentReceipt(receiptPath, newRoot); err != nil {
+		t.Fatalf("switch from a valid Release root rejected: %v", err)
+	}
+	writeVersionedCurrentTestRelease(t, oldRoot, "0.1.0-ci.97", "tool ci.97")
+	if _, err := ValidateReplaceableCurrentReceipt(receiptPath, newRoot); err == nil {
+		t.Fatal("switch accepted a receipt whose own Release no longer validates")
+	}
+}
+
+func TestValidateReplaceableCurrentReceiptRejectsMalformedReceipt(t *testing.T) {
+	root := t.TempDir()
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.98", "tool ci.98")
+	valid := filepath.Join(t.TempDir(), "valid.yaml")
+	writeCurrentTestReceipt(t, valid, root)
+	contents, err := os.ReadFile(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(path string){
+		"invalid YAML": func(path string) {
+			writeTestFile(t, path, "schema_version: [v1\n")
+		},
+		"missing field": func(path string) {
+			writeTestFile(t, path, strings.Replace(string(contents), "release_identity:", "unused_identity:", 1))
+		},
+		"symlink": func(path string) {
+			if err := os.Symlink(valid, path); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"directory": func(path string) {
+			if err := os.Mkdir(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "current.yaml")
+			setup(path)
+			if _, err := ValidateReplaceableCurrentReceipt(path, root); err == nil {
+				t.Fatal("malformed receipt was accepted")
+			}
+			if err := RestoreCurrentReceipt(filepath.Join(t.TempDir(), "current.yaml"), path, root); err == nil {
+				t.Fatal("malformed receipt backup was restored")
+			}
+		})
+	}
+}
+
+func TestRestoreCurrentReceiptRollsBackSamePathUpgrade(t *testing.T) {
+	root := t.TempDir()
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.96", "tool ci.96")
+	directory := t.TempDir()
+	receiptPath := filepath.Join(directory, "current.yaml")
+	backupPath := filepath.Join(directory, "backup.yaml")
+	writeCurrentTestReceipt(t, receiptPath, root)
+	original, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, backupPath, string(original))
+
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.98", "tool ci.98")
+	writeCurrentTestReceipt(t, receiptPath, root)
+	if err := RestoreCurrentReceipt(receiptPath, backupPath, root); err != nil {
+		t.Fatalf("restore same-path receipt backup: %v", err)
+	}
+	restored, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("restored receipt = %q, want %q", restored, original)
+	}
+}
+
+func writeVersionedCurrentTestRelease(t *testing.T, root, version, tool string) {
+	t.Helper()
+	files := map[string]string{"eva-tool.tar.gz": tool, "eva-infra.tar.gz": "infra " + version, "eva-solution.tar.gz": "solution " + version}
+	metadata := "version: " + version + "\nplatform:\n  os: " + runtime.GOOS + "\n  arch: " + runtime.GOARCH + "\nartifacts:\n"
+	checksums := ""
+	for _, name := range []string{"eva-tool.tar.gz", "eva-infra.tar.gz", "eva-solution.tar.gz"} {
+		writeTestFile(t, filepath.Join(root, name), files[name])
+		metadata += "  - name: " + strings.TrimSuffix(name, ".tar.gz") + "\n    file: " + name + "\n    sha256: " + checksum(files[name]) + "\n"
+		checksums += checksum(files[name]) + "  " + name + "\n"
+	}
+	writeTestFile(t, filepath.Join(root, "release.yaml"), metadata)
+	writeTestFile(t, filepath.Join(root, "checksums.sha256"), checksums)
+}
+
+func writeCurrentTestReceipt(t *testing.T, path, root string) {
+	t.Helper()
+	resolved, err := Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCurrentReceipt(path, resolved, "eva-tool-installer", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}

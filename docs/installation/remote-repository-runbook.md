@@ -131,6 +131,19 @@ SSH·sudo 인증도 저장 전에 검증합니다.
 sudo eva remote target add site-dev-196
 ```
 
+이미 등록된 이름으로 다시 `add`하면 입력을 받기 전에 거부되며 기존 설정과 credential은
+그대로 유지됩니다. 등록된 Target과 주소는 다음 명령으로 확인합니다. credential은 출력하지
+않으며, credential 등이 손상된 Target은 `STATUS`에 `invalid`와 원인이 표시됩니다.
+
+```bash
+sudo eva remote target list
+```
+
+```text
+NAME          HOST           PORT  USER  AUTH      STATUS
+site-dev-196  10.159.56.196  22    eva   password  ok
+```
+
 게시 전에는 Target 연결과 권한, `linux/amd64`, storage 및 inbox parent를 다시 확인합니다.
 이 preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.
 

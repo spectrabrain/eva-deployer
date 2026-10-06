@@ -271,3 +271,35 @@ func TestTargetStoreLoadsPublicKeyCredentialOnlyWithManagedIdentity(t *testing.T
 func testTargetConfiguration() TargetConfiguration {
 	return TargetConfiguration{SchemaVersion: "v1", Name: "site-dev-196", Host: "10.159.56.197", Port: 22, User: "eva", Authentication: TargetAuthentication{Method: "password", CredentialRef: "site-dev-196"}, Sudo: TargetAuthentication{Method: "password", CredentialRef: "site-dev-196"}, HostKey: TargetHostKey{Algorithm: "ssh-ed25519", Fingerprint: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789"}}
 }
+
+func TestTargetStoreListsTargetsWithAddressesAndReportsDamage(t *testing.T) {
+	store := NewTargetStore(filepath.Join(t.TempDir(), "targets"), filepath.Join(t.TempDir(), "credentials"))
+	if listings, err := store.List(); err != nil || len(listings) != 0 {
+		t.Fatalf("missing registry listings = %#v, %v", listings, err)
+	}
+	for _, target := range []struct{ name, host string }{{"site-mg-c", "10.159.57.20"}, {"site-dev-196", "10.159.56.197"}} {
+		config := testTargetConfiguration()
+		config.Name, config.Host = target.name, target.host
+		config.Authentication.CredentialRef, config.Sudo.CredentialRef = target.name, target.name
+		if err := store.Write(config, TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "sudo-secret"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	credentialPath, _ := store.CredentialPath("site-mg-c")
+	if err := os.Remove(credentialPath); err != nil {
+		t.Fatal(err)
+	}
+	listings, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listings) != 2 || listings[0].Name != "site-dev-196" || listings[1].Name != "site-mg-c" {
+		t.Fatalf("listings = %#v", listings)
+	}
+	if listings[0].Err != nil || listings[0].Config.Host != "10.159.56.197" {
+		t.Fatalf("healthy listing = %#v", listings[0])
+	}
+	if listings[1].Err == nil || listings[1].Config.Host != "10.159.57.20" {
+		t.Fatalf("credential-damaged listing must keep its address and report an error: %#v", listings[1])
+	}
+}

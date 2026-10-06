@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -798,4 +799,90 @@ func environmentMap(environment []string) map[string]string {
 		}
 	}
 	return values
+}
+
+func TestRemoteTargetListShowsAddressesWithoutCredentials(t *testing.T) {
+	previousRegistry, previousCredential, previousUID := remoteTargetRegistryRoot, remoteTargetCredentialRoot, remoteTargetEffectiveUID
+	t.Cleanup(func() {
+		remoteTargetRegistryRoot, remoteTargetCredentialRoot, remoteTargetEffectiveUID = previousRegistry, previousCredential, previousUID
+	})
+	remoteTargetRegistryRoot = filepath.Join(t.TempDir(), "targets")
+	remoteTargetCredentialRoot = filepath.Join(t.TempDir(), "credentials")
+	remoteTargetEffectiveUID = func() int { return 0 }
+	empty := captureRemoteTargetStdout(t, func() error { return run([]string{"remote", "target", "list"}) })
+	if !strings.Contains(empty, "No Remote Targets are registered.") {
+		t.Fatalf("empty list output = %q", empty)
+	}
+	config := remotecommand.TargetConfiguration{SchemaVersion: "v1", Name: "site-mg-c", Host: "10.159.57.20", Port: 2222, User: "eva", Authentication: remotecommand.TargetAuthentication{Method: "password", CredentialRef: "site-mg-c"}, Sudo: remotecommand.TargetAuthentication{Method: "password", CredentialRef: "site-mg-c"}, HostKey: remotecommand.TargetHostKey{Algorithm: "ssh-ed25519", Fingerprint: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789"}}
+	if err := remotecommand.NewTargetStore(remoteTargetRegistryRoot, remoteTargetCredentialRoot).Write(config, remotecommand.TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "sudo-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	output := captureRemoteTargetStdout(t, func() error { return run([]string{"remote", "target", "list"}) })
+	if !strings.Contains(output, "NAME") || !strings.Contains(output, "site-mg-c") || !strings.Contains(output, "10.159.57.20") || !strings.Contains(output, "2222") || !strings.Contains(output, "ok") {
+		t.Fatalf("list output = %q", output)
+	}
+	if strings.Contains(output, "secret") {
+		t.Fatalf("list output leaked a credential: %q", output)
+	}
+	if err := run([]string{"remote", "target", "list", "extra"}); err == nil {
+		t.Fatal("target list accepted an extra argument")
+	}
+	remoteTargetEffectiveUID = func() int { return 1000 }
+	if err := run([]string{"remote", "target", "list"}); err == nil {
+		t.Fatal("target list ran without root")
+	}
+}
+
+func TestRemoteTargetAddRejectsExistingNameBeforePrompting(t *testing.T) {
+	previousRegistry, previousCredential, previousUID, previousStat := remoteTargetRegistryRoot, remoteTargetCredentialRoot, remoteTargetEffectiveUID, stdinStat
+	t.Cleanup(func() {
+		remoteTargetRegistryRoot, remoteTargetCredentialRoot, remoteTargetEffectiveUID, stdinStat = previousRegistry, previousCredential, previousUID, previousStat
+	})
+	remoteTargetRegistryRoot = filepath.Join(t.TempDir(), "targets")
+	remoteTargetCredentialRoot = filepath.Join(t.TempDir(), "credentials")
+	remoteTargetEffectiveUID = func() int { return 0 }
+	stdinStat = func() (os.FileInfo, error) { return fakeCharDeviceInfo{}, nil }
+	config := remotecommand.TargetConfiguration{SchemaVersion: "v1", Name: "site-mg-c", Host: "10.159.57.20", Port: 22, User: "eva", Authentication: remotecommand.TargetAuthentication{Method: "password", CredentialRef: "site-mg-c"}, Sudo: remotecommand.TargetAuthentication{Method: "password", CredentialRef: "site-mg-c"}, HostKey: remotecommand.TargetHostKey{Algorithm: "ssh-ed25519", Fingerprint: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789"}}
+	store := remotecommand.NewTargetStore(remoteTargetRegistryRoot, remoteTargetCredentialRoot)
+	if err := store.Write(config, remotecommand.TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "sudo-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	configPath, _ := store.ConfigPath("site-mg-c")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = run([]string{"remote", "target", "add", "site-mg-c"})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("duplicate add error = %v", err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil || string(after) != string(before) {
+		t.Fatalf("duplicate add changed the existing Target: %q, %v", after, readErr)
+	}
+	if _, _, err := store.Load("site-mg-c"); err != nil {
+		t.Fatalf("existing Target became unusable after duplicate add: %v", err)
+	}
+}
+
+type fakeCharDeviceInfo struct{ os.FileInfo }
+
+func (fakeCharDeviceInfo) Mode() os.FileMode { return os.ModeDevice | os.ModeCharDevice | 0o620 }
+
+func captureRemoteTargetStdout(t *testing.T, action func() error) string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdout
+	os.Stdout = writer
+	runErr := action()
+	os.Stdout = previous
+	writer.Close()
+	contents, readErr := io.ReadAll(reader)
+	if runErr != nil || readErr != nil {
+		t.Fatalf("action error = %v, read error = %v", runErr, readErr)
+	}
+	return string(contents)
 }

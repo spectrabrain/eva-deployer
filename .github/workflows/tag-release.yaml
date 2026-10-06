@@ -111,6 +111,7 @@ jobs:
           scripts/test/test_eva_qdrant_reconciliation.sh
           scripts/test/test_eva_vllm_reconciliation.sh
           scripts/test/test_eva_qdrant_values.sh
+          scripts/test/test_eva_agent_release_values_layout.sh
 
       - name: Test Config GPU CDI contract
         run: scripts/test/test_config_gpu_cdi.sh

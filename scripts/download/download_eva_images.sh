@@ -23,7 +23,12 @@ EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (s
 # 을 태그로 박습니다. 렌더에도 같은 값을 넣어야 배포할 태그를 받습니다 — 안 그러면 Harbor 에
 # appVersion 태그만 올라가고 배포는 ImagePullBackOff 로 죽습니다.
 EVA_APP_DEPLOY_VERSION="${EVA_APP_DEPLOY_VERSION:?missing EVA_APP_DEPLOY_VERSION (set in src/solution/version.yaml)}"
-EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-values-k3s.PRO6000-MIGx4.yaml}"
+# Image discovery renders the upstream-source values variant: the Harbor
+# variant names the target registry, whose images do not exist here yet.
+EVA_AGENT_VALUES_LAYOUT="$(eva_agent_values_layout "$EVA_AGENT_RELEASE")"
+EVA_AGENT_VALUES_FILE="${EVA_AGENT_VALUES_FILE:-$(eva_agent_values_file "$EVA_AGENT_VALUES_LAYOUT" eva-agent source)}"
+EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-$(eva_agent_values_file "$EVA_AGENT_VALUES_LAYOUT" eva-agent-vllm source PRO6000-MIGx4)}"
+echo "[info] EVA Agent values layout=${EVA_AGENT_VALUES_LAYOUT}, agent=${EVA_AGENT_VALUES_FILE}, vllm=${EVA_AGENT_VLLM_VALUES_FILE}"
 EVA_AGENT_QDRANT_SNAPSHOT_SOURCE="${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE:-local_pv}"
 case "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" in
   local_pv) qdrant_default_values_file="values-k3s.yaml" ;;
@@ -101,7 +106,7 @@ want eva-iam          && required_files+=("$IAM_CHART")
 want eva-agent-init   && required_files+=("$INIT_CHART" "$RELEASE_DIR/eva-agent-init/values-k3s.yaml")
 want eva-agent-qdrant && required_files+=("$QDRANT_CHART" "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}")
 want eva-agent-vllm   && required_files+=("$VLLM_CHART" "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}")
-want eva-agent        && required_files+=("$AGENT_CHART" "$RELEASE_DIR/eva-agent/values-k3s.yaml" "$RELEASE_DIR/eva-agent/values-secret.yaml")
+want eva-agent        && required_files+=("$AGENT_CHART" "$RELEASE_DIR/eva-agent/${EVA_AGENT_VALUES_FILE}" "$RELEASE_DIR/eva-agent/values-secret.yaml")
 
 for f in "${required_files[@]}"; do
   [[ -f "$f" ]] || { echo "[ERROR] missing file: $f"; echo "[hint] 먼저 ./scripts/download/download_offline_assets.sh 실행"; exit 1; }
@@ -123,7 +128,7 @@ want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \
   --set-string "sidecarContainers[0].image=${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE}" \
   > "$RENDER_DIR/eva-agent-qdrant.yaml"
 want eva-agent-vllm   && helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"
-want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/values-k3s.yaml" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" > "$RENDER_DIR/eva-agent.yaml"
+want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/${EVA_AGENT_VALUES_FILE}" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" > "$RENDER_DIR/eva-agent.yaml"
 # imagePullSecrets off = airgap 렌더. 켜두면 ECR 로그인 cronjob 의 amazon/aws-cli 까지
 # 목록에 들어오는데, airgap 에서는 쓰이지 않습니다.
 want eva-iam          && helm template eva-iam "$IAM_CHART" \

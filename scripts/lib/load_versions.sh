@@ -190,3 +190,80 @@ load_deploy_versions() {
     done
   fi
 }
+
+# EVA Agent 3.2.0 split its chartmuseum release values by image source:
+#   eva-agent/values-k3s.{ecr,harbor}.yaml
+#   eva-agent-vllm/values-k3s.<profile>.{docker,harbor}.yaml
+# Earlier releases publish one values-k3s[.<profile>].yaml per chart. The
+# "source" variant names upstream registries and is used to discover images on
+# the preparation host; the "harbor" variant names the Harbor placeholder and is
+# deployed into Remote and Local Repository targets.
+EVA_AGENT_VLLM_PROFILES=(A6000x1 L40sx1 PRO5000x3 PRO6000-MIGx4)
+
+eva_agent_values_layout() {
+  local version="$1"
+  if [[ ! "$version" =~ ^v?([0-9]+)\.([0-9]+)\.[0-9]+([-+][A-Za-z0-9.]+)?$ ]]; then
+    echo "[ERROR] invalid EVA Agent release version: ${version}" >&2
+    return 1
+  fi
+  if (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 2) )); then
+    echo source-split
+  else
+    echo legacy
+  fi
+}
+
+# eva_agent_values_file LAYOUT CHART VARIANT [PROFILE]
+#   CHART is eva-agent or eva-agent-vllm; VARIANT is source or harbor.
+eva_agent_values_file() {
+  local layout="$1" chart="$2" variant="$3" profile="${4:-}" base suffix
+  if [[ "$variant" != source && "$variant" != harbor ]]; then
+    echo "[ERROR] invalid EVA Agent values variant: ${variant}" >&2
+    return 1
+  fi
+  case "$chart" in
+    eva-agent)
+      [[ -z "$profile" ]] || { echo "[ERROR] eva-agent values take no vLLM profile" >&2; return 1; }
+      base="values-k3s"
+      suffix=ecr
+      ;;
+    eva-agent-vllm)
+      if [[ " ${EVA_AGENT_VLLM_PROFILES[*]} " != *" ${profile} "* ]]; then
+        echo "[ERROR] unsupported EVA Agent vLLM profile: ${profile}" >&2
+        return 1
+      fi
+      base="values-k3s.${profile}"
+      suffix=docker
+      ;;
+    *)
+      echo "[ERROR] unsupported EVA Agent values chart: ${chart}" >&2
+      return 1
+      ;;
+  esac
+  [[ "$variant" == harbor ]] && suffix=harbor
+  case "$layout" in
+    legacy) printf '%s.yaml\n' "$base" ;;
+    source-split) printf '%s.%s.yaml\n' "$base" "$suffix" ;;
+    *)
+      echo "[ERROR] invalid EVA Agent values layout: ${layout}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Prints, once each, every eva-agent and eva-agent-vllm values path relative to
+# the Agent release root that LAYOUT requires.
+eva_agent_release_values_paths() {
+  local layout="$1" profile variant file
+  local -A seen=()
+  for variant in source harbor; do
+    file="$(eva_agent_values_file "$layout" eva-agent "$variant")" || return 1
+    [[ -n "${seen[eva-agent/$file]+x}" ]] || { seen[eva-agent/$file]=1; printf 'eva-agent/%s\n' "$file"; }
+  done
+  for profile in "${EVA_AGENT_VLLM_PROFILES[@]}"; do
+    for variant in source harbor; do
+      file="$(eva_agent_values_file "$layout" eva-agent-vllm "$variant" "$profile")" || return 1
+      [[ -n "${seen[eva-agent-vllm/$file]+x}" ]] || { seen[eva-agent-vllm/$file]=1; printf 'eva-agent-vllm/%s\n' "$file"; }
+    done
+  done
+}

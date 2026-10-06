@@ -216,11 +216,17 @@ func runInternal(args []string) error {
 			}
 		}
 		return nil
-	case "restore-current-release":
-		if *backup == "" || *releaseRoot != "" || *selectedBy != "" {
-			return errors.New("internal restore-current-release requires --backup")
+	case "validate-replaceable-current-release":
+		if *releaseRoot == "" || *selectedBy != "" || *backup != "" {
+			return errors.New("internal validate-replaceable-current-release requires only --release")
 		}
-		return release.RestoreCurrentReceipt(internalCurrentReceiptPath(), *backup)
+		_, err := release.ValidateReplaceableCurrentReceipt(internalCurrentReceiptPath(), *releaseRoot)
+		return err
+	case "restore-current-release":
+		if *backup == "" || *releaseRoot == "" || *selectedBy != "" {
+			return errors.New("internal restore-current-release requires --backup and --release")
+		}
+		return release.RestoreCurrentReceipt(internalCurrentReceiptPath(), *backup, *releaseRoot)
 	case "clear-current-release":
 		if *releaseRoot != "" || *selectedBy != "" || *backup != "" {
 			return errors.New("internal clear-current-release accepts no options")

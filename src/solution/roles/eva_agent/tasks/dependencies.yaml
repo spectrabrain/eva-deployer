@@ -59,7 +59,6 @@
       }}
     eva_agent_vllm_chart_version: "{{ eva_agent_vllm_chart_version | mandatory }}"
     eva_agent_vllm_profile: "{{ eva_agent_vllm_profile | mandatory }}"
-    eva_agent_vllm_values_file: "{{ eva_agent_vllm_values_file | default('values-k3s.' ~ eva_agent_vllm_profile ~ '.yaml') }}"
     eva_agent_vllm_engine_deployment_name: "{{ eva_agent_vllm_engine_deployment_name | default('eva-agent-vllm-qwen35-vl-9b-fp8-deployment-vllm') }}"
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
@@ -106,6 +105,50 @@
             )
         )
       }}
+
+# EVA Agent 3.2.0 split its Release values by image source; the same rule is
+# defined for preparation in scripts/lib/load_versions.sh. Repository targets
+# deploy the Harbor variant, Cloud targets the upstream-source variant.
+- name: Resolve EVA Agent Release values layout
+  ansible.builtin.set_fact:
+    eva_agent_values_layout: >-
+      {{
+        eva_agent_values_layout
+        | default((eva_agent_deploy_version is version('3.2.0', '>=')) | ternary('source-split', 'legacy'))
+      }}
+    eva_agent_values_variant: "{{ (airgap_mode | bool) | ternary('harbor', 'source') }}"
+  tags:
+    - eva_agent_values_layout
+
+- name: Validate EVA Agent Release values layout
+  ansible.builtin.assert:
+    that:
+      - eva_agent_values_layout in ['legacy', 'source-split']
+    fail_msg: "eva_agent_values_layout must be legacy or source-split: {{ eva_agent_values_layout }}"
+  tags:
+    - eva_agent_values_layout
+
+- name: Resolve EVA Agent Release values files
+  ansible.builtin.set_fact:
+    eva_agent_values_file: >-
+      {{
+        eva_agent_values_file
+        | default(
+            (eva_agent_values_layout == 'legacy')
+            | ternary('values-k3s.yaml', 'values-k3s.' ~ ((eva_agent_values_variant == 'harbor') | ternary('harbor', 'ecr')) ~ '.yaml')
+          )
+      }}
+    eva_agent_vllm_values_file: >-
+      {{
+        eva_agent_vllm_values_file
+        | default(
+            'values-k3s.' ~ eva_agent_vllm_profile
+            ~ ((eva_agent_values_layout == 'legacy') | ternary('', '.' ~ ((eva_agent_values_variant == 'harbor') | ternary('harbor', 'docker'))))
+            ~ '.yaml'
+          )
+      }}
+  tags:
+    - eva_agent_values_layout
 
 - name: Validate repository mode for EVA Agent dependencies
   ansible.builtin.assert:
@@ -599,6 +642,14 @@
       {{ eva_agent_qdrant_values_file }}. Verify the selected Release assets before deploying Agent.
   when: not ansible_check_mode
 
+- name: Resolve placeholders in vLLM Release values
+  ansible.builtin.include_tasks: resolve_release_values_placeholders.yaml
+  vars:
+    eva_agent_release_values_path: "{{ eva_agent_workdir }}/eva-agent-vllm/{{ eva_agent_vllm_values_file }}"
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
 - name: Ensure Qdrant post-renderer executable bit
   ansible.builtin.file:
     path: "{{ eva_agent_workdir }}/plugin/eva-agent-qdrant/post-renderer.sh"
@@ -712,6 +763,23 @@
     path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
     regexp: 'localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0'
     replace: '{{ repository_registry }}/{{ repository_project }}/eva-agent-qdrant-snapshot-sync:0.1.0'
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
+- name: Point Harbor Qdrant snapshot project at the selected repository
+  ansible.builtin.replace:
+    path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    regexp: '(- name: HARBOR_PROJECT\s+value: )[^\r\n]+'
+    replace: '\g<1>{{ repository_project }}'
+  when:
+    - not ansible_check_mode
+    - eva_agent_qdrant_snapshot_source == 'harbor'
+
+- name: Resolve placeholders in Qdrant Release values
+  ansible.builtin.include_tasks: resolve_release_values_placeholders.yaml
+  vars:
+    eva_agent_release_values_path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'

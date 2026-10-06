@@ -82,10 +82,14 @@ else
 fi
 
 EVA_AGENT_QDRANT_VALUES_URL="${EVA_AGENT_QDRANT_VALUES_URL:-${EVA_AGENT_RELEASE_BASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}}"
+EVA_AGENT_VALUES_LAYOUT="$(eva_agent_values_layout "$EVA_AGENT_RELEASE")"
+agent_release_values_listing="$(eva_agent_release_values_paths "$EVA_AGENT_VALUES_LAYOUT")"
+mapfile -t agent_release_values_paths <<< "$agent_release_values_listing"
 
 echo "[info] EVA Agent source=${EVA_AGENT_SOURCE_NAME}"
 echo "[info] EVA Agent chart base=${EVA_AGENT_CHART_BASE}"
 echo "[info] EVA Agent release base=${EVA_AGENT_RELEASE_BASE}"
+echo "[info] EVA Agent values layout=${EVA_AGENT_VALUES_LAYOUT}"
 K3S_DEFAULT_VERSION="${K3S_DEFAULT_VERSION:?missing K3S_DEFAULT_VERSION (set in src/infra/version.yaml)}"
 ORAS_VERSION="${ORAS_VERSION:-1.3.3}"
 
@@ -214,14 +218,10 @@ required_agent_urls=(
   "${EVA_AGENT_CHART_BASE}/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
   "${EVA_AGENT_CHART_BASE}/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
   "${EVA_AGENT_CHART_BASE}/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
-  "${EVA_AGENT_RELEASE_BASE}/eva-agent/values-k3s.yaml"
   "${EVA_AGENT_RELEASE_BASE}/eva-agent/values-secret.yaml"
   "${EVA_AGENT_RELEASE_BASE}/eva-agent-init/values-k3s.yaml"
   "${EVA_AGENT_QDRANT_VALUES_URL}"
-  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.A6000x1.yaml"
-  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.L40sx1.yaml"
-  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.PRO5000x3.yaml"
-  "${EVA_AGENT_RELEASE_BASE}/eva-agent-vllm/values-k3s.PRO6000-MIGx4.yaml"
+  "${agent_release_values_paths[@]/#/${EVA_AGENT_RELEASE_BASE}/}"
   "${EVA_AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/post-renderer.sh"
   "${EVA_AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/plugin.yaml"
   "${EVA_AGENT_REPOSITORY_RAW_BASE}/install_eva_agent.sh"
@@ -472,7 +472,6 @@ fetch "https://github.com/qdrant/qdrant-helm/releases/download/qdrant-${QDRANT_C
 
 # EVA Agent release values/templates/scripts
 AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE}"
-fetch "${AGENT_RELEASE_BASE}/eva-agent/values-k3s.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-k3s.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent/values-secret.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent/values-secret.yaml"
 fetch "${AGENT_RELEASE_BASE}/eva-agent-init/values-k3s.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-init/values-k3s.yaml"
 # 릴리스마다 이 파일이 빠지는 일이 있습니다 (agent 3.1.0 에 없었고, plugins/eva-agent-qdrant/*
@@ -487,15 +486,10 @@ if ! fetch_optional "${EVA_AGENT_QDRANT_VALUES_URL}" "$EVA_CACHE_ROOT/eva-agent/
   exit 1
 fi
 
-# Download all supported k3s GPU profile values for eva-agent-vllm
-VLLM_K3S_VALUES_FILES=(
-  "values-k3s.A6000x1.yaml"
-  "values-k3s.L40sx1.yaml"
-  "values-k3s.PRO5000x3.yaml"
-  "values-k3s.PRO6000-MIGx4.yaml"
-)
-for name in "${VLLM_K3S_VALUES_FILES[@]}"; do
-  fetch "${AGENT_RELEASE_BASE}/eva-agent-vllm/${name}" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/eva-agent-vllm/${name}"
+# eva-agent and every supported vLLM GPU profile, in each image-source variant
+# the release layout publishes. Cache names mirror the upstream names.
+for path in "${agent_release_values_paths[@]}"; do
+  fetch "${AGENT_RELEASE_BASE}/${path}" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/${path}"
 done
 fetch "${AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/post-renderer.sh" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/post-renderer.sh"
 fetch "${AGENT_RELEASE_BASE}/plugins/eva-agent-qdrant/plugin.yaml" "$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}/plugins/eva-agent-qdrant/plugin.yaml"

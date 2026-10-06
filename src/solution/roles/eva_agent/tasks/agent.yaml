@@ -173,8 +173,8 @@
 
 - name: Download EVA Agent k3s values from chartmuseum release
   ansible.builtin.get_url:
-    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent/values-k3s.yaml"
+    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent/{{ eva_agent_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent/{{ eva_agent_values_file }}"
     mode: "0644"
   when:
     - not ansible_check_mode
@@ -192,10 +192,18 @@
 
 - name: Copy EVA Agent k3s values from offline bundle
   ansible.builtin.copy:
-    src: "{{ eva_agent_offline_dir }}/release/{{ eva_agent_deploy_version }}/eva-agent/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent/values-k3s.yaml"
+    src: "{{ eva_agent_offline_dir }}/release/{{ eva_agent_deploy_version }}/eva-agent/{{ eva_agent_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent/{{ eva_agent_values_file }}"
     mode: "0644"
     remote_src: true
+  when:
+    - not ansible_check_mode
+    - airgap_mode | default(false) | bool
+
+- name: Resolve placeholders in EVA Agent Release values
+  ansible.builtin.include_tasks: resolve_release_values_placeholders.yaml
+  vars:
+    eva_agent_release_values_path: "{{ eva_agent_workdir }}/eva-agent/{{ eva_agent_values_file }}"
   when:
     - not ansible_check_mode
     - airgap_mode | default(false) | bool
@@ -250,7 +258,7 @@
   ansible.builtin.slurp:
     src: "{{ item }}"
   loop:
-    - "{{ eva_agent_workdir }}/eva-agent/values-k3s.yaml"
+    - "{{ eva_agent_workdir }}/eva-agent/{{ eva_agent_values_file }}"
     - "{{ eva_agent_workdir }}/eva-agent/agent-k3s-override.yaml"
   register: eva_agent_generated_values_raw
   when: not ansible_check_mode

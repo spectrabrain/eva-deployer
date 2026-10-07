@@ -1,0 +1,84 @@
+- name: Resolve target kubeconfig for Argo CD tracking detection
+  ansible.builtin.set_fact:
+    precondition_argocd_kubeconfig: >-
+      {{
+        precondition_argocd_kubeconfig_override
+        | default(
+            '/home/'
+            ~ (
+              ansible_user
+              | default(ansible_ssh_user | default('eva'))
+            )
+            ~ '/.kube/config'
+          )
+      }}
+  changed_when: false
+
+- name: Read Argo CD tracking metadata from target resources
+  ansible.builtin.shell: |
+    set -o pipefail
+    if ! command -v kubectl >/dev/null 2>&1; then
+      exit 10
+    fi
+    kubeconfig={{ precondition_argocd_kubeconfig | quote }}
+    if [[ ! -f "$kubeconfig" || -L "$kubeconfig" ]]; then
+      exit 10
+    fi
+    resource_types='pods,deployments.apps,statefulsets.apps,daemonsets.apps,replicasets.apps,jobs.batch,cronjobs.batch,services,configmaps,secrets,persistentvolumeclaims,serviceaccounts,ingresses.networking.k8s.io,roles.rbac.authorization.k8s.io,rolebindings.rbac.authorization.k8s.io'
+    tracking_output="$(kubectl --kubeconfig "$kubeconfig" get "$resource_types" \
+      --all-namespaces \
+      -o go-template='{% raw %}{{ range .items }}{{ with .metadata.labels }}{{ with index . "argocd.argoproj.io/instance" }}label={{ . }}{{ "\n" }}{{ end }}{{ end }}{{ with .metadata.annotations }}{{ with index . "argocd.argoproj.io/tracking-id" }}tracking={{ . }}{{ "\n" }}{{ end }}{{ end }}{{ end }}{% endraw %}' 2>&1)" || {
+      rc=$?
+      case "$tracking_output" in
+        *"The connection to the server"*|*"no configuration has been provided"*|*"couldn't get current server API group list"*|*"current-context is not set"*|*"localhost:8080 was refused"*)
+          exit 10
+          ;;
+      esac
+      printf '%s\n' "$tracking_output" >&2
+      exit "$rc"
+    }
+    printf '%s\n' "$tracking_output"
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: "{{ precondition_argocd_kubeconfig }}"
+  register: precondition_argocd_tracking_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Summarize Argo CD tracking metadata for this EVA site
+  ansible.builtin.set_fact:
+    precondition_argocd_tracking_status: >-
+      {{
+        ((precondition_argocd_tracking_cmd.rc | default(10) | int) == 0)
+        | ternary(
+          'ok',
+          (((precondition_argocd_tracking_cmd.rc | default(10) | int) == 10)
+          | ternary('unavailable', 'error'))
+        )
+      }}
+    precondition_argocd_applications: >-
+      {{
+        precondition_argocd_tracking_cmd.stdout | default('')
+        | regex_findall(
+            '(?m)^(?:label|tracking)='
+            ~ '([A-Za-z0-9._-]+-eva-'
+            ~ '(?:iam|app|vision|agent'
+            ~ '(?:-(?:init|qdrant|vllm))?))'
+            ~ '(?::|\\s*$)'
+          )
+        | unique | sort | list
+      }}
+    precondition_argocd_metadata_entries: >-
+      {{
+        precondition_argocd_tracking_cmd.stdout | default('')
+        | regex_findall(
+            '(?m)^(?:label|tracking)='
+            ~ '[A-Za-z0-9._-]+-eva-'
+            ~ '(?:iam|app|vision|agent'
+            ~ '(?:-(?:init|qdrant|vllm))?)'
+            ~ '(?::|\\s*$)'
+          )
+        | length
+      }}
+  changed_when: false

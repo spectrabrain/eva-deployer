@@ -1,0 +1,392 @@
+- name: Reconcile exact legacy Argo CD-managed EVA Vision resources
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="$EVA_VISION_NAMESPACE"
+    release="$EVA_VISION_RELEASE"
+    chart_version="$EVA_VISION_CHART_VERSION"
+    values_file="$EVA_VISION_VALUES_FILE"
+    chart_source="$EVA_VISION_CHART_SOURCE"
+    use_chart_version="$EVA_VISION_USE_CHART_VERSION"
+    expected_application_suffix='-eva-vision'
+
+    rendered_file="$(mktemp)"
+    rendered_json_file="$(mktemp)"
+    rendered_resources_file="$(mktemp)"
+    live_file="$(mktemp)"
+    candidates_file="$(mktemp)"
+
+    cleanup() {
+      rm -f \
+        "$rendered_file" \
+        "$rendered_json_file" \
+        "$rendered_resources_file" \
+        "$live_file" \
+        "$candidates_file"
+    }
+
+    trap cleanup EXIT
+
+    if helm status \
+      "$release" \
+      -n "$namespace" \
+      >/dev/null 2>&1
+    then
+      release_status="$(
+        helm status \
+          "$release" \
+          -n "$namespace" \
+          -o json |
+        jq -r '.info.status // empty'
+      )"
+
+      case "$release_status" in
+        deployed)
+          echo "[INFO] deployed EVA Vision Helm release requires no legacy reconciliation"
+          exit 0
+          ;;
+        failed)
+          echo "[INFO] failed EVA Vision Helm release will be recovered by Helm upgrade"
+          exit 0
+          ;;
+        *)
+          echo "[ERROR] unsafe EVA Vision Helm release status: $release_status"
+          exit 1
+          ;;
+      esac
+    fi
+
+    helm_template_command=(
+      helm template
+      "$release"
+      "$chart_source"
+      --namespace "$namespace"
+      --values "$values_file"
+      --post-renderer eva-vision-postrenderer
+    )
+
+    if [[ "$use_chart_version" == '1' ]]; then
+      helm_template_command+=(
+        --version
+        "$chart_version"
+      )
+    fi
+
+    "${helm_template_command[@]}" > "$rendered_file"
+
+    kubectl create \
+      --dry-run=client \
+      --namespace "$namespace" \
+      -f "$rendered_file" \
+      -o json |
+    jq -s '
+      [
+        .[]
+        | if .kind == "List"
+          then .items[]
+          else .
+          end
+      ]
+    ' > "$rendered_json_file"
+
+    jq -r '
+      .[]
+      | select(
+          (.kind // "") != ""
+          and
+          (.metadata.name // "") != ""
+        )
+      | [
+          .kind,
+          .metadata.name
+        ]
+      | @tsv
+    ' "$rendered_json_file" |
+    LC_ALL=C sort -u > "$rendered_resources_file"
+
+    expected_inventory="$(
+      cat <<'EOF'
+    ConfigMap	eva-vision-config
+    Deployment	eva-vision
+    Service	eva-vision
+    ServiceAccount	eva-vision-sa
+    EOF
+    )"
+
+    actual_inventory="$(
+      cat "$rendered_resources_file"
+    )"
+
+    if [[ "$actual_inventory" != "$expected_inventory" ]]; then
+      echo "[ERROR] rendered EVA Vision resource inventory is unsupported"
+      printf '%s\n' "$actual_inventory"
+      exit 1
+    fi
+
+    kubectl get \
+      deployments,services,configmaps,serviceaccounts \
+      -n "$namespace" \
+      -o json > "$live_file"
+
+    jq -r '
+      .items[]
+      | select(
+          (
+            .kind == "Deployment"
+            and
+            .metadata.name == "eva-vision"
+          )
+          or
+          (
+            .kind == "Service"
+            and
+            .metadata.name == "eva-vision"
+          )
+          or
+          (
+            .kind == "ConfigMap"
+            and
+            .metadata.name == "eva-vision-config"
+          )
+          or
+          (
+            .kind == "ServiceAccount"
+            and
+            .metadata.name == "eva-vision-sa"
+          )
+        )
+      | @base64
+    ' "$live_file" > "$candidates_file"
+
+    candidate_count="$(
+      wc -l < "$candidates_file" |
+      tr -d ' '
+    )"
+
+    if [[ "$candidate_count" == '0' ]]; then
+      echo "[INFO] clean EVA Vision installation state"
+      exit 0
+    fi
+
+    if [[ "$candidate_count" != '4' ]]; then
+      echo "[ERROR] partial legacy EVA Vision resource set detected: actual=$candidate_count"
+      exit 1
+    fi
+
+    tracking_application=""
+
+    while IFS= read -r encoded
+    do
+      [[ -n "$encoded" ]] || continue
+
+      resource_json="$(
+        printf '%s' "$encoded" |
+        base64 -d
+      )"
+
+      kind="$(
+        jq -r '.kind // empty' \
+          <<< "$resource_json"
+      )"
+
+      name="$(
+        jq -r '.metadata.name // empty' \
+          <<< "$resource_json"
+      )"
+
+      resource_namespace="$(
+        jq -r '.metadata.namespace // empty' \
+          <<< "$resource_json"
+      )"
+
+      managed_by="$(
+        jq -r '
+          .metadata.labels."app.kubernetes.io/managed-by"
+          // empty
+        ' <<< "$resource_json"
+      )"
+
+      release_name="$(
+        jq -r '
+          .metadata.annotations."meta.helm.sh/release-name"
+          // empty
+        ' <<< "$resource_json"
+      )"
+
+      release_namespace="$(
+        jq -r '
+          .metadata.annotations."meta.helm.sh/release-namespace"
+          // empty
+        ' <<< "$resource_json"
+      )"
+
+      tracking="$(
+        jq -r '
+          .metadata.annotations."argocd.argoproj.io/tracking-id"
+          // empty
+        ' <<< "$resource_json"
+      )"
+
+      if [[
+        -z "$kind" ||
+        -z "$name" ||
+        "$resource_namespace" != "$namespace"
+      ]]; then
+        echo "[ERROR] unsafe EVA Vision resource identity"
+        exit 1
+      fi
+
+      if ! grep -Fxq \
+        "$kind"$'\t'"$name" \
+        "$rendered_resources_file"
+      then
+        echo "[ERROR] live EVA Vision resource is absent from rendered chart: $kind/$name"
+        exit 1
+      fi
+
+      if [[
+        -n "$release_name" ||
+        -n "$release_namespace"
+      ]]; then
+        echo "[ERROR] foreign or partial Helm ownership: $kind/$name"
+        exit 1
+      fi
+
+      if [[
+        -n "$managed_by" &&
+        "$managed_by" != 'Helm'
+      ]]; then
+        echo "[ERROR] unsupported managed-by ownership: $kind/$name=$managed_by"
+        exit 1
+      fi
+
+      if [[ -z "$tracking" ]]; then
+        echo "[ERROR] EVA Vision resource has no Argo CD tracking ID: $kind/$name"
+        exit 1
+      fi
+
+      application="${tracking%%:*}"
+
+      if [[
+        -z "$application" ||
+        "$application" != *"$expected_application_suffix"
+      ]]; then
+        echo "[ERROR] unsafe EVA Vision tracking Application: $kind/$name=$application"
+        exit 1
+      fi
+
+      if [[ -z "$tracking_application" ]]; then
+        tracking_application="$application"
+      elif [[ "$tracking_application" != "$application" ]]; then
+        echo "[ERROR] EVA Vision resources have different tracking Applications"
+        exit 1
+      fi
+
+      case "$kind/$name" in
+        Deployment/eva-vision)
+          expected_tracking="$tracking_application:apps/Deployment:$namespace/eva-vision"
+          ;;
+        Service/eva-vision)
+          expected_tracking="$tracking_application:/Service:$namespace/eva-vision"
+          ;;
+        ConfigMap/eva-vision-config)
+          expected_tracking="$tracking_application:/ConfigMap:$namespace/eva-vision-config"
+          ;;
+        ServiceAccount/eva-vision-sa)
+          expected_tracking="$tracking_application:/ServiceAccount:$namespace/eva-vision-sa"
+          ;;
+        *)
+          echo "[ERROR] unsupported EVA Vision cleanup resource: $kind/$name"
+          exit 1
+          ;;
+      esac
+
+      if [[ "$tracking" != "$expected_tracking" ]]; then
+        echo "[ERROR] EVA Vision tracking identity mismatch: $kind/$name"
+        exit 1
+      fi
+    done < "$candidates_file"
+
+    if [[ -z "$tracking_application" ]]; then
+      echo "[ERROR] EVA Vision tracking Application was not resolved"
+      exit 1
+    fi
+
+    remaining_pods="$(
+      kubectl get pods \
+        -n "$namespace" \
+        -l "app.kubernetes.io/instance=$release" \
+        -o json |
+      jq '[.items[] | select(.status.phase != "Succeeded")] | length'
+    )"
+
+    if [[ "$remaining_pods" != '0' ]]; then
+      echo "[ERROR] EVA Vision pods remain before legacy reconciliation"
+      exit 1
+    fi
+
+    resources_to_delete=(
+      "deployment/eva-vision"
+      "service/eva-vision"
+      "configmap/eva-vision-config"
+      "serviceaccount/eva-vision-sa"
+    )
+
+    resources_to_delete_count=0
+
+    for resource in "${resources_to_delete[@]}"
+    do
+      kind="${resource%%/*}"
+      name="${resource#*/}"
+
+      if ! kubectl get \
+        "$kind/$name" \
+        -n "$namespace" \
+        >/dev/null 2>&1
+      then
+        continue
+      fi
+
+      kubectl delete \
+        "$kind/$name" \
+        -n "$namespace" \
+        --wait=true \
+        --timeout=120s
+
+      resources_to_delete_count=$((resources_to_delete_count + 1))
+    done
+
+    remaining_count=0
+
+    for resource in "${resources_to_delete[@]}"
+    do
+      if kubectl get \
+        "$resource" \
+        -n "$namespace" \
+        >/dev/null 2>&1
+      then
+        echo "[ERROR] legacy EVA Vision resource remains: $resource"
+        remaining_count=$((remaining_count + 1))
+      fi
+    done
+
+    if (( remaining_count != 0 )); then
+      exit 1
+    fi
+
+    echo "[OK] reconciled exact legacy EVA Vision resources application=$tracking_application count=$resources_to_delete_count"
+  args:
+    executable: /bin/bash
+  register: eva_vision_legacy_reconciliation
+  changed_when: >-
+    '[OK] reconciled exact legacy EVA Vision resources'
+    in eva_vision_legacy_reconciliation.stdout
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+    EVA_VISION_NAMESPACE: "{{ eva_vision_namespace }}"
+    EVA_VISION_RELEASE: "{{ eva_vision_name }}"
+    EVA_VISION_CHART_VERSION: "{{ eva_vision_chart_version }}"
+    EVA_VISION_VALUES_FILE: "{{ eva_vision_workdir }}/effective-input-values.yaml"
+    EVA_VISION_CHART_SOURCE: "{{ eva_vision_chart_source }}"
+    EVA_VISION_USE_CHART_VERSION: "{{ (eva_cli_chart_path | default('') | length == 0) | ternary('1', '0') }}"

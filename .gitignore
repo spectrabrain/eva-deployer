@@ -12,32 +12,38 @@ env/
 .vscode/
 .idea/
 
-config/
-deploy/
+# Local design notes and implementation planning are not release artifacts.
+docs/todo/
+docs/development/
+docs/architecture/
 
-logs/
-logs_*/
-logs_infra/
-logs_eva/
-install/
-!install/
-install/*
-!install/*.sh
-!install/*.txt
-!install/harbor-endpoint.yaml.sample
-install/manifest.txt
+out/cache/*
+!out/cache/.gitkeep
+out/work/*
+!out/work/.gitkeep
+
+# Local EVA CLI development binary. Release builds use out/work/build/eva.
+/tools/eva/eva
+out/state/*
+!out/state/.gitkeep
+out/dist/*
+!out/dist/.gitkeep
+workspace/inventory/*
+!workspace/inventory/.gitkeep
+!workspace/inventory/*.sample
+workspace/site-values/*
+!workspace/site-values/.gitkeep
+!workspace/site-values/*.sample
 
 *.ini
 
-# Always include config role files
-!roles/config/
-!roles/config/**
-
 # Deployment-specific EVA App host values (contains license credentials)
 values/app.yaml
+workspace/site-values/app.yaml
 
 # EVA IAM host settings (contains secrets / client credentials)
 values/eva-iam.yaml
+workspace/site-values/iam.yaml
 
 # Keycloak realm exports contain client secrets + signing keys — never commit
 eva-iam-realm-*.json

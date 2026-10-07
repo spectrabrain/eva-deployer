@@ -1,0 +1,825 @@
+---
+- name: Reconcile exact legacy Argo CD-managed EVA Agent resources
+  no_log: true
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="$EVA_AGENT_NAMESPACE"
+    release='eva-agent'
+    chart_version="$EVA_AGENT_CHART_VERSION"
+    values_file="$EVA_AGENT_VALUES_FILE"
+    chart_source="$EVA_AGENT_CHART_SOURCE"
+    use_chart_version="$EVA_AGENT_USE_CHART_VERSION"
+    expected_application_suffix='-eva-agent'
+    static_pv='eva-agent-model-pvc-storage'
+    static_pvc='eva-agent-models'
+    secret_name='eva-agent-secret'
+
+    rendered_file="$(mktemp)"
+    rendered_json_file="$(mktemp)"
+    rendered_resources_file="$(mktemp)"
+    live_file="$(mktemp)"
+    candidates_file="$(mktemp)"
+    persistent_before_file="$(mktemp)"
+    persistent_after_file="$(mktemp)"
+    live_secret_file="$(mktemp)"
+    rendered_secret_file="$(mktemp)"
+
+    cleanup() {
+      rm -f \
+        "$rendered_file" \
+        "$rendered_json_file" \
+        "$rendered_resources_file" \
+        "$live_file" \
+        "$candidates_file" \
+        "$persistent_before_file" \
+        "$persistent_after_file" \
+        "$live_secret_file" \
+        "$rendered_secret_file"
+    }
+
+    trap cleanup EXIT
+
+    failed_release_recovery=0
+
+    if helm status \
+      "$release" \
+      -n "$namespace" \
+      >/dev/null 2>&1
+    then
+      release_status="$(
+        helm status \
+          "$release" \
+          -n "$namespace" \
+          -o json |
+        jq -r '.info.status // empty'
+      )"
+
+      if [[ "$release_status" == 'deployed' ]]; then
+        echo "[INFO] deployed EVA Agent Helm release requires no legacy reconciliation"
+        exit 0
+      fi
+
+      if [[ "$release_status" != 'failed' ]]; then
+        echo "[ERROR] unsafe EVA Agent Helm release status: $release_status"
+        exit 1
+      fi
+
+      failed_release_recovery=1
+      echo "[INFO] failed EVA Agent Helm release requires recovery"
+    fi
+
+    helm_template_command=(
+      helm template
+      "$release"
+      "$chart_source"
+      --namespace "$namespace"
+      --values "$values_file"
+    )
+
+    if [[ "$use_chart_version" == '1' ]]; then
+      helm_template_command+=(
+        --version
+        "$chart_version"
+      )
+    fi
+
+    if ! "${helm_template_command[@]}" > "$rendered_file"; then
+      echo "[ERROR] failed to render EVA Agent chart"
+      exit 1
+    fi
+
+    if ! kubectl create \
+      --dry-run=client \
+      -f "$rendered_file" \
+      -o json |
+      jq -s '
+        [
+          .[]
+          | if .kind == "List"
+            then .items[]
+            else .
+            end
+        ]
+      ' > "$rendered_json_file"
+    then
+      echo "[ERROR] failed to canonicalize EVA Agent chart"
+      exit 1
+    fi
+
+    jq -r '
+      .[]
+      | select(
+          (.kind // "") != ""
+          and
+          (.metadata.name // "") != ""
+        )
+      | [
+          .kind,
+          .metadata.name
+        ]
+      | @tsv
+    ' "$rendered_json_file" |
+    LC_ALL=C sort -u > "$rendered_resources_file"
+
+    if [[ ! -s "$rendered_resources_file" ]]; then
+      echo "[ERROR] rendered EVA Agent resource inventory is empty"
+      exit 1
+    fi
+
+    snapshot_persistent_identity() {
+      local output_file="$1"
+
+      kubectl get pv \
+        "$static_pv" \
+        -o json |
+      jq -r '
+        [
+          .metadata.name,
+          (.metadata.uid // ""),
+          (.status.phase // ""),
+          (.spec.capacity.storage // ""),
+          ((.spec.accessModes // []) | sort | join(",")),
+          (.spec.storageClassName // ""),
+          (.spec.claimRef.namespace // ""),
+          (.spec.claimRef.name // ""),
+          (.spec.claimRef.uid // "")
+        ]
+        | @tsv
+      ' > "$output_file"
+
+      kubectl get pvc \
+        "$static_pvc" \
+        -n "$namespace" \
+        -o json |
+      jq -r '
+        [
+          .metadata.name,
+          (.metadata.uid // ""),
+          (.status.phase // ""),
+          (.spec.volumeName // ""),
+          (.spec.resources.requests.storage // ""),
+          ((.spec.accessModes // []) | sort | join(",")),
+          (.spec.storageClassName // "")
+        ]
+        | @tsv
+      ' >> "$output_file"
+    }
+
+    persistent_count=0
+
+    if kubectl get pv \
+      "$static_pv" \
+      >/dev/null 2>&1
+    then
+      persistent_count=$((persistent_count + 1))
+    fi
+
+    if kubectl get pvc \
+      "$static_pvc" \
+      -n "$namespace" \
+      >/dev/null 2>&1
+    then
+      persistent_count=$((persistent_count + 1))
+    fi
+
+    if [[ "$persistent_count" == '1' ]]; then
+      echo "[ERROR] partial EVA Agent persistent resource state detected"
+      exit 1
+    fi
+
+    if [[ "$persistent_count" == '2' ]]; then
+      snapshot_persistent_identity "$persistent_before_file"
+
+      pv_phase="$(
+        kubectl get pv \
+          "$static_pv" \
+          -o jsonpath='{.status.phase}'
+      )"
+
+      pvc_phase="$(
+        kubectl get pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          -o jsonpath='{.status.phase}'
+      )"
+
+      pv_claim_uid="$(
+        kubectl get pv \
+          "$static_pv" \
+          -o jsonpath='{.spec.claimRef.uid}'
+      )"
+
+      pvc_uid="$(
+        kubectl get pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          -o jsonpath='{.metadata.uid}'
+      )"
+
+      pvc_volume="$(
+        kubectl get pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          -o jsonpath='{.spec.volumeName}'
+      )"
+
+      if [[
+        "$pv_phase" != 'Bound' ||
+        "$pvc_phase" != 'Bound' ||
+        "$pv_claim_uid" != "$pvc_uid" ||
+        "$pvc_volume" != "$static_pv"
+      ]]; then
+        echo "[ERROR] EVA Agent PV/PVC binding identity mismatch"
+        exit 1
+      fi
+    fi
+
+    kubectl get \
+      serviceaccounts,configmaps,secrets,services,roles,rolebindings,deployments,statefulsets,daemonsets,cronjobs,poddisruptionbudgets \
+      -n "$namespace" \
+      -o json > "$live_file"
+
+    jq -r '
+      .items[]
+      | select(
+          (
+            .metadata.annotations."argocd.argoproj.io/tracking-id"
+            // ""
+          )
+          | test("^[A-Za-z0-9.-]+-eva-agent:")
+        )
+      | [
+          .kind,
+          .metadata.name,
+          (
+            .metadata.labels."app.kubernetes.io/managed-by"
+            // ""
+          ),
+          (
+            .metadata.annotations."meta.helm.sh/release-name"
+            // ""
+          ),
+          (
+            .metadata.annotations."meta.helm.sh/release-namespace"
+            // ""
+          ),
+          (
+            .metadata.annotations."argocd.argoproj.io/tracking-id"
+            // ""
+          )
+        ]
+      | join("\u001f")
+    ' "$live_file" |
+    LC_ALL=C sort -u > "$candidates_file"
+
+    candidate_count="$(
+      wc -l < "$candidates_file" |
+      tr -d ' '
+    )"
+
+    if [[ "$candidate_count" == '0' ]]; then
+      if [[ "$persistent_count" == '0' ]]; then
+        echo "[INFO] clean EVA Agent installation state"
+        exit 0
+      fi
+
+      echo "[INFO] EVA Agent persistent-only installation state"
+    fi
+
+    remaining_deployment_pods="$(
+      kubectl get pods \
+        -n "$namespace" \
+        -l 'app.kubernetes.io/name=eva-agent,pod-template-hash' \
+        -o name 2>/dev/null
+    )"
+
+    if [[ -n "$remaining_deployment_pods" ]]; then
+      echo "[ERROR] EVA Agent Deployment pods exist during reconciliation"
+      printf '%s\n' "$remaining_deployment_pods"
+      exit 1
+    fi
+
+    tracking_application=''
+    declare -a resources_to_delete=()
+    resources_to_delete_count=0
+
+    while IFS=$'\x1f' read -r \
+      kind \
+      name \
+      managed_by \
+      release_name \
+      release_namespace \
+      tracking_id
+    do
+      [[ -n "$kind" ]] || continue
+
+      case "$kind" in
+        ServiceAccount|ConfigMap|Secret|Service|Role|RoleBinding|Deployment|StatefulSet|DaemonSet|CronJob|PodDisruptionBudget)
+          ;;
+        *)
+          echo "[ERROR] unsupported legacy EVA Agent kind: $kind/$name"
+          exit 1
+          ;;
+      esac
+
+      if [[
+        "$kind" == 'PersistentVolume' ||
+        "$kind" == 'PersistentVolumeClaim'
+      ]]; then
+        echo "[ERROR] persistent EVA Agent resource entered deletion candidates: $kind/$name"
+        exit 1
+      fi
+
+      if ! grep -Fqx -- \
+        "${kind}"$'\t'"${name}" \
+        "$rendered_resources_file"
+      then
+        echo "[ERROR] legacy EVA Agent resource is not managed by rendered chart: $kind/$name"
+        exit 1
+      fi
+
+      if [[
+        -n "$release_name" &&
+        "$release_name" != "$release"
+      ]]; then
+        echo "[ERROR] foreign Helm release ownership: $kind/$name=$release_name"
+        exit 1
+      fi
+
+      if [[
+        -n "$release_namespace" &&
+        "$release_namespace" != "$namespace"
+      ]]; then
+        echo "[ERROR] foreign Helm namespace ownership: $kind/$name=$release_namespace"
+        exit 1
+      fi
+
+      if [[
+        -n "$managed_by" &&
+        "$managed_by" != 'Helm' &&
+        "$managed_by" != 'helm'
+      ]]; then
+        echo "[ERROR] unsupported managed-by value: $kind/$name=$managed_by"
+        exit 1
+      fi
+
+      case "$kind" in
+        ServiceAccount|ConfigMap|Secret|Service)
+          expected_group_kind="/$kind"
+          ;;
+        Role|RoleBinding)
+          expected_group_kind="rbac.authorization.k8s.io/$kind"
+          ;;
+        Deployment|StatefulSet|DaemonSet)
+          expected_group_kind="apps/$kind"
+          ;;
+        CronJob)
+          expected_group_kind="batch/$kind"
+          ;;
+        PodDisruptionBudget)
+          expected_group_kind="policy/$kind"
+          ;;
+      esac
+
+      expected_suffix=":${expected_group_kind}:${namespace}/${name}"
+
+      if [[ "$tracking_id" != *"$expected_suffix" ]]; then
+        echo "[ERROR] legacy EVA Agent tracking identity mismatch: $kind/$name"
+        exit 1
+      fi
+
+      application="${tracking_id%%:*}"
+
+      if [[ "$application" != *"$expected_application_suffix" ]]; then
+        echo "[ERROR] unexpected EVA Agent tracking Application: $application"
+        exit 1
+      fi
+
+      if [[
+        -n "$tracking_application" &&
+        "$tracking_application" != "$application"
+      ]]; then
+        echo "[ERROR] mixed EVA Agent tracking Applications detected"
+        exit 1
+      fi
+
+      tracking_application="$application"
+
+      if [[
+        "$kind" == 'Secret' &&
+        "$name" == "$secret_name"
+      ]]; then
+        kubectl get secret \
+          "$secret_name" \
+          -n "$namespace" \
+          -o json |
+        jq -S -c '.data // {}' > "$live_secret_file"
+
+        jq -S -c \
+          --arg secret "$secret_name" '
+            .[]
+            | select(
+                .kind == "Secret"
+                and
+                .metadata.name == $secret
+              )
+            | .data // {}
+          ' "$rendered_json_file" > "$rendered_secret_file"
+
+        if [[ ! -s "$rendered_secret_file" ]]; then
+          echo "[ERROR] rendered EVA Agent Secret is absent"
+          exit 1
+        fi
+
+        if ! cmp -s \
+          "$live_secret_file" \
+          "$rendered_secret_file"
+        then
+          echo "[ERROR] live and rendered EVA Agent Secret data differ"
+          exit 1
+        fi
+      fi
+
+      case "$kind" in
+        ServiceAccount)
+          resource="serviceaccount/$name"
+          ;;
+        ConfigMap)
+          resource="configmap/$name"
+          ;;
+        Secret)
+          resource="secret/$name"
+          ;;
+        Service)
+          resource="service/$name"
+          ;;
+        Role)
+          resource="role.rbac.authorization.k8s.io/$name"
+          ;;
+        RoleBinding)
+          resource="rolebinding.rbac.authorization.k8s.io/$name"
+          ;;
+        Deployment)
+          resource="deployment.apps/$name"
+          ;;
+        StatefulSet)
+          resource="statefulset.apps/$name"
+          ;;
+        DaemonSet)
+          resource="daemonset.apps/$name"
+          ;;
+        CronJob)
+          resource="cronjob.batch/$name"
+          ;;
+        PodDisruptionBudget)
+          resource="poddisruptionbudget.policy/$name"
+          ;;
+      esac
+
+      resources_to_delete+=("$resource")
+      resources_to_delete_count=$((resources_to_delete_count + 1))
+    done < "$candidates_file"
+
+    if [[
+      "$candidate_count" != '0' &&
+      -z "$tracking_application"
+    ]]; then
+      echo "[ERROR] EVA Agent tracking Application was not resolved"
+      exit 1
+    fi
+
+    for resource in "${resources_to_delete[@]}"
+    do
+      kubectl delete \
+        "$resource" \
+        -n "$namespace" \
+        --wait=true \
+        --timeout=120s
+    done
+
+    remaining_count=0
+
+    for resource in "${resources_to_delete[@]}"
+    do
+      if kubectl get \
+        "$resource" \
+        -n "$namespace" \
+        >/dev/null 2>&1
+      then
+        echo "[ERROR] legacy EVA Agent resource remains: $resource"
+        remaining_count=$((remaining_count + 1))
+      fi
+    done
+
+    if (( remaining_count != 0 )); then
+      exit 1
+    fi
+
+    if [[ "$persistent_count" == '2' ]]; then
+      snapshot_persistent_identity "$persistent_after_file"
+
+      if ! cmp -s \
+        "$persistent_before_file" \
+        "$persistent_after_file"
+      then
+        echo "[ERROR] EVA Agent PV/PVC identity changed during legacy cleanup"
+        exit 1
+      fi
+
+      kubectl label pv \
+        "$static_pv" \
+        app.kubernetes.io/managed-by=Helm \
+        --overwrite
+
+      kubectl annotate pv \
+        "$static_pv" \
+        meta.helm.sh/release-name="$release" \
+        meta.helm.sh/release-namespace="$namespace" \
+        --overwrite
+
+      kubectl label pvc \
+        "$static_pvc" \
+        -n "$namespace" \
+        app.kubernetes.io/managed-by=Helm \
+        --overwrite
+
+      kubectl annotate pvc \
+        "$static_pvc" \
+        -n "$namespace" \
+        meta.helm.sh/release-name="$release" \
+        meta.helm.sh/release-namespace="$namespace" \
+        --overwrite
+
+      snapshot_persistent_identity "$persistent_after_file"
+
+      if ! cmp -s \
+        "$persistent_before_file" \
+        "$persistent_after_file"
+      then
+        echo "[ERROR] EVA Agent PV/PVC identity changed during Helm adoption"
+        exit 1
+      fi
+
+      pv_release_name="$(
+        kubectl get pv \
+          "$static_pv" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'
+      )"
+
+      pv_release_namespace="$(
+        kubectl get pv \
+          "$static_pv" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}'
+      )"
+
+      pvc_release_name="$(
+        kubectl get pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-name}'
+      )"
+
+      pvc_release_namespace="$(
+        kubectl get pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}'
+      )"
+
+      if [[
+        "$pv_release_name" != "$release" ||
+        "$pv_release_namespace" != "$namespace" ||
+        "$pvc_release_name" != "$release" ||
+        "$pvc_release_namespace" != "$namespace"
+      ]]; then
+        echo "[ERROR] EVA Agent PV/PVC Helm ownership adoption failed"
+        exit 1
+      fi
+
+      rendered_pv_version="$(
+        jq -r '
+          .[]
+          | select(
+              .kind == "PersistentVolume"
+              and
+              .metadata.name == "eva-agent-model-pvc-storage"
+            )
+          | .metadata.labels."app.kubernetes.io/version"
+          // empty
+        ' "$rendered_json_file"
+      )"
+
+      rendered_pv_chart="$(
+        jq -r '
+          .[]
+          | select(
+              .kind == "PersistentVolume"
+              and
+              .metadata.name == "eva-agent-model-pvc-storage"
+            )
+          | .metadata.labels."helm.sh/chart"
+          // empty
+        ' "$rendered_json_file"
+      )"
+
+      rendered_pvc_version="$(
+        jq -r '
+          .[]
+          | select(
+              .kind == "PersistentVolumeClaim"
+              and
+              .metadata.name == "eva-agent-models"
+            )
+          | .metadata.labels."app.kubernetes.io/version"
+          // empty
+        ' "$rendered_json_file"
+      )"
+
+      rendered_pvc_chart="$(
+        jq -r '
+          .[]
+          | select(
+              .kind == "PersistentVolumeClaim"
+              and
+              .metadata.name == "eva-agent-models"
+            )
+          | .metadata.labels."helm.sh/chart"
+          // empty
+        ' "$rendered_json_file"
+      )"
+
+      if [[
+        -z "$rendered_pv_version" ||
+        -z "$rendered_pv_chart" ||
+        -z "$rendered_pvc_version" ||
+        -z "$rendered_pvc_chart" ||
+        "$rendered_pv_version" != "$rendered_pvc_version" ||
+        "$rendered_pv_chart" != "$rendered_pvc_chart" ||
+        "$rendered_pv_chart" != "eva-agent-$rendered_pv_version"
+      ]]; then
+        echo "[ERROR] rendered EVA Agent PV/PVC chart labels are invalid"
+        exit 1
+      fi
+
+      if [[ "$failed_release_recovery" == '1' ]]; then
+        pv_live_version="$(
+          kubectl get pv \
+            "$static_pv" \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}'
+        )"
+
+        pv_live_chart="$(
+          kubectl get pv \
+            "$static_pv" \
+            -o jsonpath='{.metadata.labels.helm\.sh/chart}'
+        )"
+
+        pvc_live_version="$(
+          kubectl get pvc \
+            "$static_pvc" \
+            -n "$namespace" \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}'
+        )"
+
+        pvc_live_chart="$(
+          kubectl get pvc \
+            "$static_pvc" \
+            -n "$namespace" \
+            -o jsonpath='{.metadata.labels.helm\.sh/chart}'
+        )"
+
+        if [[
+          -n "$pv_live_version" ||
+          -n "$pv_live_chart"
+        ]]; then
+          if [[
+            -z "$pv_live_version" ||
+            -z "$pv_live_chart" ||
+            "$pv_live_chart" != "eva-agent-$pv_live_version"
+          ]]; then
+            echo "[ERROR] live EVA Agent PV chart labels are inconsistent"
+            exit 1
+          fi
+        fi
+
+        if [[
+          -n "$pvc_live_version" ||
+          -n "$pvc_live_chart"
+        ]]; then
+          if [[
+            -z "$pvc_live_version" ||
+            -z "$pvc_live_chart" ||
+            "$pvc_live_chart" != "eva-agent-$pvc_live_version"
+          ]]; then
+            echo "[ERROR] live EVA Agent PVC chart labels are inconsistent"
+            exit 1
+          fi
+        fi
+
+        if [[
+          "$pv_live_version" != "$pvc_live_version" ||
+          "$pv_live_chart" != "$pvc_live_chart"
+        ]]; then
+          echo "[ERROR] live EVA Agent PV/PVC chart labels differ"
+          exit 1
+        fi
+
+        if [[
+          -n "$pv_live_version" &&
+          (
+            "$pv_live_version" != "$rendered_pv_version" ||
+            "$pv_live_chart" != "$rendered_pv_chart"
+          )
+        ]]; then
+          echo "[INFO] transferring legacy EVA Agent PV/PVC chart label ownership"
+        fi
+
+        kubectl label pv \
+          "$static_pv" \
+          app.kubernetes.io/version- \
+          helm.sh/chart-
+
+        kubectl label pvc \
+          "$static_pvc" \
+          -n "$namespace" \
+          app.kubernetes.io/version- \
+          helm.sh/chart-
+
+        snapshot_persistent_identity "$persistent_after_file"
+
+        if ! cmp -s \
+          "$persistent_before_file" \
+          "$persistent_after_file"
+        then
+          echo "[ERROR] EVA Agent PV/PVC identity changed during SSA ownership handoff"
+          exit 1
+        fi
+
+        pv_remaining_version="$(
+          kubectl get pv \
+            "$static_pv" \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}'
+        )"
+
+        pv_remaining_chart="$(
+          kubectl get pv \
+            "$static_pv" \
+            -o jsonpath='{.metadata.labels.helm\.sh/chart}'
+        )"
+
+        pvc_remaining_version="$(
+          kubectl get pvc \
+            "$static_pvc" \
+            -n "$namespace" \
+            -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}'
+        )"
+
+        pvc_remaining_chart="$(
+          kubectl get pvc \
+            "$static_pvc" \
+            -n "$namespace" \
+            -o jsonpath='{.metadata.labels.helm\.sh/chart}'
+        )"
+
+        if [[
+          -n "$pv_remaining_version" ||
+          -n "$pv_remaining_chart" ||
+          -n "$pvc_remaining_version" ||
+          -n "$pvc_remaining_chart"
+        ]]; then
+          echo "[ERROR] legacy EVA Agent PV/PVC chart labels remain after SSA handoff"
+          exit 1
+        fi
+
+        echo "[OK] transferred EVA Agent PV/PVC chart labels to Helm SSA"
+      fi
+    fi
+
+    if [[ "$candidate_count" == '0' ]]; then
+      echo "[OK] adopted persistent-only EVA Agent resources into Helm ownership"
+    else
+      echo "[OK] reconciled exact legacy EVA Agent resources application=$tracking_application count=$resources_to_delete_count"
+    fi
+  args:
+    executable: /bin/bash
+  register: eva_agent_legacy_reconciliation
+  changed_when: >-
+    ('[OK] reconciled exact legacy EVA Agent resources'
+     in eva_agent_legacy_reconciliation.stdout)
+    or
+    ('[OK] adopted persistent-only EVA Agent resources into Helm ownership'
+     in eva_agent_legacy_reconciliation.stdout)
+    or
+    ('[OK] transferred EVA Agent PV/PVC chart labels to Helm SSA'
+     in eva_agent_legacy_reconciliation.stdout)
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_agent_workdir }}/plugin"
+    EVA_AGENT_NAMESPACE: "{{ eva_agent_namespace }}"
+    EVA_AGENT_CHART_VERSION: "{{ eva_agent_chart_version }}"
+    EVA_AGENT_VALUES_FILE: "{{ eva_agent_workdir }}/eva-agent/effective-input-values.yaml"
+    EVA_AGENT_CHART_SOURCE: "{{ eva_agent_chart_source }}"
+    EVA_AGENT_USE_CHART_VERSION: >-
+      {{ ((eva_cli_chart_path | default('') | length) == 0)
+         | ternary('1', '0') }}

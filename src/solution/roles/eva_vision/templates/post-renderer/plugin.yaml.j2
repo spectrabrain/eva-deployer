@@ -1,0 +1,8 @@
+apiVersion: v1
+type: postrenderer/v1
+name: eva-vision-postrenderer
+version: 1.0.0
+runtime: subprocess
+runtimeConfig:
+  platformCommand:
+    - command: "${HELM_PLUGIN_DIR}/post-renderer.py"

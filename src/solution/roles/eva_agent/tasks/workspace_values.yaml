@@ -1,0 +1,39 @@
+- name: Resolve optional EVA Agent Workspace values file
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_values_host: "{{ ansible_host | default(inventory_hostname) }}"
+    eva_agent_values_file: "{{ eva_site_values_root ~ '/agent.yaml' }}"
+    eva_agent_workspace_values: {}
+    eva_agent_workspace_chart_values: {}
+
+- name: Check for optional EVA Agent Workspace values on control node
+  ansible.builtin.stat:
+    path: "{{ eva_agent_values_file }}"
+  register: eva_agent_values_file_status
+  delegate_to: localhost
+  become: false
+
+- name: Load optional EVA Agent Workspace values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_values_config: "{{ lookup('ansible.builtin.file', eva_agent_values_file) | from_yaml }}"
+  when: eva_agent_values_file_status.stat.exists
+
+- name: Select target-specific optional EVA Agent Workspace values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_workspace_values: "{{ (eva_agent_values_config | default({}, true)).get(eva_agent_values_host, {}) }}"
+  when: eva_agent_values_file_status.stat.exists
+
+- name: Validate target-specific optional EVA Agent Workspace values
+  ansible.builtin.assert:
+    that:
+      - eva_agent_workspace_values is mapping
+    fail_msg: >-
+      {{ eva_agent_values_file }} target {{ eva_agent_values_host }} must be a mapping.
+  when: eva_agent_values_file_status.stat.exists
+
+- name: Use optional EVA Agent chart values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_workspace_chart_values: "{{ eva_agent_workspace_values }}"

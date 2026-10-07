@@ -1,0 +1,40 @@
+- name: Resolve EVA Vision Workspace values file
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_values_host: "{{ ansible_host | default(inventory_hostname) }}"
+    eva_vision_values_file: "{{ eva_vision_values_file | default(eva_site_values_root ~ '/vision.yaml') }}"
+    eva_vision_workspace_values: {}
+    eva_vision_workspace_chart_values: {}
+
+- name: Check for EVA Vision Workspace values on control node
+  ansible.builtin.stat:
+    path: "{{ eva_vision_values_file }}"
+  register: eva_vision_values_file_status
+  delegate_to: localhost
+  become: false
+
+- name: Load EVA Vision Workspace values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_values_config: "{{ lookup('ansible.builtin.file', eva_vision_values_file) | from_yaml }}"
+  when: eva_vision_values_file_status.stat.exists
+
+- name: Select target-specific EVA Vision Workspace values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_workspace_values: >-
+      {{ (eva_vision_values_config | default({}, true)).get(eva_vision_values_host, {}) }}
+  when: eva_vision_values_file_status.stat.exists
+
+- name: Validate target-specific EVA Vision Workspace values
+  ansible.builtin.assert:
+    that:
+      - eva_vision_workspace_values is mapping
+    fail_msg: >-
+      {{ eva_vision_values_file }}의 {{ eva_vision_values_host }} 값은 mapping이어야 합니다.
+  when: eva_vision_values_file_status.stat.exists
+
+- name: Use target-specific optional EVA Vision chart values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_workspace_chart_values: "{{ eva_vision_workspace_values }}"

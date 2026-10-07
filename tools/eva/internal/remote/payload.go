@@ -158,14 +158,44 @@ func BuildTargetPayloadWithProgress(
 	if err := os.Rename(staging, final); err != nil {
 		return PayloadSource{}, fmt.Errorf("publish target payload: %w", err)
 	}
-	return LoadTargetPayload(final, identity)
+	// The staged payload was fully verified above; rename does not change it.
+	return InspectTargetPayload(final, identity)
 }
 
 func TargetPayloadPath(preparationRoot string, identity PreparationIdentity) string {
 	return filepath.Join(preparationRoot, targetPayloadDirectory, payloadIdentityKey(identity))
 }
 
+// LoadTargetPayload fully verifies a Target payload, including both archive
+// digests. Prepare calls it once when it builds the payload; later consumers
+// use InspectTargetPayload instead of rehashing tens of gigabytes.
 func LoadTargetPayload(directory string, identity PreparationIdentity) (PayloadSource, error) {
+	source, err := InspectTargetPayload(directory, identity)
+	if err != nil {
+		return PayloadSource{}, err
+	}
+	manifest := source.Manifest
+	archivePath := filepath.Join(directory, manifest.Archive)
+	if digest, err := regularFileSHA256(archivePath); err != nil || digest != manifest.ArchiveSHA256 {
+		if err != nil {
+			return PayloadSource{}, err
+		}
+		return PayloadSource{}, errors.New("target payload archive digest does not match manifest")
+	}
+	if digest, err := payloadArchiveDigest(archivePath); err != nil || digest != manifest.ContentSHA256 {
+		if err != nil {
+			return PayloadSource{}, err
+		}
+		return PayloadSource{}, errors.New("target payload content digest does not match manifest")
+	}
+	return source, nil
+}
+
+// InspectTargetPayload checks the recorded payload evidence without reading
+// the archive: manifest, identity, directory layout and checksum manifest.
+// The archive digest itself was verified by prepare and is verified again by
+// the publish backend and on the Target after transfer.
+func InspectTargetPayload(directory string, identity PreparationIdentity) (PayloadSource, error) {
 	manifestPath := filepath.Join(directory, "manifest.yaml")
 	info, err := os.Lstat(manifestPath)
 	if err != nil {
@@ -203,20 +233,21 @@ func LoadTargetPayload(directory string, identity PreparationIdentity) (PayloadS
 	if err := validatePayloadChecksums(directory, manifest); err != nil {
 		return PayloadSource{}, err
 	}
-	archivePath := filepath.Join(directory, manifest.Archive)
-	if digest, err := regularFileSHA256(archivePath); err != nil || digest != manifest.ArchiveSHA256 {
-		if err != nil {
-			return PayloadSource{}, err
-		}
-		return PayloadSource{}, errors.New("target payload archive digest does not match manifest")
-	}
-	if digest, err := payloadArchiveDigest(archivePath); err != nil || digest != manifest.ContentSHA256 {
-		if err != nil {
-			return PayloadSource{}, err
-		}
-		return PayloadSource{}, errors.New("target payload content digest does not match manifest")
+	if err := requireRecordedArchive(filepath.Join(directory, manifest.Archive)); err != nil {
+		return PayloadSource{}, fmt.Errorf("target payload archive: %w", err)
 	}
 	return PayloadSource{Directory: directory, Manifest: manifest}, nil
+}
+
+func requireRecordedArchive(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
+		return errors.New("archive must be a non-empty regular non-symlink file")
+	}
+	return nil
 }
 
 func validatePayloadDirectory(directory, archive string) error {

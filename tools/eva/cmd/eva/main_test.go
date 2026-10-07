@@ -886,3 +886,46 @@ func captureRemoteTargetStdout(t *testing.T, action func() error) string {
 	}
 	return string(contents)
 }
+
+func TestRemoteTargetRemoveRequiresConfirmationAndRoot(t *testing.T) {
+	previousRegistry, previousCredential, previousUID, previousStat := remoteTargetRegistryRoot, remoteTargetCredentialRoot, remoteTargetEffectiveUID, stdinStat
+	t.Cleanup(func() {
+		remoteTargetRegistryRoot, remoteTargetCredentialRoot, remoteTargetEffectiveUID, stdinStat = previousRegistry, previousCredential, previousUID, previousStat
+	})
+	remoteTargetRegistryRoot = filepath.Join(t.TempDir(), "targets")
+	remoteTargetCredentialRoot = filepath.Join(t.TempDir(), "credentials")
+	remoteTargetEffectiveUID = func() int { return 0 }
+	config := remotecommand.TargetConfiguration{SchemaVersion: "v1", Name: "site-mg-x", Host: "10.159.56.197", Port: 22, User: "eva", Authentication: remotecommand.TargetAuthentication{Method: "password", CredentialRef: "site-mg-x"}, Sudo: remotecommand.TargetAuthentication{Method: "password", CredentialRef: "site-mg-x"}, HostKey: remotecommand.TargetHostKey{Algorithm: "ssh-ed25519", Fingerprint: "SHA256:abcdefghijklmnopqrstuvwxyz0123456789"}}
+	store := remotecommand.NewTargetStore(remoteTargetRegistryRoot, remoteTargetCredentialRoot)
+	if err := store.Write(config, remotecommand.TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "sudo-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	stdinStat = func() (os.FileInfo, error) { return os.Stat(remoteTargetRegistryRoot) }
+	if err := run([]string{"remote", "target", "remove", "site-mg-x"}); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("non-interactive remove without --yes error = %v", err)
+	}
+	for _, arguments := range [][]string{{"remote", "target", "remove"}, {"remote", "target", "remove", "site-mg-x", "--force"}, {"remote", "target", "remove", "../x", "--yes"}} {
+		if err := run(arguments); err == nil {
+			t.Fatalf("run(%q) succeeded", arguments)
+		}
+	}
+	remoteTargetEffectiveUID = func() int { return 1000 }
+	if err := run([]string{"remote", "target", "remove", "site-mg-x", "--yes"}); err == nil {
+		t.Fatal("remove ran without root")
+	}
+	if _, _, err := store.Load("site-mg-x"); err != nil {
+		t.Fatalf("rejected removals changed the Target: %v", err)
+	}
+	remoteTargetEffectiveUID = func() int { return 0 }
+	output := captureRemoteTargetStdout(t, func() error { return run([]string{"remote", "target", "remove", "site-mg-x", "--yes"}) })
+	if !strings.Contains(output, "Remote Target removed: site-mg-x") {
+		t.Fatalf("remove output = %q", output)
+	}
+	listed := captureRemoteTargetStdout(t, func() error { return run([]string{"remote", "target", "list"}) })
+	if !strings.Contains(listed, "No Remote Targets are registered.") {
+		t.Fatalf("Target still listed after removal: %q", listed)
+	}
+	if err := run([]string{"remote", "target", "remove", "site-mg-x", "--yes"}); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("removing a missing Target error = %v", err)
+	}
+}

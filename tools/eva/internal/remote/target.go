@@ -287,6 +287,54 @@ func (store TargetStore) List() ([]TargetListing, error) {
 	return listings, nil
 }
 
+// Remove deletes one registered Target: its non-secret configuration and its
+// credential directory. The credential goes first so an interrupted removal
+// leaves a visible, invalid registry entry rather than an orphaned secret.
+// Linked or special directories are rejected instead of followed.
+func (store TargetStore) Remove(name string) error {
+	if err := ValidateTargetName(name); err != nil {
+		return err
+	}
+	directories := []struct {
+		root, path string
+		mode       os.FileMode
+	}{
+		{store.CredentialRoot, filepath.Join(store.CredentialRoot, name), 0o700},
+		{store.RegistryRoot, filepath.Join(store.RegistryRoot, name), 0o750},
+	}
+	found := false
+	for _, directory := range directories {
+		if err := validateTargetRoot(directory.root, directory.mode); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		info, err := os.Lstat(directory.path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return errors.New("managed Remote Target directory is unsafe")
+		}
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("Remote Target %q is not registered", name)
+	}
+	for _, directory := range directories {
+		if err := os.RemoveAll(directory.path); err != nil {
+			return fmt.Errorf("remove Remote Target %q: %w", name, err)
+		}
+		if parent, err := os.Open(directory.root); err == nil {
+			_ = parent.Sync()
+			parent.Close()
+		}
+	}
+	return nil
+}
+
 func ensureTargetRoot(path string, mode os.FileMode) error {
 	if err := validateTargetRoot(path, mode); err == nil {
 		return nil

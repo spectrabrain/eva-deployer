@@ -285,8 +285,9 @@ func remoteUsage() {
 func remoteTargetUsage() {
 	fmt.Println("Usage: eva remote target list")
 	fmt.Println("       eva remote target <add|verify> NAME")
+	fmt.Println("       eva remote target remove NAME [--yes]")
 	fmt.Println("")
-	fmt.Println("list shows registered Targets without credentials. add stores credentials only in the root-only Main Target registry. verify performs no registry writes.")
+	fmt.Println("list shows registered Targets without credentials. add stores credentials only in the root-only Main Target registry. verify performs no registry writes. remove deletes one Target's configuration and credentials.")
 }
 
 func runRemoteTarget(args []string) error {
@@ -299,6 +300,15 @@ func runRemoteTarget(args []string) error {
 			return errors.New("remote target list accepts no arguments")
 		}
 		return runRemoteTargetList()
+	}
+	if args[0] == "remove" {
+		if len(args) < 2 || len(args) > 3 || (len(args) == 3 && args[2] != "--yes") {
+			return errors.New("remote target remove requires a Target name and optional --yes")
+		}
+		if err := remote.ValidateTargetName(args[1]); err != nil {
+			return err
+		}
+		return runRemoteTargetRemove(args[1], len(args) == 3)
 	}
 	if len(args) != 2 {
 		return errors.New("remote target requires an action and Target name")
@@ -473,6 +483,53 @@ func runRemoteTargetList() error {
 		fmt.Fprintf(writer, "%s\t%s\t%d\t%s\t%s\t%s\n", config.Name, config.Host, config.Port, config.User, config.Authentication.Method, status)
 	}
 	return writer.Flush()
+}
+
+func runRemoteTargetRemove(name string, yes bool) error {
+	if remoteTargetEffectiveUID() != 0 {
+		return errors.New("Remote Target management requires root; run with sudo")
+	}
+	store := newRemoteTargetStore(remoteTargetRegistryRoot, remoteTargetCredentialRoot)
+	listings, err := store.List()
+	if err != nil {
+		return fmt.Errorf("list Remote Targets: %w", err)
+	}
+	description := ""
+	for _, listing := range listings {
+		if listing.Name != name {
+			continue
+		}
+		description = "status=ok"
+		if listing.Err != nil {
+			description = "status=invalid"
+		}
+		if listing.Config.Name != "" {
+			description = fmt.Sprintf("host=%s port=%d user=%s %s", listing.Config.Host, listing.Config.Port, listing.Config.User, description)
+		}
+	}
+	if description == "" {
+		// A credential left behind without its configuration is still removable.
+		description = "configuration missing"
+	}
+	if !yes {
+		info, err := stdinStat()
+		if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			return errors.New("eva remote target remove requires --yes when standard input is not a terminal")
+		}
+		fmt.Fprintf(os.Stderr, "Remove Remote Target %s (%s)? [y/N]: ", name, description)
+		answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && len(answer) == 0 {
+			return fmt.Errorf("read Remote Target removal confirmation: %w", err)
+		}
+		if answer = strings.TrimSpace(answer); !strings.EqualFold(answer, "y") && !strings.EqualFold(answer, "yes") {
+			return errors.New("Remote Target removal was not confirmed")
+		}
+	}
+	if err := store.Remove(name); err != nil {
+		return err
+	}
+	fmt.Printf("[OK] Remote Target removed: %s\n", name)
+	return nil
 }
 
 func runRemoteTargetVerify(name string) error {

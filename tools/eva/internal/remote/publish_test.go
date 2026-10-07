@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -505,4 +506,56 @@ func writeOriginalRelease(t *testing.T, includeOffline bool) release.Resolved {
 func artifactYAML(name, file, contents string) string {
 	digest := sha256.Sum256([]byte(contents))
 	return fmt.Sprintf("  - name: %s\n    file: %s\n    sha256: %x\n", name, file, digest)
+}
+
+// TestWriteRemotePublishFixture writes a Release, Runtime artifact and Target
+// payload built by the real preparation code for
+// scripts/test/test_remote_publish_end_to_end.sh. It only runs on request.
+func TestWriteRemotePublishFixture(t *testing.T) {
+	destination := os.Getenv("EVA_REMOTE_PUBLISH_FIXTURE_DIR")
+	if destination == "" {
+		t.Skip("set EVA_REMOTE_PUBLISH_FIXTURE_DIR to write the publish backend fixture")
+	}
+	cacheOwner, _, _ := writeCompletedPreparation(t)
+	resolved := writeOriginalRelease(t, false)
+	checksums := ""
+	for _, name := range []string{"eva-tool.tar.gz", "eva-tool-installer.sh", "eva-infra.tar.gz", "eva-solution.tar.gz"} {
+		contents, err := os.ReadFile(filepath.Join(resolved.Root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checksums += fmt.Sprintf("%x  %s\n", sha256.Sum256(contents), name)
+	}
+	if err := os.WriteFile(filepath.Join(resolved.Root, "checksums.sha256"), []byte(checksums), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := BuildPreparationIdentity(resolved, "harbor.example.internal:32080", "eva")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparation := t.TempDir()
+	payload, err := BuildTargetPayload(preparation, filepath.Join(cacheOwner, "cache"), identity, resolved.Metadata.Platform.OS+"/"+resolved.Metadata.Platform.Arch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeArtifact, err := BuildRuntimeArtifact(preparation, identity, writeRuntimeFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for source, name := range map[string]string{resolved.Root: "release", payload.Directory: "payload", runtimeArtifact.Directory: "runtime"} {
+		if output, err := exec.Command("cp", "-a", source, filepath.Join(destination, name)).CombinedOutput(); err != nil {
+			t.Fatalf("copy %s: %v: %s", name, err, output)
+		}
+	}
+	// The same ssh -o values the managed Target connection hands the backend.
+	options := strings.Join(testTargetSSHOptions(), "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(destination, "ssh-options"), []byte(options), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testTargetSSHOptions() []string {
+	verifier := TargetVerifier{}
+	config := testTargetConfiguration()
+	return append(verifier.sshOptions(config, "/run/eva/p/known_hosts", "/run/eva/p/control"), "BatchMode=yes")
 }

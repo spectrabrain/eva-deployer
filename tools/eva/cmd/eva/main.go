@@ -53,6 +53,8 @@ var (
 	validateRemoteAWSCredential       = remote.ValidateAWSCredential
 	materializeRemotePayload          = remote.MaterializeTargetPayload
 	bootstrapRemoteRuntime            = remote.BootstrapTargetRuntime
+	runArgoCDPrecondition             = apply.RunPrecondition
+	runArgoCDHandoff                  = argoCDPreflightHandoff
 	defaultCurrentReleaseReceiptPath  = release.DefaultCurrentReceiptPath
 	defaultRemoteInboxRoot            = release.DefaultRemoteInboxRoot
 	currentReleaseNow                 = time.Now
@@ -1552,7 +1554,7 @@ type gpuPreflight struct {
 func runPreflight(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		fmt.Println("Usage: eva preflight gpu")
-		fmt.Println("       eva preflight argocd --site ID|--workspace PATH [--runtime-root PATH]")
+		fmt.Println("       eva preflight argocd --site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 		return nil
 	}
 	if args[0] == "argocd" {
@@ -1589,6 +1591,8 @@ func runArgoCDPreflight(args []string) error {
 	flags.SetOutput(os.Stderr)
 	siteID := flags.String("site", "", "site identifier")
 	workspaceRoot := flags.String("workspace", "", "workspace path")
+	releaseInput := flags.String("release", "", "release directory or release.yaml path")
+	installRoot := flags.String("install-root", release.DefaultInstallRoot, "prepared Release installation directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -1603,17 +1607,24 @@ func runArgoCDPreflight(args []string) error {
 	if err != nil {
 		return err
 	}
-	releaseResolved, err := release.Resolve(".")
+	// Select the Release exactly like eva install: explicit, then the Current
+	// Release, then the working directory. On a Remote Target the Current
+	// Release is the published inbox Release, not the operator's directory.
+	selected, err := selectRelease(*releaseInput)
 	if err != nil {
-		return fmt.Errorf(
-			"resolve Release from current directory: %w",
-			err,
-		)
+		return err
+	}
+	releaseResolved := selected.Resolved
+	printSelectedRelease(releaseResolved, selected.Source)
+	// The precondition runs Ansible, so a first Remote Target needs the
+	// published Runtime artifact installed first, from the original Release.
+	if err := ensureInstallRuntimeForRepository(*runtimeRoot, releaseResolved, workspaceResolved.Config.Repository.Mode, workspaceResolved.Config.Repository.Registry, workspaceResolved.Config.Repository.Project); err != nil {
+		return err
 	}
 	if !releaseResolved.Prepared {
 		prepared, err := release.Prepare(
 			releaseResolved,
-			release.DefaultInstallRoot,
+			*installRoot,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -1636,11 +1647,11 @@ func runArgoCDPreflight(args []string) error {
 		releaseResolved,
 		time.Now(),
 	)
-	releaseRoot, err := apply.RunPrecondition(apply.Options{RuntimeRoot: *runtimeRoot, Stdout: os.Stdout, Stderr: os.Stderr}, document)
+	releaseRoot, err := runArgoCDPrecondition(apply.Options{RuntimeRoot: *runtimeRoot, Stdout: os.Stdout, Stderr: os.Stderr}, document)
 	if err != nil {
 		return err
 	}
-	if err := argoCDPreflightHandoff(document, releaseRoot); err != nil {
+	if err := runArgoCDHandoff(document, releaseRoot); err != nil {
 		return err
 	}
 	printStatus(

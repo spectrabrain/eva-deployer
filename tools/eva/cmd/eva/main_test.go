@@ -1,6 +1,9 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -14,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/health"
 	"eva-deployer/tools/eva/internal/operation"
@@ -928,4 +932,133 @@ func TestRemoteTargetRemoveRequiresConfirmationAndRoot(t *testing.T) {
 	if err := run([]string{"remote", "target", "remove", "site-mg-x", "--yes"}); err == nil || !strings.Contains(err.Error(), "not registered") {
 		t.Fatalf("removing a missing Target error = %v", err)
 	}
+}
+
+// Regression: preflight argocd resolved the Release from the working
+// directory, so on a Remote Target it ignored the published Current Release,
+// and it never supplied the Remote Runtime its Ansible precondition needs.
+func TestArgoCDPreflightUsesCurrentReleaseAndRemoteRuntime(t *testing.T) {
+	releaseRoot := writePreparableRelease(t)
+	previousReceipt, previousBootstrap, previousPrecondition, previousHandoff := defaultCurrentReleaseReceiptPath, bootstrapRemoteRuntime, runArgoCDPrecondition, runArgoCDHandoff
+	t.Cleanup(func() {
+		defaultCurrentReleaseReceiptPath, bootstrapRemoteRuntime, runArgoCDPrecondition, runArgoCDHandoff = previousReceipt, previousBootstrap, previousPrecondition, previousHandoff
+	})
+	defaultCurrentReleaseReceiptPath = filepath.Join(t.TempDir(), "releases", "current.yaml")
+	resolved, err := release.Resolve(releaseRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release.WriteCurrentReceipt(defaultCurrentReleaseReceiptPath, resolved, "eva-tool-installer", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspaceRoot, "site-values"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "site-values", "site.yaml"), []byte("site:\n  id: site-mg-d\nrepository:\n  mode: remote\n  registry: 10.159.57.172:32080\n  project: eva\ncomponents:\n  app: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
+
+	var bootstrapped []string
+	bootstrapRemoteRuntime = func(resolved release.Resolved, registry, project, root string) (runtime.Resolved, error) {
+		bootstrapped = append(bootstrapped, resolved.Root+"|"+registry+"|"+project)
+		return runtime.Resolved{Root: root}, nil
+	}
+	var preconditionRelease string
+	runArgoCDPrecondition = func(_ apply.Options, document plan.Document) (string, error) {
+		preconditionRelease = document.ReleaseVersion
+		return "/prepared", nil
+	}
+	handoffCalled := false
+	runArgoCDHandoff = func(plan.Document, string) error {
+		handoffCalled = true
+		return nil
+	}
+	installRoot := t.TempDir()
+	missingRuntime := filepath.Join(t.TempDir(), "runtime")
+	if err := run([]string{"preflight", "argocd", "--workspace", workspaceRoot, "--install-root", installRoot, "--runtime-root", missingRuntime}); err != nil {
+		t.Fatalf("preflight argocd: %v", err)
+	}
+	if want := releaseRoot + "|10.159.57.172:32080|eva"; len(bootstrapped) != 1 || bootstrapped[0] != want {
+		t.Fatalf("Remote Runtime bootstrap = %q, want [%q]", bootstrapped, want)
+	}
+	if preconditionRelease != resolved.Metadata.Version || !handoffCalled {
+		t.Fatalf("precondition release=%q handoff=%v", preconditionRelease, handoffCalled)
+	}
+	if _, err := os.Stat(filepath.Join(installRoot, resolved.Metadata.Version)); err != nil {
+		t.Fatalf("Current Release was not prepared: %v", err)
+	}
+
+	bootstrapped = nil
+	if err := run([]string{"preflight", "argocd", "--workspace", workspaceRoot, "--install-root", installRoot, "--runtime-root", writeRetryRuntime(t)}); err != nil {
+		t.Fatalf("preflight argocd with an existing Runtime: %v", err)
+	}
+	if len(bootstrapped) != 0 {
+		t.Fatalf("existing Runtime was bootstrapped again: %q", bootstrapped)
+	}
+}
+
+// writePreparableRelease writes an original Release whose infra and solution
+// artifacts are real archives, so release.Prepare can extract it.
+func writePreparableRelease(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	archive := func(entries map[string]string) string {
+		var buffer bytes.Buffer
+		compressed := gzip.NewWriter(&buffer)
+		writer := tar.NewWriter(compressed)
+		for name, contents := range entries {
+			if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(contents)), Typeflag: tar.TypeReg}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write([]byte(contents)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := compressed.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buffer.String()
+	}
+	files := map[string]string{
+		"eva-tool.tar.gz":       "tool",
+		"eva-tool-installer.sh": "installer",
+		"eva-infra.tar.gz": archive(map[string]string{
+			"ansible.cfg":                                "[defaults]\n",
+			"src/playbook-preflight.yaml":                "---\n",
+			"src/playbook-vars.yaml":                     "---\n",
+			"src/infra/playbooks/site_precondition.yaml": "---\n",
+			"src/infra/playbooks/site_infra.yaml":        "---\n",
+		}),
+		"eva-solution.tar.gz": archive(map[string]string{"src/solution/playbooks/site_eva_app.yaml": "---\n"}),
+	}
+	metadata := fmt.Sprintf("version: 3.2.0\nplatform:\n  os: %s\n  arch: %s\nartifacts:\n", gort.GOOS, gort.GOARCH)
+	checksums := ""
+	for _, artifact := range []struct{ name, file string }{{"eva-tool", "eva-tool.tar.gz"}, {"eva-tool-installer", "eva-tool-installer.sh"}, {"eva-infra", "eva-infra.tar.gz"}, {"eva-solution", "eva-solution.tar.gz"}} {
+		contents := files[artifact.file]
+		if err := os.WriteFile(filepath.Join(root, artifact.file), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(contents)))
+		metadata += "  - name: " + artifact.name + "\n    file: " + artifact.file + "\n    sha256: " + digest + "\n"
+		checksums += digest + "  " + artifact.file + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(root, "release.yaml"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "checksums.sha256"), []byte(checksums), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }

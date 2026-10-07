@@ -51,6 +51,19 @@ jobs:
           go test ./...
           go vet ./...
 
+      - name: Test askpass on a noexec runtime filesystem
+        working-directory: tools/eva
+        run: |
+          set -euo pipefail
+          # Mounting the noexec tmpfs needs root; the test skips silently
+          # otherwise, so require an explicit PASS line.
+          go test -c -o "$RUNNER_TEMP/remote.test" ./internal/remote
+          log_path="$RUNNER_TEMP/askpass-noexec.log"
+          sudo "$RUNNER_TEMP/remote.test" \
+            -test.run '^TestRunAskpassSSHSucceedsOnNoexecRuntimeRoot$' -test.v \
+            2>&1 | tee "$log_path"
+          grep -Fq -- '--- PASS: TestRunAskpassSSHSucceedsOnNoexecRuntimeRoot' "$log_path"
+
       - name: Check shell syntax
         run: |
           while IFS= read -r -d '' script; do

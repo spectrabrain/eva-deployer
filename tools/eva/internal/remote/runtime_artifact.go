@@ -217,10 +217,40 @@ func BuildRuntimeArtifact(root string, identity PreparationIdentity, runtimeRoot
 	if err := parent.Sync(); err != nil {
 		return RuntimeArtifactSource{}, fmt.Errorf("sync Runtime artifact parent: %w", err)
 	}
-	return LoadRuntimeArtifact(final, identity)
+	// The staged artifact was fully verified above; rename does not change it.
+	return InspectRuntimeArtifact(final, identity)
 }
 
+// LoadRuntimeArtifact fully verifies a Runtime artifact, including its digest
+// and an offline bootstrap. Later consumers use InspectRuntimeArtifact.
 func LoadRuntimeArtifact(directory string, identity PreparationIdentity) (RuntimeArtifactSource, error) {
+	source, err := InspectRuntimeArtifact(directory, identity)
+	if err != nil {
+		return RuntimeArtifactSource{}, err
+	}
+	manifest := source.Manifest
+	archivePath := filepath.Join(directory, manifest.Runtime.Archive)
+	if digest, err := regularFileSHA256(archivePath); err != nil || digest != manifest.Runtime.ArchiveSHA256 {
+		return RuntimeArtifactSource{}, errors.New("Runtime artifact checksum mismatch")
+	}
+	if err := validateRuntimeArchive(archivePath, manifest.Runtime.DescriptorSHA256); err != nil {
+		return RuntimeArtifactSource{}, err
+	}
+	validationRoot, err := os.MkdirTemp("", ".eva-runtime-verify-")
+	if err != nil {
+		return RuntimeArtifactSource{}, fmt.Errorf("create Runtime artifact validation directory: %w", err)
+	}
+	defer os.RemoveAll(validationRoot)
+	validated, err := runtime.BootstrapOffline(archivePath, filepath.Join(validationRoot, "runtime"))
+	if err != nil || validated.Descriptor.Version != manifest.Runtime.Version {
+		return RuntimeArtifactSource{}, errors.New("Runtime artifact does not contain the declared valid managed Runtime")
+	}
+	return source, nil
+}
+
+// InspectRuntimeArtifact checks the recorded Runtime artifact evidence
+// without reading or extracting the archive.
+func InspectRuntimeArtifact(directory string, identity PreparationIdentity) (RuntimeArtifactSource, error) {
 	manifestPath := filepath.Join(directory, "manifest.yaml")
 	info, err := os.Lstat(manifestPath)
 	if err != nil {
@@ -259,21 +289,8 @@ func LoadRuntimeArtifact(directory string, identity PreparationIdentity) (Runtim
 	if err := validatePayloadChecksums(directory, checksums); err != nil {
 		return RuntimeArtifactSource{}, fmt.Errorf("Runtime artifact checksums: %w", err)
 	}
-	archivePath := filepath.Join(directory, manifest.Runtime.Archive)
-	if digest, err := regularFileSHA256(archivePath); err != nil || digest != manifest.Runtime.ArchiveSHA256 {
-		return RuntimeArtifactSource{}, errors.New("Runtime artifact checksum mismatch")
-	}
-	if err := validateRuntimeArchive(archivePath, manifest.Runtime.DescriptorSHA256); err != nil {
-		return RuntimeArtifactSource{}, err
-	}
-	validationRoot, err := os.MkdirTemp("", ".eva-runtime-verify-")
-	if err != nil {
-		return RuntimeArtifactSource{}, fmt.Errorf("create Runtime artifact validation directory: %w", err)
-	}
-	defer os.RemoveAll(validationRoot)
-	validated, err := runtime.BootstrapOffline(archivePath, filepath.Join(validationRoot, "runtime"))
-	if err != nil || validated.Descriptor.Version != manifest.Runtime.Version {
-		return RuntimeArtifactSource{}, errors.New("Runtime artifact does not contain the declared valid managed Runtime")
+	if err := requireRecordedArchive(filepath.Join(directory, manifest.Runtime.Archive)); err != nil {
+		return RuntimeArtifactSource{}, fmt.Errorf("Runtime artifact archive: %w", err)
 	}
 	return RuntimeArtifactSource{Directory: directory, Manifest: manifest}, nil
 }

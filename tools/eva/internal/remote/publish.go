@@ -312,7 +312,7 @@ func ResolvePayloadForPublish(resolved release.Resolved, registry, project strin
 	if err != nil {
 		return PayloadSource{}, err
 	}
-	return LoadTargetPayload(TargetPayloadPath(root, identity), identity)
+	return InspectTargetPayload(TargetPayloadPath(root, identity), identity)
 }
 
 func ResolveRuntimeArtifactForPublish(resolved release.Resolved, registry, project string) (RuntimeArtifactSource, error) {
@@ -320,7 +320,7 @@ func ResolveRuntimeArtifactForPublish(resolved release.Resolved, registry, proje
 	if err != nil {
 		return RuntimeArtifactSource{}, err
 	}
-	return LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
+	return InspectRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
 }
 
 func resolveCompletedPreparationForPublish(resolved release.Resolved, registry, project string) (string, PreparationIdentity, error) {

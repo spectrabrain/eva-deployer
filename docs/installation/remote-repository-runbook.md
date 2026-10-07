@@ -144,6 +144,14 @@ NAME          HOST           PORT  USER  AUTH      STATUS
 site-dev-196  10.159.56.196  22    eva   password  ok
 ```
 
+잘못 등록한 Target은 이름으로 삭제한 뒤 다시 `add`합니다. 삭제 전 host 정보를 보여주고
+확인을 받으며, 비대화형 실행에서는 `--yes`가 필요합니다. 해당 Target의 설정과 credential만
+삭제하며 다른 Target이나 Release·cache는 건드리지 않습니다.
+
+```bash
+sudo eva remote target remove site-dev-196
+```
+
 게시 전에는 Target 연결과 권한, `linux/amd64`, storage 및 inbox parent를 다시 확인합니다.
 이 preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.
 

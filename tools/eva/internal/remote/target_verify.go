@@ -316,10 +316,10 @@ func (verifier TargetVerifier) verifySudo(ctx context.Context, config TargetConf
 	stdin := []byte(nil)
 	args := verifier.sshArgs(config, knownHosts, controlPath, target)
 	if config.Sudo.Method == "passwordless" {
-		args = append(args, "sudo", "-n", "true")
+		args = append(args, remoteCommand("sudo", "-n", "true"))
 	} else {
 		stdin = []byte(credential.SudoPassword + "\n")
-		args = append(args, "sudo", "-S", "-p", "", "true")
+		args = append(args, remoteCommand("sudo", "-S", "-p", "", "true"))
 	}
 	if _, err := verifier.Run(ctx, "ssh", args, stdin); err != nil {
 		return errors.New("Target sudo authentication failed")
@@ -372,13 +372,12 @@ func (verifier TargetVerifier) probeInbox(ctx context.Context, config TargetConf
 	runSudo := func(command ...string) error {
 		args := verifier.sshArgs(config, knownHosts, controlPath, target)
 		stdin := []byte(nil)
+		words := []string{"sudo", "-n"}
 		if config.Sudo.Method == "password" {
 			stdin = []byte(credential.SudoPassword + "\n")
-			args = append(args, "sudo", "-S", "-p", "")
-		} else {
-			args = append(args, "sudo", "-n")
+			words = []string{"sudo", "-S", "-p", ""}
 		}
-		args = append(args, command...)
+		args = append(args, remoteCommand(append(words, command...)...))
 		_, err := verifier.Run(ctx, "ssh", args, stdin)
 		return err
 	}
@@ -398,47 +397,63 @@ func (verifier TargetVerifier) probeInbox(ctx context.Context, config TargetConf
 	return nil
 }
 
+// remoteCommand quotes words into the single command string ssh hands to the
+// remote shell. ssh joins separate arguments with spaces and drops empty ones,
+// which turned `sudo -S -p "" true` into `sudo -S -p true` (a usage error).
+func remoteCommand(words ...string) string {
+	quoted := make([]string, len(words))
+	for index, word := range words {
+		quoted[index] = "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
+}
+
 func runTargetCommand(ctx context.Context, path string, args []string, stdin []byte) ([]byte, error) {
 	command := exec.CommandContext(ctx, path, args...)
 	command.Stdin = bytes.NewReader(stdin)
 	return command.CombinedOutput()
 }
 
-func writeAskpassRuntime(
-	directory string,
-	password string,
-) (string, string, error) {
+// askpassModeEnv makes the installed eva executable act as SSH_ASKPASS. The
+// helper is the static Tool binary, never a generated script: /run is often
+// mounted noexec, so /run/eva holds only the password file.
+const askpassModeEnv = "EVA_SSH_ASKPASS_MODE"
+const askpassSecretEnv = "EVA_SSH_ASKPASS_SECRET"
+
+var askpassRuntimeRoot = "/run/eva"
+var askpassExecutable = os.Executable
+
+// ServeAskpassIfRequested answers an SSH_ASKPASS prompt when ssh invoked eva
+// in askpass mode. It reports whether it handled the invocation.
+func ServeAskpassIfRequested(stdout io.Writer) (bool, error) {
+	if os.Getenv(askpassModeEnv) != "1" {
+		return false, nil
+	}
+	path := os.Getenv(askpassSecretEnv)
+	if path == "" || !filepath.IsAbs(path) {
+		return true, errors.New("askpass secret is unavailable")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return true, errors.New("askpass secret is unavailable")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return true, errors.New("askpass secret is unavailable")
+	}
+	_, err = stdout.Write(contents)
+	return true, err
+}
+
+func writeAskpassSecret(directory, password string) (string, error) {
 	if password == "" {
-		return "", "", errors.New(
-			"SSH authentication failed",
-		)
+		return "", errors.New("SSH authentication failed")
 	}
-
 	secret := filepath.Join(directory, "secret")
-	helper := filepath.Join(directory, "askpass")
-
-	if err := os.WriteFile(
-		secret,
-		[]byte(password+"\n"),
-		0o600,
-	); err != nil {
-		return "", "", err
+	if err := os.WriteFile(secret, []byte(password+"\n"), 0o600); err != nil {
+		return "", err
 	}
-
-	helperContents := []byte(
-		"#!/bin/sh\n" +
-			"exec cat -- \"$EVA_SSH_ASKPASS_SECRET\"\n",
-	)
-
-	if err := os.WriteFile(
-		helper,
-		helperContents,
-		0o700,
-	); err != nil {
-		return "", "", err
-	}
-
-	return helper, secret, nil
+	return secret, nil
 }
 
 func runAskpassSSH(
@@ -446,10 +461,15 @@ func runAskpassSSH(
 	args []string,
 	password string,
 ) error {
-	directory, err := os.MkdirTemp(
-		"/run/eva",
-		"askpass-",
-	)
+	helper, err := askpassExecutable()
+	if err != nil {
+		return fmt.Errorf("locate askpass helper: %w", err)
+	}
+	if helper, err = filepath.EvalSymlinks(helper); err != nil {
+		return fmt.Errorf("resolve askpass helper: %w", err)
+	}
+
+	directory, err := os.MkdirTemp(askpassRuntimeRoot, "askpass-")
 	if err != nil {
 		return err
 	}
@@ -459,10 +479,7 @@ func runAskpassSSH(
 		return err
 	}
 
-	helper, secret, err := writeAskpassRuntime(
-		directory,
-		password,
-	)
+	secret, err := writeAskpassSecret(directory, password)
 	if err != nil {
 		return err
 	}
@@ -478,7 +495,8 @@ func runAskpassSSH(
 		"SSH_ASKPASS="+helper,
 		"SSH_ASKPASS_REQUIRE=force",
 		"DISPLAY=eva",
-		"EVA_SSH_ASKPASS_SECRET="+secret,
+		askpassModeEnv+"=1",
+		askpassSecretEnv+"="+secret,
 	)
 
 	if output, err := command.CombinedOutput(); err != nil {

@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -102,76 +104,137 @@ func TestTargetVerifierUsesPinnedHostKeyAndConnectionContext(t *testing.T) {
 	}
 }
 
-func TestWriteAskpassRuntimeUsesRestrictedSecretFile(
-	t *testing.T,
-) {
+func TestWriteAskpassSecretUsesRestrictedFileOnly(t *testing.T) {
 	directory := t.TempDir()
-
-	helper, secret, err := writeAskpassRuntime(
-		directory,
-		"ssh-secret",
-	)
+	secret, err := writeAskpassSecret(directory, "ssh-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	for path, expectedMode := range map[string]os.FileMode{
-		helper: 0o700,
-		secret: 0o600,
-	} {
-		info, err := os.Lstat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !info.Mode().IsRegular() {
-			t.Fatalf("%s is not a regular file", path)
-		}
-		if actual := info.Mode().Perm(); actual != expectedMode {
-			t.Fatalf(
-				"%s mode=%o, want=%o",
-				path,
-				actual,
-				expectedMode,
-			)
-		}
+	info, err := os.Lstat(secret)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("secret file = %v, %v", info, err)
 	}
-
-	secretContents, err := os.ReadFile(secret)
-	if err != nil {
-		t.Fatal(err)
+	contents, err := os.ReadFile(secret)
+	if err != nil || string(contents) != "ssh-secret\n" {
+		t.Fatalf("secret contents = %q, %v", contents, err)
 	}
-	if string(secretContents) != "ssh-secret\n" {
-		t.Fatal("askpass secret content differs")
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("runtime directory must hold only the secret: %v, %v", entries, err)
 	}
-
-	helperContents, err := os.ReadFile(helper)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if strings.Contains(
-		string(helperContents),
-		"ssh-secret",
-	) {
-		t.Fatal("askpass helper contains the SSH password")
-	}
-	if !strings.Contains(
-		string(helperContents),
-		"EVA_SSH_ASKPASS_SECRET",
-	) {
-		t.Fatal("askpass helper does not use the secret path")
+	if _, err := writeAskpassSecret(t.TempDir(), ""); err == nil {
+		t.Fatal("empty SSH password was accepted")
 	}
 }
 
-func TestWriteAskpassRuntimeRejectsEmptyPassword(
-	t *testing.T,
-) {
-	if _, _, err := writeAskpassRuntime(
-		t.TempDir(),
-		"",
-	); err == nil {
-		t.Fatal("empty SSH password was accepted")
+func TestServeAskpassRequiresModeAndPrivateSecret(t *testing.T) {
+	directory := t.TempDir()
+	secret, err := writeAskpassSecret(directory, "ssh-secret")
+	if err != nil {
+		t.Fatal(err)
 	}
+	var output strings.Builder
+	t.Setenv(askpassModeEnv, "")
+	t.Setenv(askpassSecretEnv, secret)
+	if handled, _ := ServeAskpassIfRequested(&output); handled || output.Len() != 0 {
+		t.Fatal("askpass ran without askpass mode")
+	}
+	t.Setenv(askpassModeEnv, "1")
+	if handled, err := ServeAskpassIfRequested(&output); !handled || err != nil || output.String() != "ssh-secret\n" {
+		t.Fatalf("askpass handled=%v err=%v output=%q", handled, err, output.String())
+	}
+	if err := os.Chmod(secret, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := ServeAskpassIfRequested(&strings.Builder{}); !handled || err == nil {
+		t.Fatal("askpass served a group/world-readable secret")
+	}
+	link := filepath.Join(directory, "link")
+	if err := os.Chmod(secret, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(askpassSecretEnv, link)
+	if handled, err := ServeAskpassIfRequested(&strings.Builder{}); !handled || err == nil {
+		t.Fatal("askpass followed a secret symlink")
+	}
+}
+
+// Regression: /run is commonly mounted noexec. The askpass helper must not be
+// executed from the runtime directory, which may only store the secret.
+func TestRunAskpassSSHSucceedsOnNoexecRuntimeRoot(t *testing.T) {
+	runtimeRoot := t.TempDir()
+	if err := syscall.Mount("tmpfs", runtimeRoot, "tmpfs", syscall.MS_NOEXEC|syscall.MS_NOSUID|syscall.MS_NODEV, "mode=0700"); err != nil {
+		t.Skipf("mounting a noexec tmpfs requires CAP_SYS_ADMIN (run under sudo or unshare -rm): %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Unmount(runtimeRoot, 0) })
+	probe := filepath.Join(runtimeRoot, "probe")
+	if err := os.WriteFile(probe, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command(probe).Run(); err == nil {
+		t.Fatal("test runtime root is not noexec")
+	}
+	// No location guard here: the result must come from the real noexec execve.
+	runAskpassSSHWithFakeClient(t, runtimeRoot, false)
+}
+
+func TestRunAskpassSSHKeepsHelperOutsideRuntimeRoot(t *testing.T) {
+	runAskpassSSHWithFakeClient(t, t.TempDir(), true)
+}
+
+func runAskpassSSHWithFakeClient(t *testing.T, runtimeRoot string, requireHelperOutsideRuntime bool) {
+	t.Helper()
+	previousRoot, previousExecutable := askpassRuntimeRoot, askpassExecutable
+	t.Cleanup(func() { askpassRuntimeRoot, askpassExecutable = previousRoot, previousExecutable })
+	askpassRuntimeRoot = runtimeRoot
+
+	// The test binary stands in for the installed eva binary: TestMain serves
+	// askpass mode exactly like cmd/eva main does.
+	bin := t.TempDir()
+	report := filepath.Join(bin, "report")
+	locationGuard := ""
+	if requireHelperOutsideRuntime {
+		locationGuard = "case \"$SSH_ASKPASS\" in \"$ASKPASS_RUNTIME_ROOT\"/*) echo helper-in-runtime-root >\"$ASKPASS_REPORT\"; exit 1 ;; esac\n"
+	}
+	fakeSSH := "#!/bin/sh\n" + locationGuard +
+		"[ -n \"$(ls \"$ASKPASS_RUNTIME_ROOT\")\" ] || exit 1\n" +
+		"password=$(\"$SSH_ASKPASS\" 'eva@target password: ') || { echo askpass-exec-failed >\"$ASKPASS_REPORT\"; exit 1; }\n" +
+		"[ \"$password\" = ssh-secret ] || { echo wrong-password >\"$ASKPASS_REPORT\"; exit 1; }\n" +
+		"echo ok >\"$ASKPASS_REPORT\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(fakeSSH), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("ASKPASS_RUNTIME_ROOT", runtimeRoot)
+	t.Setenv("ASKPASS_REPORT", report)
+
+	err := runAskpassSSH(context.Background(), []string{"eva@target", "true"}, "ssh-secret")
+	result, _ := os.ReadFile(report)
+	if err != nil || strings.TrimSpace(string(result)) != "ok" {
+		t.Fatalf("runAskpassSSH err=%v report=%q", err, strings.TrimSpace(string(result)))
+	}
+	entries, err := os.ReadDir(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "askpass-") {
+			t.Fatalf("askpass runtime directory was not removed: %s", entry.Name())
+		}
+	}
+}
+
+func TestMain(m *testing.M) {
+	if handled, err := ServeAskpassIfRequested(os.Stdout); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
 }
 
 func TestTargetVerifierRejectsChangedHostKeyBeforeAuthentication(t *testing.T) {
@@ -301,5 +364,72 @@ func TestTargetStoreListsTargetsWithAddressesAndReportsDamage(t *testing.T) {
 	}
 	if listings[1].Err == nil || listings[1].Config.Host != "10.159.57.20" {
 		t.Fatalf("credential-damaged listing must keep its address and report an error: %#v", listings[1])
+	}
+}
+
+// Regression: ssh joins remote arguments with spaces, so an unquoted empty
+// sudo prompt vanished and `sudo -S -p "" true` reached the Target as a usage
+// error regardless of the password. The fake transport reproduces that join.
+func TestTargetSudoCommandsSurviveSSHArgumentJoin(t *testing.T) {
+	bin := t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	fakeSudo := "#!/bin/sh\n" +
+		"if [ \"$1\" = -n ]; then shift; printf 'n:%s\\n' \"$*\" >>\"$SUDO_CALLS\"; exec true; fi\n" +
+		"[ \"$1\" = -S ] && [ \"$2\" = -p ] && [ \"$3\" = '' ] && [ $# -ge 4 ] || { echo usage >&2; exit 1; }\n" +
+		"shift 3; read -r password; [ \"$password\" = \"$SUDO_EXPECTED\" ] || exit 1\n" +
+		"printf 'S:%s\\n' \"$*\" >>\"$SUDO_CALLS\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte(fakeSudo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SUDO_CALLS", calls)
+	t.Setenv("SUDO_EXPECTED", "it's a \"sudo\" secret")
+	target := "eva@target.example.internal"
+	run := func(ctx context.Context, path string, args []string, stdin []byte) ([]byte, error) {
+		index := -1
+		for position, arg := range args {
+			if arg == target {
+				index = position
+			}
+		}
+		if path != "ssh" || index < 0 {
+			t.Fatalf("unexpected command %s %q", path, args)
+		}
+		// Exactly what ssh sends: the remaining words joined by spaces.
+		command := exec.CommandContext(ctx, "sh", "-c", strings.Join(args[index+1:], " "))
+		command.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		command.Stdin = strings.NewReader(string(stdin))
+		return command.CombinedOutput()
+	}
+	verifier := TargetVerifier{Run: run}
+	for _, method := range []string{"password", "passwordless"} {
+		t.Run(method, func(t *testing.T) {
+			_ = os.Remove(calls)
+			config := testTargetConfiguration()
+			if method == "passwordless" {
+				config.Sudo = TargetAuthentication{Method: "passwordless"}
+			}
+			credential := TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "it's a \"sudo\" secret"}
+			if err := verifier.verifySudo(context.Background(), config, credential, "known_hosts", "control", target); err != nil {
+				t.Fatalf("verifySudo: %v", err)
+			}
+			if err := verifier.probeInbox(context.Background(), config, credential, "known_hosts", "control", target); err != nil {
+				t.Fatalf("probeInbox: %v", err)
+			}
+			recorded, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(recorded)), "\n")
+			prefix := "S:"
+			if method == "passwordless" {
+				prefix = "n:"
+			}
+			if len(lines) != 5 || lines[0] != prefix+"true" || lines[1] != prefix+"mkdir -p /var/lib/eva/inbox/releases" {
+				t.Fatalf("remote sudo calls = %q", lines)
+			}
+		})
+	}
+	if err := verifier.verifySudo(context.Background(), testTargetConfiguration(), TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "wrong"}, "known_hosts", "control", target); err == nil {
+		t.Fatal("wrong sudo password was accepted")
 	}
 }

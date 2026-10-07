@@ -100,6 +100,13 @@ func usage() {
 }
 
 func main() {
+	if handled, err := remote.ServeAskpassIfRequested(os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(os.Args[1:]); err != nil {
 		var displayed *displayedError
 		if errors.As(err, &displayed) {

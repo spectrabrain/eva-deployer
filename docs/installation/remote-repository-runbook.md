@@ -272,6 +272,10 @@ sudo eva preflight argocd \
 발견된 관리 연결을 해제할지 묻는 경우 현재 상태와 승인 내용을 확인합니다. 거절하거나
 검증에 실패하면 설치를 시작하지 않습니다.
 
+이 명령은 `eva install`과 같이 Current Release(7단계에서 등록한 게시 Release)를 사용하므로
+실행 위치와 무관합니다. Target에 Managed Runtime이 아직 없으면 게시된 Remote Runtime
+artifact로 먼저 설치합니다.
+
 ## 11. [Target] EVA 설치
 
 Workspace와 게시된 Release를 검증한 뒤 설치를 실행합니다.

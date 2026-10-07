@@ -10,7 +10,8 @@ Usage:
     --payload-dir PATH \
     --target HOST \
     [--target-root PATH] \
-    [--ssh-option OPTION] \
+    [--staging-root PATH] \
+    [--ssh-option KEY=VALUE] \
     [--sudo-mode none|password|passwordless] \
     [--sudo-password-fd FD]
 
@@ -27,6 +28,12 @@ Required release contents:
 Default target root:
   /var/lib/eva/inbox/releases
 
+Default staging root:
+  /var/lib/eva-staging
+  The SSH user transfers into a private directory here because the target root
+  sits under the root-only EVA state directory. It must be on the same
+  filesystem as the target root so the verified Release is renamed into place.
+
 Environment:
   SSH_CMD       SSH executable. Default: ssh
   RSYNC_CMD     rsync executable. Default: rsync
@@ -38,6 +45,7 @@ payload_dir=""
 runtime_dir=""
 target=""
 target_root="/var/lib/eva/inbox/releases"
+staging_root="/var/lib/eva-staging"
 ssh_options=()
 sudo_mode="none"
 sudo_password_fd=""
@@ -67,8 +75,18 @@ while (($#)); do
       target_root="${2:-}"
       shift 2
       ;;
+    --staging-root)
+      staging_root="${2:-}"
+      shift 2
+      ;;
     --ssh-option)
-      ssh_options+=("${2:-}")
+      # The EVA Tool passes ssh -o values (Key=Value). Passing them bare made
+      # ssh read "Port=22" as the destination host.
+      if [[ ! "${2:-}" =~ ^[A-Za-z]+=.+$ ]]; then
+        echo "[ERROR] --ssh-option must be an ssh -o Key=Value option: ${2:-}" >&2
+        exit 2
+      fi
+      ssh_options+=(-o "$2")
       shift 2
       ;;
     --sudo-mode)
@@ -117,6 +135,10 @@ fi
 
 if [[ "$target_root" != /* || "$target_root" == "/" ]]; then
   echo "[ERROR] --target-root must be an absolute non-root path" >&2
+  exit 2
+fi
+if [[ "$staging_root" != /* || "$staging_root" == "/" || "$staging_root" == *..* || "${staging_root%/}/" == "${target_root%/}/"* || "${target_root%/}/" == "${staging_root%/}/"* ]]; then
+  echo "[ERROR] --staging-root must be an absolute non-root path outside the target root" >&2
   exit 2
 fi
 
@@ -168,6 +190,34 @@ release_dir="$(cd "$release_dir" && pwd)"
 payload_dir="$(cd "$payload_dir" && pwd)"
 runtime_dir="$(cd "$runtime_dir" && pwd)"
 
+# manifest_value FILE SECTION KEY prints KEY from a top-level SECTION mapping
+# of a manifest written by the EVA Tool (yaml.v3, any indentation width), or a
+# top-level KEY when SECTION is empty. It is also sent to the Target script.
+manifest_value() {
+  awk -v section="$2" -v key="$3" '
+    section == "" && $0 ~ "^" key ":" { print $2; exit }
+    section != "" && $0 ~ "^" section ":[[:space:]]*$" { inside = 1; next }
+    /^[^[:space:]]/ { inside = 0 }
+    inside && $0 ~ "^[[:space:]]+" key ":" { print $2; exit }
+  ' "$1"
+}
+
+# runtime_archive_entry_is_safe ENTRY mirrors the EVA Tool Runtime builder
+# allowlist: runtime.yaml, bin, venv and Ansible collections. Third-party venv
+# and collection code legitimately names modules after secrets, credentials
+# and tokens (amazon.aws secretsmanager_secret, awx credential, ...), so the
+# credential-name guard applies only to the EVA-assembled bin and descriptor.
+runtime_archive_entry_is_safe() {
+  local entry="${1%/}"
+  [[ -n "$entry" && "$entry" != /* && "/$entry/" != */../* ]] || return 1
+  case "$entry" in
+    runtime|runtime/venv|runtime/venv/*|runtime/collections|runtime/collections/*) return 0 ;;
+    runtime/runtime.yaml|runtime/bin|runtime/bin/*) ;;
+    *) return 1 ;;
+  esac
+  [[ "$entry" != *secret* && "$entry" != *credential* && "$entry" != *token* ]]
+}
+
 validate_runtime_artifact() {
   local directory="$1" prefix="$2" archive schema version platform release_version registry project descriptor_sha256 actual_descriptor_sha256
   for required_path in "$directory/manifest.yaml" "$directory/checksums.sha256"; do
@@ -179,13 +229,13 @@ validate_runtime_artifact() {
   if find "$directory" -type l -print -quit | grep -q .; then
     echo "[ERROR] ${prefix} Runtime artifact contains a symbolic link" >&2; return 1
   fi
-  archive="$(awk '/^  archive:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
+  archive="$(manifest_value "$directory/manifest.yaml" runtime archive)"
   schema="$(awk '/^schema_version:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
-  version="$(awk '/^  version:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
-  platform="$(awk '/^  platform:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
-  release_version="$(awk '/^release:/{ x=1; next } /^[^ ]/{x=0} x && /^  version:/{print $2; exit}' "$directory/manifest.yaml")"
-  registry="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  registry:/{print $2; exit}' "$directory/manifest.yaml")"
-  project="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  project:/{print $2; exit}' "$directory/manifest.yaml")"
+  version="$(manifest_value "$directory/manifest.yaml" runtime version)"
+  platform="$(manifest_value "$directory/manifest.yaml" runtime platform)"
+  release_version="$(manifest_value "$directory/manifest.yaml" release version)"
+  registry="$(manifest_value "$directory/manifest.yaml" repository registry)"
+  project="$(manifest_value "$directory/manifest.yaml" repository project)"
   if [[ "$schema" != v1 || -z "$version" || "$platform" != linux/amd64 || -z "$release_version" || -z "$registry" || -z "$project" || ! "$archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$directory/$archive" || -L "$directory/$archive" ]]; then
     echo "[ERROR] ${prefix} Runtime artifact manifest is invalid" >&2; return 1
   fi
@@ -195,16 +245,13 @@ validate_runtime_artifact() {
   if [[ "$(wc -l < "$directory/checksums.sha256")" -ne 1 ]]; then
     echo "[ERROR] ${prefix} Runtime artifact checksum manifest is invalid" >&2; return 1
   fi
-  descriptor_sha256="$(awk '/^  descriptor_sha256:[[:space:]]*/ { print $2; exit }' "$directory/manifest.yaml")"
+  descriptor_sha256="$(manifest_value "$directory/manifest.yaml" runtime descriptor_sha256)"
   actual_descriptor_sha256="$(tar -xOzf "$directory/$archive" runtime/runtime.yaml 2>/dev/null | sha256sum | awk '{print $1}')"
   if [[ ! "$descriptor_sha256" =~ ^[a-f0-9]{64}$ || "$descriptor_sha256" != "$actual_descriptor_sha256" ]]; then
     echo "[ERROR] ${prefix} Runtime descriptor digest is invalid" >&2; return 1
   fi
   while IFS= read -r entry; do
-    case "$entry" in runtime|runtime/runtime.yaml|runtime/bin|runtime/bin/*|runtime/venv|runtime/venv/*) ;; *) echo "[ERROR] unsafe Runtime archive entry: $entry" >&2; return 1 ;; esac
-    if [[ -z "$entry" || "$entry" == /* || "/$entry/" == */../* || "$entry" == *secret* || "$entry" == *credential* || "$entry" == *token* ]]; then
-      echo "[ERROR] unsafe Runtime archive entry: $entry" >&2; return 1
-    fi
+    runtime_archive_entry_is_safe "$entry" || { echo "[ERROR] unsafe Runtime archive entry: $entry" >&2; return 1; }
   done < <(tar -tzf "$directory/$archive")
   if tar -tvzf "$directory/$archive" | awk '$1 !~ /^[-d]/ { exit 1 }'; then :; else
     echo "[ERROR] Runtime artifact contains a link or special file" >&2; return 1
@@ -229,9 +276,9 @@ fi
 payload_archive="$(awk '/^archive:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
 payload_schema="$(awk '/^schema_version:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
 payload_identity="$(awk '/^identity:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_release_version="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  version:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_registry="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  registry:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_project="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  project:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_release_version="$(manifest_value "$payload_dir/manifest.yaml" release version)"
+payload_registry="$(manifest_value "$payload_dir/manifest.yaml" repository registry)"
+payload_project="$(manifest_value "$payload_dir/manifest.yaml" repository project)"
 if [[ "$payload_schema" != "v1" || ! "$payload_identity" =~ ^[a-f0-9]{32}$ || -z "$payload_release_version" || -z "$payload_registry" || -z "$payload_project" || ! "$payload_archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$payload_dir/$payload_archive" || -L "$payload_dir/$payload_archive" ]]; then
   echo "[ERROR] target payload archive is invalid" >&2
   exit 1
@@ -404,7 +451,7 @@ checksum_manifest_sha256="$(
 
 transfer_id="${release_version}-${checksum_manifest_sha256:0:16}"
 target_final="$target_root/$release_version"
-target_staging="$target_root/.incoming-$transfer_id"
+target_staging="$staging_root/.incoming-$transfer_id"
 
 remote_shell=("$SSH_CMD")
 remote_shell+=("${ssh_options[@]}")
@@ -414,9 +461,14 @@ printf -v remote_shell_text '%q ' "${remote_shell[@]}"
 remote_shell_text="${remote_shell_text% }"
 
 run_remote_root_script() {
-  local remote_script
+  local remote_script remote_command
 
-  remote_script="$(cat)"
+  # The Target script reuses the same manifest reader as the source checks.
+  remote_script="$(declare -f manifest_value runtime_archive_entry_is_safe)"$'\n'"$(cat)"
+  # ssh joins its remote arguments with spaces, dropping empty ones: an
+  # unquoted `-p ''` vanished and sudo then misparsed the command. Send one
+  # quoted command string instead.
+  printf -v remote_command '%q ' bash -s -- "$@"
 
   case "$sudo_mode" in
     password)
@@ -425,17 +477,17 @@ run_remote_root_script() {
         printf '%s\n' "$remote_script"
       } |
         "$SSH_CMD" "${ssh_options[@]}" "$target" \
-          sudo -S -p '' bash -s -- "$@"
+          "sudo -S -p '' $remote_command"
       ;;
     passwordless)
       printf '%s\n' "$remote_script" |
         "$SSH_CMD" "${ssh_options[@]}" "$target" \
-          sudo -n bash -s -- "$@"
+          "sudo -n $remote_command"
       ;;
     none)
       printf '%s\n' "$remote_script" |
         "$SSH_CMD" "${ssh_options[@]}" "$target" \
-          bash -s -- "$@"
+          "$remote_command"
       ;;
   esac
 }
@@ -489,7 +541,8 @@ run_remote_root_script \
   "$target_staging" \
   "$target_final" \
   "$target" \
-  "$sudo_mode" <<'REMOTE_PREPARE'
+  "$sudo_mode" \
+  "$staging_root" <<'REMOTE_PREPARE'
 set -euo pipefail
 
 target_root="$1"
@@ -497,6 +550,7 @@ target_staging="$2"
 target_final="$3"
 target_identity="$4"
 sudo_mode="$5"
+staging_root="$6"
 target_user="${target_identity%@*}"
 
 case "$sudo_mode" in
@@ -516,11 +570,26 @@ if [[ -L "$target_root" ]]; then
   exit 1
 fi
 
-if [[ -e "$target_staging" ]]; then
+# The SSH user cannot traverse the root-only EVA state directory that holds
+# the target root, so it transfers into a private directory under a separate,
+# root-owned staging root that only needs to be traversable.
+mkdir -p "$staging_root"
+if [[ -L "$staging_root" || ! -d "$staging_root" ]]; then
+  echo "[ERROR] staging root must be a directory, not a symbolic link: $staging_root" >&2
+  exit 1
+fi
+chown root:root "$staging_root"
+chmod 0755 "$staging_root"
+if [[ "$(stat -c %d "$staging_root")" != "$(stat -c %d "$target_root")" ]]; then
+  echo "[ERROR] staging root and target root must be on the same filesystem: $staging_root $target_root" >&2
+  exit 1
+fi
+
+if [[ -e "$target_staging" || -L "$target_staging" ]]; then
   rm -rf -- "$target_staging"
 fi
 
-mkdir -p "$target_staging"
+mkdir "$target_staging"
 
 if [[ "$target_user" == "$target_identity" ]] ||
   [[ -z "$target_user" ]]
@@ -590,6 +659,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Take the transferred tree away from the SSH user before verifying it, so it
+# cannot change between verification and publication. chown -R does not
+# follow symbolic links; any link is rejected below.
+if [[ -L "$target_staging" || ! -d "$target_staging" ]]; then
+  echo "[ERROR] transferred staging directory is invalid" >&2
+  exit 1
+fi
+chown -R root:root "$target_staging"
+chmod 0700 "$target_staging"
+
 for command in awk sha256sum tar; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "[ERROR] required Target command not found: $command" >&2
@@ -602,16 +681,15 @@ runtime_dir="$target_staging/remote-runtime"
 for required_path in "$runtime_dir/manifest.yaml" "$runtime_dir/checksums.sha256"; do
   if [[ ! -f "$required_path" || -L "$required_path" ]]; then echo "[ERROR] transferred Runtime artifact file is invalid" >&2; exit 1; fi
 done
-runtime_archive="$(awk '/^  archive:[[:space:]]*/ { print $2; exit }' "$runtime_dir/manifest.yaml")"
-runtime_platform="$(awk '/^  platform:[[:space:]]*/ { print $2; exit }' "$runtime_dir/manifest.yaml")"
-runtime_release_version="$(awk '/^release:/{ x=1; next } /^[^ ]/{x=0} x && /^  version:/{print $2; exit}' "$runtime_dir/manifest.yaml")"
-runtime_registry="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  registry:/{print $2; exit}' "$runtime_dir/manifest.yaml")"
-runtime_project="$(awk '/^repository:/{ x=1; next } /^[^ ]/{x=0} x && /^  project:/{print $2; exit}' "$runtime_dir/manifest.yaml")"
-runtime_descriptor_sha256="$(awk '/^  descriptor_sha256:[[:space:]]*/ { print $2; exit }' "$runtime_dir/manifest.yaml")"
+runtime_archive="$(manifest_value "$runtime_dir/manifest.yaml" runtime archive)"
+runtime_platform="$(manifest_value "$runtime_dir/manifest.yaml" runtime platform)"
+runtime_release_version="$(manifest_value "$runtime_dir/manifest.yaml" release version)"
+runtime_registry="$(manifest_value "$runtime_dir/manifest.yaml" repository registry)"
+runtime_project="$(manifest_value "$runtime_dir/manifest.yaml" repository project)"
+runtime_descriptor_sha256="$(manifest_value "$runtime_dir/manifest.yaml" runtime descriptor_sha256)"
 if find "$runtime_dir" -type l -print -quit | grep -q . || [[ "$(find "$runtime_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | wc -l)" -ne 3 ]] || [[ "$(wc -l < "$runtime_dir/checksums.sha256")" -ne 1 ]] || [[ "$runtime_platform" != linux/amd64 || "$runtime_release_version" != "$release_version" || -z "$runtime_registry" || -z "$runtime_project" || ! "$runtime_archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$runtime_dir/$runtime_archive" || -L "$runtime_dir/$runtime_archive" ]] || ! (cd "$runtime_dir" && sha256sum --check --strict checksums.sha256 >/dev/null) || [[ ! "$runtime_descriptor_sha256" =~ ^[a-f0-9]{64}$ ]] || [[ "$(tar -xOzf "$runtime_dir/$runtime_archive" runtime/runtime.yaml 2>/dev/null | sha256sum | awk '{print $1}')" != "$runtime_descriptor_sha256" ]]; then echo "[ERROR] transferred Runtime artifact is invalid" >&2; exit 1; fi
 while IFS= read -r runtime_entry; do
-  case "$runtime_entry" in runtime|runtime/runtime.yaml|runtime/bin|runtime/bin/*|runtime/venv|runtime/venv/*) ;; *) echo "[ERROR] unsafe Runtime archive entry: $runtime_entry" >&2; exit 1 ;; esac
-  if [[ -z "$runtime_entry" || "$runtime_entry" == /* || "/$runtime_entry/" == */../* || "$runtime_entry" == *secret* || "$runtime_entry" == *credential* || "$runtime_entry" == *token* ]]; then echo "[ERROR] unsafe Runtime archive entry: $runtime_entry" >&2; exit 1; fi
+  runtime_archive_entry_is_safe "$runtime_entry" || { echo "[ERROR] unsafe Runtime archive entry: $runtime_entry" >&2; exit 1; }
 done < <(tar -tzf "$runtime_dir/$runtime_archive")
 runtime_manifest_sha256="$(sha256sum "$runtime_dir/manifest.yaml" | awk '{print $1}')"
 if [[ "$runtime_manifest_sha256" != "$expected_runtime_manifest_sha256" ]]; then echo "[ERROR] transferred Runtime artifact digest mismatch" >&2; exit 1; fi
@@ -628,11 +706,11 @@ fi
 payload_archive="$(awk '/^archive:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
 payload_schema="$(awk '/^schema_version:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
 payload_identity="$(awk '/^identity:[[:space:]]*/ { print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_release_version="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  version:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_release_digest="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  release_yaml_sha256:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_checksums_digest="$(awk '/^release:/{ in_release=1; next } /^[^ ]/{ in_release=0 } in_release && /^  checksums_sha256:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_registry="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  registry:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
-payload_project="$(awk '/^repository:/{ in_repository=1; next } /^[^ ]/{ in_repository=0 } in_repository && /^  project:/{ print $2; exit }' "$payload_dir/manifest.yaml")"
+payload_release_version="$(manifest_value "$payload_dir/manifest.yaml" release version)"
+payload_release_digest="$(manifest_value "$payload_dir/manifest.yaml" release release_yaml_sha256)"
+payload_checksums_digest="$(manifest_value "$payload_dir/manifest.yaml" release checksums_sha256)"
+payload_registry="$(manifest_value "$payload_dir/manifest.yaml" repository registry)"
+payload_project="$(manifest_value "$payload_dir/manifest.yaml" repository project)"
 if [[ "$payload_schema" != "v1" || ! "$payload_identity" =~ ^[a-f0-9]{32}$ || -z "$payload_registry" || -z "$payload_project" || ! "$payload_archive" =~ ^[A-Za-z0-9._-]+$ || ! -f "$payload_dir/$payload_archive" || -L "$payload_dir/$payload_archive" ]]; then
   echo "[ERROR] transferred target payload archive is invalid" >&2
   exit 1

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -431,5 +432,70 @@ func TestTargetSudoCommandsSurviveSSHArgumentJoin(t *testing.T) {
 	}
 	if err := verifier.verifySudo(context.Background(), testTargetConfiguration(), TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "wrong"}, "known_hosts", "control", target); err == nil {
 		t.Fatal("wrong sudo password was accepted")
+	}
+}
+
+func TestTargetStoreRemoveDeletesOnlyNamedTarget(t *testing.T) {
+	store := NewTargetStore(filepath.Join(t.TempDir(), "targets"), filepath.Join(t.TempDir(), "credentials"))
+	for _, name := range []string{"site-mg-c", "site-mg-x"} {
+		config := testTargetConfiguration()
+		config.Name, config.Authentication.CredentialRef, config.Sudo.CredentialRef = name, name, name
+		if err := store.Write(config, TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "sudo-secret"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Remove("site-mg-x"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(store.RegistryRoot, "site-mg-x"), filepath.Join(store.CredentialRoot, "site-mg-x")} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s survived removal: %v", path, err)
+		}
+	}
+	if _, _, err := store.Load("site-mg-c"); err != nil {
+		t.Fatalf("other Target was affected: %v", err)
+	}
+	if err := store.Remove("site-mg-x"); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("second removal error = %v", err)
+	}
+	for _, name := range []string{"", ".", "..", "../targets", "a/b"} {
+		if err := store.Remove(name); err == nil {
+			t.Fatalf("unsafe name %q was accepted", name)
+		}
+	}
+	if _, _, err := store.Load("site-mg-c"); err != nil {
+		t.Fatalf("unsafe names affected another Target: %v", err)
+	}
+}
+
+func TestTargetStoreRemoveHandlesPartialAndLinkedEntries(t *testing.T) {
+	store := NewTargetStore(filepath.Join(t.TempDir(), "targets"), filepath.Join(t.TempDir(), "credentials"))
+	config := testTargetConfiguration()
+	if err := store.Write(config, TargetCredential{SchemaVersion: "v1", SSHPassword: "ssh-secret", SudoPassword: "sudo-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	// A credential without configuration is invisible to list but must still go.
+	if err := os.RemoveAll(filepath.Join(store.RegistryRoot, config.Name)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove(config.Name); err != nil {
+		t.Fatalf("orphaned credential was not removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(store.CredentialRoot, config.Name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphaned credential survived: %v", err)
+	}
+	outside := t.TempDir()
+	keep := filepath.Join(outside, "keep")
+	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(store.RegistryRoot, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove("linked"); err == nil {
+		t.Fatal("linked Target directory was accepted")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("symlink target contents were touched: %v", err)
 	}
 }

@@ -251,3 +251,103 @@ func preparationFingerprint(t *testing.T, root string) string {
 	sort.Strings(values)
 	return strings.Join(values, "\n")
 }
+
+// Regression: target verify, publish, and a repeated prepare each rehashed the
+// tens-of-gigabytes delivery archives that prepare had already verified. They
+// must rely on the recorded evidence; explicit `eva remote verify` still
+// rehashes, and structural damage is still rejected.
+func TestCompletedPreparationReliesOnRecordedArtifactEvidence(t *testing.T) {
+	root, resolved, identity := writeCompletedPreparation(t)
+	manifest, err := NewManifestStore(filepath.Dir(root), nil).Load(identity.ReleaseVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := InspectTargetPayload(TargetPayloadPath(root, identity), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeArtifact, err := InspectRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same-size bit flips: only a content rehash can notice them.
+	for _, archive := range []string{filepath.Join(payload.Directory, payload.Manifest.Archive), filepath.Join(runtimeArtifact.Directory, runtimeArtifact.Manifest.Runtime.Archive)} {
+		contents, err := os.ReadFile(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents[len(contents)/2] ^= 0xff
+		if err := os.WriteFile(archive, contents, 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cacheRoot := filepath.Join(root, "cache")
+	if err := ValidateCompletedPreparation(root, cacheRoot, resolved, identity, manifest); err != nil {
+		t.Fatalf("completed preparation rehashed delivery archives: %v", err)
+	}
+	if _, err := InspectTargetPayload(payload.Directory, identity); err != nil {
+		t.Fatalf("InspectTargetPayload read the archive: %v", err)
+	}
+	if _, err := LoadTargetPayload(payload.Directory, identity); err == nil {
+		t.Fatal("LoadTargetPayload accepted a corrupted archive")
+	}
+	if _, err := LoadRuntimeArtifact(runtimeArtifact.Directory, identity); err == nil {
+		t.Fatal("LoadRuntimeArtifact accepted a corrupted archive")
+	}
+	if err := VerifyCompletedPreparation(root, cacheRoot, resolved, identity, manifest); err == nil {
+		t.Fatal("VerifyCompletedPreparation accepted a corrupted archive")
+	}
+	if _, err := (VerifyService{PreparationRoot: filepath.Dir(root), CacheRoot: cacheRoot}).Verify(VerifyOptions{Release: resolved, Registry: identity.RepositoryRegistry}); err == nil {
+		t.Fatal("eva remote verify no longer rehashes delivery archives")
+	}
+}
+
+func TestCompletedPreparationStillRejectsDamagedArtifactEvidence(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(t *testing.T, payload PayloadSource)
+	}{
+		{"missing archive", func(t *testing.T, payload PayloadSource) {
+			if err := os.Remove(filepath.Join(payload.Directory, payload.Manifest.Archive)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"empty archive", func(t *testing.T, payload PayloadSource) {
+			if err := os.WriteFile(filepath.Join(payload.Directory, payload.Manifest.Archive), nil, 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"symlinked archive", func(t *testing.T, payload PayloadSource) {
+			archive := filepath.Join(payload.Directory, payload.Manifest.Archive)
+			moved := filepath.Join(t.TempDir(), "archive")
+			if err := os.Rename(archive, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(moved, archive); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"checksum manifest disagrees", func(t *testing.T, payload PayloadSource) {
+			line := strings.Repeat("0", 64) + "  " + payload.Manifest.Archive + "\n"
+			if err := os.WriteFile(filepath.Join(payload.Directory, "checksums.sha256"), []byte(line), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root, resolved, identity := writeCompletedPreparation(t)
+			manifest, err := NewManifestStore(filepath.Dir(root), nil).Load(identity.ReleaseVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload, err := InspectTargetPayload(TargetPayloadPath(root, identity), identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testCase.mutate(t, payload)
+			if err := ValidateCompletedPreparation(root, filepath.Join(root, "cache"), resolved, identity, manifest); err == nil {
+				t.Fatal("damaged payload evidence was accepted")
+			}
+		})
+	}
+}

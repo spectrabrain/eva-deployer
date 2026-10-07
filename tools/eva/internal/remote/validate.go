@@ -19,7 +19,14 @@ var imageReferencePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:@-]*$`
 // ValidatePreparation is intentionally read-only. It is shared by prepare's
 // final step and the later verify command. The completed-manifest wrapper adds
 // the final verification report after it has been written by prepare.
+// ValidatePreparation fully verifies a preparation, rehashing its delivery
+// artifacts. Prepare runs it once while assembling the summary; explicit
+// `eva remote verify` runs it on demand.
 func ValidatePreparation(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+	return validatePreparation(root, cacheRoot, resolved, identity, manifest, true)
+}
+
+func validatePreparation(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest, verifyArtifactDigests bool) error {
 	if err := EnsureIdentity(manifest, identity); err != nil {
 		return err
 	}
@@ -42,10 +49,14 @@ func ValidatePreparation(root, cacheRoot string, resolved release.Resolved, iden
 	if err := validatePreparationAssets(root, cacheRoot, identity); err != nil {
 		return err
 	}
-	if _, err := LoadTargetPayload(TargetPayloadPath(root, identity), identity); err != nil {
+	loadPayload, loadRuntime := InspectTargetPayload, InspectRuntimeArtifact
+	if verifyArtifactDigests {
+		loadPayload, loadRuntime = LoadTargetPayload, LoadRuntimeArtifact
+	}
+	if _, err := loadPayload(TargetPayloadPath(root, identity), identity); err != nil {
 		return fmt.Errorf("target payload: %w", err)
 	}
-	if _, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity); err != nil {
+	if _, err := loadRuntime(RuntimeArtifactPath(root, identity), identity); err != nil {
 		return fmt.Errorf("Runtime artifact: %w", err)
 	}
 	if err := validateSummaryReport(root, identity); err != nil {
@@ -71,12 +82,24 @@ func ValidatePreparationAssets(root, cacheRoot string, resolved release.Resolved
 }
 
 // ValidateCompletedPreparation is the read-only contract for a previously
-// completed preparation. It never writes the manifest or reports.
+// completed preparation. It never writes the manifest or reports. Artifact
+// digests were verified when prepare completed, so it checks the recorded
+// evidence only; VerifyCompletedPreparation also rehashes the artifacts.
 func ValidateCompletedPreparation(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+	return validateCompletedPreparation(root, cacheRoot, resolved, identity, manifest, false)
+}
+
+// VerifyCompletedPreparation is ValidateCompletedPreparation plus a full
+// rehash of the delivery artifacts, for explicit integrity verification.
+func VerifyCompletedPreparation(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest) error {
+	return validateCompletedPreparation(root, cacheRoot, resolved, identity, manifest, true)
+}
+
+func validateCompletedPreparation(root, cacheRoot string, resolved release.Resolved, identity PreparationIdentity, manifest Manifest, verifyArtifactDigests bool) error {
 	if err := validateCompletedManifest(manifest, identity); err != nil {
 		return err
 	}
-	if err := ValidatePreparation(root, cacheRoot, resolved, identity, manifest); err != nil {
+	if err := validatePreparation(root, cacheRoot, resolved, identity, manifest, verifyArtifactDigests); err != nil {
 		return err
 	}
 	if err := validateVerificationReport(root, identity); err != nil {

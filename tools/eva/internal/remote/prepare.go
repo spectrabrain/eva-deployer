@@ -284,7 +284,8 @@ func (service PrepareService) steps(
 			relative := filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity)))
 			return StepResult{Evidence: stableEvidence([]string{relative + "/manifest.yaml", relative + "/checksums.sha256", relative + "/" + artifact.Manifest.Runtime.Archive})}, nil
 		}, ValidateEvidence: func(context.Context, []string) error {
-			_, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
+			// BuildRuntimeArtifact fully verified the staged artifact.
+			_, err := InspectRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
 			return err
 		}},
 		command("prepare-offline-assets", awsEnv(nil), []string{"reports/cache-offline-assets.yaml"}, func() error { return ValidateOfflineAssets(cacheRoot) }),
@@ -331,7 +332,7 @@ func (service PrepareService) steps(
 			if err != nil {
 				return StepResult{}, err
 			}
-			runtimeArtifact, err := LoadRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
+			runtimeArtifact, err := InspectRuntimeArtifact(RuntimeArtifactPath(root, identity), identity)
 			if err != nil {
 				return StepResult{}, err
 			}
@@ -344,7 +345,9 @@ func (service PrepareService) steps(
 			return nonEmptyRegular(root, "reports/preparation-summary.yaml")
 		}},
 		{Name: "verify", Run: func(context.Context) (StepResult, error) {
-			if err := ValidatePreparation(root, cacheRoot, resolved, identity, *manifest); err != nil {
+			// Both delivery artifacts were fully verified when this run built
+			// them; rehashing tens of gigabytes again adds no assurance here.
+			if err := validatePreparation(root, cacheRoot, resolved, identity, *manifest, false); err != nil {
 				return StepResult{}, err
 			}
 			if err := writeYAMLReport(root, "reports/verification.yaml", map[string]string{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "status": "validated"}); err != nil {

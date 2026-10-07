@@ -64,7 +64,7 @@ func (service VerifyService) Verify(options VerifyOptions) (VerifyResult, error)
 	if cacheRoot == "" {
 		cacheRoot = DefaultRemoteCacheRoot
 	}
-	if err := ValidateCompletedPreparation(filepath.Dir(manifestPath), cacheRoot, options.Release, identity, manifest); err != nil {
+	if err := VerifyCompletedPreparation(filepath.Dir(manifestPath), cacheRoot, options.Release, identity, manifest); err != nil {
 		return VerifyResult{ManifestPath: manifestPath}, safeVerifyError(fmt.Errorf("verify Remote preparation: %w", err))
 	}
 	return VerifyResult{

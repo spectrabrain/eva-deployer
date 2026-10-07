@@ -127,6 +127,15 @@ jobs:
       - name: Test Remote Release transport contract
         run: scripts/test/test_remote_release_transport.sh
 
+      - name: Test Remote publish end to end
+        run: |
+          set -euo pipefail
+          log_path="$RUNNER_TEMP/remote-publish-e2e.log"
+          sudo --preserve-env=PATH,HOME,GOPATH,GOCACHE,GOMODCACHE \
+            bash scripts/test/test_remote_publish_end_to_end.sh 2>&1 | tee "$log_path"
+          # CI runs as real root, so the unprivileged SSH user must be exercised.
+          grep -Fqx '[OK] Remote publish end-to-end test passed with an unprivileged SSH user' "$log_path"
+
       - name: Test Docker credential store contract
         run: scripts/test/test_docker_credential_store_contract.sh
 

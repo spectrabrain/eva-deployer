@@ -1198,6 +1198,7 @@ func materializedRemoteCache(releaseResolved release.Resolved, workspaceResolved
 		workspaceResolved.Config.Repository.Registry,
 		workspaceResolved.Config.Repository.Project,
 		"",
+		os.Stdout,
 	)
 }
 

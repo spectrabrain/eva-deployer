@@ -700,7 +700,7 @@ func TestMaterializedRemoteCacheOnlyUsesRemoteRepository(t *testing.T) {
 	previous := materializeRemotePayload
 	defer func() { materializeRemotePayload = previous }()
 	calls := 0
-	materializeRemotePayload = func(resolved release.Resolved, registry, project, artifactRoot string) (string, error) {
+	materializeRemotePayload = func(resolved release.Resolved, registry, project, artifactRoot string, _ io.Writer) (string, error) {
 		calls++
 		if registry != "harbor.example.internal:32080" || project != "eva" || artifactRoot != "" {
 			t.Fatalf("materialize arguments = %q, %q, %q", registry, project, artifactRoot)

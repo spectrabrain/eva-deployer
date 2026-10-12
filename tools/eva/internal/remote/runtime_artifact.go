@@ -62,7 +62,9 @@ func RuntimeArtifactPath(root string, identity PreparationIdentity) string {
 // from the verified delivery artifact. It intentionally has no online or
 // eva-offline Release fallback.
 func BootstrapTargetRuntime(resolved release.Resolved, registry, project, runtimeRoot string) (runtime.Resolved, error) {
-	artifact, _, err := ValidatePublishedRemoteDelivery(resolved, registry, project)
+	// The Runtime archive is installed from here, so it is verified in full.
+	// The payload is verified while eva install materializes it.
+	artifact, _, err := checkPublishedRemoteDelivery(resolved, registry, project, true)
 	if err != nil {
 		return runtime.Resolved{}, fmt.Errorf("load published Remote Runtime artifact: %w", err)
 	}
@@ -76,18 +78,26 @@ func BootstrapTargetRuntime(resolved release.Resolved, registry, project, runtim
 	return installed, nil
 }
 
-// ValidatePublishedRemoteDelivery is the Target-side, read-only trust-boundary
-// check for the marker plus the separately published Runtime and payload.
-func ValidatePublishedRemoteDelivery(resolved release.Resolved, registry, project string) (RuntimeArtifactSource, PayloadSource, error) {
+// checkPublishedRemoteDelivery is the Target-side, read-only trust-boundary
+// check for the marker plus the separately published Runtime and payload. It
+// binds the marker to both manifests. The tens-of-gigabytes payload archive is
+// not hashed here: MaterializeTargetPayload verifies both of its digests while
+// extracting it, before anything is published. verifyRuntime additionally
+// rehashes and test-bootstraps the Runtime archive for callers that install it.
+func checkPublishedRemoteDelivery(resolved release.Resolved, registry, project string, verifyRuntime bool) (RuntimeArtifactSource, PayloadSource, error) {
 	identity, err := BuildPreparationIdentity(resolved, registry, project)
 	if err != nil {
 		return RuntimeArtifactSource{}, PayloadSource{}, err
 	}
-	runtimeArtifact, err := LoadRuntimeArtifact(filepath.Join(resolved.Root, "remote-runtime"), identity)
+	loadRuntime := InspectRuntimeArtifact
+	if verifyRuntime {
+		loadRuntime = LoadRuntimeArtifact
+	}
+	runtimeArtifact, err := loadRuntime(filepath.Join(resolved.Root, "remote-runtime"), identity)
 	if err != nil {
 		return RuntimeArtifactSource{}, PayloadSource{}, fmt.Errorf("load published Remote Runtime artifact: %w", err)
 	}
-	payload, err := LoadTargetPayload(filepath.Join(resolved.Root, targetPayloadDirectory), identity)
+	payload, err := InspectTargetPayload(filepath.Join(resolved.Root, targetPayloadDirectory), identity)
 	if err != nil {
 		return RuntimeArtifactSource{}, PayloadSource{}, fmt.Errorf("load published Target payload: %w", err)
 	}

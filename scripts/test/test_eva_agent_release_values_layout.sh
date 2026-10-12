@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
+PYTHON="${PYTHON:-python3}"
 TMP_ROOT="$(mktemp -d)"
 
 cleanup() {
@@ -140,6 +141,28 @@ image:
   repository: "{{ harbor_registry }}/eva/eva-agent"
 EOF
 
+# Exercise the real offline-copy and generated-input read tasks without
+# invoking Helm, Kubernetes or host provisioning. Do not duplicate their
+# source/destination expressions: the production task must drive the test.
+"$PYTHON" - "$REPO_ROOT/src/solution/roles/eva_agent/tasks/agent.yaml" "$TMP_ROOT/offline-values-tasks.yaml" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+tasks = yaml.safe_load(Path(sys.argv[1]).read_text())
+names = (
+    "Copy EVA Agent k3s values from offline bundle",
+    "Read EVA Agent generated input values",
+)
+selected = []
+for name in names:
+    matches = [task for task in tasks if task.get("name") == name]
+    if len(matches) != 1:
+        raise SystemExit(f"expected exactly one production task: {name}")
+    selected.append(matches[0])
+Path(sys.argv[2]).write_text(yaml.safe_dump(selected, sort_keys=False))
+PY
+
 cat >"$TMP_ROOT/layout.yaml" <<EOF
 ---
 - hosts: localhost
@@ -147,8 +170,23 @@ cat >"$TMP_ROOT/layout.yaml" <<EOF
   connection: local
   vars:
     eva_cache_root: $TMP_ROOT/cache
+    ansible_host: site-dev-196
+    eva_site_values_root: "$TMP_ROOT/{{ workspace_scenario }}/site-values"
     eva_agent_vllm_profile: L40sx1
+    eva_agent_offline_dir: $TMP_ROOT/cache/eva-agent
+    eva_agent_workdir: $TMP_ROOT/target
   tasks:
+    - name: Load explicit Release filename override below extra-var precedence
+      ansible.builtin.include_vars: $TMP_ROOT/release-override.yaml
+      tags: always
+
+    - name: Load Workspace values before resolving Release values
+      ansible.builtin.include_tasks:
+        file: $REPO_ROOT/src/solution/roles/eva_agent/tasks/workspace_values.yaml
+        apply:
+          tags: eva_agent_values_layout
+      tags: always
+
     - name: Load Agent values layout
       ansible.builtin.include_tasks: $REPO_ROOT/src/solution/roles/eva_agent/tasks/dependencies.yaml
       tags: always
@@ -158,23 +196,61 @@ cat >"$TMP_ROOT/layout.yaml" <<EOF
         that:
           - eva_agent_values_file == expected_agent
           - eva_agent_vllm_values_file == expected_vllm
+          - "eva_agent_workspace_chart_values == ({'image': {'pullPolicy': 'Always'}} if workspace_scenario == 'present' else {})"
+      tags: always
+
+    - name: Copy and read actual Agent offline Release values
+      ansible.builtin.import_tasks: $TMP_ROOT/offline-values-tasks.yaml
+      when: airgap_mode | bool
+      tags: always
+
+    - name: Assert generated inputs use the Release file, not Workspace overrides
+      ansible.builtin.assert:
+        that:
+          - "(eva_agent_generated_values_raw.results[0].content | b64decode | from_yaml) == {'release_marker': expected_agent}"
+          - (eva_agent_generated_values_raw.results[1].content | b64decode | from_yaml) == {}
+      when: airgap_mode | bool
       tags: always
 EOF
 
+mkdir -p "$TMP_ROOT/target/eva-agent" "$TMP_ROOT/present/site-values" "$TMP_ROOT/absent/site-values"
+printf '{}\n' >"$TMP_ROOT/target/eva-agent/agent-k3s-override.yaml"
+cat >"$TMP_ROOT/present/site-values/agent.yaml" <<'EOF'
+site-dev-196:
+  image:
+    pullPolicy: Always
+EOF
+
 # set_fact results persist for the host, so each case runs in its own play.
+# Both an absent and a present Workspace file used to replace the Release
+# filename with an absolute path. Explicit Release overrides must survive.
 for case in \
-  '3.1.0 true values-k3s.yaml values-k3s.L40sx1.yaml' \
-  '3.1.0 false values-k3s.yaml values-k3s.L40sx1.yaml' \
-  '3.2.0 true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml' \
-  '3.2.0 false values-k3s.ecr.yaml values-k3s.L40sx1.docker.yaml' \
-  '3.2.1 true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml'; do
-  read -r version airgap agent vllm <<<"$case"
-  "$ANSIBLE_PLAYBOOK" --tags eva_agent_values_layout \
-    -e "{\"eva_agent_deploy_version\": \"$version\", \"airgap_mode\": $airgap, \"expected_agent\": \"$agent\", \"expected_vllm\": \"$vllm\"}" \
-    "$TMP_ROOT/layout.yaml" >"$TMP_ROOT/ansible.log" 2>&1 || {
-    cat "$TMP_ROOT/ansible.log" >&2
-    fail "Agent role values layout differs for $case"
-  }
+  '3.1.0 local_repository true values-k3s.yaml values-k3s.L40sx1.yaml default' \
+  '3.1.0 cloud_repository false values-k3s.yaml values-k3s.L40sx1.yaml default' \
+  '3.2.0 remote_repository true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml default' \
+  '3.2.0 cloud_repository false values-k3s.ecr.yaml values-k3s.L40sx1.docker.yaml default' \
+  '3.2.0 local_repository true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml default' \
+  '3.2.1 remote_repository true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml default' \
+  '3.2.0 remote_repository true values-custom.yaml values-k3s.L40sx1.harbor.yaml explicit'; do
+  read -r version mode airgap agent vllm override <<<"$case"
+  release_values_dir="$TMP_ROOT/cache/eva-agent/release/$version/eva-agent"
+  mkdir -p "$release_values_dir"
+  printf 'release_marker: %s\n' "$agent" >"$release_values_dir/$agent"
+  if [[ "$override" == explicit ]]; then
+    printf 'eva_agent_values_file: %s\n' "$agent" >"$TMP_ROOT/release-override.yaml"
+  else
+    printf '{}\n' >"$TMP_ROOT/release-override.yaml"
+  fi
+  for scenario in absent present; do
+    # A previous copy must not hide an incorrect source or a skipped task.
+    rm -f "$TMP_ROOT/target/eva-agent/$agent"
+    "$ANSIBLE_PLAYBOOK" --tags eva_agent_values_layout \
+      -e "{\"eva_agent_deploy_version\": \"$version\", \"repository_mode\": \"$mode\", \"airgap_mode\": $airgap, \"expected_agent\": \"$agent\", \"expected_vllm\": \"$vllm\", \"workspace_scenario\": \"$scenario\"}" \
+      "$TMP_ROOT/layout.yaml" >"$TMP_ROOT/ansible.log" 2>&1 || {
+      cat "$TMP_ROOT/ansible.log" >&2
+      fail "Agent role values layout/offline copy differs for $case (Workspace $scenario)"
+    }
+  done
 done
 
 cat >"$TMP_ROOT/placeholders.yaml" <<EOF

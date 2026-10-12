@@ -391,6 +391,19 @@ func waitForRegistrationRevision(
 }
 
 func verifyStableRemoval(session Session, cluster clusterRegistration, commit string) error {
+	return verifyRemovalWindow(session, cluster, commit, true)
+}
+
+// verifyRecordedRemoval re-checks a handoff completed in an earlier run. The
+// registration repository may have moved past the recorded commit since then
+// (other sites are registered or removed in the same repository), so the
+// revision only has to be a synced commit; what must hold is that neither the
+// desired nor the live state carries the target cluster again.
+func verifyRecordedRemoval(session Session, cluster clusterRegistration, commit string) error {
+	return verifyRemovalWindow(session, cluster, commit, false)
+}
+
+func verifyRemovalWindow(session Session, cluster clusterRegistration, commit string, requireCommit bool) error {
 	// Thirteen observations separated by twelve five-second waits prove a
 	// full sixty-second absence window rather than a one-shot deletion.
 	for attempt := 0; attempt < 13; attempt++ {
@@ -402,7 +415,14 @@ func verifyStableRemoval(session Session, cluster clusterRegistration, commit st
 		if err != nil {
 			return err
 		}
-		if registration.Status.Sync.Revision != commit || registrationContainsSecret(registration, cluster.SecretName) {
+		revision := registration.Status.Sync.Revision
+		if requireCommit && revision != commit {
+			return fmt.Errorf("registration Application synced revision %s, not the handoff commit %s", revision, commit)
+		}
+		if !requireCommit && !validCommitSHA(revision) {
+			return errors.New("registration Application has no synced revision")
+		}
+		if registrationContainsSecret(registration, cluster.SecretName) {
 			return errors.New("registration Application again desires the target cluster Secret")
 		}
 		secretsOutput, err := session.Run(clusterSecretListCommand())
@@ -458,7 +478,7 @@ func recoverGitBackedHandoff(session Session, detection Detection, applications 
 		}
 	}
 	cluster := clusterRegistration{SecretName: receipt.ClusterName, Name: receipt.ClusterName, Server: receipt.ClusterServer}
-	if err := verifyStableRemoval(session, cluster, receipt.RegistrationCommit); err != nil {
+	if err := verifyRecordedRemoval(session, cluster, receipt.RegistrationCommit); err != nil {
 		return Receipt{}, false, err
 	}
 	return receipt, true, nil

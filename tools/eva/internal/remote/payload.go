@@ -276,23 +276,34 @@ func validatePayloadDirectory(directory, archive string) error {
 
 // MaterializeTargetPayload safely extracts a verified payload into the cache
 // consumed by existing offline roles. It never overwrites a different identity.
-func MaterializeTargetPayload(releaseResolved release.Resolved, registry, project, artifactRoot string) (string, error) {
+// MaterializeTargetPayload extracts the published payload into the managed
+// Target cache once. The archive is read a single time: extraction computes
+// both the archive and the content digest, and the staged tree is published
+// only when both match the manifest bound to the delivery marker.
+func MaterializeTargetPayload(releaseResolved release.Resolved, registry, project, artifactRoot string, progress io.Writer) (string, error) {
 	identity, err := BuildPreparationIdentity(releaseResolved, registry, project)
 	if err != nil {
 		return "", err
 	}
-	_, payload, err := ValidatePublishedRemoteDelivery(releaseResolved, registry, project)
+	_, payload, err := checkPublishedRemoteDelivery(releaseResolved, registry, project, false)
 	if err != nil {
 		return "", err
+	}
+	if progress == nil {
+		progress = io.Discard
 	}
 	if artifactRoot == "" {
 		artifactRoot = DefaultTargetPayloadRoot
 	}
 	destination := filepath.Join(artifactRoot, identity.ReleaseVersion, payload.Manifest.Identity)
 	cacheDestination := filepath.Join(destination, "cache")
+	archive := filepath.Join(payload.Directory, payload.Manifest.Archive)
 	if _, err := os.Lstat(destination); err == nil {
 		if err := validateMaterializedCache(destination, payload.Manifest); err != nil {
 			return "", fmt.Errorf("existing materialized payload is invalid: %w", err)
+		}
+		if err := requireMaterializedSource(destination, archive, payload.Manifest); err != nil {
+			return "", err
 		}
 		return cacheDestination, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -306,10 +317,22 @@ func MaterializeTargetPayload(releaseResolved release.Resolved, registry, projec
 		return "", err
 	}
 	defer os.RemoveAll(staging)
-	if err := extractPayloadArchive(filepath.Join(payload.Directory, payload.Manifest.Archive), staging); err != nil {
+	fmt.Fprintln(progress, "[INFO] Verifying and extracting the published Target payload")
+	archiveDigest, contentDigest, err := extractPayloadArchive(archive, staging, progress)
+	if err != nil {
 		return "", err
 	}
+	if archiveDigest != payload.Manifest.ArchiveSHA256 {
+		return "", errors.New("published target payload archive digest does not match manifest")
+	}
+	if contentDigest != payload.Manifest.ContentSHA256 {
+		return "", errors.New("published target payload content digest does not match manifest")
+	}
+	fmt.Fprintln(progress, "[OK] Target payload verified and extracted")
 	if err := validateMaterializedCache(staging, payload.Manifest); err != nil {
+		return "", err
+	}
+	if err := writeMaterializedSource(staging, archive, archiveDigest); err != nil {
 		return "", err
 	}
 	if err := os.Rename(staging, destination); err != nil {
@@ -699,53 +722,173 @@ func validatePayloadArchiveHeader(header *tar.Header) error {
 	}
 	return nil
 }
-func extractPayloadArchive(archive, destination string) error {
-	reader, err := os.Open(archive)
+
+// materializedSourceFile records which published archive a materialized cache
+// was verified from. Reuse compares the archive's size and modification time
+// instead of rehashing it, so a replaced or rewritten source still fails closed.
+const materializedSourceFile = ".eva-payload-source.yaml"
+
+type materializedSource struct {
+	ArchiveSHA256 string `yaml:"archive_sha256"`
+	Size          int64  `yaml:"size"`
+	ModifiedUnix  int64  `yaml:"modified_unix_nano"`
+}
+
+func archiveStamp(archive string) (int64, int64, error) {
+	info, err := os.Lstat(archive)
+	if err != nil {
+		return 0, 0, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return 0, 0, errors.New("published target payload archive must be a regular non-symlink file")
+	}
+	return info.Size(), info.ModTime().UnixNano(), nil
+}
+
+func writeMaterializedSource(root, archive, archiveDigest string) error {
+	size, modified, err := archiveStamp(archive)
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
-	gzipReader, err := gzip.NewReader(reader)
+	contents, err := yaml.Marshal(materializedSource{ArchiveSHA256: archiveDigest, Size: size, ModifiedUnix: modified})
 	if err != nil {
 		return err
+	}
+	return os.WriteFile(filepath.Join(root, materializedSourceFile), contents, 0o640)
+}
+
+func requireMaterializedSource(root, archive string, manifest PayloadManifest) error {
+	contents, err := os.ReadFile(filepath.Join(root, materializedSourceFile))
+	if errors.Is(err, os.ErrNotExist) {
+		// Materialized by an earlier Tool that kept no source record: verify
+		// the published archive in full once, then record it.
+		if digest, err := regularFileSHA256(archive); err != nil || digest != manifest.ArchiveSHA256 {
+			return errors.New("published target payload archive does not match the materialized payload")
+		}
+		if digest, err := payloadArchiveDigest(archive); err != nil || digest != manifest.ContentSHA256 {
+			return errors.New("published target payload content does not match the materialized payload")
+		}
+		return writeMaterializedSource(root, archive, manifest.ArchiveSHA256)
+	}
+	if err != nil {
+		return fmt.Errorf("read materialized payload source record: %w", err)
+	}
+	var source materializedSource
+	if err := yaml.Unmarshal(contents, &source); err != nil {
+		return fmt.Errorf("parse materialized payload source record: %w", err)
+	}
+	size, modified, err := archiveStamp(archive)
+	if err != nil {
+		return err
+	}
+	if source.ArchiveSHA256 != manifest.ArchiveSHA256 || source.Size != size || source.ModifiedUnix != modified {
+		return errors.New("published target payload archive changed since it was verified and materialized")
+	}
+	return nil
+}
+
+// extractPayloadArchive extracts a payload archive into destination and
+// returns the SHA-256 of the archive file and the payload content digest (the
+// same value payloadArchiveDigest computes) from one read of the archive.
+func extractPayloadArchive(archive, destination string, progress io.Writer) (string, string, error) {
+	file, err := os.Open(archive)
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", "", err
+	}
+	if progress == nil {
+		progress = io.Discard
+	}
+	archiveHash := sha256.New()
+	counted := &progressReader{reader: io.TeeReader(file, archiveHash), total: info.Size(), progress: progress}
+	gzipReader, err := gzip.NewReader(counted)
+	if err != nil {
+		return "", "", err
 	}
 	defer gzipReader.Close()
 	tarReader := tar.NewReader(gzipReader)
+	contentDigest := sha256.New()
+	saw := false
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return err
+			return "", "", err
 		}
 		if err := validatePayloadArchiveHeader(header); err != nil {
-			return err
+			return "", "", err
 		}
 		target := filepath.Join(destination, filepath.FromSlash(path.Clean(header.Name)))
 		if header.Typeflag == tar.TypeDir {
 			if err := os.MkdirAll(target, 0o750); err != nil {
-				return err
+				return "", "", err
 			}
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
-			return err
+			return "", "", err
 		}
-		file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(header.Mode)&0o755)
+		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(header.Mode)&0o755)
 		if err != nil {
-			return err
+			return "", "", err
 		}
-		if _, err := io.Copy(file, tarReader); err != nil {
-			file.Close()
-			return err
+		content := sha256.New()
+		if _, err := io.Copy(io.MultiWriter(output, content), tarReader); err != nil {
+			output.Close()
+			return "", "", err
 		}
-		if err := file.Close(); err != nil {
-			return err
+		if err := output.Close(); err != nil {
+			return "", "", err
 		}
+		if _, err := fmt.Fprintf(contentDigest, "%s %s\n", hex.EncodeToString(content.Sum(nil)), header.Name); err != nil {
+			return "", "", err
+		}
+		saw = true
 	}
-	return nil
+	if !saw {
+		return "", "", errors.New("target payload archive has no files")
+	}
+	// gzip may stop before trailing bytes; the archive digest covers the file.
+	if _, err := io.Copy(io.Discard, counted); err != nil {
+		return "", "", err
+	}
+	counted.report(true)
+	return hex.EncodeToString(archiveHash.Sum(nil)), hex.EncodeToString(contentDigest.Sum(nil)), nil
 }
+
+// progressReader reports how much of a large archive has been read, at most
+// once per progressReportStep bytes, so a long extraction is visibly alive.
+type progressReader struct {
+	reader   io.Reader
+	total    int64
+	read     int64
+	reported int64
+	progress io.Writer
+}
+
+const progressReportStep = int64(1) << 30
+
+func (reader *progressReader) Read(buffer []byte) (int, error) {
+	count, err := reader.reader.Read(buffer)
+	reader.read += int64(count)
+	reader.report(false)
+	return count, err
+}
+
+func (reader *progressReader) report(final bool) {
+	if reader.total <= 0 || (!final && reader.read-reader.reported < progressReportStep) || reader.reported == reader.read {
+		return
+	}
+	reader.reported = reader.read
+	fmt.Fprintf(reader.progress, "[INFO] Target payload progress: bytes=%d/%d percent=%.1f\n", reader.read, reader.total, float64(reader.read)*100/float64(reader.total))
+}
+
 func validateMaterializedCache(root string, manifest PayloadManifest) error {
 	cacheRoot := filepath.Join(root, "cache")
 	if err := ValidateOfflineAssets(cacheRoot); err != nil {

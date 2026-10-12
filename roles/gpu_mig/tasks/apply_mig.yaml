@@ -355,7 +355,7 @@
       Description=Auto enable NVIDIA MIG mode on boot
       Wants=nvidia-persistenced.service
       After=nvidia-persistenced.service
-      Before=display-manager.service
+      Before=display-manager.service nvidia-cdi-refresh.service k3s.service
       ConditionPathExists=/usr/local/sbin/gpu-mig-auto-enable.sh
 
       [Service]

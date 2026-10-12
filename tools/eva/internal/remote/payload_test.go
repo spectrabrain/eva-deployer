@@ -254,7 +254,7 @@ func TestLoadAndMaterializeTargetPayloadFailClosedAndReuse(t *testing.T) {
 	}
 	writeRemoteDeliveryMarker(t, resolved.Root, identity)
 	artifactRoot := t.TempDir()
-	cacheRoot, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot)
+	cacheRoot, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot, nil)
 	if err != nil {
 		t.Fatalf("MaterializeTargetPayload() error = %v", err)
 	}
@@ -271,14 +271,14 @@ func TestLoadAndMaterializeTargetPayloadFailClosedAndReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reused, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot); err != nil || reused != cacheRoot {
+	if reused, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot, nil); err != nil || reused != cacheRoot {
 		t.Fatalf("materialized payload reuse = %q, %v", reused, err)
 	}
 	archive := filepath.Join(resolved.Root, targetPayloadDirectory, "remote-payload_"+identity.ReleaseVersion+"_"+payloadIdentityKey(identity)+".tar.gz")
 	if err := os.WriteFile(archive, []byte("corrupt"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot); err == nil {
+	if _, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot, nil); err == nil {
 		t.Fatal("MaterializeTargetPayload() accepted corrupt source archive")
 	}
 	after, err := os.ReadFile(filepath.Join(cacheRoot, "models/agent/hf/model.bin"))
@@ -312,7 +312,7 @@ func TestPayloadArchiveRejectsTraversalAndSpecialEntries(t *testing.T) {
 			if _, err := payloadArchiveDigest(archive); err == nil {
 				t.Fatal("payloadArchiveDigest() accepted unsafe archive")
 			}
-			if err := extractPayloadArchive(archive, t.TempDir()); err == nil {
+			if _, _, err := extractPayloadArchive(archive, t.TempDir(), nil); err == nil {
 				t.Fatal("extractPayloadArchive() accepted unsafe archive")
 			}
 		})
@@ -411,5 +411,85 @@ func mustRemove(t *testing.T, path string) {
 	t.Helper()
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Regression: eva install on a Remote Target hashed the payload archive twice
+// before extracting it, so the archive was read three times with no output.
+// Extraction now computes both digests in the one read and still fails closed.
+func TestMaterializeTargetPayloadVerifiesWhileExtracting(t *testing.T) {
+	preparationRoot, resolved, identity := writeCompletedPreparation(t)
+	if err := copyPayloadDirectory(TargetPayloadPath(preparationRoot, identity), filepath.Join(resolved.Root, targetPayloadDirectory)); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyPayloadDirectory(RuntimeArtifactPath(preparationRoot, identity), filepath.Join(resolved.Root, "remote-runtime")); err != nil {
+		t.Fatal(err)
+	}
+	writeRemoteDeliveryMarker(t, resolved.Root, identity)
+	archive := filepath.Join(resolved.Root, targetPayloadDirectory, "remote-payload_"+identity.ReleaseVersion+"_"+payloadIdentityKey(identity)+".tar.gz")
+
+	archiveDigest, contentDigest, err := extractPayloadArchive(archive, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantArchive, err := regularFileSHA256(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContent, err := payloadArchiveDigest(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archiveDigest != wantArchive || contentDigest != wantContent {
+		t.Fatalf("single-pass digests = %s %s, want %s %s", archiveDigest, contentDigest, wantArchive, wantContent)
+	}
+
+	// Same-size corruption: only a content read can notice it.
+	original, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt := append([]byte(nil), original...)
+	corrupt[len(corrupt)/2] ^= 0xff
+	if err := os.WriteFile(archive, corrupt, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := checkPublishedRemoteDelivery(resolved, identity.RepositoryRegistry, identity.RepositoryProject, false); err != nil {
+		t.Fatalf("delivery check hashed the payload archive before extraction: %v", err)
+	}
+	artifactRoot := t.TempDir()
+	if _, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot, nil); err == nil {
+		t.Fatal("MaterializeTargetPayload() published a corrupt payload")
+	}
+	if entries, err := os.ReadDir(filepath.Join(artifactRoot, identity.ReleaseVersion)); err != nil || len(entries) != 0 {
+		t.Fatalf("corrupt payload left materialized state: %v, %v", entries, err)
+	}
+
+	if err := os.WriteFile(archive, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	var progress bytes.Buffer
+	if _, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot, &progress); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Verifying and extracting the published Target payload", "Target payload progress:", "percent=100.0", "[OK] Target payload verified and extracted"} {
+		if !strings.Contains(progress.String(), want) {
+			t.Fatalf("materialization output lacks %q:\n%s", want, progress.String())
+		}
+	}
+	// A cache materialized by an earlier Tool has no source record; reuse
+	// verifies the archive once and records it instead of failing.
+	sourceRecords, err := filepath.Glob(filepath.Join(artifactRoot, identity.ReleaseVersion, "*", materializedSourceFile))
+	if err != nil || len(sourceRecords) != 1 {
+		t.Fatalf("materialized source record = %v, %v", sourceRecords, err)
+	}
+	if err := os.Remove(sourceRecords[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeTargetPayload(resolved, identity.RepositoryRegistry, identity.RepositoryProject, artifactRoot, nil); err != nil {
+		t.Fatalf("legacy materialized payload without a source record was rejected: %v", err)
+	}
+	if _, err := os.Stat(sourceRecords[0]); err != nil {
+		t.Fatalf("source record was not written for the legacy materialized payload: %v", err)
 	}
 }

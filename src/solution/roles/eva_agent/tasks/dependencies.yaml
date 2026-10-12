@@ -43,17 +43,20 @@
             | ternary('values-k3s.harbor.yaml', 'values-k3s.s3.yaml')
           )
       }}
+    # Filters bind tighter than comparisons; ternary must receive the boolean.
     eva_agent_qdrant_snapshot_source: >-
       {{
         eva_agent_qdrant_snapshot_source
         | default(
             (
-              eva_agent_qdrant_values_file
-              | default(
-                  ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
-                  | ternary('values-k3s.harbor.yaml', 'values-k3s.s3.yaml')
-                )
-            ) == 'values-k3s.harbor.yaml'
+              (
+                eva_agent_qdrant_values_file
+                | default(
+                    ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
+                    | ternary('values-k3s.harbor.yaml', 'values-k3s.s3.yaml')
+                  )
+              ) == 'values-k3s.harbor.yaml'
+            )
             | ternary('harbor', 'local_pv')
           )
       }}
@@ -105,6 +108,8 @@
             )
         )
       }}
+  tags:
+    - eva_agent_dependency_defaults
 
 # EVA Agent 3.2.0 split its Release values by image source; the same rule is
 # defined for preparation in scripts/lib/load_versions.sh. Repository targets
@@ -158,6 +163,8 @@
     fail_msg: >-
       repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
+  tags:
+    - eva_agent_dependency_defaults
 
 - name: Validate Qdrant snapshot source
   ansible.builtin.assert:
@@ -169,6 +176,12 @@
     fail_msg: >-
       Cloud Qdrant uses values-k3s.s3.yaml with local_pv bootstrap snapshots.
       Harbor snapshots require values-k3s.harbor.yaml with snapshot source harbor.
+      Resolved values: repository_mode={{ repository_mode }},
+      eva_agent_qdrant_values_file={{ eva_agent_qdrant_values_file }},
+      eva_agent_qdrant_snapshot_source={{ eva_agent_qdrant_snapshot_source }}
+      ({{ eva_agent_qdrant_snapshot_source | type_debug }}).
+  tags:
+    - eva_agent_dependency_defaults
 
 - name: Set local PV Qdrant snapshot PVC name
   ansible.builtin.set_fact:

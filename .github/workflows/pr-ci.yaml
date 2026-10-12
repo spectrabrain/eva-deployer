@@ -63,12 +63,12 @@ jobs:
         run: |
           while IFS= read -r -d '' script; do
             bash -n "$script"
-          done < <(find scripts -type f -name '*.sh' -print0)
+          done < <(find scripts src -type f -name '*.sh' -print0)
 
       - name: Run ShellCheck
         run: |
           mapfile -d '' scripts < <(
-            find scripts -type f -name '*.sh' -print0
+            find scripts src -type f -name '*.sh' -print0
           )
 
           if (( ${#scripts[@]} == 0 )); then
@@ -120,6 +120,9 @@ jobs:
           scripts/test/test_eva_vllm_reconciliation.sh
           scripts/test/test_eva_qdrant_values.sh
           scripts/test/test_eva_agent_release_values_layout.sh
+          scripts/test/test_playbook_path_contract.sh
+          scripts/test/test_release_role_paths.sh
+          scripts/test/test_role_template_syntax.sh
 
       - name: Test Config GPU CDI contract
         run: bash -x scripts/test/test_config_gpu_cdi.sh

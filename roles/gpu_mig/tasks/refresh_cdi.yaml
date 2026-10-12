@@ -1,0 +1,109 @@
+- name: Verify MIG targets before refreshing CDI
+  ansible.builtin.assert:
+    that:
+      - gpu_mig_mig_gpu_indices | default([]) | length > 0
+      - gpu_mig_mig_instance_count | int > 0
+    fail_msg: "CDI 갱신 대상 GPU와 MIG 인스턴스 개수가 유효하지 않습니다."
+
+- name: Collect usable MIG devices from each configured GPU
+  ansible.builtin.command:
+    argv:
+      - nvidia-smi
+      - -i
+      - "{{ item }}"
+      - -L
+  loop: "{{ gpu_mig_mig_gpu_indices }}"
+  register: gpu_mig_cdi_inventory
+  changed_when: false
+
+- name: Verify configured GPUs expose the expected MIG devices
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | regex_findall('MIG-[^)\s]+') | length) == (gpu_mig_mig_instance_count | int)
+    fail_msg: >-
+      GPU {{ item.item }}에서 사용 가능한 MIG 인스턴스가 기대한
+      {{ gpu_mig_mig_instance_count }}개와 다릅니다. GI/CI 생성 상태를 확인하세요.
+  loop: "{{ gpu_mig_cdi_inventory.results }}"
+  loop_control:
+    label: "GPU {{ item.item }}"
+
+- name: Collect expected MIG device names for CDI verification
+  ansible.builtin.set_fact:
+    gpu_mig_cdi_expected_devices: >-
+      {{
+        gpu_mig_cdi_inventory.results
+        | map(attribute='stdout')
+        | map('regex_findall', 'MIG-[^)\s]+')
+        | flatten
+        | unique
+        | list
+      }}
+
+- name: Ensure NVIDIA CDI directory exists
+  ansible.builtin.file:
+    path: /etc/cdi
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Generate and validate CDI before publishing it
+  block:
+    - name: Allocate a temporary CDI output file
+      ansible.builtin.tempfile:
+        state: file
+        path: /etc/cdi
+        prefix: .nvidia-mig-
+        suffix: .tmp
+      register: gpu_mig_cdi_tempfile
+
+    # Call the generator directly; this must not start the MIG systemd service.
+    - name: Generate NVIDIA CDI specification with current MIG devices
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/nvidia-ctk
+          - cdi
+          - generate
+          - "--output={{ gpu_mig_cdi_tempfile.path }}"
+      changed_when: true
+
+    - name: Read the generated NVIDIA CDI specification
+      ansible.builtin.slurp:
+        src: "{{ gpu_mig_cdi_tempfile.path }}"
+      register: gpu_mig_cdi_generated
+
+    - name: Parse the generated NVIDIA CDI specification
+      ansible.builtin.set_fact:
+        gpu_mig_cdi_spec: "{{ gpu_mig_cdi_generated.content | b64decode | from_yaml }}"
+
+    - name: Verify CDI contains all configured MIG device names
+      ansible.builtin.assert:
+        that:
+          - gpu_mig_cdi_spec is mapping
+          - (gpu_mig_cdi_spec.kind | default('')) == 'nvidia.com/gpu'
+          - >-
+            (gpu_mig_cdi_expected_devices | difference(
+              gpu_mig_cdi_spec.devices | default([]) | map(attribute='name') | list
+            ) | length) == 0
+        fail_msg: >-
+          생성한 CDI 파일에 설정된 MIG 디바이스가 모두 포함되지 않았습니다.
+          기대한 MIG 목록: {{ gpu_mig_cdi_expected_devices }}.
+          기존 /etc/cdi/nvidia.yaml은 교체하지 않았습니다.
+
+    - name: Publish the verified NVIDIA CDI specification
+      ansible.builtin.copy:
+        src: "{{ gpu_mig_cdi_tempfile.path }}"
+        dest: /etc/cdi/nvidia.yaml
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0644"
+
+  always:
+    - name: Remove temporary NVIDIA CDI specification
+      ansible.builtin.file:
+        path: "{{ gpu_mig_cdi_tempfile.path }}"
+        state: absent
+      when:
+        - gpu_mig_cdi_tempfile is defined
+        - gpu_mig_cdi_tempfile.path is defined

@@ -138,6 +138,30 @@
       - "MIG enabled GPU indices: {{ gpu_mig_mig_enabled_gpu_indices }}"
       - "MIG disabled GPU indices: {{ gpu_mig_mig_disabled_gpu_indices }}"
 
+- name: Check NVIDIA CDI generator before changing MIG configuration
+  ansible.builtin.stat:
+    path: /usr/bin/nvidia-ctk
+    follow: true
+  register: gpu_mig_nvidia_ctk
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
+- name: Require NVIDIA Container Toolkit for MIG CDI refresh
+  ansible.builtin.assert:
+    that:
+      - gpu_mig_nvidia_ctk.stat.exists
+      - gpu_mig_nvidia_ctk.stat.isreg | default(false)
+      - gpu_mig_nvidia_ctk.stat.executable | default(false)
+    fail_msg: >-
+      MIG 설정 후 CDI 파일을 갱신하려면 /usr/bin/nvidia-ctk가 필요합니다.
+      NVIDIA Container Toolkit을 먼저 설치한 뒤 MIG playbook을 다시 실행하세요.
+  when:
+    - gpu_mig_enable_mig_workflow | bool
+    - gpu_mig_apply_mig_partition | bool
+    - gpu_mig_mig_capable_gpu_count | int > 0
+
 - name: Resolve mode selector architecture
   ansible.builtin.set_fact:
     gpu_mig_mig_selector_arch: >-

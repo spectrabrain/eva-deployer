@@ -113,3 +113,37 @@ func TestParseGitRemovalCommitRejectsMissingDuplicateAndInvalidMarkers(t *testin
 		}
 	}
 }
+
+// Regression: a handoff recorded in an earlier run was rejected as "again
+// desires the target cluster Secret" once the shared registration repository
+// had moved past the recorded commit, although the cluster stayed removed.
+func TestRecordedRemovalAcceptsLaterRegistrationRevision(t *testing.T) {
+	const laterCommit = "cccccccccccccccccccccccccccccccccccccccc"
+	cluster := clusterRegistration{SecretName: testClusterSecret, Name: testClusterSecret, Server: testClusterServer}
+	removed := func(revision string, desired bool) *fakeSession {
+		return &fakeSession{outputs: map[string]string{
+			registrationApplicationCommand(): registrationApplicationJSON(testClusterSecret, revision, desired),
+			clusterSecretListCommand():       clusterSecretsJSON(),
+			applicationListCommand():         applicationsJSON(),
+		}}
+	}
+
+	if err := verifyRecordedRemoval(removed(laterCommit, false), cluster, testGitCommit); err != nil {
+		t.Fatalf("recorded removal rejected a later registration revision: %v", err)
+	}
+	// A fresh handoff must still observe its own pushed commit.
+	if err := verifyStableRemoval(removed(laterCommit, false), cluster, testGitCommit); err == nil || !strings.Contains(err.Error(), "not the handoff commit") {
+		t.Fatalf("fresh handoff accepted a different revision: %v", err)
+	}
+	if err := verifyRecordedRemoval(removed(laterCommit, true), cluster, testGitCommit); err == nil || !strings.Contains(err.Error(), "again desires") {
+		t.Fatalf("recorded removal accepted a re-desired cluster Secret: %v", err)
+	}
+	if err := verifyRecordedRemoval(removed("", false), cluster, testGitCommit); err == nil || !strings.Contains(err.Error(), "no synced revision") {
+		t.Fatalf("recorded removal accepted an unsynced registration Application: %v", err)
+	}
+	recreated := removed(laterCommit, false)
+	recreated.outputs[clusterSecretListCommand()] = clusterSecretsJSON(clusterSecretFixture{SecretName: testClusterSecret, Name: testClusterSecret, Server: testClusterServer})
+	if err := verifyRecordedRemoval(recreated, cluster, testGitCommit); err == nil || !strings.Contains(err.Error(), "recreated") {
+		t.Fatalf("recorded removal accepted a recreated cluster Secret: %v", err)
+	}
+}

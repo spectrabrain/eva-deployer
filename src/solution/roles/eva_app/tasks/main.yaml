@@ -422,21 +422,17 @@
       exit 0
     fi
 
-    if [[ ! -f "$handoff_file" ]]; then
-      echo \
-        '[ERROR] active legacy EVA App internal Service requires an Argo CD handoff receipt'
-      exit 1
-    fi
-
     python3 - \
       "$handoff_file" \
       "$site_id" \
       "$namespace" \
       "$service_name" \
-      "$service_json" <<'PY_INTERNAL_SERVICE'
+      "$service_json" \
+      "$EVA_APP_RELEASE" <<'PY_INTERNAL_SERVICE'
     from pathlib import Path
     import json
     import re
+    import subprocess
     import sys
 
     import yaml
@@ -447,80 +443,36 @@
     expected_namespace = sys.argv[3]
     expected_service_name = sys.argv[4]
     service = json.loads(sys.argv[5])
-
-    handoff = yaml.safe_load(
-        handoff_path.read_text()
-    )
-
-    if (
-        not isinstance(handoff, dict)
-        or handoff.get("schema_version") != "v1"
-        or handoff.get("site_id") != expected_site_id
-        or not handoff.get("completed_at")
-    ):
-        raise SystemExit(
-            "[ERROR] invalid Argo CD handoff receipt "
-            "for EVA App internal Service preservation"
-        )
-
-    cluster_name = handoff.get("cluster_name")
-    applications = handoff.get("applications")
-
-    if (
-        not isinstance(cluster_name, str)
-        or not cluster_name
-        or not isinstance(applications, list)
-    ):
-        raise SystemExit(
-            "[ERROR] incomplete Argo CD handoff identity "
-            "for EVA App internal Service preservation"
-        )
-
-    expected_application = (
-        cluster_name + "-eva-app"
-    )
-
-    matches = [
-        application
-        for application in applications
-        if application == expected_application
-    ]
-
-    if matches != [expected_application]:
-        raise SystemExit(
-            "[ERROR] Argo CD handoff receipt does not "
-            "identify exactly one EVA App Application"
-        )
+    expected_release = sys.argv[6]
 
     metadata = service.get("metadata")
     spec = service.get("spec")
 
     if not isinstance(metadata, dict) or not isinstance(spec, dict):
         raise SystemExit(
-            "[ERROR] malformed legacy EVA App internal Service"
+        "[ERROR] malformed EVA App internal Service"
+        )
+
+    if (
+      service.get("apiVersion") != "v1"
+      or service.get("kind") != "Service"
+      or metadata.get("name") != expected_service_name
+      or metadata.get("namespace") != expected_namespace
+    ):
+        raise SystemExit(
+        "[ERROR] EVA App internal Service identity mismatch"
         )
 
     annotations = metadata.get("annotations") or {}
     labels = metadata.get("labels") or {}
     owner_references = metadata.get("ownerReferences") or []
-
-    expected_tracking = (
-        f"{expected_application}:/Service:"
-        f"{expected_namespace}/{expected_service_name}"
-    )
-
     if (
-        service.get("apiVersion") != "v1"
-        or service.get("kind") != "Service"
-        or metadata.get("name") != expected_service_name
-        or metadata.get("namespace") != expected_namespace
-        or annotations.get(
-            "argocd.argoproj.io/tracking-id"
-        ) != expected_tracking
+        not isinstance(annotations, dict)
+        or not isinstance(labels, dict)
+        or not isinstance(owner_references, list)
     ):
         raise SystemExit(
-            "[ERROR] legacy EVA App internal Service "
-            "tracking identity mismatch"
+            "[ERROR] malformed EVA App internal Service ownership"
         )
 
     helm_release_name = annotations.get(
@@ -529,16 +481,21 @@
     helm_release_namespace = annotations.get(
         "meta.helm.sh/release-namespace"
     )
+    managed_by = labels.get("app.kubernetes.io/managed-by")
+    helm_owned = bool(helm_release_name or helm_release_namespace)
 
-    if helm_release_name or helm_release_namespace:
+    # A prior successful install or failed Helm adoption may already own this
+    # Service. Only the exact current release may preserve that retry state.
+    if helm_owned and (
+        helm_release_name != expected_release
+        or helm_release_namespace != expected_namespace
+        or managed_by != "Helm"
+    ):
         raise SystemExit(
-            "[ERROR] legacy EVA App internal Service "
-            "has foreign or partial Helm annotations"
+            "[ERROR] EVA App internal Service has foreign or partial Helm ownership: "
+            f"release={helm_release_name!r}, namespace={helm_release_namespace!r}, "
+            f"managed_by={managed_by!r}; expected={expected_namespace}/{expected_release}"
         )
-
-    managed_by = labels.get(
-        "app.kubernetes.io/managed-by"
-    )
 
     if managed_by not in (None, "", "Helm"):
         raise SystemExit(
@@ -560,7 +517,7 @@
         )
 
     expected_selector = {
-        "app.kubernetes.io/instance": "eva-app",
+      "app.kubernetes.io/instance": expected_release,
         "app.kubernetes.io/name": "eva-app",
         "component": "eva-app",
     }
@@ -596,24 +553,117 @@
             "port contract mismatch"
         )
 
-    commit = handoff.get("registration_commit")
+    tracking = annotations.get("argocd.argoproj.io/tracking-id")
+    # Unowned legacy resources always need a receipt. Helm-owned resources
+    # need one only when residual Argo CD tracking still needs verification.
+    if not helm_owned or tracking:
+        if not handoff_path.is_file():
+            raise SystemExit(
+                "[ERROR] active legacy EVA App internal Service requires an Argo CD handoff receipt"
+            )
+        handoff = yaml.safe_load(handoff_path.read_text())
+        if (
+            not isinstance(handoff, dict)
+            or handoff.get("schema_version") != "v1"
+            or handoff.get("site_id") != expected_site_id
+            or not handoff.get("completed_at")
+        ):
+            raise SystemExit(
+                "[ERROR] invalid Argo CD handoff receipt "
+                "for EVA App internal Service preservation"
+            )
+        cluster_name = handoff.get("cluster_name")
+        applications = handoff.get("applications")
+        if (
+            not isinstance(cluster_name, str)
+            or not cluster_name
+            or not isinstance(applications, list)
+        ):
+            raise SystemExit(
+                "[ERROR] incomplete Argo CD handoff identity "
+                "for EVA App internal Service preservation"
+            )
+        expected_application = cluster_name + "-eva-app"
+        matches = [application for application in applications if application == expected_application]
+        if matches != [expected_application]:
+            raise SystemExit(
+                "[ERROR] Argo CD handoff receipt does not "
+                "identify exactly one EVA App Application"
+            )
+        expected_tracking = (
+            f"{expected_application}:/Service:"
+            f"{expected_namespace}/{expected_service_name}"
+        )
+        if tracking != expected_tracking:
+            raise SystemExit(
+                "[ERROR] legacy EVA App internal Service tracking identity mismatch"
+            )
+        commit = handoff.get("registration_commit")
+        if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40,64}", commit) is None:
+            raise SystemExit(
+                "[ERROR] invalid Argo CD handoff registration commit"
+            )
 
-    if (
-        not isinstance(commit, str)
-        or re.fullmatch(
-            r"[0-9a-f]{40,64}",
-            commit,
-        )
-        is None
-    ):
-        raise SystemExit(
-            "[ERROR] invalid Argo CD handoff registration commit"
-        )
+    if helm_owned:
+        # Annotations alone are not proof: require a deployed/failed current
+        # release and membership in its stored manifest. Pending or orphaned
+        # ownership remains fail-closed; downstream reconciliation validates
+        # failed release recovery before any Helm mutation.
+        def helm_output(arguments):
+            result = subprocess.run(
+                ["helm", *arguments, "-n", expected_namespace],
+                text=True, capture_output=True, check=False,
+            )
+            if result.returncode != 0:
+                raise SystemExit(
+                    "[ERROR] cannot verify current EVA App Helm release for internal Service preservation"
+                )
+            return result.stdout
+
+        status = json.loads(helm_output(["status", expected_release, "-o", "json"]))
+        if (
+            not isinstance(status, dict)
+            or status.get("name") != expected_release
+            or status.get("namespace") != expected_namespace
+            or not isinstance(status.get("version"), int)
+            or isinstance(status.get("version"), bool)
+            or status["version"] < 1
+            or not isinstance(status.get("info"), dict)
+            or status["info"].get("status") not in ("deployed", "failed")
+        ):
+            raise SystemExit(
+                "[ERROR] unsafe current EVA App Helm release identity or status"
+            )
+
+        def resources(document):
+            if not isinstance(document, dict):
+                return
+            if document.get("kind") == "List":
+                for item in document.get("items") or []:
+                    yield from resources(item)
+            else:
+                yield document
+
+        matches = []
+        for document in yaml.safe_load_all(helm_output(["get", "manifest", expected_release])):
+            for resource in resources(document):
+                resource_metadata = resource.get("metadata") or {}
+                if (
+                    resource.get("apiVersion") == "v1"
+                    and resource.get("kind") == "Service"
+                    and resource_metadata.get("name") == expected_service_name
+                    and resource_metadata.get("namespace", expected_namespace) == expected_namespace
+                ):
+                    matches.append(resource)
+        if len(matches) != 1:
+            raise SystemExit(
+                "[ERROR] current EVA App Helm manifest does not identify exactly one internal Service"
+            )
     PY_INTERNAL_SERVICE
 
     echo 'preserve_internal_service=true'
     echo \
-      '[OK] verified active legacy EVA App internal Service for Helm preservation'
+      '[OK] verified EVA App internal Service for Helm preservation'
   args:
     executable: /bin/bash
   register: eva_app_internal_service_preservation
@@ -622,6 +672,7 @@
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
     EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_RELEASE: "{{ eva_app_name }}"
     EVA_APP_INTERNAL_SERVICE: "{{ eva_app_name }}-internal"
     EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
     EVA_APP_SITE_ID: "{{ eva_site_id }}"

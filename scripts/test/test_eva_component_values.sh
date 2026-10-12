@@ -57,6 +57,8 @@ EOF
         that:
           - eva_agent_workspace_values is mapping
           - eva_agent_workspace_chart_values is mapping
+          - eva_agent_workspace_values_file == '$root/site-values/agent.yaml'
+          - eva_agent_values_file is not defined
 EOF
 
   if [[ "$scenario" == selected ]]; then

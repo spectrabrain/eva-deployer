@@ -100,18 +100,35 @@ mkdir -p "$EVA_CACHE_ROOT/nvidia/container-toolkit-debs"
 mkdir -p "$EVA_CACHE_ROOT/eva-agent/release/$EVA_AGENT_RELEASE"/{eva-agent,eva-agent-init,eva-agent-qdrant,eva-agent-vllm,plugins/eva-agent-qdrant}
 mkdir -p "$EVA_CACHE_ROOT/display_mode_selector"
 
+download_file() (
+  local url="$1"
+  local out="$2"
+  local partial rc
+  partial="$(mktemp "${out}.part.XXXXXX")" || return "$?"
+  trap 'rm -f "$partial"' EXIT
+  # Avoid HTTP/2 stream failures from upstream/CDN/proxy connections. Retry
+  # transport errors too, and publish the cache file only after curl succeeds.
+  if curl -fL --http1.1 --retry 3 --retry-all-errors --retry-delay 2 \
+    --connect-timeout 20 --max-time 1800 "$url" -o "$partial"; then
+    chmod 0644 "$partial" && mv -f "$partial" "$out"
+  else
+    rc=$?
+    return "$rc"
+  fi
+)
+
 fetch() {
   local url="$1"
   local out="$2"
   echo "[download] $url -> $out"
-  curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 1800 "$url" -o "$out"
+  download_file "$url" "$out"
 }
 
 fetch_optional() {
   local url="$1"
   local out="$2"
   echo "[download-optional] $url -> $out"
-  if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 1800 "$url" -o "$out"; then
+  if ! download_file "$url" "$out"; then
     echo "[warn] optional download failed: $url"
     return 1
   fi

@@ -721,6 +721,14 @@
   ansible.builtin.set_fact:
     eva_app_effective_values: "{{ eva_app_effective_values | combine(eva_app_cli_values_override, recursive=true) }}"
 
+- name: Disable ECR refresh resources for repository-backed EVA App
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_effective_values: >-
+      {{ eva_app_effective_values
+         | combine({'imagePullSecrets': {'enabled': false, 'create': false}}, recursive=true) }}
+  when: repository_mode in ['remote_repository', 'local_repository']
+
 - name: Determine whether EVA App TLS Job is enabled
   no_log: true
   ansible.builtin.set_fact:
@@ -788,6 +796,11 @@
     eva_app_server_side_conflict_args: >-
       {{ (eva_app_legacy_reconciliation.stdout is search('(?m)^force_conflicts=true$'))
          | ternary('--server-side=true --force-conflicts', '') }}
+    eva_app_obsolete_ecr_resources: >-
+      {{ (eva_app_legacy_reconciliation.stdout_lines
+          | select('match', '^obsolete_ecr_resources=') | list | first
+          | default('obsolete_ecr_resources=[]'))
+         | regex_replace('^obsolete_ecr_resources=', '') | from_json }}
   changed_when: false
   when: not ansible_check_mode
 
@@ -805,11 +818,52 @@
     --dry-run=server
     --hide-secret
     {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+    {% if repository_mode in ['remote_repository', 'local_repository'] %}--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false{% endif %}
   register: eva_app_server_dry_run
   changed_when: false
   when: not ansible_check_mode
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Delete verified obsolete EVA App ECR resources
+  ansible.builtin.shell: |
+    set -euo pipefail
+    options_file="$(mktemp)"
+    trap 'rm -f "$options_file"' EXIT
+    while IFS= read -r encoded
+    do
+      resource="$(printf '%s' "$encoded" | base64 -d)"
+      kind="$(jq -r '.kind' <<< "$resource")"
+      name="$(jq -r '.name' <<< "$resource")"
+      uid="$(jq -r '.uid' <<< "$resource")"
+      version="$(jq -r '.resourceVersion' <<< "$resource")"
+      api_path="$(jq -r '.api_path' <<< "$resource")"
+      live="$(kubectl get "$kind/$name" -n "$EVA_APP_NAMESPACE" --ignore-not-found=true -o json)"
+      [[ -n "$live" ]] || continue
+      if [[ "$(jq -r '.metadata.uid' <<< "$live")" != "$uid" ]]; then
+        echo "[ERROR] obsolete ECR resource identity changed: $kind/$name"
+        exit 1
+      fi
+      # The API rejects deletion if identity or ownership changed after assessment.
+      jq -n --arg uid "$uid" --arg version "$version" \
+        '{apiVersion: "v1", kind: "DeleteOptions", propagationPolicy: "Foreground",
+          preconditions: {uid: $uid, resourceVersion: $version}}' > "$options_file"
+      kubectl delete --raw "$api_path" -f "$options_file" >/dev/null
+      kubectl wait --for=delete "$kind/$name" -n "$EVA_APP_NAMESPACE" --timeout=120s
+      echo "[OK] deleted verified obsolete ECR resource: $kind/$name"
+    done < <(jq -r '.[] | @base64' <<< "$EVA_APP_OBSOLETE_ECR_JSON")
+  args:
+    executable: /bin/bash
+  register: eva_app_ecr_cleanup
+  changed_when: "'deleted verified obsolete ECR resource:' in eva_app_ecr_cleanup.stdout"
+  when:
+    - not ansible_check_mode
+    - repository_mode in ['remote_repository', 'local_repository']
+    - eva_app_obsolete_ecr_resources | length > 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_OBSOLETE_ECR_JSON: "{{ eva_app_obsolete_ecr_resources | to_json }}"
 
 - name: Check existing EVA App deployment
   ansible.builtin.command: kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }}
@@ -902,6 +956,7 @@
         {{ eva_app_take_ownership_arg }}
         {{ eva_app_server_side_conflict_args }}
         {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+        {% if repository_mode in ['remote_repository', 'local_repository'] %}--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false{% endif %}
       register: eva_app_install_online
       changed_when: >-
         'has been upgraded' in eva_app_install_online.stdout
@@ -922,6 +977,7 @@
         {{ eva_app_take_ownership_arg }}
         {{ eva_app_server_side_conflict_args }}
         {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+        {% if repository_mode in ['remote_repository', 'local_repository'] %}--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false{% endif %}
       register: eva_app_install_offline
       changed_when: >-
         'has been upgraded' in eva_app_install_offline.stdout

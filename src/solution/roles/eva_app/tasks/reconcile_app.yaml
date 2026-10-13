@@ -11,6 +11,7 @@
     effective_values_file="$EVA_APP_EFFECTIVE_VALUES_FILE"
     handoff_file="$EVA_APP_HANDOFF_FILE"
     use_chart_version="$EVA_APP_USE_CHART_VERSION"
+    repository_mode="$EVA_APP_REPOSITORY_MODE"
     failed_release_recovery=false
     deployed_release_reconciliation=false
 
@@ -21,6 +22,7 @@
     failed_manifest_file="$(mktemp)"
     failed_manifest_json_file="$(mktemp)"
     failed_manifest_resources_file="$(mktemp)"
+    obsolete_ecr_file="$(mktemp)"
     cleanup() {
       rm -f \
         "$rendered_file" \
@@ -29,9 +31,36 @@
         "$rendered_resources_file" \
         "$failed_manifest_file" \
         "$failed_manifest_json_file" \
-        "$failed_manifest_resources_file"
+        "$failed_manifest_resources_file" \
+        "$obsolete_ecr_file"
     }
     trap cleanup EXIT
+
+    is_obsolete_ecr_resource() {
+      [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]] || return 1
+      case "$1/$2" in
+        "CronJob/$release-ecr-cronjob"|"Job/$release-ecr-job-once"|\
+        "Role/$release-ecr-cronjob-role"|"RoleBinding/$release-ecr-cronjob-rolebinding"|\
+        "ServiceAccount/$release-ecr-cronjob-sa") return 0 ;;
+      esac
+      return 1
+    }
+
+    # Snapshot only the known ECR refresh resources. No Secret/PVC or general
+    # application resources are cleanup candidates. Validate ownership below.
+    if [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]]; then
+      for resource in \
+        "CronJob/$release-ecr-cronjob" \
+        "Job/$release-ecr-job-once" \
+        "Role/$release-ecr-cronjob-role" \
+        "RoleBinding/$release-ecr-cronjob-rolebinding" \
+        "ServiceAccount/$release-ecr-cronjob-sa"
+      do
+        resource_json="$(kubectl get "$resource" -n "$namespace" --ignore-not-found=true -o json)"
+        [[ -n "$resource_json" ]] || continue
+        jq -c '.' <<< "$resource_json" >> "$obsolete_ecr_file"
+      done
+    fi
 
     if helm status "$release" -n "$namespace" >/dev/null 2>&1; then
       release_status_json="$(helm status "$release" -n "$namespace" -o json)"
@@ -50,6 +79,7 @@
       fi
 
       if [[ "$release_status" == 'deployed' ]]; then
+        [[ ! -s "$obsolete_ecr_file" ]] || deployed_release_reconciliation=true
         # Helm annotations do not transfer SSA field ownership. A deployed
         # release may still have fields owned by argocd-controller after handoff.
         helm get manifest "$release" -n "$namespace" > "$failed_manifest_file"
@@ -102,6 +132,9 @@
     if [[ "$use_chart_version" == '1' ]]; then
       helm_template+=(--version "$chart_version")
     fi
+    if [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]]; then
+      helm_template+=(--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false)
+    fi
     "${helm_template[@]}" > "$rendered_file"
 
     kubectl create --dry-run=client --namespace "$namespace" -f "$rendered_file" -o json |
@@ -122,6 +155,9 @@
       do
         [[ -n "$kind" && -n "$name" ]] || continue
         if ! grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file"; then
+          if is_obsolete_ecr_resource "$kind" "$name"; then
+            continue
+          fi
           if [[ "$failed_release_recovery" == true ]]; then
             echo "[ERROR] failed EVA App release manifest is incompatible with current rendered chart: $kind/$name"
           else
@@ -153,7 +189,7 @@
     done < "$rendered_resources_file"
 
     candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
-    if [[ "$candidate_count" == '0' ]]; then
+    if [[ "$candidate_count" == '0' && ! -s "$obsolete_ecr_file" ]]; then
       if [[ "$failed_release_recovery" == true || "$deployed_release_reconciliation" == true ]]; then
         echo '[ERROR] EVA App release reconciliation has no live rendered resource candidates'
         exit 1
@@ -325,6 +361,62 @@
       fi
     done < "$candidates_file"
 
+    obsolete_ecr_json="$(
+      python3 - "$obsolete_ecr_file" "$namespace" "$release" "$legacy_application" "$rendered_resources_file" <<'PY_ECR'
+    import json
+    from pathlib import Path
+    import sys
+
+    source, namespace, release, application, rendered = sys.argv[1:]
+    allowed = {
+      ('CronJob', release + '-ecr-cronjob'): ('batch/v1', 'cronjobs'),
+      ('Job', release + '-ecr-job-once'): ('batch/v1', 'jobs'),
+      ('Role', release + '-ecr-cronjob-role'): ('rbac.authorization.k8s.io/v1', 'roles'),
+      ('RoleBinding', release + '-ecr-cronjob-rolebinding'): ('rbac.authorization.k8s.io/v1', 'rolebindings'),
+      ('ServiceAccount', release + '-ecr-cronjob-sa'): ('v1', 'serviceaccounts'),
+    }
+    inventory = set(Path(rendered).read_text().splitlines())
+    cleanup = []
+    for line in Path(source).read_text().splitlines():
+      resource = json.loads(line)
+      kind = resource.get('kind')
+      metadata = resource.get('metadata') or {}
+      name = metadata.get('name')
+      identity = (kind, name)
+      if identity not in allowed or metadata.get('namespace') != namespace:
+        raise SystemExit('[ERROR] unsafe obsolete ECR resource identity')
+      if kind + '\t' + name in inventory:
+        raise SystemExit('[ERROR] ECR refresh resource is still rendered in repository mode: ' + kind + '/' + name)
+      api_version, plural = allowed[identity]
+      if resource.get('apiVersion') != api_version:
+        raise SystemExit('[ERROR] unexpected obsolete ECR apiVersion: ' + kind + '/' + name)
+      annotations = metadata.get('annotations') or {}
+      labels = metadata.get('labels') or {}
+      helm_name = annotations.get('meta.helm.sh/release-name', '')
+      helm_namespace = annotations.get('meta.helm.sh/release-namespace', '')
+      tracking = annotations.get('argocd.argoproj.io/tracking-id', '')
+      group = api_version.split('/')[0] if '/' in api_version else ''
+      expected = f'{application}:{group}/{kind}:{namespace}/{name}'
+      if helm_name or helm_namespace:
+        if (helm_name, helm_namespace, labels.get('app.kubernetes.io/managed-by')) != (release, namespace, 'Helm'):
+          raise SystemExit('[ERROR] foreign or partial obsolete ECR Helm ownership: ' + kind + '/' + name)
+        if tracking and tracking != expected:
+          raise SystemExit('[ERROR] obsolete ECR tracking identity mismatch: ' + kind + '/' + name)
+      elif tracking != expected or labels.get('app.kubernetes.io/managed-by', '') not in ('', 'Helm'):
+        raise SystemExit('[ERROR] unverified obsolete ECR ownership: ' + kind + '/' + name)
+      if any(owner.get('controller') is True for owner in metadata.get('ownerReferences') or []):
+        raise SystemExit('[ERROR] unexpected obsolete ECR controller ownership: ' + kind + '/' + name)
+      uid = metadata.get('uid')
+      version = metadata.get('resourceVersion')
+      if not isinstance(uid, str) or not uid or not isinstance(version, str) or not version:
+        raise SystemExit('[ERROR] missing obsolete ECR deletion preconditions: ' + kind + '/' + name)
+      prefix = '/api/v1' if api_version == 'v1' else '/apis/' + api_version
+      cleanup.append({'kind': kind, 'name': name, 'uid': uid, 'resourceVersion': version,
+              'api_path': f'{prefix}/namespaces/{namespace}/{plural}/{name}'})
+    print(json.dumps(cleanup))
+    PY_ECR
+    )"
+
     # A previously Argo CD-managed App object omitted by the current chart is
     # an ambiguous partial migration. Discover it explicitly rather than
     # adopting only the rendered subset.
@@ -365,6 +457,14 @@
           "$kind"$'\t'"$name" \
           "$rendered_resources_file"
         then
+          if is_obsolete_ecr_resource "$kind" "$name"; then
+            if jq -e --arg kind "$kind" --arg name "$name" \
+              'any(.[]; .kind == $kind and .name == $name)' <<< "$obsolete_ecr_json" >/dev/null; then
+              continue
+            fi
+            echo "[ERROR] obsolete ECR resource changed during assessment: $kind/$name"
+            exit 1
+          fi
           echo \
             "[ERROR] legacy EVA App resource is absent from rendered chart: $kind/$name"
           exit 1
@@ -373,6 +473,7 @@
 
     echo 'take_ownership=true'
     echo 'force_conflicts=true'
+    echo "obsolete_ecr_resources=$obsolete_ecr_json"
     echo "failed_release_recovery=$failed_release_recovery"
     echo "[OK] verified EVA App resources for Helm adoption application=$legacy_application count=$candidate_count failed_release_recovery=$failed_release_recovery deployed_release_reconciliation=$deployed_release_reconciliation"
   args:
@@ -389,5 +490,6 @@
     EVA_APP_EFFECTIVE_VALUES_FILE: "{{ eva_app_effective_values_dest }}"
     EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
     EVA_APP_SITE_ID: "{{ eva_site_id }}"
+    EVA_APP_REPOSITORY_MODE: "{{ repository_mode }}"
     EVA_APP_HELM_SET_JSON: "{{ eva_cli_helm_set | default([]) | to_json }}"
     EVA_APP_USE_CHART_VERSION: "{{ (eva_cli_chart_path | default('') | length == 0) | ternary('1', '0') }}"

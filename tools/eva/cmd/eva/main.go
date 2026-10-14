@@ -21,6 +21,7 @@ import (
 	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/health"
+	"eva-deployer/tools/eva/internal/inspect"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/release"
@@ -79,7 +80,7 @@ func usage() {
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
 	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
 	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET")
-	fmt.Println("  remote target <add|verify> NAME")
+	fmt.Println("  remote target list | <add|verify> NAME | remove NAME [--yes]")
 	fmt.Println("  remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("  remote verify [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("  install [--release PATH|RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
@@ -87,6 +88,7 @@ func usage() {
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
+	fmt.Println("  inspect [paths|operations|files|values|config|plan|result|logs] [options]")
 	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
 	fmt.Println("  preflight <gpu|argocd>")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
@@ -151,6 +153,8 @@ func run(args []string) error {
 		return runRetry(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "inspect":
+		return inspect.Run(args[1:], os.Stdout, os.Stderr)
 	case "check":
 		return runCheck(args[1:])
 	case "preflight":

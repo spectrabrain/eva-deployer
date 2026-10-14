@@ -53,7 +53,8 @@
     eva_app_license_product_code: "{{ eva_app_license_product_code | default('eva-dev') }}"
     eva_app_license_api_key: "{{ eva_app_license_api_key | default('LICENSE_API_KEY') }}"
     eva_app_license_shared_key: "{{ eva_app_license_shared_key | default('LICENSE_SHARED_KEY') }}"
-    eva_app_db_name: "{{ eva_app_db_name | default('eva') }}"
+    # Empty = omit database.name from the role override and retain the selected Chart default.
+    eva_app_db_name: "{{ eva_app_db_name | default('', true) }}"
     eva_app_db_user: "{{ eva_app_db_user | default('root') }}"
     eva_app_db_password: "{{ eva_app_db_password | default('passwd') }}"
     eva_app_db_nodeport: "{{ eva_app_db_nodeport | default(32060) }}"
@@ -201,7 +202,9 @@
 
 - name: Export default values.yaml from EVA App chart
   ansible.builtin.shell: >-
-    helm show values {{ eva_app_chart_source }} > {{ eva_app_workdir }}/values.yaml
+    helm show values {{ eva_app_chart_source }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+    > {{ eva_app_workdir }}/values.yaml
   args:
     executable: /bin/bash
   changed_when: false

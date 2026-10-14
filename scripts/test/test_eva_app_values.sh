@@ -56,7 +56,9 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_HELM_LOG:?}"
 case "$1 $2" in
   "repo add"|"repo update") exit 0 ;;
-  "show values") printf 'app:\n  sso:\n    baseUrl: https://chart.example\n    adminClientSecret: chart-default-secret\n' ;;
+  "show values")
+    printf 'database:\n  name: %s\napp:\n  sso:\n    baseUrl: https://chart.example\n    adminClientSecret: chart-default-secret\n' "${FAKE_CHART_DB_NAME:-eva_v3_0}"
+    ;;
   "status eva-app") exit 1 ;;
   "template eva-app") exit 0 ;;
   "upgrade --install") echo 'has been installed' ;;
@@ -134,6 +136,7 @@ run_app() {
   local root="$1"
   local components="$2"
   local set_value="$3"
+  shift 3
 
   PATH="$root/bin:$PATH" \
     FAKE_HELM_LOG="$root/helm.log" \
@@ -142,7 +145,32 @@ run_app() {
     "$ANSIBLE_PLAYBOOK" -i "$root/inventory.ini" "$root/playbook.yaml" \
       -e "eva_enabled_components=$components" \
       -e "eva_cli_values_path=$root/cli.yaml" \
-      -e "{\"eva_cli_helm_set\":[\"$set_value\"]}"
+      -e "{\"eva_cli_helm_set\":[\"$set_value\"]}" "$@"
+}
+
+assert_database_values() {
+  local root="$1"
+  local chart_default="$2"
+  local role_name="$3"
+  local effective_name="$4"
+
+  python3 - "$root/rendered" "$chart_default" "$role_name" "$effective_name" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+root = Path(sys.argv[1])
+defaults = yaml.safe_load((root / "chart-defaults.yaml").read_text())
+override = yaml.safe_load((root / "app-k3s-override.yaml").read_text())
+effective = yaml.safe_load((root / "effective-input-values.yaml").read_text())
+assert defaults["database"]["name"] == sys.argv[2], defaults["database"]
+assert override["database"]["type"] == "internal", override["database"]
+for values, expected in ((override, sys.argv[3]), (effective, sys.argv[4])):
+    if expected:
+        assert values["database"]["name"] == expected, values["database"]
+    else:
+        assert "name" not in values["database"], values["database"]
+PY
 }
 
 root="$(make_fixture generated)"
@@ -186,6 +214,8 @@ run_app "$root" 'app,iam' 'app.browserTitleName=set-title' >"$root/ansible.log" 
 workspace_checksum_after="$(sha256sum "$root/workspace/site-values/app.yaml")"
 
 [[ "$workspace_checksum_before" == "$workspace_checksum_after" ]]
+assert_database_values "$root" eva_v3_0 '' ''
+grep -Fq 'show values eva-app/eva-app --version 3.1.8' "$root/helm.log"
 grep -Fq 'delete job eva-app-tls-job -n eva-app --ignore-not-found=true --wait=true --timeout=120s' "$root/kubectl.log"
 grep -Fq 'wait --for=condition=Complete job/eva-app-tls-job -n eva-app --timeout=120s' "$root/kubectl.log"
 grep -Fq 'create secret tls eva-tls-for-traefik -' "$root/kubectl.log"
@@ -225,10 +255,11 @@ fi
 grep -Fq 'EVA App SSO 입력이 필요합니다' "$root/ansible.log"
 
 root="$(make_fixture app-only-workspace-sso)"
-printf '%s\n' 'localhost:' '  app:' '    sso:' '      baseUrl: https://workspace.example' '      adminClientSecret: workspace-secret' >"$root/workspace/site-values/app.yaml"
+printf '%s\n' 'localhost:' '  database:' '    name: eva' '  app:' '    sso:' '      baseUrl: https://workspace.example' '      adminClientSecret: workspace-secret' >"$root/workspace/site-values/app.yaml"
 printf '%s\n' 'schema_version: v1' 'site_id: another-site' 'target: another-target' 'iam_public_host: stale-iam.example' 'generated_at: "2026-09-15T00:00:00Z"' 'sso:' '  baseUrl: https://stale-iam.example' '  adminClientSecret: stale-secret' >"$root/state/site/localhost/eva-iam.yaml"
 printf '%s\n' 'app: {}' >"$root/cli.yaml"
-run_app "$root" 'app' 'app.replicaCount=2' >"$root/ansible.log" 2>&1
+run_app "$root" 'app' 'app.replicaCount=2' -e eva_app_db_name=role_db >"$root/ansible.log" 2>&1
+assert_database_values "$root" eva_v3_0 role_db eva
 grep -Fq 'adminClientSecret: workspace-secret' "$root/rendered/effective-input-values.yaml"
 if grep -Fq 'stale-iam.example' "$root/rendered/effective-input-values.yaml"; then
   echo 'Stale IAM base URL was applied to effective values' >&2
@@ -245,13 +276,34 @@ if grep -Fq 'stale-secret' "$root/ansible.log"; then
 fi
 
 root="$(make_fixture app-only-matching-handoff)"
-printf '%s\n' 'localhost:' '  app: {}' >"$root/workspace/site-values/app.yaml"
+printf '%s\n' 'localhost:' '  database:' '    name: workspace_db' '  app: {}' >"$root/workspace/site-values/app.yaml"
 printf '%s\n' 'schema_version: v1' 'site_id: site' 'target: localhost' 'iam_public_host: iam.example' 'generated_at: "2026-09-15T00:00:00Z"' 'sso:' '  baseUrl: https://iam.example' '  adminClientSecret: matching-secret' >"$root/state/site/localhost/eva-iam.yaml"
-printf '%s\n' 'app: {}' >"$root/cli.yaml"
-run_app "$root" 'app' 'app.replicaCount=2' >"$root/ansible.log" 2>&1
+printf '%s\n' 'database:' '  name: cli_db' >"$root/cli.yaml"
+run_app "$root" 'app' 'database.name=set_db' -e eva_app_db_name=role_db >"$root/ansible.log" 2>&1
+assert_database_values "$root" eva_v3_0 role_db cli_db
+grep -Fq -- '--set database.name=set_db' "$root/helm.log"
 grep -Fq 'baseUrl: https://iam.example' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'adminClientSecret: matching-secret' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'iam_handoff: true' "$root/rendered/values-sources.yaml"
+
+for scenario in explicit-role-db empty-role-db; do
+  root="$(make_fixture "$scenario")"
+  printf '%s\n' 'localhost:' '  app:' '    sso:' '      baseUrl: https://workspace.example' '      adminClientSecret: workspace-secret' >"$root/workspace/site-values/app.yaml"
+  printf '%s\n' 'app: {}' >"$root/cli.yaml"
+  if [[ "$scenario" == explicit-role-db ]]; then
+    # A CLI Chart supplies its own defaults; the catalog version must not select another Chart.
+    printf 'fake chart\n' >"$root/custom-chart.tgz"
+    run_app "$root" 'app' 'app.replicaCount=2' \
+      -e eva_app_db_name=custom_db -e "eva_cli_chart_path=$root/custom-chart.tgz" >"$root/ansible.log" 2>&1
+    assert_database_values "$root" eva_v3_0 custom_db custom_db
+    grep -Fxq "show values $root/app-work/cli-chart.tgz" "$root/helm.log"
+  else
+    # Both an empty role variable and a changed Chart default must remain Chart-driven.
+    FAKE_CHART_DB_NAME=eva_next run_app "$root" 'app' 'app.replicaCount=2' \
+      -e eva_app_db_name= >"$root/ansible.log" 2>&1
+    assert_database_values "$root" eva_next '' ''
+  fi
+done
 
 root="$(make_fixture app-only-mismatched-handoff)"
 printf '%s\n' 'localhost:' '  app: {}' >"$root/workspace/site-values/app.yaml"

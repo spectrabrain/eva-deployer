@@ -46,7 +46,9 @@ app:
     shared_key: "{{ eva_app_license_shared_key }}"
 
 database:
+{% if eva_app_db_name | length > 0 %}
   name: "{{ eva_app_db_name }}"
+{% endif %}
   type: internal
   internal:
     # 차트 3.1.5 부터 repository/tag 맵입니다. 그 전에는 "repo:tag" 문자열이었고,

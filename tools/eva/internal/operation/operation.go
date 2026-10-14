@@ -450,13 +450,14 @@ func WriteResult(root string, record Record, result Result) (string, error) {
 	return path, nil
 }
 
-func Latest(root string) (Record, error) {
+// List returns operations newest-created first, optionally scoped to one site.
+func List(root, siteID string) ([]Record, error) {
 	if root == "" {
 		root = DefaultRoot
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return Record{}, fmt.Errorf("read operation root: %w", err)
+		return nil, fmt.Errorf("read operation root: %w", err)
 	}
 	records := make([]Record, 0, len(entries))
 	for _, entry := range entries {
@@ -465,9 +466,25 @@ func Latest(root string) (Record, error) {
 		}
 		record, err := Load(root, entry.Name())
 		if err != nil {
-			return Record{}, err
+			return nil, err
 		}
-		records = append(records, record)
+		if siteID == "" || record.SiteID == siteID {
+			records = append(records, record)
+		}
+	}
+	sort.Slice(records, func(left, right int) bool {
+		if records[left].CreatedAt.Equal(records[right].CreatedAt) {
+			return records[left].ID > records[right].ID
+		}
+		return records[left].CreatedAt.After(records[right].CreatedAt)
+	})
+	return records, nil
+}
+
+func Latest(root string) (Record, error) {
+	records, err := List(root, "")
+	if err != nil {
+		return Record{}, err
 	}
 	if len(records) == 0 {
 		return Record{}, errors.New("no operations found")

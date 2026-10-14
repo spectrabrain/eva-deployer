@@ -14,6 +14,10 @@ EVA는 고객마다 Network와 Security 환경이 다르므로, 하나의 설치
 - [Remote Repository 설치 가이드](docs/installation/remote-repository-runbook.md)
 - [Local Repository 설치 가이드](docs/installation/local-repository-runbook.md)
 
+설치 결과·최종 Values·생성 Config·작업 로그 조회와 공개 명령 목록은
+[EVA Tool 명령어 가이드](docs/operations/eva-cli-command-guide.md)를 참고합니다.
+`sudo eva inspect files`, `sudo eva inspect values --component app`으로 경로를 직접 찾아가지 않고 조회할 수 있습니다.
+
 특히 Remote의 정상 경로는 통합 Runbook에 있는 `eva remote bootstrap`, `prepare`,
 `verify`, `publish`와 Target `eva install`입니다. 아래의 직접 Docker/Harbor/download,
 Ansible 실행 예시는 source 개발·이관 참고용이며 Remote 운영 절차로 사용하지 않습니다.

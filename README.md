@@ -1027,7 +1027,7 @@ ansible-playbook -i 'localhost,' -c local site_eva_app.yaml -K \
 
 네임스페이스가 없는 경우 아래 명령어 실행
 ```bash
-kubectl create namespace eva-visionkubectl create namespace eva-vision
+kubectl create namespace eva-vision
 ```
 
 ```bash
@@ -1044,7 +1044,7 @@ kubectl create secret docker-registry eva-vision-regcred \
 
 네임스페이스가 없는 경우 아래 명령어 실행
 ```bash
-kubectl create namespace eva-visionkubectl create namespace eva-agent
+kubectl create namespace eva-agent
 ```
 ```bash
 ECR_PASSWORD=$(aws ecr get-login-password --region ap-northeast-2)

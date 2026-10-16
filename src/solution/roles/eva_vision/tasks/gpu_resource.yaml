@@ -1,0 +1,58 @@
+- name: Collect Kubernetes NVIDIA allocatable resources
+  ansible.builtin.command: kubectl get nodes -o json
+  register: eva_vision_nodes
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+- name: Extract Kubernetes NVIDIA allocatable resources
+  ansible.builtin.set_fact:
+    eva_vision_node_allocatable: >-
+      {{ ((eva_vision_nodes.stdout | from_json)['items']
+          | map(attribute='status.allocatable') | list)
+         if eva_vision_nodes.rc == 0 else [] }}
+
+- name: Select positive NVIDIA allocatable resource names
+  ansible.builtin.set_fact:
+    eva_vision_mig_resource_names: >-
+      {{ eva_vision_node_allocatable
+         | map('dict2items') | flatten
+         | selectattr('key', 'match', '^nvidia[.]com/mig-')
+         | rejectattr('value', 'equalto', '0')
+         | map(attribute='key') | unique | list }}
+    eva_vision_gpu_resource_names: >-
+      {{ eva_vision_node_allocatable
+         | map('dict2items') | flatten
+         | selectattr('key', 'equalto', 'nvidia.com/gpu')
+         | rejectattr('value', 'equalto', '0')
+         | map(attribute='key') | unique | list }}
+
+- name: Validate automatically detected EVA Vision accelerator resource
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (eva_vision_mig_enabled_from_config | default(false) | bool)
+        or (eva_vision_mig_resource_names | length > 0)
+      - >-
+        not (eva_vision_mig_enabled_from_config | default(false) | bool)
+        or (eva_vision_mig_resource_names | length == 1)
+      - >-
+        (eva_vision_mig_enabled_from_config | default(false) | bool)
+        or (eva_vision_gpu_resource_names | length > 0)
+    fail_msg: >-
+      EVA Vision accelerator resource를 자동 선택할 수 없습니다. MIG가 활성화된 경우 Kubernetes node에
+      양수의 nvidia.com/mig-* allocatable resource가 정확히 하나 있어야 합니다. 일반 GPU인 경우
+      nvidia.com/gpu allocatable resource가 필요합니다. NVIDIA Device Plugin과 MIG 구성을 확인하세요.
+  when: eva_vision_gpu_resource_name | length == 0
+
+- name: Resolve EVA Vision GPU or MIG resource name automatically
+  ansible.builtin.set_fact:
+    eva_vision_gpu_resource_name: >-
+      {{ eva_vision_gpu_resource_name
+         if (eva_vision_gpu_resource_name | length > 0)
+         else (
+           eva_vision_mig_resource_names | first
+           if (eva_vision_mig_enabled_from_config | default(false) | bool)
+           else (eva_vision_gpu_resource_names | first)
+         ) }}

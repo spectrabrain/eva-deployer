@@ -1,0 +1,283 @@
+---
+- name: Verify eva-agent-vllm reconciliation after Helm installation
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace={{ eva_agent_namespace | quote }}
+    release='eva-agent-vllm'
+    static_pv='eva-agent-vllm-shared-pvc-storage'
+    claim='eva-agent-vllm-shared-pvc-storage-claim'
+    cache_path='/share/eva-agent/vllm-cache'
+    snapshot_file="$cache_path/.eva-vllm-storage-migration.tsv"
+
+    static_pv_file="$(mktemp)"
+    claim_file="$(mktemp)"
+    workloads_file="$(mktemp)"
+
+    cleanup() {
+      rm -f \
+        "$static_pv_file" \
+        "$claim_file" \
+        "$workloads_file"
+    }
+
+    trap cleanup EXIT
+
+    release_status="$(
+      helm status \
+        "$release" \
+        -n "$namespace" \
+        -o json |
+      jq -r '.info.status // empty'
+    )"
+
+    if [[ "$release_status" != 'deployed' ]]; then
+      echo "[ERROR] eva-agent-vllm Helm release is not deployed: $release_status"
+      exit 1
+    fi
+
+    binding_verified=0
+
+    for attempt in $(seq 1 25)
+    do
+      static_pv_phase=''
+      claim_phase=''
+      claim_volume=''
+
+      if kubectl get pv \
+        "$static_pv" \
+        -o json > "$static_pv_file" 2>/dev/null
+      then
+        static_pv_phase="$(
+          jq -r '.status.phase // empty' "$static_pv_file"
+        )"
+      fi
+
+      if kubectl get pvc \
+        "$claim" \
+        -n "$namespace" \
+        -o json > "$claim_file" 2>/dev/null
+      then
+        claim_phase="$(
+          jq -r '.status.phase // empty' "$claim_file"
+        )"
+        claim_volume="$(
+          jq -r '.spec.volumeName // empty' "$claim_file"
+        )"
+      fi
+
+      if [[
+        "$static_pv_phase" == 'Bound' &&
+        "$claim_phase" == 'Bound' &&
+        "$claim_volume" == "$static_pv"
+      ]]; then
+        binding_verified=1
+        break
+      fi
+
+      if (( attempt < 25 )); then
+        sleep 5
+      fi
+    done
+
+    if (( binding_verified != 1 )); then
+      echo "[ERROR] VLLM static PV and PVC binding did not become ready within 120 seconds"
+      echo "[INFO] pv_phase=${static_pv_phase:-absent} pvc_phase=${claim_phase:-absent} pvc_volume=${claim_volume:-unset}"
+      exit 1
+    fi
+
+    static_pv_errors="$(
+      jq -r \
+        --arg namespace "$namespace" \
+        --arg claim "$claim" \
+        --arg cache_path "$cache_path" \
+        --arg release "$release" '
+          select(
+            .metadata.name
+              != "eva-agent-vllm-shared-pvc-storage"
+            or
+            .status.phase != "Bound"
+            or
+            .spec.persistentVolumeReclaimPolicy != "Retain"
+            or
+            .spec.storageClassName != "eva-agent-sc-fs"
+            or
+            .spec.capacity.storage != "50Gi"
+            or
+            (.spec.accessModes | index("ReadWriteMany")) == null
+            or
+            .spec.nfs.server != "localhost"
+            or
+            .spec.nfs.path != $cache_path
+            or
+            .spec.claimRef.namespace != $namespace
+            or
+            .spec.claimRef.name != $claim
+            or
+            (
+              .metadata.labels."app.kubernetes.io/managed-by"
+              // ""
+            ) != "Helm"
+            or
+            (
+              .metadata.annotations."meta.helm.sh/release-name"
+              // ""
+            ) != $release
+            or
+            (
+              .metadata.annotations."meta.helm.sh/release-namespace"
+              // ""
+            ) != $namespace
+            or
+            (
+              .metadata.annotations."helm.sh/resource-policy"
+              // ""
+            ) != "keep"
+            or
+            (
+              .metadata.annotations."argocd.argoproj.io/tracking-id"
+              // ""
+            ) != ""
+          )
+          | "invalid"
+        ' "$static_pv_file"
+    )"
+
+    if [[ -n "$static_pv_errors" ]]; then
+      echo "[ERROR] installed VLLM static PV contract mismatch"
+      exit 1
+    fi
+
+    claim_uid="$(
+      jq -r '.metadata.uid // empty' "$claim_file"
+    )"
+
+    claim_errors="$(
+      jq -r \
+        --arg namespace "$namespace" \
+        --arg claim "$claim" \
+        --arg static_pv "$static_pv" \
+        --arg release "$release" '
+          select(
+            .metadata.name != $claim
+            or
+            .metadata.namespace != $namespace
+            or
+            .status.phase != "Bound"
+            or
+            .spec.volumeName != $static_pv
+            or
+            .spec.storageClassName != "eva-agent-sc-fs"
+            or
+            .spec.resources.requests.storage != "50Gi"
+            or
+            (.spec.accessModes | index("ReadWriteMany")) == null
+            or
+            (
+              .metadata.labels."app.kubernetes.io/managed-by"
+              // ""
+            ) != "Helm"
+            or
+            (
+              .metadata.annotations."meta.helm.sh/release-name"
+              // ""
+            ) != $release
+            or
+            (
+              .metadata.annotations."meta.helm.sh/release-namespace"
+              // ""
+            ) != $namespace
+            or
+            (
+              .metadata.annotations."helm.sh/resource-policy"
+              // ""
+            ) != "keep"
+            or
+            (
+              .metadata.annotations."argocd.argoproj.io/tracking-id"
+              // ""
+            ) != ""
+          )
+          | "invalid"
+        ' "$claim_file"
+    )"
+
+    if [[ -n "$claim_errors" ]]; then
+      echo "[ERROR] installed VLLM PVC contract mismatch"
+      exit 1
+    fi
+
+    pv_claim_uid="$(
+      jq -r '.spec.claimRef.uid // empty' "$static_pv_file"
+    )"
+
+    if [[ -z "$claim_uid" || "$pv_claim_uid" != "$claim_uid" ]]; then
+      echo "[ERROR] installed VLLM PV and PVC UID binding mismatch"
+      exit 1
+    fi
+
+    if ! kubectl get deployments,statefulsets \
+      -n "$namespace" \
+      -o json > "$workloads_file"
+    then
+      echo "[ERROR] failed to inspect installed VLLM workloads"
+      exit 1
+    fi
+
+    workload_count="$(
+      jq -r \
+        --arg claim "$claim" '
+          [
+            .items[]
+            | select(
+                .metadata.name
+                | test("eva-agent-vllm"; "i")
+              )
+            | select(
+                [
+                  (.spec.template.spec.volumes // [])[]
+                  | select(
+                      .persistentVolumeClaim.claimName
+                      == $claim
+                    )
+                ]
+                | length > 0
+              )
+          ]
+          | length
+        ' "$workloads_file"
+    )"
+
+    if [[ "$workload_count" == '0' ]]; then
+      echo "[ERROR] no installed VLLM workload references the expected PVC"
+      exit 1
+    fi
+
+    if [[ ! -d "$cache_path" ]]; then
+      echo "[ERROR] canonical VLLM cache path is absent after Helm installation"
+      exit 1
+    fi
+
+    if [[ -f "$snapshot_file" ]]; then
+      if [[ ! -d "$cache_path/hub" ]]; then
+        echo "[ERROR] migrated VLLM model hub directory is absent after Helm installation"
+        exit 1
+      fi
+
+      if [[ -z "$(find "$cache_path" -mindepth 1 -print -quit)" ]]; then
+        echo "[ERROR] migrated VLLM cache path is empty after Helm installation"
+        exit 1
+      fi
+
+      rm -f "$snapshot_file"
+      echo "[OK] migrated VLLM cache content was preserved"
+    else
+      echo "[INFO] VLLM cache content validation skipped for non-migration installation"
+    fi
+
+    echo "[OK] eva-agent-vllm static PV and PVC binding verified"
+  args:
+    executable: /bin/bash
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"

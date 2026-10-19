@@ -726,6 +726,24 @@ func TestMaterializedRemoteCacheOnlyUsesRemoteRepository(t *testing.T) {
 	}
 }
 
+func TestEnsureInstallRuntimeReusesExistingRuntimeAcrossRepositoryModes(t *testing.T) {
+	root := writeShellRuntime(t)
+	// No offline payload is provided: a valid existing Runtime must be enough,
+	// including when a former Remote target changes to Cloud.
+	resolvedRelease := release.Resolved{Prepared: true, Metadata: release.Metadata{Version: "new-release"}}
+	for _, mode := range []string{"remote", "cloud", "local", "remote_repository", "cloud_repository", "local_repository"} {
+		t.Run(mode, func(t *testing.T) {
+			if err := ensureInstallRuntime(root, resolvedRelease, mode); err != nil {
+				t.Fatalf("existing Runtime must be reusable for %s: %v", mode, err)
+			}
+			resolved, err := runtime.Resolve(root)
+			if err != nil || resolved.Descriptor.Version != "3.2.0" {
+				t.Fatalf("existing Runtime changed: version=%s, error=%v", resolved.Descriptor.Version, err)
+			}
+		})
+	}
+}
+
 func TestEnsureInstallRuntimeFailsClosedForPreparedRemoteRelease(t *testing.T) {
 	releaseResolved := release.Resolved{
 		Prepared: true,

@@ -39,8 +39,8 @@ installer는 하나의 `eva-tool_*_linux_amd64.tar.gz` archive와 Release checks
 
 ## 3. Managed Runtime 준비
 
-서버에 EVA Runtime이 아직 없을 때만 bootstrap을 실행합니다. 관리되는 Ansible 및 Kubernetes
-도구를 설치하고 검증한 뒤 `/opt/eva/runtime`에 게시합니다.
+다음 명령으로 관리되는 Ansible 및 Kubernetes 도구를 설치하고 검증한 뒤
+`/opt/eva/runtime`에 게시합니다.
 
 ```bash
 sudo eva runtime bootstrap

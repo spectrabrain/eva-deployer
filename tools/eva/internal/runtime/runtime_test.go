@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -186,24 +185,6 @@ func TestBootstrapOnlinePublishesValidatedRuntime(t *testing.T) {
 	}
 }
 
-func TestInstallCloudPrerequisitesUpdatesAPTAndInstallsRequiredPackages(t *testing.T) {
-	var commands [][]string
-	err := installCloudPrerequisites(func(name string, args ...string) error {
-		commands = append(commands, append([]string{name}, args...))
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("installCloudPrerequisites() error = %v", err)
-	}
-	want := [][]string{
-		{"apt-get", "update"},
-		{"apt-get", "install", "--yes", "ca-certificates", "python3", "python3-venv"},
-	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("APT commands = %#v, want %#v", commands, want)
-	}
-}
-
 func TestBootstrapOnlineInstallsPinnedAnsibleCollections(t *testing.T) {
 	spec, payloads := testOnlineBootstrapSpec(t)
 	spec.AnsibleCollections = []string{"ansible.posix:==2.2.2"}
@@ -329,6 +310,7 @@ func testOnlineBootstrapDependencies(t *testing.T, payloads map[string][]byte) o
 	}
 	return onlineBootstrapDependencies{
 		goos: "linux", goarch: "amd64", run: run,
+		prepareHost: func(string) error { return nil },
 		runWithEnv: func(_ []string, name string, args ...string) error {
 			return run(name, args...)
 		},

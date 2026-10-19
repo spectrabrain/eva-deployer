@@ -250,6 +250,17 @@
     - gpu_mig_apply_mig_partition | bool
     - gpu_mig_mig_capable_gpu_count | int > 0
 
+- name: Install shared MIG configuration tool for next boot
+  ansible.builtin.copy:
+    src: gpu-mig-configure.py
+    dest: /usr/local/sbin/gpu-mig-configure.py
+    mode: "0755"
+    owner: root
+    group: root
+  when:
+    - gpu_mig_apply_mig_completed | default(false) | bool
+    - gpu_mig_mig_gpu_indices | default([]) | length > 0
+
 - name: Install auto-enable MIG script for next boot
   ansible.builtin.copy:
     dest: /usr/local/sbin/gpu-mig-auto-enable.sh
@@ -260,86 +271,11 @@
       #!/usr/bin/env bash
       set -euo pipefail
 
-      selector="{{ gpu_mig_mig_selector_remote_dir }}/displaymodeselector"
-      desired_profile_id="{{ gpu_mig_mig_profile_id | string | trim }}"
-      desired_instance_count="{{ gpu_mig_mig_instance_count | int }}"
-      desired_profile_list="{{ ([gpu_mig_mig_profile_id | string | trim] * (gpu_mig_mig_instance_count | int)) | join(',') }}"
-
-      count_existing_instances() {
-        local gpu_idx="$1"
-        # `nvidia-smi mig -lgi` returns rc=6 when no instances exist; treat it as empty output.
-        local lgi_out
-        lgi_out="$(nvidia-smi mig -i "${gpu_idx}" -lgi 2>/dev/null || true)"
-        printf '%s\n' "${lgi_out}" \
-          | awk -v gpu="${gpu_idx}" -v profile="${desired_profile_id}" '
-              /^\|/ {
-                line=$0
-                gsub(/\|/, "", line)
-                gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-                split(line, f, /[[:space:]]+/)
-                if (f[1] == gpu && f[2] == "MIG" && f[4] == profile && f[5] ~ /^[0-9]+$/ && f[6] ~ /^[0-9]+:[0-9]+$/) {
-                  c++
-                }
-              }
-              END { print c + 0 }'
-      }
-
-      # Guard against early graphical clients grabbing GPUs before partitioning.
-      for svc in display-manager.service gdm.service gdm3.service lightdm.service sddm.service; do
-        systemctl stop "${svc}" 2>/dev/null || true
-      done
-
-      for wait_try in 1 2 3 4 5; do
-        if ! nvidia-smi | awk '/Processes:/,0' | grep -Eq 'Xorg|gnome-shell|gnome-control-center'; then
-          break
-        fi
-        echo "gpu-mig-auto-enable: waiting for graphical GPU clients to exit (${wait_try}/5)" >&2
-        sleep 2
-      done
-
-      if [ -x "${selector}" ]; then
-        "${selector}" --gpumode compute --auto
-      fi
-
-      mapfile -t gpu_indices < <(
-        nvidia-smi --query-gpu=index,mig.mode.current --format=csv,noheader \
-          | awk -F',' '{
-              gsub(/^[ \t]+|[ \t]+$/, "", $1);
-              gsub(/^[ \t]+|[ \t]+$/, "", $2);
-              if ($2 != "N/A") print $1;
-            }'
-      )
-
-      for idx in "${gpu_indices[@]}"; do
-        nvidia-smi -i "${idx}" -mig 1
-
-        if [ -n "${desired_profile_id}" ] && [ "${desired_instance_count}" -gt 0 ]; then
-          existing_count="$(count_existing_instances "${idx}")"
-
-          if [ "${existing_count:-0}" -ne "${desired_instance_count}" ]; then
-            applied=0
-            for attempt in 1 2 3; do
-              if nvidia-smi mig -i "${idx}" -cgi "${desired_profile_list}" -C; then
-                applied=1
-                break
-              fi
-              echo "gpu-mig-auto-enable: retry MIG partition on GPU ${idx} (${attempt}/3)" >&2
-              sleep 2
-            done
-
-            if [ "${applied}" -ne 1 ]; then
-              echo "gpu-mig-auto-enable: failed to apply MIG profile ${desired_profile_list} on GPU ${idx}" >&2
-              exit 1
-            fi
-
-            final_count="$(count_existing_instances "${idx}")"
-            if [ "${final_count:-0}" -ne "${desired_instance_count}" ]; then
-              echo "gpu-mig-auto-enable: MIG profile count mismatch on GPU ${idx} (have ${final_count:-0}, want ${desired_instance_count})" >&2
-              exit 1
-            fi
-          fi
-        fi
-      done
+      exec /usr/local/sbin/gpu-mig-configure.py reconcile \
+        --selector {{ (gpu_mig_mig_selector_remote_dir ~ '/displaymodeselector') | quote }} \
+        --profile {{ (gpu_mig_mig_profile_id | string | trim) | quote }} \
+        --count {{ gpu_mig_mig_instance_count | int }} \
+        {{ gpu_mig_mig_gpu_indices | map('regex_replace', '^', '--gpu ') | join(' ') }}
   when:
     - gpu_mig_apply_mig_completed | default(false) | bool
     - gpu_mig_mig_gpu_indices | default([]) | length > 0
@@ -361,7 +297,7 @@
       [Service]
       Type=oneshot
       ExecStart=/usr/local/sbin/gpu-mig-auto-enable.sh
-      RemainAfterExit=no
+      RemainAfterExit=yes
 
       [Install]
       WantedBy=multi-user.target

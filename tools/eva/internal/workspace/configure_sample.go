@@ -5,10 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+type configuredSampleTarget struct {
+	node       *yaml.Node
+	components map[string]bool
+}
 
 // ConfigureTarget separates connection inputs from reusable installation choices.
 // Address "ip" selects path separation and uses the SSH IP when available.
@@ -48,6 +54,7 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 	targetMapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	setSampleMappingValue(root, "targets", targetMapping)
 	global := map[string]bool{"infra": true, "iam": false, "app": false, "agent": false, "vision": false, "n8n": false}
+	configured := make(map[string]configuredSampleTarget, len(targets))
 	seen := make(map[string]bool)
 	for index, options := range targets {
 		if err := ValidateConfigureTargetName(options.Name); err != nil {
@@ -98,8 +105,6 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 		if err := componentNode.Encode(components); err != nil {
 			return nil, err
 		}
-		componentNode.HeadComment = "이 target에 설치할 component만 활성화합니다. 생략된 component는 설치하지 않습니다."
-		setSampleMappingValue(target, "components", componentNode)
 		for component, enabled := range components {
 			global[component] = global[component] || enabled
 		}
@@ -126,7 +131,24 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 				return requiredPlaceholder.ReplaceAllStringFunc(value, func(marker string) string { return prefix + marker[1:] })
 			})
 		}
-		targetMapping.Content = append(targetMapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: options.Name}, target)
+		configured[options.Name] = configuredSampleTarget{node: target, components: components}
+	}
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		selected := configured[name]
+		if !equalBoolMap(selected.components, global) {
+			componentNode := new(yaml.Node)
+			if err := componentNode.Encode(selected.components); err != nil {
+				return nil, err
+			}
+			componentNode.HeadComment = "이 target에 설치할 component만 활성화합니다. 생략된 component는 설치하지 않습니다."
+			setSampleMappingValue(selected.node, "components", componentNode)
+		}
+		targetMapping.Content = append(targetMapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: name}, selected.node)
 	}
 	globalNode := new(yaml.Node)
 	if err := globalNode.Encode(global); err != nil {
@@ -142,6 +164,18 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), encoder.Close()
+}
+
+func equalBoolMap(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftValue := range left {
+		if rightValue, ok := right[key]; !ok || rightValue != leftValue {
+			return false
+		}
+	}
+	return true
 }
 
 func setSampleMappingValue(mapping *yaml.Node, key string, value *yaml.Node) {

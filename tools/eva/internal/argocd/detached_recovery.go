@@ -3,6 +3,7 @@ package argocd
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -29,9 +30,24 @@ func detachedClusterName(detected []string) (string, error) {
 }
 
 func gitAbsenceCommand(plan GitRemovalPlan) string {
+	return gitCheckoutCommand(plan) + gitAbsenceCheckCommand(plan)
+}
+
+func gitReadAbsenceCommand(plan GitRemovalPlan) string {
+	// Keep credential helpers available, but disable terminal/GUI prompting.
+	// No credentials are read from stdin unless an actual auth failure occurs.
+	return "set -euo pipefail; umask 077; base=\"$HOME/tmp\"; mkdir -p \"$base\"; root=$(mktemp -d \"$base/eva-argocd-handoff.XXXXXX\"); trap 'rm -rf \"$root\"' EXIT; " +
+		"work=\"$root/repository\"; " + gitReadEnvironment +
+		"timeout 60s git clone --depth 1 --branch " + shellQuote(plan.Branch) + " " + shellQuote(plan.Repository) + " \"$work\"; cd \"$work\"; " +
+		"[ \"$(timeout 30s git rev-parse HEAD)\" = " + shellQuote(plan.ExpectedHead) + " ]; " + gitAbsenceCheckCommand(plan)
+}
+
+const gitReadEnvironment = "export LC_ALL=C GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false GCM_INTERACTIVE=never; "
+
+func gitAbsenceCheckCommand(plan GitRemovalPlan) string {
 	// Inspect the Git tree rather than the filesystem: symlinked parents or a
 	// sparse checkout must not make a tracked registration appear absent.
-	command := gitCheckoutCommand(plan)
+	command := ""
 	for parent := path.Dir(plan.Manifest); parent != "."; parent = path.Dir(parent) {
 		command += "entry=$(timeout 30s git ls-tree HEAD -- " + shellQuote(parent) + "); " +
 			"[[ -z \"$entry\" || \"$entry\" == '040000 tree '* ]]; "
@@ -56,6 +72,55 @@ func requireGitAbsenceMarker(output, head string) error {
 		return errors.New("Git absence verification did not return exactly one commit marker")
 	}
 	return nil
+}
+
+// readOnlyGitAccess tries the management account's existing read access first.
+// Only explicit HTTP authentication failures may request credentials, once.
+// Transport, certificate, repository-state and manifest failures must not
+// turn into misleading password prompts or bypass the absence check.
+type readOnlyGitAccess struct {
+	session     Session
+	prompt      Prompter
+	plan        GitRemovalPlan
+	credentials GitCredentials
+}
+
+func (access *readOnlyGitAccess) run(command, authenticatedCommand string) (string, error) {
+	if access.credentials.Username != "" {
+		return access.session.RunWithInput(authenticatedCommand, gitCredentialInput(access.credentials))
+	}
+	output, err := access.session.Run(command)
+	if err == nil || !isGitReadAuthenticationFailure(access.plan.Repository, output) {
+		return output, err
+	}
+	reportProgress(access.prompt, "[INFO] Git read access requires authentication to verify the removed registration manifest; no commit or push will be performed.")
+	credentials, credentialErr := access.prompt.GitCredentials(access.plan)
+	if credentialErr != nil {
+		return "", fmt.Errorf("read Git credentials for absence verification: %w", credentialErr)
+	}
+	if err := validateGitCredentials(credentials); err != nil {
+		return "", err
+	}
+	access.credentials = credentials
+	return access.session.RunWithInput(authenticatedCommand, gitCredentialInput(credentials))
+}
+
+func isGitReadAuthenticationFailure(repository, output string) bool {
+	repositoryURL, err := url.Parse(repository)
+	if err != nil || (repositoryURL.Scheme != "http" && repositoryURL.Scheme != "https") {
+		return false
+	}
+	text := strings.ToLower(output)
+	for _, marker := range []string{
+		"could not read username for", "could not read password for",
+		"authentication failed for", "http basic: access denied",
+		"the requested url returned error: 401",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func recoverDetachedHandoff(session Session, prompt Prompter, detection Detection, applications []applicationRecord, registrations []clusterRegistration) (Receipt, error) {
@@ -88,7 +153,12 @@ func recoverDetachedHandoff(session Session, prompt Prompter, detection Detectio
 	if err != nil {
 		return Receipt{}, err
 	}
-	output, err = session.Run(defaultBranchCommand(source.Repository))
+	access := readOnlyGitAccess{session: session, prompt: prompt, plan: GitRemovalPlan{Repository: source.Repository}}
+	defer func() { access.credentials = GitCredentials{} }()
+	readDefaultBranch := gitReadEnvironment + defaultBranchCommand(source.Repository)
+	// Authenticated reads pass credentials through private temporary askpass files.
+	authenticatedDefaultBranch := gitAuthenticatedDefaultBranchCommand(source.Repository)
+	output, err = access.run(readDefaultBranch, authenticatedDefaultBranch)
 	if err != nil {
 		return Receipt{}, fmt.Errorf("resolve registration repository default branch: %w", err)
 	}
@@ -108,16 +178,9 @@ func recoverDetachedHandoff(session Session, prompt Prompter, detection Detectio
 		Repository:              source.Repository, Branch: branch, Manifest: manifest,
 		ClusterName: clusterName, ExpectedHead: head,
 	}
+	access.plan = gitPlan
 	reportProgress(prompt, "[INFO] Checking that the target registration manifest is absent from Git (read-only; no commit or push)...")
-	credentials, err := prompt.GitCredentials(gitPlan)
-	if err != nil {
-		return Receipt{}, fmt.Errorf("read Git credentials for absence verification: %w", err)
-	}
-	if err := validateGitCredentials(credentials); err != nil {
-		return Receipt{}, err
-	}
-	output, err = session.RunWithInput(gitAbsenceCommand(gitPlan), gitCredentialInput(credentials))
-	credentials.Secret = ""
+	output, err = access.run(gitReadAbsenceCommand(gitPlan), gitAbsenceCommand(gitPlan))
 	if err != nil {
 		return Receipt{}, fmt.Errorf("verify target registration manifest is absent from Git: %w", err)
 	}
@@ -132,7 +195,7 @@ func recoverDetachedHandoff(session Session, prompt Prompter, detection Detectio
 	if err := verifyRemovalWindowWithSource(session, cluster, head, true, &source); err != nil {
 		return Receipt{}, err
 	}
-	output, err = session.Run(defaultBranchCommand(source.Repository))
+	output, err = access.run(readDefaultBranch, authenticatedDefaultBranch)
 	if err != nil {
 		return Receipt{}, fmt.Errorf("recheck registration repository HEAD: %w", err)
 	}

@@ -12,6 +12,7 @@
     handoff_file="$EVA_APP_HANDOFF_FILE"
     use_chart_version="$EVA_APP_USE_CHART_VERSION"
     repository_mode="$EVA_APP_REPOSITORY_MODE"
+    tls_job_enabled="${EVA_APP_TLS_JOB_ENABLED:-true}"
     failed_release_recovery=false
     deployed_release_reconciliation=false
 
@@ -23,6 +24,7 @@
     failed_manifest_json_file="$(mktemp)"
     failed_manifest_resources_file="$(mktemp)"
     obsolete_ecr_file="$(mktemp)"
+    obsolete_tls_resources_file="$(mktemp)"
     cleanup() {
       rm -f \
         "$rendered_file" \
@@ -32,7 +34,8 @@
         "$failed_manifest_file" \
         "$failed_manifest_json_file" \
         "$failed_manifest_resources_file" \
-        "$obsolete_ecr_file"
+        "$obsolete_ecr_file" \
+        "$obsolete_tls_resources_file"
     }
     trap cleanup EXIT
 
@@ -44,6 +47,17 @@
         "ServiceAccount/$release-ecr-cronjob-sa") return 0 ;;
       esac
       return 1
+    }
+
+    obsolete_tls_api_version() {
+      [[ "$tls_job_enabled" == false ]] || return 1
+      case "$1/$2" in
+        "Job/$release-tls-job") printf 'batch/v1' ;;
+        "Role/$release-tls-job-role"|"RoleBinding/$release-tls-job-rolebinding")
+          printf 'rbac.authorization.k8s.io/v1' ;;
+        "ServiceAccount/$release-tls-job-sa") printf 'v1' ;;
+        *) return 1 ;;
+      esac
     }
 
     # Snapshot only the known ECR refresh resources. No Secret/PVC or general
@@ -158,6 +172,18 @@
           if is_obsolete_ecr_resource "$kind" "$name"; then
             continue
           fi
+          if expected_api="$(obsolete_tls_api_version "$kind" "$name")"; then
+            # Only TLS generation helpers may disappear when generation is
+            # disabled. Live helpers still undergo the full ownership checks.
+            if ! jq -e --arg kind "$kind" --arg name "$name" --arg api "$expected_api" --arg namespace "$namespace" '
+              [.[] | select(.kind == $kind and .metadata.name == $name)]
+              | all(.[]; .apiVersion == $api and ((.metadata.namespace // $namespace) == $namespace))
+            ' "$failed_manifest_json_file" >/dev/null; then
+              echo "[ERROR] unsafe stored EVA App TLS helper identity: $kind/$name"
+              exit 1
+            fi
+            continue
+          fi
           if [[ "$failed_release_recovery" == true ]]; then
             echo "[ERROR] failed EVA App release manifest is incompatible with current rendered chart: $kind/$name"
           else
@@ -188,12 +214,41 @@
       fi
     done < "$rendered_resources_file"
 
+    # TLS Job/RBAC helpers omitted by HTTP or create:false are not adoption
+    # targets, but cannot bypass receipt, tracking, Helm or controller checks.
+    # Helm handles old manifest entries during upgrade; do not delete Secrets,
+    # TLSStore or helpers here (the Job may already have expired via its TTL).
+    rendered_candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
+    for resource in \
+      "Job/$release-tls-job" \
+      "Role/$release-tls-job-role" \
+      "RoleBinding/$release-tls-job-rolebinding" \
+      "ServiceAccount/$release-tls-job-sa"
+    do
+      kind="${resource%%/*}"
+      name="${resource#*/}"
+      expected_api="$(obsolete_tls_api_version "$kind" "$name")" || continue
+      grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file" && continue
+      resource_json="$(kubectl get "$resource" -n "$namespace" --ignore-not-found=true --show-managed-fields=true -o json)"
+      [[ -n "$resource_json" ]] || continue
+      if ! jq -e --arg kind "$kind" --arg name "$name" --arg api "$expected_api" \
+        '.kind == $kind and .metadata.name == $name and .apiVersion == $api' <<< "$resource_json" >/dev/null; then
+        echo "[ERROR] unsafe live EVA App TLS helper identity: $resource"
+        exit 1
+      fi
+      printf '%s' "$resource_json" | base64 | tr -d '\n' >> "$candidates_file"
+      printf '\n' >> "$candidates_file"
+      printf '%s\t%s\n' "$kind" "$name" >> "$obsolete_tls_resources_file"
+    done
+
     candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
-    if [[ "$candidate_count" == '0' && ! -s "$obsolete_ecr_file" ]]; then
+    if [[ "$rendered_candidate_count" == '0' && ! -s "$obsolete_ecr_file" ]]; then
       if [[ "$failed_release_recovery" == true || "$deployed_release_reconciliation" == true ]]; then
         echo '[ERROR] EVA App release reconciliation has no live rendered resource candidates'
         exit 1
       fi
+    fi
+    if [[ "$candidate_count" == '0' && ! -s "$obsolete_ecr_file" ]]; then
       echo 'take_ownership=false'
       echo 'force_conflicts=false'
       echo 'failed_release_recovery=false'
@@ -465,6 +520,13 @@
             echo "[ERROR] obsolete ECR resource changed during assessment: $kind/$name"
             exit 1
           fi
+          if obsolete_tls_api_version "$kind" "$name" >/dev/null; then
+            if grep -Fxq "$kind"$'\t'"$name" "$obsolete_tls_resources_file"; then
+              continue
+            fi
+            echo "[ERROR] obsolete TLS helper changed during assessment: $kind/$name"
+            exit 1
+          fi
           echo \
             "[ERROR] legacy EVA App resource is absent from rendered chart: $kind/$name"
           exit 1
@@ -491,5 +553,6 @@
     EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
     EVA_APP_SITE_ID: "{{ eva_site_id }}"
     EVA_APP_REPOSITORY_MODE: "{{ repository_mode }}"
+    EVA_APP_TLS_JOB_ENABLED: "{{ eva_app_tls_job_enabled | bool | lower }}"
     EVA_APP_HELM_SET_JSON: "{{ eva_cli_helm_set | default([]) | to_json }}"
     EVA_APP_USE_CHART_VERSION: "{{ (eva_cli_chart_path | default('') | length == 0) | ternary('1', '0') }}"

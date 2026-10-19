@@ -247,28 +247,53 @@ func TestInstallConfigureRetriesInvalidChoicesAndTargetIdentity(t *testing.T) {
 
 func TestInstallConfigureProtectsExistingFilesAndSymlinks(t *testing.T) {
 	for _, kind := range []string{"existing", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			home := t.TempDir()
-			path := filepath.Join(home, "eva-install.yaml")
-			original := []byte("private-original")
-			if kind == "existing" {
-				if err := os.WriteFile(path, original, 0o600); err != nil {
+		for _, location := range []string{"default", "absolute-output", "relative-output"} {
+			t.Run(kind+"/"+location, func(t *testing.T) {
+				home := t.TempDir()
+				path := filepath.Join(home, "eva-install.yaml")
+				var args []string
+				if location != "default" {
+					path = filepath.Join(home, "custom install's.yaml")
+					outputPath := path
+					if location == "relative-output" {
+						cwd, err := os.Getwd()
+						if err != nil {
+							t.Fatal(err)
+						}
+						outputPath, err = filepath.Rel(cwd, path)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					args = []string{"--output", outputPath}
+				}
+				original := []byte("private-original")
+				if kind == "existing" {
+					if err := os.WriteFile(path, original, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Symlink(filepath.Join(home, "missing"), path); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := os.Symlink(filepath.Join(home, "missing"), path); err != nil {
-				t.Fatal(err)
-			}
-			var output bytes.Buffer
-			if err := runInstallConfigure(nil, strings.NewReader(""), &output, home, "eva", nil); err == nil || output.Len() != 0 {
-				t.Fatal("must reject existing outputs before asking questions")
-			}
-			if kind == "existing" {
-				contents, err := os.ReadFile(path)
-				if err != nil || !bytes.Equal(contents, original) {
-					t.Fatal("existing file changed")
+				var output bytes.Buffer
+				err := runInstallConfigure(args, strings.NewReader(""), &output, home, "eva", nil)
+				if err == nil || output.Len() != 0 {
+					t.Fatal("must reject existing outputs before asking questions")
 				}
-			}
-		})
+				if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "--output") {
+					t.Fatalf("existing file error must show the absolute path and alternative output option: %v", err)
+				}
+				if strings.Contains(err.Error(), string(original)) {
+					t.Fatal("existing file contents leaked to the error")
+				}
+				if kind == "existing" {
+					contents, err := os.ReadFile(path)
+					if err != nil || !bytes.Equal(contents, original) {
+						t.Fatal("existing file changed")
+					}
+				}
+			})
+		}
 	}
 }
 

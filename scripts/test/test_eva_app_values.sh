@@ -127,6 +127,12 @@ EOF
   tasks:
     - ansible.builtin.import_role:
         name: eva_app
+    - name: Assert actual App TLS Job gating fact
+      ansible.builtin.assert:
+        that:
+          - eva_app_tls_job_enabled is boolean
+          - eva_app_tls_job_enabled == fixture_expected_tls_job_enabled
+      when: fixture_expected_tls_job_enabled is defined
 EOF
 
   printf '%s\n' "$root"
@@ -226,6 +232,7 @@ grep -Fq 'baseUrl: https://workspace.example' "$root/rendered/effective-input-va
 grep -Fq 'adminClientSecret: generated-secret' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'workerNum: 11' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'workerNum: 7' "$root/rendered/effective-input-values.yaml"
+grep -Fq 'activation_mode: online' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'browserTitleName: CLI title' "$root/rendered/effective-input-values.yaml"
 grep -Fq -- '--set app.browserTitleName=set-title' "$root/helm.log"
 if grep -Fq 'generated-secret' "$root/ansible.log"; then
@@ -236,6 +243,39 @@ if grep -Fq 'generated-secret' "$root/rendered/values-sources.yaml"; then
   echo 'Generated IAM secret leaked into values-sources.yaml' >&2
   false
 fi
+
+for scenario in remote-default local-default remote-online local-online remote-role-online; do
+  root="$(make_fixture "license-$scenario")"
+  mode=remote_repository
+  [[ "$scenario" == local-* ]] && mode=local_repository
+  expected=offline
+  cat >"$root/workspace/site-values/app.yaml" <<'EOF'
+localhost:
+  app:
+    sso:
+      baseUrl: https://workspace.example
+      adminClientSecret: workspace-secret
+EOF
+  if [[ "$scenario" == remote-online || "$scenario" == local-online ]]; then
+    printf '%s\n' '    license:' '      activation_mode: online' >>"$root/workspace/site-values/app.yaml"
+    expected=online
+  fi
+  args=()
+  if [[ "$scenario" == remote-role-online ]]; then
+    args+=(-e eva_app_license_activation_mode=online)
+    expected=online
+  fi
+  printf '%s\n' 'app: {}' >"$root/cli.yaml"
+  printf 'fake chart\n' >"$root/custom-chart.tgz"
+  if ! run_app "$root" 'app' 'app.replicaCount=2' \
+    -e "repository_mode=$mode" -e repository_registry=harbor.example.test:32080 \
+    -e "eva_cli_chart_path=$root/custom-chart.tgz" "${args[@]}" >"$root/ansible.log" 2>&1; then
+    cat "$root/ansible.log" >&2
+    exit 1
+  fi
+  grep -Fq "activation_mode: $expected" "$root/rendered/effective-input-values.yaml"
+  echo "[OK] App license $scenario ($expected)"
+done
 
 root="$(make_fixture missing-handoff)"
 printf '%s\n' 'localhost:' '  app:' '    sso:' '      baseUrl: https://workspace.example' >"$root/workspace/site-values/app.yaml"
@@ -393,6 +433,70 @@ if grep -Fq 'wait --for=condition=Complete job/eva-app-tls-job' "$root/kubectl.l
   echo 'App waited for a TLS Job when TLS Job creation was disabled' >&2
   false
 fi
+
+# Exercise the full production role with no host certificate directory. Keeping
+# create:true is intentional: HTTP must override it, while secret auth must not
+# disable the chart's TLS Job (only the hostPath Traefik caller).
+for scenario in http-ip http-dns https-secret-auth; do
+  root="$(make_fixture "$scenario")"
+  rm -rf "$root/certs"
+  host=192.0.2.10
+  tls_enabled=false
+  tls_auth=hostPath
+  expected_job=false
+  if [[ "$scenario" == http-dns ]]; then
+    host=app.example.test
+  elif [[ "$scenario" == https-secret-auth ]]; then
+    tls_enabled=true
+    tls_auth=secret
+    expected_job=true
+  fi
+  cat >"$root/workspace/site-values/app.yaml" <<EOF
+localhost:
+  app:
+    backendHost: $host
+    sso:
+      baseUrl: http://iam.example.test
+      adminClientSecret: workspace-secret
+  ingress:
+    enabled: true
+    tls:
+      enabled: $tls_enabled
+      create: true
+      authType: $tls_auth
+      hostPath: $root/certs
+EOF
+  printf '%s\n' 'app: {}' >"$root/cli.yaml"
+  if ! run_app "$root" 'app' 'app.replicaCount=2' \
+    -e "{\"fixture_expected_tls_job_enabled\":$expected_job}" >"$root/ansible.log" 2>&1; then
+    cat "$root/ansible.log" >&2
+    exit 1
+  fi
+  [[ ! -e "$root/certs" ]]
+  grep -Fq 'upgrade --install eva-app' "$root/helm.log"
+  if grep -Eq 'create secret tls eva-tls-for-traefik|apply --filename=-' "$root/kubectl.log"; then
+    echo "$scenario unexpectedly configured hostPath Traefik TLS resources" >&2
+    exit 1
+  fi
+  if [[ "$expected_job" == true ]]; then
+    grep -Fq 'delete job eva-app-tls-job' "$root/kubectl.log"
+    grep -Fq 'wait --for=condition=Complete job/eva-app-tls-job' "$root/kubectl.log"
+  elif grep -Eq 'delete job eva-app-tls-job|wait --for=condition=Complete job/eva-app-tls-job' "$root/kubectl.log"; then
+    echo "$scenario deleted or waited for a disabled TLS Job" >&2
+    exit 1
+  fi
+  python3 - "$root/rendered/effective-input-values.yaml" "$tls_enabled" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+values = yaml.safe_load(Path(sys.argv[1]).read_text())
+assert values["ingress"]["enabled"] is True, values["ingress"]
+assert values["ingress"]["tls"]["enabled"] is (sys.argv[2] == "true"), values["ingress"]
+assert values["ingress"]["tls"]["create"] is True, values["ingress"]
+PY
+  echo "[OK] actual App role $scenario (TLS Job enabled=$expected_job)"
+done
 
 root="$(make_fixture tls-job-delete-failure)"
 printf '%s\n' \

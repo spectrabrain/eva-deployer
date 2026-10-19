@@ -30,6 +30,7 @@ var requiredPreparationTools = []toolProbe{
 // are only TCP probes; preparation remains responsible for authenticated reads.
 var DefaultExternalSources = []string{
 	"s3.ap-northeast-2.amazonaws.com:443", "339713051385.dkr.ecr.ap-northeast-2.amazonaws.com:443",
+	"211722900905.dkr.ecr.ap-northeast-2.amazonaws.com:443",
 	"registry-1.docker.io:443", "registry.k8s.io:443", "github.com:443", "get.helm.sh:443",
 	"download.docker.com:443", "nvidia.github.io:443", "pypi.org:443",
 }

@@ -65,7 +65,7 @@ imagePullSecrets:
   enabled: {{ (repository_mode == 'cloud_repository') | lower }}
   create: {{ (repository_mode == 'cloud_repository') | lower }}
   nameOverride: "ecr-registry"
-  account: "339713051385"
+  account: "{{ eva_app_ecr_account }}"
   region: "ap-northeast-2"
   authType: "{{ eva_app_image_pull_auth_type }}"
   hostPath: "{{ eva_app_image_pull_host_path }}"

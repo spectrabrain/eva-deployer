@@ -2,8 +2,8 @@
 app:
   app:
     sso:
-      baseUrl: "<EXTERNAL_IAM_BASE_URL>" # 필수: 외부 IAM URL, App 프로토콜과 독립. ex) https://iam.eva.com/iam 또는 http://192.0.2.20/iam
-      realm: "<SSO_REALM>" # 필수: 외부 IAM realm 이름. ex) eva-iam
-      clientId: "<SSO_CLIENT_ID>" # 필수: 외부 IAM에 등록한 App OIDC client ID. ex) eva-app
-      adminClientId: "<SSO_ADMIN_CLIENT_ID>" # 필수: 관리 API용 confidential client ID. ex) eva-admin-api
-      adminClientSecret: "<SSO_ADMIN_CLIENT_SECRET>" # 필수: 해당 client Credentials에서 확인한 Secret. ex) demo-admin-client-secret (예시 전용)
+      baseUrl: "<EXTERNAL_IAM_BASE_URL>"  # 필수: 외부 IAM URL, App 프로토콜과 독립. ex) https://iam.eva.com/iam 또는 http://192.0.2.20/iam
+      realm: "<SSO_REALM>"  # 필수: 외부 IAM realm 이름. ex) eva-iam
+      clientId: "<SSO_CLIENT_ID>"  # 필수: 외부 IAM에 등록한 App OIDC client ID. ex) eva-app
+      adminClientId: "<SSO_ADMIN_CLIENT_ID>"  # 필수: 관리 API용 confidential client ID. ex) eva-admin-api
+      adminClientSecret: "<SSO_ADMIN_CLIENT_SECRET>"  # 필수: 해당 client Credentials에서 확인한 Secret. ex) demo-admin-client-secret (예시 전용)

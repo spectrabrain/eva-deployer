@@ -42,14 +42,23 @@ func TestConfigSampleInteractiveChoices(t *testing.T) {
 			if input.Components["iam"] != (test.iam == "install") {
 				t.Fatal("IAM installation component does not match menu selection")
 			}
+			license := input.Targets["server-a"].Values["app"]["app"].(map[string]any)["license"].(map[string]any)
+			if license["activation_mode"] != "offline" || strings.Contains(messages.String(), "라이선스 서버 인터넷 연결") {
+				t.Fatal("Remote must default to offline without an additional license prompt")
+			}
 			if strings.Contains(yamlOutput.String(), "선택 [") || !strings.Contains(yamlOutput.String(), "remote / "+test.address+" / "+test.protocol) {
 				t.Fatal("selected template mismatch or prompts mixed with YAML")
 			}
 			if !strings.Contains(messages.String(), "v3.3") || !strings.Contains(yamlOutput.String(), "v3.3") {
 				t.Fatal("v3.3 sample target not displayed")
 			}
-			if test.protocol == "http" && (!strings.Contains(messages.String(), "TLS SAN/TLSStore") || strings.Contains(messages.String(), "미지원")) {
-				t.Fatal("HTTP runtime follow-up must be distinguished from local Chart support")
+			for _, version := range []string{"3.3.0-beta.3", "3.3.0-beta.1"} {
+				if !strings.Contains(messages.String(), version) || !strings.Contains(yamlOutput.String(), version) {
+					t.Fatal("published App/IAM version baseline not displayed")
+				}
+			}
+			if test.protocol == "http" && (!strings.Contains(messages.String(), "생략") || !strings.Contains(messages.String(), "E2E") || strings.Contains(messages.String(), "미지원")) {
+				t.Fatal("HTTP must explain TLS skipping without claiming live E2E validation")
 			}
 		})
 	}
@@ -84,6 +93,35 @@ func TestConfigSampleNoninteractiveAndExplicitOptions(t *testing.T) {
 		if err := runConfigSample(args, strings.NewReader(""), &output, &messages, true); err == nil {
 			t.Fatal("invalid explicit option accepted")
 		}
+	}
+}
+
+func TestConfigSampleActivationMode(t *testing.T) {
+	for _, test := range []struct {
+		mode, want string
+	}{
+		{"cloud", "online"},
+		{"remote", "offline"},
+		{"local", "offline"},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			args := []string{"sample", "--mode", test.mode, "--address", "shared", "--protocol", "http"}
+			var output, messages bytes.Buffer
+			if err := runConfigSample(args, strings.NewReader(""), &output, &messages, true); err != nil {
+				t.Fatal(err)
+			}
+			var input workspace.Installer
+			if err := yaml.Unmarshal(output.Bytes(), &input); err != nil {
+				t.Fatal(err)
+			}
+			license := input.Targets["server-a"].Values["app"]["app"].(map[string]any)["license"].(map[string]any)
+			if license["activation_mode"] != test.want {
+				t.Fatalf("activation_mode = %v, want %s", license["activation_mode"], test.want)
+			}
+			if strings.Contains(messages.String(), "선택 [") {
+				t.Fatal("license defaults must not add prompts")
+			}
+		})
 	}
 }
 

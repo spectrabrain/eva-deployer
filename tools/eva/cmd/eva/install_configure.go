@@ -195,7 +195,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	fmt.Fprintln(output, "타겟별 components와 SSO/Redis 값을 확인하고, 기본 Redis 비밀번호는 IAM과 동일하게 변경하세요. 파일에는 비밀번호가 있으므로 공유/커밋하지 마세요.")
 	for _, target := range targets {
 		if target.Solution {
-			fmt.Fprintln(output, "[v3.3] 로컬 App/IAM 소스 기준 틀입니다. HTTP 실설치는 Release Chart 전환과 TLS SAN/TLSStore 실행 연동·E2E 검증이 별도로 필요합니다.")
+			fmt.Fprintln(output, "[v3.3] 게시 App 3.3.0-beta.3 / IAM 3.3.0-beta.1 기준 틀입니다. HTTP는 인증서 검사·TLS 리소스 생성을 생략하고 HTTPS는 유지합니다. 실제 설치 E2E는 별도 검증하세요.")
 			break
 		}
 	}

@@ -1187,7 +1187,10 @@ site-a-localhost:
         dispatcherFaceAnonymizerEnabled: true
 ```
 
-prod는 `activation_mode: "offline"`, `product_code: "eva-prod"`와 prod용 API/shared key를 사용합니다. dev는 `activation_mode: "online"`, `product_code: "eva-dev"`와 dev용 API/shared key를 사용합니다.
+`product_code`는 발급된 라이선스에 따라 `eva-dev` 또는 `eva-prod`를 사용하며 해당 제품의 API/shared key와 일치시킵니다.
+`activation_mode`의 기본값은 Cloud `online`, Remote/Local `offline`입니다. 제품 코드로 활성화 방식을 고정하지 않습니다.
+라이선스는 사전에 결정하므로 별도 연결 질문 없이 기본값을 제공하며, 온라인 라이선스이면 Values에서 `online`으로 변경합니다.
+`online`은 App에서 라이선스 서버로 연결할 수 있어야 합니다.
 
 예를 들어 `ansible_host=10.0.0.10`인 dev inventory에는 `10.0.0.10:` 아래에 dev 설정을 작성합니다. `ansible_host`를 쓰지 않는 inventory라면 `site-a-eva-node-01:`처럼 inventory hostname을 사용합니다. 해당 호스트 키가 없으면 기존 공통 설정만 적용됩니다. `workspace/site-values/app.yaml`이 없으면 호스트별 override 없이 배포합니다.
 

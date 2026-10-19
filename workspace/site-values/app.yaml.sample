@@ -2,8 +2,8 @@ server.example.com:
   app:
     browserTitleName: "EVA"
     license:
-      activation_mode: "online"
-      product_code: "<LICENSE_PRODUCT_CODE>"
+      activation_mode: "online" # Cloud 기본 online, Remote/Local 기본 offline. 사전 결정한 라이선스 방식에 맞게 변경합니다.
+      product_code: "<LICENSE_PRODUCT_CODE>" # 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
       api_key: "<LICENSE_API_KEY>"
       shared_key: "<LICENSE_SHARED_KEY>"
     pipeline:

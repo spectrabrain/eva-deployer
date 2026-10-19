@@ -46,7 +46,7 @@ func fillSample(contents []byte) []byte {
 		"<PUBLIC_HOST>", "192.0.2.10", "<APP_HOST>", "app.example.com", "<IAM_HOST>", "iam.example.com",
 		"<TLS_CERT_DIRECTORY>", "/etc/eva/certs", "<APP_TLS_CERT_DIRECTORY>", "/etc/eva/app-certs", "<IAM_TLS_CERT_DIRECTORY>", "/etc/eva/iam-certs",
 		"<AWS_ACCESS_KEY_ID>", "private-access", "<AWS_SECRET_ACCESS_KEY>", "private-secret",
-		"<REALM_ADMIN_PASSWORD>", "private-realm-password", "<LICENSE_PRODUCT_CODE>", "eva-test",
+		"<REALM_ADMIN_PASSWORD>", "private-realm-password", "<LICENSE_PRODUCT_CODE>", "eva-dev",
 		"<LICENSE_API_KEY>", "private-license", "<LICENSE_SHARED_KEY>", "private-shared",
 		"<EXTERNAL_IAM_BASE_URL>", "https://iam.external.example.com/iam",
 		"<SSO_REALM>", "eva-iam", "<SSO_CLIENT_ID>", "eva-app", "<SSO_ADMIN_CLIENT_ID>", "eva-admin-api",
@@ -78,6 +78,7 @@ func TestAllInstallerSampleCombinations(t *testing.T) {
 						t.Fatal("offline sample contains AWS settings")
 					}
 					values := input.Targets["server-a"].Values
+					assertSampleLicense(t, contents, values["app"], mode)
 					assertSampleSSODefaults(t, values["app"])
 					if nestedSampleValue(values["iam"], "keycloak", "realmConfig", "substitutions", "EVA_IAM_ADMIN_EMAIL") != "admin@eva.com" {
 						t.Fatal("sample lost base IAM admin email while merging endpoint profile")
@@ -116,8 +117,12 @@ func TestAllInstallerSampleCombinations(t *testing.T) {
 							t.Fatalf("%s certificate input does not match protocol", component)
 						}
 					}
+					if nestedSampleValue(values["iam"], "config", "publicPort") != "" ||
+						!strings.Contains(string(contents), "기본 HTTP 80 / HTTPS 443") ||
+						!strings.Contains(string(contents), "노출 포트를 변경하지 않습니다") {
+						t.Fatal("IAM must provide an empty publicPort with default and exposure guidance")
+					}
 					if nestedSampleValue(values["iam"], "config", "publicUrl") != nil ||
-						nestedSampleValue(values["iam"], "config", "publicPort") != nil ||
 						nestedSampleValue(values["iam"], "keycloak", "config", "hostnameStrictHttps") != nil ||
 						nestedSampleValue(values["iam"], "keycloak", "config", "realmSslRequired") != nil {
 						t.Fatal("IAM must derive URL and realm SSL mode from TLS and path")
@@ -187,6 +192,7 @@ func TestExternalIAMInstallerSamples(t *testing.T) {
 					t.Fatal("external IAM must not retain base IAM values")
 				}
 				app := input.Targets["server-a"].Values["app"]
+				assertSampleLicense(t, contents, app, mode)
 				assertSampleSSODefaults(t, app)
 				for _, key := range []string{"baseUrl", "realm", "clientId", "adminClientId", "adminClientSecret"} {
 					if value, ok := nestedSampleValue(app, "app", "sso", key).(string); !ok || value == "" {
@@ -208,6 +214,56 @@ func TestExternalIAMInstallerSamples(t *testing.T) {
 					t.Fatal("external SSO values lost while materializing workspace")
 				}
 			})
+		}
+	}
+}
+
+func assertSampleLicense(t *testing.T, contents []byte, app map[string]any, mode string) {
+	t.Helper()
+	want := "offline"
+	if mode == "cloud" {
+		want = "online"
+	}
+	if nestedSampleValue(app, "app", "license", "activation_mode") != want {
+		t.Fatalf("%s sample license default does not match repository mode", mode)
+	}
+	if !strings.Contains(string(contents), "사전 결정한 라이선스") || !strings.Contains(string(contents), "online은 라이선스 서버 연결이 필요") {
+		t.Fatal("license defaults must retain guidance for prearranged online/offline activation")
+	}
+	if !strings.Contains(string(contents), "eva-dev 또는 eva-prod") {
+		t.Fatal("license product examples must use actual product codes")
+	}
+}
+
+func TestInstallerSampleLicenseOverrides(t *testing.T) {
+	for _, mode := range []string{"cloud", "remote", "local"} {
+		for _, activation := range []string{"online", "offline"} {
+			for _, iam := range []string{"install", "external"} {
+				t.Run(mode+"/"+activation+"/"+iam, func(t *testing.T) {
+					contents, err := InstallerSampleFor(SampleOptions{Mode: mode, Address: "separate", Protocol: "http", IAM: iam})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var document yaml.Node
+					if err := yaml.Unmarshal(contents, &document); err != nil {
+						t.Fatal(err)
+					}
+					target := sampleMappingValue(sampleMappingValue(document.Content[0], "targets"), "server-a")
+					app := sampleMappingValue(sampleMappingValue(sampleMappingValue(target, "values"), "app"), "app")
+					sampleMappingValue(sampleMappingValue(app, "license"), "activation_mode").Value = activation
+					contents, err = yaml.Marshal(&document)
+					if err != nil {
+						t.Fatal(err)
+					}
+					input, err := LoadInstaller(writeInstaller(t, string(fillSample(contents))), "")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if nestedSampleValue(input.Targets["server-a"].Values["app"], "app", "license", "activation_mode") != activation {
+						t.Fatal("repository mode overrode the explicit license selection")
+					}
+				})
+			}
 		}
 	}
 }
@@ -249,7 +305,7 @@ func TestCloudInstallerSampleUsesAutomaticCredentialPath(t *testing.T) {
 	}
 }
 
-func TestEmbeddedSamplePlaceholderExamples(t *testing.T) {
+func TestEmbeddedSampleFormattingAndPlaceholderExamples(t *testing.T) {
 	paths := []string{"installer.yaml.sample"}
 	entries, err := installerSamples.ReadDir("samples")
 	if err != nil {
@@ -263,6 +319,9 @@ func TestEmbeddedSamplePlaceholderExamples(t *testing.T) {
 			contents, err := installerSamples.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if len(contents) == 0 || contents[len(contents)-1] != '\n' {
+				t.Fatal("embedded YAML sample must end with a newline for CI yamllint")
 			}
 			assertPlaceholderExamples(t, contents)
 		})

@@ -33,6 +33,10 @@ func TestConfigureSampleProfileMatrix(t *testing.T) {
 						if address == "ip" && nestedSampleValue(input.Targets["node-a"].Values["app"], "app", "backendHost") != "192.0.2.10" {
 							t.Fatal("IP profile must prefill the target IP")
 						}
+						if iam == "install" && nestedSampleValue(input.Targets["node-a"].Values["iam"], "config", "publicPort") != "" {
+							t.Fatal("wizard must retain the optional empty IAM publicPort")
+						}
+						assertSampleLicense(t, contents, input.Targets["node-a"].Values["app"], mode)
 						resolved, err := Resolve(Options{ConfigFile: path, CacheRoot: filepath.Join(t.TempDir(), "cache")})
 						if err != nil {
 							t.Fatal(err)

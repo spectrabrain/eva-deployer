@@ -40,18 +40,28 @@
     precondition_tls_checks: >-
       {{
         ([]
-         + ((('iam' in (eva_enabled_components | default('')).split(','))
-             | ternary([{
+         + ([{
                'component': 'IAM',
                'host': precondition_iam_values.config.host | default(precondition_tls_target),
                'certificate': precondition_iam_values.ingress.tls.hostPath | default('/home/eva/certs') ~ '/tls.crt'
-             }], [])))
-         + ((('app' in (eva_enabled_components | default('')).split(','))
-             | ternary([{
+             }] if (
+               ('iam' in (eva_enabled_components | default('')).split(','))
+               and (precondition_iam_values.ingress.enabled | default(true) | bool)
+               and (precondition_iam_values.ingress.tls.enabled | default(true) | bool)
+               and (precondition_iam_values.ingress.tls.create | default(true) | bool)
+               and ((precondition_iam_values.ingress.tls.authType | default('hostPath')) == 'hostPath')
+             ) else [])
+         + ([{
                'component': 'App',
                'host': precondition_app_values.app.backendHost | default(precondition_tls_target),
                'certificate': precondition_app_values.ingress.tls.hostPath | default('/home/eva/certs') ~ '/tls.crt'
-             }], [])))
+             }] if (
+               ('app' in (eva_enabled_components | default('')).split(','))
+               and (precondition_app_values.ingress.enabled | default(true) | bool)
+               and (precondition_app_values.ingress.tls.enabled | default(true) | bool)
+               and (precondition_app_values.ingress.tls.create | default(true) | bool)
+               and ((precondition_app_values.ingress.tls.authType | default('hostPath')) == 'hostPath')
+             ) else [])
         )
       }}
 

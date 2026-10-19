@@ -131,11 +131,23 @@ placeholder의 실제 문자열은 오류에 출력하지 않는다.
 `host: "<IAM_HOST>" # 필수: IAM 도메인. ex) iam.eva.com`처럼 입력 형식을 안내한다.
 예시 IP는 문서용 주소이며, 예시 비밀번호·AWS key·license key는 실제 사용하지 않는다.
 
+### App 라이선스
+
+`targets.<alias>.values.app.app.license.activation_mode`의 생성 기본값은 Cloud가 `online`,
+Remote/Local이 `offline`이다. 라이선스는 설치 전에 결정하며 추가 질문이나 연결 검사를 하지 않는다.
+Repository mode는 이미지 공급 방식이므로 라이선스 활성화 방식을 강제하지 않는다.
+사전 발급된 라이선스가 온라인 방식이면 Remote에서도 `online`으로 변경할 수 있다.
+`online`을 사용할 때는 **App에서 라이선스 서버로 연결**할 수 있어야 한다.
+
+`product_code`는 발급된 라이선스에 맞는 `eva-dev` 또는 `eva-prod`를 입력하고,
+그 제품에 발급된 `api_key`와 `shared_key`를 함께 사용한다. 제품 코드만으로
+`online`/`offline`을 결정하지 않으며 두 설정 모두 사전 결정한 라이선스와 일치시킨다.
+
 ### v3.3 대상 주소·프로토콜 샘플
 
-샘플은 v3.3을 준비 중인 **로컬 App/IAM 소스의 Values·template 계약**을 기준으로 한다.
-로컬 Chart metadata에 남아 있는 버전 문자열이나 기존 배포 패키지의 동작과 혼동하지 않는다.
-이번 샘플 정리에서는 Release catalog나 Chart/image 버전을 올리지 않는다.
+샘플은 **게시 App `3.3.0-beta.3` / IAM `3.3.0-beta.1`의 Values·template 계약**을 기준으로 한다.
+현재 소스의 Release catalog도 이 버전을 사용한다. 이미 설치된 Tool이나 Current Release는 자동
+갱신되지 않으므로 변경이 포함된 새 Tool과 Release를 함께 사용한다. 실제 설치 E2E는 별도 검증 대상이다.
 
 | 주소 구성 | 프로토콜 | App 예시 | IAM 예시 | 인증서 입력 |
 | --- | --- | --- | --- | --- |
@@ -151,17 +163,21 @@ placeholder의 실제 문자열은 오류에 출력하지 않는다.
   **`create: false`만으로 HTTP로 바뀌지 않는다.** HTTP에서는 둘 다 `false`이다.
 - App은 HTTP에 `backendSecure: false`, `backendPublicPort: 80`, HTTPS에
   `backendSecure: true`, `backendSecurePort: 443`을 사용한다.
-- IAM `config.publicUrl`, 기본 포트용 `config.publicPort`, `keycloak.config.realmSslRequired`처럼
+- IAM `config.publicPort: ""`를 기본 제공한다. 비워두면 HTTP는 **80**, HTTPS는 **443**을 사용하며
+  URL에는 포트를 붙이지 않는다. `"30080"`/`"30443"`처럼 명시하면 IAM 외부 URL·issuer·App SSO
+  handoff에 해당 포트를 반영한다. **실제 Ingress/Service/LB의 노출 포트를 변경하는 설정은 아니다.**
+  `config.publicUrl`을 별도로 지정하면 이 전체 URL이 우선한다.
+- IAM `config.publicUrl`, `keycloak.config.realmSslRequired`처럼
   Chart가 기본값·자동 계산으로 처리하는 항목은 샘플에서 생략한다. 외부 URL과 issuer는
   TLS 설정·host·path에서, realm SSL 모드는 HTTP에서 `none`, HTTPS에서 `external`로 결정된다.
-  로컬 Chart는 HTTP에서 hostname HTTPS 강제를 끄고 realm patch로 기존 HSTS도 정리한다.
+  게시 Chart는 HTTP에서 hostname HTTPS 강제를 끄고 realm patch로 기존 HSTS도 정리한다.
 - IAM client `redirectUris`는 IAM이 아니라 **App의 외부 주소**를 가리킨다. 비표준 포트이면
-  IAM `config.publicPort`를 추가하고(예: `"30080"`/`"30443"`), App의 해당 외부 포트와 redirect URI를
-  함께 맞춘다. `shared`에서는 포트도 같다.
+  IAM과 App 각각의 실제 외부 포트를 반영한다. IAM은 `config.publicPort`를 채우고,
+  App은 해당 외부 포트와 redirect URI를 함께 맞춘다. `shared`에서는 포트도 같다.
 - IAM `redis.tls.enabled`는 HTTP 샘플에서 `false`, HTTPS 샘플에서 `true`로 맞춘다.
   HTTPS Redis는 기본적으로 IAM Ingress 인증서 Secret을 재사용하므로 Redis 클라이언트 접속 주소도
   인증서 SAN에 포함되어야 한다. 내부 dispatcher용 평문 리스너는 Chart 기본값을 유지한다.
-- IAM 함께 설치 시 `redis.external.enabled`는 모든 샘플에서 `true`로 고정한다. 로컬 Chart 기본값 기준으로
+- IAM 함께 설치 시 `redis.external.enabled`는 모든 샘플에서 `true`로 고정한다. 게시 Chart 기본값 기준으로
   NodePort `32079`가 HTTP 구성에서는 평문 `6379`, HTTPS 구성에서는 TLS `6380` 리스너로 연결된다.
   대상 방화벽에서 Redis 접속을 허용할 클라이언트를 제한한다.
 - App SSO URL·Secret은 기존 IAM handoff를 사용한다. App Redis는 `port: 32079`, `db: 0`,
@@ -170,6 +186,11 @@ placeholder의 실제 문자열은 오류에 출력하지 않는다.
   App Redis TLS도 별도 값을 반복하지 않고
   전달된 SSO URL의 HTTP/HTTPS에서 자동 결정하게 둔다. Redis TLS 자체는 독립 설정이지만 이 샘플은
   요청한 외부 HTTP/HTTPS 구성에 맞춰 사용한다.
+
+HTTP에서는 host 인증서 SAN 검사·TLS Secret Job·Traefik 기본 TLSStore 생성을 실행하지 않는다.
+HTTPS라도 Ingress가 꺼졌거나 `tls.create: false` 또는 `tls.authType: secret`이면 hostPath
+인증서를 요구하지 않는다. `create: false`의 기존 TLS Secret과 IP 접속용 기본 인증서는 운영자가
+미리 관리해야 한다. 기존 TLS 리소스를 삭제하거나 Traefik 외부 포트를 바꾸지는 않는다.
 
 ### 외부 IAM 서버 연동
 

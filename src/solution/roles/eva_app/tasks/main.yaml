@@ -21,6 +21,11 @@
     eva_app_kubeconfig: "{{ eva_app_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_app_argocd_handoff_path: "{{ eva_app_argocd_handoff_path | default(eva_site_state_root ~ '/argocd-handoff.yaml') }}"
     eva_app_chart_ref: "{{ eva_app_chart_ref | default('eva-app/eva-app') }}"
+    eva_app_chart_repo_url: >-
+      {{ eva_app_chart_repo_url | default(
+         'https://spectrabrain.github.io/eva-app-chart'
+         if (eva_app_chart_version is version('3.3.0', '>='))
+         else 'https://mellerikat.github.io/eva-app') }}
     eva_app_chart_version: "{{ eva_app_chart_version | mandatory }}"
     eva_app_offline_dir: "{{ eva_app_offline_dir | default(eva_cache_root ~ '/eva-app') }}"
     eva_app_offline_chart_tgz: >-
@@ -49,7 +54,8 @@
     eva_app_agent_request_timeout_seconds: "{{ eva_app_agent_request_timeout_seconds | default(600) }}"
     eva_app_pipeline_detector_worker_num: "{{ eva_app_pipeline_detector_worker_num | default(16) }}"
     eva_app_pipeline_perceptor_worker_num: "{{ eva_app_pipeline_perceptor_worker_num | default(2) }}"
-    eva_app_license_activation_mode: "{{ eva_app_license_activation_mode | default('online') }}"
+    # Repository 공급과 라이선스 연결은 별개입니다. 사전 결정한 라이선스가 다르면 Values에서 변경합니다.
+    eva_app_license_activation_mode: "{{ eva_app_license_activation_mode | default('online' if (repository_mode | default('cloud_repository')) == 'cloud_repository' else 'offline') }}"
     eva_app_license_product_code: "{{ eva_app_license_product_code | default('eva-dev') }}"
     eva_app_license_api_key: "{{ eva_app_license_api_key | default('LICENSE_API_KEY') }}"
     eva_app_license_shared_key: "{{ eva_app_license_shared_key | default('LICENSE_SHARED_KEY') }}"
@@ -105,7 +111,9 @@
         eva_app_image_repository | default(
           (repository_mode == 'cloud_repository')
           | ternary(
-              '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-app',
+              ('211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-app'
+               if (eva_app_chart_version is version('3.3.0', '>='))
+               else '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-app'),
               repository_registry ~ '/' ~ repository_project ~ '/eva-app'
             )
         )
@@ -118,6 +126,9 @@
         )
       }}
     eva_app_mysql_image_tag: "{{ eva_app_mysql_image_tag | default('8.0.42-bookworm') }}"
+    eva_app_ecr_account: >-
+      {{ eva_app_ecr_account | default(
+         '211722900905' if (eva_app_chart_version is version('3.3.0', '>=')) else '339713051385') }}
     # TLS Secret Job 과 ECR CronJob 이 쓰는 kubectl. 차트 3.1.5 에서 values 로 노출됐습니다.
     # Harbor 이름은 scripts/publish/push_images_to_repository.sh 의 평탄화 규칙을 따릅니다.
     eva_app_kubectl_image_repository: >-
@@ -160,7 +171,7 @@
   changed_when: false
 
 - name: Add Helm repository for EVA App
-  ansible.builtin.command: helm repo add eva-app https://mellerikat.github.io/eva-app
+  ansible.builtin.command: helm repo add eva-app {{ eva_app_chart_repo_url }} --force-update
   register: helm_repo_eva_app
   changed_when: "'already exists' not in (helm_repo_eva_app.stdout + helm_repo_eva_app.stderr)"
   failed_when:
@@ -737,9 +748,11 @@
   ansible.builtin.set_fact:
     eva_app_tls_job_enabled: >-
       {{
-        (eva_app_effective_values.ingress.tls.create | default(false) | bool)
+        (eva_app_effective_values.ingress.enabled | default(true) | bool)
         and
-        ((eva_app_effective_values.ingress.tls.authType | default('')) == 'hostPath')
+        (eva_app_effective_values.ingress.tls.enabled | default(true) | bool)
+        and
+        (eva_app_effective_values.ingress.tls.create | default(true) | bool)
       }}
 
 - name: Configure Traefik default TLS certificate for an IP-based App host
@@ -749,7 +762,10 @@
     eva_traefik_tls_host: "{{ eva_app_effective_values.app.backendHost | default(eva_app_backend_host) }}"
     eva_traefik_tls_host_path: "{{ eva_app_effective_values.ingress.tls.hostPath | default(eva_app_tls_host_path) }}"
     eva_traefik_tls_kubeconfig: "{{ eva_app_kubeconfig }}"
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - eva_app_tls_job_enabled | bool
+    - (eva_app_effective_values.ingress.tls.authType | default('hostPath')) == 'hostPath'
 
 - name: Record private EVA App effective input values on control node
   no_log: true

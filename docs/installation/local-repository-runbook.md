@@ -21,8 +21,9 @@ HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 고릅니다
 `eva-install.yaml`입니다. 외부 IAM은 App의 SSO·Redis 연결값을 파일에서 입력합니다.
 기존 옵션/자동화용 `eva config sample --mode local --iam external --protocol https`도 유지합니다.
 이 경우 IAM 설치와 Values는 제외되며 내부망에서 기존 IAM/Redis까지 도달할 수 있어야 합니다. 샘플은
-v3.3 대상 로컬 App/IAM 소스 기준입니다. HTTP도 입력 검증은 가능하지만 실제 설치에는 Release
-Chart 전환과 Deployer TLS 실행 연동이 별도로 필요합니다. 기존 Release 설치는 HTTPS를 선택합니다.
+게시 App `3.3.0-beta.3` / IAM `3.3.0-beta.1` 기준입니다. 이 변경을 포함한 Tool·Release·offline 자산을
+함께 준비합니다. HTTP는 격리 테스트용으로 인증서 검사·TLS 생성을 생략하며 HTTPS 검증은 유지합니다.
+실제 설치 E2E는 별도 검증 대상입니다.
 기존 `config sample`의 메뉴 생략은 `--address shared|separate --protocol https`로 지정합니다.
 파일은 `0600`으로 생성하며 덮어쓰지 않습니다. `<...>` 필수 입력이 남으면 검증이 중단됩니다.
 
@@ -647,7 +648,9 @@ print('OK')"
   `localhost` 는 `-i 'localhost,'` 로 돌릴 때의 이름입니다
 - `sso.realm` / `clientId` 는 차트 기본값이 `eva-sso` / `eva-app-kr-2` 라 반드시 덮어써야 합니다
   (role 의 `-e` 노브가 없어 이 파일에서만 지정 가능)
-- `activation_mode` 는 기본이 `online` 이라 폐쇄망에서 실패합니다
+- 현재 Tool/Release에서 `activation_mode` 기본값은 Cloud `online`, Remote/Local `offline`입니다.
+  이전 Release나 기존 Values에 `online`이 남아 있으면 폐쇄망 설치 전에 `offline`으로 변경합니다.
+  `product_code`는 발급된 라이선스의 `eva-dev`/`eva-prod`와 일치시킵니다.
 
 ### 13. eva-iam 배포 · **[대상]**
 

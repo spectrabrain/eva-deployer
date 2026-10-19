@@ -216,9 +216,9 @@ HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 선택합니
 `eva-install.yaml`입니다. 기존 옵션/자동화용 `eva config sample --mode remote`도 유지합니다.
 이 기존 명령에서 IAM만 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
 App의 외부 SSO·Redis 연결값을 입력합니다. Target에서 IAM/Redis로의 내부망 접근이 필요합니다.
-샘플은 v3.3 대상 로컬 App/IAM 소스 기준입니다. HTTP도 입력 검증은 가능하지만 실제 설치에는
-Release Chart 전환과 Deployer TLS 실행 연동이 별도로 필요합니다. 기존 Release 설치는 HTTPS를
-선택합니다. 기존 `config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
+샘플은 게시 App `3.3.0-beta.3` / IAM `3.3.0-beta.1` 기준입니다. 이 변경을 포함한 Tool·Release·배포
+자산을 사용합니다. HTTP는 격리 테스트용으로 인증서 검사·TLS 생성을 생략하고 HTTPS 검증은 유지합니다.
+실제 설치 E2E는 별도 검증 대상입니다. 기존 `config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
 명시합니다. `--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
 제거하기 전에는 검증에 실패합니다.
 
@@ -282,8 +282,8 @@ targets:
           backendSecure: true
           backendSecurePort: 443
           license:
-            activation_mode: online
-            product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 승인된 제품 코드. ex) eva
+            activation_mode: offline # Remote 기본값. 사전 결정한 라이선스가 온라인이면 online으로 변경합니다.
+            product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
             api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key. ex) demo-license-api-key (예시 전용)
             shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key. ex) demo-license-shared-key (예시 전용)
 ```
@@ -293,6 +293,10 @@ mapping이며 `ansible_host`를 지정하면 Deployer가 해당 주소를 기존
 자동 변환합니다. SSH private key의 상대 경로는 설정 파일 기준입니다.
 필요한 Agent/Vision Chart override만 `values.agent`/`values.vision`에 추가하고,
 GPU/MIG/profile과 repository-derived image 설정은 고정하지 않습니다.
+
+Remote의 라이선스 활성화 기본값은 `offline`이며 별도 연결 질문은 하지 않습니다.
+사전 발급된 온라인 라이선스를 사용하면 `activation_mode: online`으로 변경하고 App에서
+라이선스 서버로 연결할 수 있도록 준비합니다. 이미지 공급 방식과 라이선스 방식은 독립적입니다.
 
 Remote/Local 설정의 `credentials.aws`는 거부됩니다. AWS/S3/ECR credential은 Main에만
 관리하며 Target 입력과 Release에 넣지 않습니다. 원본 설정과 내부 생성 Workspace는

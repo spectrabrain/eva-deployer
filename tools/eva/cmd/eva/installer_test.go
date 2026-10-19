@@ -39,7 +39,7 @@ func fillInstallerSample(contents []byte) []byte {
 		"<TLS_CERT_DIRECTORY>", "/etc/eva/certs", "<APP_TLS_CERT_DIRECTORY>", "/etc/eva/app-certs", "<IAM_TLS_CERT_DIRECTORY>", "/etc/eva/iam-certs",
 		"<AWS_ACCESS_KEY_ID>", "test-access", "<AWS_SECRET_ACCESS_KEY>", "test-secret",
 		"<SUDO_PASSWORD>", "test-sudo", "<REALM_ADMIN_PASSWORD>", "test-admin",
-		"<LICENSE_PRODUCT_CODE>", "eva-test", "<LICENSE_API_KEY>", "test-license", "<LICENSE_SHARED_KEY>", "test-shared",
+		"<LICENSE_PRODUCT_CODE>", "eva-dev", "<LICENSE_API_KEY>", "test-license", "<LICENSE_SHARED_KEY>", "test-shared",
 		"<EXTERNAL_IAM_BASE_URL>", "https://iam.external.example.com/iam",
 		"<SSO_REALM>", "eva-iam", "<SSO_CLIENT_ID>", "eva-app", "<SSO_ADMIN_CLIENT_ID>", "eva-admin-api",
 		"<SSO_ADMIN_CLIENT_SECRET>", "test-external-secret",

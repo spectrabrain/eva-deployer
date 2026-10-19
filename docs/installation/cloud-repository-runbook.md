@@ -92,9 +92,28 @@ eva install configure
 연결 비밀번호와 서비스 주소·Secret은 복사하지 않습니다. 여러 타겟은 하나의 cluster를 만드는 기능이 아닙니다.
 기존 단일 서버용 `eva config sample --mode cloud`와 비대화형 옵션도 유지합니다.
 
-샘플은 v3.3 대상 로컬 App/IAM 소스 기준입니다. HTTP도 입력 검증은 가능하지만 실제 설치에는
-Release Chart 전환과 Deployer TLS 실행 연동이 별도로 필요합니다. 기존 Release 설치는 **HTTPS**를
-선택합니다. 두 명령 모두 `--output FILE`로 위치를 바꿀 수 있고 새 파일만 `0600`으로 만들며 덮어쓰지 않습니다.
+현재 소스의 버전은 **App `3.3.0-beta.3` / IAM `3.3.0-beta.1`**입니다. 두 Chart는
+SpectraBrain 게시 저장소에서 가져오며 App ECR 이미지·인증 계정도 새 공급원으로 맞춥니다.
+이 변경이 포함된 **새 EVA Tool과 Release**를 사용해야 합니다. 기존에 등록된 Current Release나
+이미 설치된 Tool은 소스 수정만으로 갱신되지 않습니다. Release의 버전 catalog도 확인합니다.
+두 명령 모두 `--output FILE`로 위치를 바꿀 수 있고 새 파일만 `0600`으로 만들며 덮어쓰지 않습니다.
+
+**첫 단일 서버 Cloud 실설치 테스트**는 `cloud → 현재 서버 → Infra + Solution`으로 시작하고,
+원하는 HTTP/HTTPS와 주소·IAM·Agent/Vision 구성을 선택합니다. 실제 설치 E2E는 아직 별도 검증 대상입니다.
+
+- **HTTP:** 격리된 테스트에만 사용합니다. 생성된 App/IAM `ingress.tls.enabled/create: false`,
+  App `backendSecure: false`를 유지합니다. host 인증서 SAN 검사·TLS Secret Job·Traefik 기본
+  TLSStore 생성을 실행하지 않습니다. 기존 TLS Secret/TLSStore를 삭제하는 동작은 하지 않습니다.
+- **HTTPS:** 인증서 생성 방식이 hostPath일 때 SAN 검사를 수행하고 IP 접속에서는 Traefik
+  기본 TLS 인증서를 구성합니다. DNS 접속은 기존 host-based Ingress TLS를 유지합니다.
+  기존 Secret 사용(`create: false`) 또는 Secret 인증 방식은 hostPath 인증서를 요구하지 않습니다.
+- 표준 외부 포트는 HTTP `80`, HTTPS `443`입니다. 기존 Traefik 포트를 자동 변경하지 않습니다.
+  비표준 포트라면 실제 Service/외부 LB 노출과 App의 외부 포트·IAM `config.publicPort`·
+  App client `redirectUris`를 함께 맞춥니다.
+- AWS credential에는 새 제품 Registry(`211722900905.dkr.ecr.ap-northeast-2.amazonaws.com`)의
+  App·IAM pull 권한이 필요합니다. Agent/Vision 버전과 기존 공급원은 이번 변경에서 유지합니다.
+- 브라우저뿐 아니라 **App Pod에서도 IAM 외부 주소를 해석·접속**할 수 있어야 합니다.
+  주소·license·AWS·sudo 입력을 채운 뒤 아래 입력 검증, 6절 preflight, 7절 설치 순서로 진행합니다.
 
 다음은 다른 도메인 + HTTPS의 구조 예시입니다. 선택 결과에 따라 같은 주소 틀은 App `/`,
 IAM `/iam`과 공통 host를 사용합니다. `<...>` 입력이 남으면 검증이 해당 필드 경로를 안내합니다.
@@ -170,8 +189,8 @@ targets:
               password: eva-redis-pass # IAM Redis와 동일하게 맞추고 변경
               url: "" # 선택 override; 비우면 App이 SSO 변수로 조합
           license:
-            activation_mode: online
-            product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 승인된 제품 코드. ex) eva
+            activation_mode: online # Cloud 기본값. 사전 결정한 라이선스 방식에 맞게 변경합니다.
+            product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
             api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key. ex) demo-license-api-key (예시 전용)
             shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key. ex) demo-license-shared-key (예시 전용)
 ```

@@ -70,6 +70,46 @@ func TestInstallerSamplesAgainstLocalCharts(t *testing.T) {
 	assertExternalIAMSampleCharts(t, helm, charts["app"])
 }
 
+func TestInstallerSampleIAMPublicPortAgainstChart(t *testing.T) {
+	chart := os.Getenv("EVA_IAM_CHART_DIR")
+	if chart == "" {
+		t.Skip("set EVA_IAM_CHART_DIR to verify IAM publicPort rendering")
+	}
+	helm, err := exec.LookPath("helm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range []string{"shared", "separate"} {
+		for _, protocol := range []string{"http", "https"} {
+			port := "30080"
+			if protocol == "https" {
+				port = "30443"
+			}
+			for _, publicPort := range []string{"", port} {
+				t.Run(address+"/"+protocol+"/port="+publicPort, func(t *testing.T) {
+					contents, err := InstallerSampleFor(SampleOptions{Mode: "cloud", Address: address, Protocol: protocol})
+					if err != nil {
+						t.Fatal(err)
+					}
+					contents = bytes.ReplaceAll(fillSample(contents), []byte("192.0.2.10"), []byte("eva.example.com"))
+					var input Installer
+					if err := yaml.Unmarshal(contents, &input); err != nil {
+						t.Fatal(err)
+					}
+					values := input.Targets["server-a"].Values["iam"]
+					config := values["config"].(map[string]any)
+					if config["publicPort"] != "" {
+						t.Fatal("sample must default to an empty publicPort")
+					}
+					config["publicPort"] = publicPort
+					resources := renderSampleChart(t, helm, chart, "iam", values)
+					assertSampleChartProtocol(t, "iam", protocol, "dns", values, resources)
+				})
+			}
+		}
+	}
+}
+
 func assertExternalIAMSampleCharts(t *testing.T, helm, chart string) {
 	t.Helper()
 	for _, mode := range []string{"cloud", "remote", "local"} {
@@ -167,7 +207,13 @@ func assertSampleChartProtocol(t *testing.T, component, protocol, hostKind strin
 		host = nestedSampleValue(values, "app", "backendHost")
 	}
 	path := nestedSampleValue(values, "ingress", "path").(string)
-	baseURL := protocol + "://" + host.(string) + strings.TrimSuffix(path, "/")
+	authority := host.(string)
+	if component == "iam" {
+		if port, ok := nestedSampleValue(values, "config", "publicPort").(string); ok && port != "" {
+			authority += ":" + port
+		}
+	}
+	baseURL := protocol + "://" + authority + strings.TrimSuffix(path, "/")
 	foundIngress, foundConfig, foundTLSJob, foundRealmPatch := false, false, false, false
 	foundAdminEmail := false
 	for _, resource := range resources {

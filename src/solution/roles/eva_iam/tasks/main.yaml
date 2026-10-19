@@ -121,7 +121,12 @@
     # Published Helm chart. The realm (Keycloak/clients/secrets) is baked into the chart —
     # no local chart copy or realm JSON handling needed.
     eva_iam_chart_repo_name: "{{ eva_iam_chart_repo_name | default('eva-iam') }}"
-    eva_iam_chart_repo_url: "{{ eva_iam_chart_repo_url | default('https://mellerikat.github.io/eva-iam') }}"
+    eva_iam_chart_repo_url: >-
+      {{ eva_iam_chart_repo_url | default(
+       'https://spectrabrain.github.io/eva-iam-chart'
+       if (eva_iam_chart_version | default(deploy_versions.eva_iam_chart_version | mandatory)
+         is version('3.3.0', '>='))
+       else 'https://mellerikat.github.io/eva-iam') }}
     eva_iam_chart_ref: "{{ eva_iam_chart_ref | default('eva-iam/eva-iam') }}"
     eva_iam_chart_version: "{{ eva_iam_chart_version | default(deploy_versions.eva_iam_chart_version | mandatory) }}"
     # config.host — keycloak hostname, dispatcher issuer/jwksUrl, ingress host derive from it.
@@ -147,9 +152,11 @@
     eva_iam_app_redirect_uris: >-
       {{ eva_iam_app_redirect_uris
          | default(
-             ['https://'
-              ~ (eva_iam_host
-                 | default(ansible_facts.get('default_ipv4', {}).get('address', '127.0.0.1')))
+             [('https://' if (eva_iam_effective_user_values.ingress.tls.enabled | default(true) | bool) else 'http://')
+              ~ (eva_iam_effective_user_values.config.host
+                | default(eva_iam_host | default(ansible_facts.get('default_ipv4', {}).get('address', '127.0.0.1'))))
+              ~ ((':' ~ (eva_iam_effective_user_values.config.publicPort | default(eva_iam_public_port | default('')) | string))
+                if (eva_iam_effective_user_values.config.publicPort | default(eva_iam_public_port | default('')) | string | length > 0) else '')
               ~ '/*']
            ) }}
     # ingress — node directory holding tls.crt / tls.key
@@ -161,7 +168,7 @@
     # internal postgres
     eva_iam_db_nodeport: "{{ eva_iam_db_nodeport | default(32091) | int }}"
     eva_iam_db_password: "{{ eva_iam_db_password | default('strongpassword') }}"
-    # central redis (external NodePort requires tls)
+    # Central Redis uses an independent TLS setting; HTTP profiles disable it.
     eva_iam_redis_password: "{{ eva_iam_redis_password | default('eva-redis-pass') }}"
     eva_iam_redis_tls_enabled: "{{ eva_iam_redis_tls_enabled | default(false) }}"
     eva_iam_redis_external_enabled: "{{ eva_iam_redis_external_enabled | default(false) }}"
@@ -356,7 +363,7 @@
       새 인스턴스를 지정하세요. (정말 덮어써야 하면 -e eva_iam_protected_releases='[]' 로 해제)
 
 - name: Add Helm repository for eva-iam
-  ansible.builtin.command: helm repo add {{ eva_iam_chart_repo_name }} {{ eva_iam_chart_repo_url }}
+  ansible.builtin.command: helm repo add {{ eva_iam_chart_repo_name }} {{ eva_iam_chart_repo_url }} --force-update
   register: eva_iam_repo_add
   changed_when: "'already exists' not in (eva_iam_repo_add.stdout + eva_iam_repo_add.stderr)"
   failed_when:
@@ -488,7 +495,12 @@
     eva_traefik_tls_host: "{{ eva_iam_effective_host }}"
     eva_traefik_tls_host_path: "{{ eva_iam_effective_user_values.ingress.tls.hostPath | default(eva_iam_tls_host_path) }}"
     eva_traefik_tls_kubeconfig: "{{ eva_iam_kubeconfig }}"
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - eva_iam_effective_tls_enabled | bool
+    - eva_iam_effective_user_values.ingress.enabled | default(true) | bool
+    - eva_iam_effective_user_values.ingress.tls.create | default(true) | bool
+    - (eva_iam_effective_user_values.ingress.tls.authType | default('hostPath')) == 'hostPath'
 
 - name: Detect NodePort collision from another namespace
   ansible.builtin.shell: >-

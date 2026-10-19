@@ -479,8 +479,10 @@ if [[ -n "${HELM_VER}" ]]; then
 fi
 
 # EVA App / Vision / Agent / IAM charts
-fetch "https://mellerikat.github.io/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
-fetch "https://mellerikat.github.io/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
+EVA_APP_CHART_BASE="${EVA_APP_CHART_BASE:-$(eva_product_chart_base app "$EVA_APP_CHART_VERSION")}"
+EVA_IAM_CHART_BASE="${EVA_IAM_CHART_BASE:-$(eva_product_chart_base iam "$EVA_IAM_CHART_VERSION")}"
+fetch "$EVA_APP_CHART_BASE/eva-app-${EVA_APP_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
+fetch "$EVA_IAM_CHART_BASE/eva-iam-${EVA_IAM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
 fetch "https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/eva-vision-${EVA_VISION_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-vision/eva-vision-${EVA_VISION_CHART_VERSION}.tgz"
 fetch "${EVA_AGENT_CHART_BASE}/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
 fetch "${EVA_AGENT_CHART_BASE}/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"

@@ -73,14 +73,55 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 				if target.Components["app"] != (scope == "2") || (len(target.Values) != 0) != (scope == "2") {
 					t.Fatal("infra-only sample retained solution components/values")
 				}
+				if scope == "2" {
+					want := "offline"
+					if mode == "cloud" {
+						want = "online"
+					}
+					license := target.Values["app"]["app"].(map[string]any)["license"].(map[string]any)
+					if license["activation_mode"] != want {
+						t.Fatal("wizard license default/selection mismatch")
+					}
+				}
 				if !strings.Contains(messages, path) || !strings.Contains(messages, "workspace validate") || !strings.Contains(messages, "<UPPER_CASE>") {
 					t.Fatal("wizard lost completion instructions")
 				}
-				if scope == "1" && strings.Contains(messages, "Solution 접속 프로토콜") {
+				if scope == "1" && (strings.Contains(messages, "Solution 접속 프로토콜") || strings.Contains(messages, "라이선스 서버 인터넷 연결")) {
 					t.Fatal("infra-only selection must skip all solution questions")
+				}
+				if strings.Contains(messages, "라이선스 서버 인터넷 연결") {
+					t.Fatal("license activation must not add a connectivity question")
 				}
 			})
 		}
+	}
+}
+
+func TestInstallConfigureCloudHTTP(t *testing.T) {
+	// Cloud/current server/Solution/HTTP/IP/IAM+App/no Agent or Vision.
+	input, messages, _ := configureTest(t, "1\n1\n2\n1\n3\n1\n4\n")
+	target := input.Targets["server-a"]
+	if input.Repository.Mode != "cloud" || target.Ansible["ansible_connection"] != "local" ||
+		!target.Components["infra"] || !target.Components["iam"] || !target.Components["app"] ||
+		target.Components["agent"] || target.Components["vision"] {
+		t.Fatal("single-server Cloud HTTP component selection changed")
+	}
+	for _, component := range []string{"iam", "app"} {
+		ingress := target.Values[component]["ingress"].(map[string]any)
+		tls := ingress["tls"].(map[string]any)
+		if tls["enabled"] != false || tls["create"] != false {
+			t.Fatalf("%s HTTP must disable ingress TLS and its Secret Job", component)
+		}
+		if _, exists := tls["hostPath"]; exists {
+			t.Fatalf("%s HTTP must not request a host certificate", component)
+		}
+	}
+	app := target.Values["app"]["app"].(map[string]any)
+	if app["backendSecure"] != false || app["backendPublicPort"] != 80 {
+		t.Fatal("HTTP frontend protocol/port mismatch")
+	}
+	if !strings.Contains(messages, "3.3.0-beta.3") || !strings.Contains(messages, "3.3.0-beta.1") || !strings.Contains(messages, "E2E") {
+		t.Fatal("completion must state published baseline and outstanding live verification")
 	}
 }
 

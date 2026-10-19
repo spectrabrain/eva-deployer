@@ -191,6 +191,22 @@ load_deploy_versions() {
   fi
 }
 
+# App/IAM 3.3+ charts moved to SpectraBrain. Keep older releases usable and
+# share the same version boundary with the online roles.
+eva_product_chart_base() {
+  local component="$1" version="$2"
+  if [[ "$component" != app && "$component" != iam ]] ||
+     [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+([-+][A-Za-z0-9.]+)?$ ]]; then
+    echo "[ERROR] invalid App/IAM chart selection: $component $version" >&2
+    return 1
+  fi
+  if (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 3) )); then
+    printf 'https://spectrabrain.github.io/eva-%s-chart\n' "$component"
+  else
+    printf 'https://mellerikat.github.io/eva-%s\n' "$component"
+  fi
+}
+
 # EVA Agent 3.2.0 split its chartmuseum release values by image source:
 #   eva-agent/values-k3s.{ecr,harbor}.yaml
 #   eva-agent-vllm/values-k3s.<profile>.{docker,harbor}.yaml

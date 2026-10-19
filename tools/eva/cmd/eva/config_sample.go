@@ -23,6 +23,7 @@ func runConfigSample(args []string, input io.Reader, output, messages io.Writer,
 		fmt.Fprintln(output, "Usage: eva config sample [--mode cloud|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE] [--non-interactive]")
 		fmt.Fprintln(output, "Terminal input prompts for missing choices; menus go to stderr and YAML goes to stdout.")
 		fmt.Fprintln(output, "Non-interactive defaults: cloud / install / separate / https. External IAM skips address selection; --protocol controls App only.")
+		fmt.Fprintln(output, "License defaults: cloud=online, remote/local=offline. Set app.license.activation_mode in the generated YAML to match the prearranged license.")
 		fmt.Fprintln(output, "--output creates a new 0600 file without overwriting.")
 		fmt.Fprintln(output, "HTTP/HTTPS profiles target v3.3 local App/IAM sources. Release catalog and HTTP execution integration are separate.")
 		return nil
@@ -112,9 +113,9 @@ func runConfigSample(args []string, input io.Reader, output, messages io.Writer,
 	if options.IAM == "external" {
 		fmt.Fprintln(messages, "[외부 IAM] IAM은 설치하지 않습니다. --protocol은 App 접속 방식이며 IAM baseUrl/client 연결값과 Redis port/db/password를 확인합니다. Redis url은 선택 override입니다.")
 	}
-	fmt.Fprintln(messages, "[v3.3] 로컬 App/IAM 소스 기준 샘플입니다. Release catalog 버전은 변경하지 않습니다.")
+	fmt.Fprintln(messages, "[v3.3] 게시 App 3.3.0-beta.3 / IAM 3.3.0-beta.1 기준 샘플입니다. 실제 버전은 사용하는 Release catalog를 확인하세요.")
 	if options.Protocol == "http" {
-		fmt.Fprintln(messages, "[HTTP] 암호화되지 않는 검증 환경용입니다. 실제 설치 전 Release Chart 전환과 Deployer TLS SAN/TLSStore 실행 연동이 필요합니다.")
+		fmt.Fprintln(messages, "[HTTP] 격리된 검증 환경용입니다. 인증서 SAN 검사·TLS Secret Job·Traefik TLSStore 생성을 생략합니다. 실제 설치 E2E는 별도 검증하세요.")
 	}
 	fmt.Fprintln(messages, "[필수] <UPPER_CASE> 입력을 모두 교체하세요. validate가 미입력 필드 경로를 안내합니다. Secret 값은 출력하지 않습니다.")
 	if *path == "" {

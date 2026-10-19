@@ -24,6 +24,19 @@
     line: 'mode = "cdi"'
     insertafter: '^\[nvidia-container-runtime\]'
 
+- name: Install read-only MIG readiness check for CDI
+  ansible.builtin.copy:
+    src: verify-mig-before-cdi.sh
+    dest: /usr/local/sbin/verify-mig-before-cdi.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Verify configured MIG devices before generating CDI
+  ansible.builtin.command: /usr/local/sbin/verify-mig-before-cdi.sh
+  changed_when: false
+  when: not ansible_check_mode
+
 - name: Generate NVIDIA CDI spec
   ansible.builtin.command: /usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
   register: config_gpu_cdi_generate
@@ -45,10 +58,33 @@
 
       [Service]
       Type=oneshot
+      ExecStartPre=/usr/local/sbin/verify-mig-before-cdi.sh
       ExecStart=/usr/bin/nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 
       [Install]
       WantedBy=multi-user.target
+
+- name: Ensure k3s drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system/k3s.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Require a successful CDI refresh before k3s starts
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/k3s.service.d/10-nvidia-cdi.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Wants=nvidia-cdi-refresh.service
+      After=nvidia-cdi-refresh.service
+
+      [Service]
+      ExecStartPre=/bin/sh -c 'systemctl show -p LoadState --value nvidia-cdi-refresh.service | grep -qx loaded && systemctl show -p Result --value nvidia-cdi-refresh.service | grep -qx success'
 
 - name: Reload systemd daemon for CDI service
   ansible.builtin.systemd:

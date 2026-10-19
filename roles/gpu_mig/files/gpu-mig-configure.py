@@ -111,6 +111,11 @@ def stop_graphics():
 
 def prepare(indices, selector, profile, count, phase):
     states = [inventory(index, profile, count) for index in indices]
+    if phase == "verify":
+        unready = [state["index"] for state in states if not state["ready"]]
+        if unready:
+            raise ConfigurationError(f"MIG devices are not ready on GPUs {unready}")
+        return {"changed": False, "reboot_required": False, "gpus": states}
     changed = False
     disabled = [state["index"] for state in states if state["mode"] == "Disabled"]
     partition_needed = phase in ("partition", "reconcile") and any(not s["ready"] for s in states)
@@ -171,7 +176,7 @@ def prepare(indices, selector, profile, count, phase):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("enable", "partition", "reconcile"))
+    parser.add_argument("phase", choices=("enable", "partition", "reconcile", "verify"))
     parser.add_argument("--gpu", action="append", required=True)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--count", required=True, type=int)

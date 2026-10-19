@@ -116,7 +116,13 @@
       #!/usr/bin/env bash
       set -euo pipefail
 
-      exec /usr/local/sbin/gpu-mig-configure.py reconcile \
+      phase="${1:-reconcile}"
+      case "${phase}" in
+        reconcile|verify) ;;
+        *) echo "Unsupported MIG action: ${phase}" >&2; exit 2 ;;
+      esac
+
+      exec /usr/local/sbin/gpu-mig-configure.py "${phase}" \
         --selector {{ (gpu_mig_mig_selector_remote_dir ~ '/displaymodeselector') | quote }} \
         --profile {{ (gpu_mig_mig_profile_id | string | trim) | quote }} \
         --count {{ gpu_mig_mig_instance_count | int }} \

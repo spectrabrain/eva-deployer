@@ -162,6 +162,27 @@ class ConfigureTests(unittest.TestCase):
             self.execute(gpu, "partition")
         self.assertEqual(gpu.mutations(), [])
 
+    def test_verify_phase_checks_devices_without_changing_gpu(self):
+        gpu = FakeGPU()
+        result = self.execute(gpu, "verify")
+        self.assertFalse(result["changed"])
+        self.assertEqual(gpu.mutations(), [])
+        self.assertFalse(any(c[0] == "selector" for c in gpu.calls))
+
+    def test_verify_phase_rejects_missing_compute_device(self):
+        gpu = FakeGPU()
+        gpu.compute_instances.pop()
+        with self.assertRaises(configure.ConfigurationError):
+            self.execute(gpu, "verify")
+        self.assertEqual(gpu.mutations(), [])
+
+    def test_verify_phase_rejects_unavailable_gpu(self):
+        gpu = FakeGPU()
+        gpu.query_failure = True
+        with self.assertRaises(configure.ConfigurationError):
+            self.execute(gpu, "verify")
+        self.assertEqual(gpu.mutations(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -113,7 +113,8 @@ SpectraBrain 게시 저장소에서 가져오며 App ECR 이미지·인증 계�
 - AWS credential에는 새 제품 Registry(`211722900905.dkr.ecr.ap-northeast-2.amazonaws.com`)의
   App·IAM pull 권한이 필요합니다. Agent/Vision 버전과 기존 공급원은 이번 변경에서 유지합니다.
 - 브라우저뿐 아니라 **App Pod에서도 IAM 외부 주소를 해석·접속**할 수 있어야 합니다.
-  주소·license·AWS·sudo 입력을 채운 뒤 아래 입력 검증, 6절 preflight, 7절 설치 순서로 진행합니다.
+  주소·license·AWS·sudo 입력을 채운 뒤 아래 입력 검증, 6절 인증서 준비, 필요한 경우 7절 preflight,
+  8절 설치 순서로 진행합니다.
 
 다음은 다른 도메인 + HTTPS의 구조 예시입니다. 선택 결과에 따라 같은 주소 틀은 App `/`,
 IAM `/iam`과 공통 host를 사용합니다. `<...>` 입력이 남으면 검증이 해당 필드 경로를 안내합니다.
@@ -213,72 +214,40 @@ IAM과 App을 함께 설치하면 SSO 값은 자동 전달됩니다. 별도 중�
 sudo eva workspace validate --config /home/eva/eva-install.yaml
 ```
 
-위 명령은 입력만 검증하고 파일을 생성하지 않습니다. 설치 시에는
-`/var/lib/eva/workspaces/<site-id>/<content-sha256>/`에 내부 Workspace를 원자적으로 생성합니다.
-폴더는 `0700`, 파일은 `0600`이며 설정이 바뀌면 새 snapshot을 사용합니다.
-기존 Workspace와 `--workspace` 방식은 계속 지원하지만 `--config`와 동시에 지정하지 않습니다.
+위 명령은 설치 설정의 필수 입력과 형식을 검증합니다. 설정 파일에는 credential이 포함되므로
+Git, 채팅, Release artifact에 넣지 않습니다.
 
-기존 `config sample`에서 메뉴 없이 틀을 지정하려면 `--address shared|separate --protocol https`를 추가합니다.
-필수 입력, 여러 target과 HTTP 지원 범위는 [단일 설치 설정](single-file-configuration.md)을 참고합니다.
+## 6. 인증서 파일 준비
 
-Bastion은 설치 대상이 아니며 생성 Workspace와 실행 로그를 보관하는 controller입니다.
-`eva check`는 현재 서버의 Docker/k3s를 확인하므로 Bastion에서 타겟 전체 점검으로 사용하지 않습니다.
-타겟별 상태·방화벽·SSH host key를 따로 확인하고, 검증된 Release의 원격 실행 경로를 사전에 시험합니다.
-기존 APT 진단도 controller 기준이므로 타겟 APT 상태를 대신 검사하지 않습니다.
+**HTTPS 설치 시** 각 대상 서버에 인증서와 개인 키를 준비합니다. HTTP 또는 기존 TLS Secret을
+사용하는 경우에는 이 단계를 건너뜁니다.
 
-원본 설정과 생성 Workspace에는 credential이 포함되므로 Git, 채팅, Release artifact에 넣지
-않습니다. 인증서와 SSH private key는 YAML에 inline하지 않고 기존 Secret 관리 절차로 준비합니다.
-TLS certificate와 key는 위 `hostPath` 예시의 `/etc/eva/certs`에 둡니다.
-`eva install`의 precondition은 선택된 IAM `config.host`와 App `app.backendHost`가 각 인증서의
-SAN에 포함되는지 변경 전에 검증합니다. IP와 DNS 모두 같은 검증 대상이며, DNS 기반 설치는 기존
-host-based Ingress TLS 흐름을 유지하고 Traefik `TLSStore`를 만들지 않습니다.
+- IAM/App의 `ingress.tls.hostPath`에 PEM 형식의 `tls.crt`(인증서)와 `tls.key`(개인 키)를 둡니다.
+  위 설정 예시는 `/etc/eva/certs/tls.crt`, `/etc/eva/certs/tls.key`를 사용합니다.
+- 인증서 SAN에는 실제 접속 주소인 IAM `config.host`와 App `app.backendHost`의 DNS 또는 IP가
+  포함되어야 합니다. IAM/App 경로가 같다면 두 주소를 모두 포함한 인증서를 사용합니다.
+- 개인 키는 YAML에 직접 넣거나 Git에 저장하지 않습니다. Bastion 설치도 파일은 각 대상 서버에 둡니다.
 
-Agent Release values, Config 생성 설정, role k3s/repository override는 자동 적용됩니다. 선택
-Agent 및 Vision Chart override는 target별로 적용되며 GPU, MIG, vLLM profile을 선택하지 않습니다.
+설치 시작 시 인증서와 접속 주소의 SAN 일치 여부를 검증합니다.
 
-## 6. Argo CD 관리 연결 확인
+## 7. Argo CD 관리 연결 확인
 
-기존 본사 Argo CD가 같은 site의 EVA resource를 관리했을 수 있는 환경에서는 설치 전에
-아래 preflight를 실행합니다. 대상 cluster의 tracking metadata를 다시 수집하고, 발견된 경우에만
-연결 해제 여부를 묻습니다.
+기존 Argo CD로 관리하던 서버에서만 설치 전에 실행합니다. 이미 연결을 해제한 서버도
+동일한 명령으로 확인할 수 있습니다. 관련 metadata가 없으면 추가 입력 없이 종료합니다.
 
 ```bash
 sudo eva preflight argocd --config /home/eva/eva-install.yaml
 ```
 
-승인하면 Argo CD 관리 서버 주소, SSH 사용자, password를 입력받습니다. 관리 서버의
-`kubectl`로 감지된 Application의 공통 destination과 ApplicationSet ownership을 확인합니다.
-cluster registration Secret의 tracking ID가 `Application/argocd/registration`임을 확인한 뒤,
-Git source에서 해당 site manifest만 제거하는 별도 승인을 표시합니다. 이 화면에는 repository,
-동적으로 확인한 default branch, target manifest 및 다음 commit 제목이 표시됩니다.
+- 요청 시 관리 서버 주소·SSH 계정·비밀번호와 Git 인증 정보를 입력합니다. 처음 접속하는
+  SSH host key는 fingerprint를 확인한 뒤 승인합니다. Argo CD 계정은 필요하지 않습니다.
+- 연결 해제는 대상 site의 Git 등록 변경을 별도 승인한 뒤 진행합니다. 관리 서버에서
+  `kubectl`·`git`을 사용할 수 있어야 하며 저장소 읽기·push 권한이 필요합니다.
+- 배포된 workload와 데이터, 다른 site는 유지합니다. 이미 해제된 경우에는 읽기 전용으로
+  상태를 검증하고 완료를 기록합니다.
+- 연결 해제 완료가 확인되지 않으면 Solution 설치를 중단합니다. `--yes`로 우회할 수 없습니다.
 
-```text
-[DEPLOYER] remove <cluster-name> from Argo CD registration
-```
-
-Git push와 `registration` Application이 pushed commit을 관측한 것이 확인된 뒤에만 live Secret을
-삭제하고, 이후 해당 cluster prefix의 legacy Application을
-non-cascade로 제거합니다. global `registration` Application의 Auto-Sync와 모든 ApplicationSet은
-변경하지 않으며 다른 site의 manifest도 수정하지 않습니다. push 실패 또는 remote HEAD 변경은
-live Secret/Application 삭제 없이 실패합니다. Argo CD CLI 로그인이나 Argo CD 계정 정보는 필요하지
-않지만 SSH 사용자는 관리 서버에서 repository clone 및 push 권한을 이미 가져야 합니다.
-
-완료된 handoff는
-`/var/lib/eva/sites/<site-id>/argocd-handoff.yaml`에 원자적으로 기록됩니다.
-receipt에는 registration Application, repository, branch, manifest, pushed commit SHA도 기록합니다.
-Git-backed handoff에는 이 다섯 metadata가 모두 필요하며, 이전 형식 receipt는 계속 읽을 수 있습니다.
-receipt 복구는 `registration`이 target Secret을 원하지 않고 live Secret/Application이 안정적으로
-계속 부재한 경우에만 허용됩니다. 그렇지 않으면 full Git-backed preflight가 필요합니다.
-거절하면 설치를 시작하지 않으므로, 필요한 경우 현재 상태를 그대로 둔 채 직접 조치할 수 있습니다.
-명령은 installer가 등록한 Current Release를 사용해 `/opt/eva/releases`에 준비합니다.
-별도의 `--release` 또는 `--install-root` 입력은 필요하지 않습니다.
-관리 서버 SSH host key는 `/home/eva/.ssh/known_hosts`에서 검증합니다.
-파일이 없으면 생성하며, 처음 보는 host key는 SHA256 fingerprint를 표시하고 별도 승인을 받습니다.
-
-`eva install` 또는 `eva apply`에서 tracking metadata가 남아 있으면 handoff를 수행하지 않고 위
-preflight 명령을 안내하며 Solution 설치 전에 중단합니다. `--yes`도 이 규칙을 우회하지 않습니다.
-
-## 7. 설치
+## 8. 설치
 
 installer가 등록한 Current Release로 명령 하나를 실행합니다.
 
@@ -319,7 +288,7 @@ sudo eva troubleshoot apt --fix-known --yes
 sudo eva retry --yes
 ```
 
-## 8. 설치 결과 확인
+## 9. 설치 결과 확인
 
 설치 상태 점검으로 시작합니다. 선택된 Agent 또는 Vision component가 있으면 node의 GPU 또는
 MIG allocatable resource, NVIDIA Device Plugin readiness, Agent/Vision Pod의 GPU 또는
@@ -338,7 +307,7 @@ sudo eva status
 App이 사용하는 Agent 및 Vision endpoint는 내부 Service인 `eva-agent.eva-agent` 및
 `eva-vision.eva-vision`입니다. 연결 문제를 진단할 때 App Pod에서 선택된 endpoint를 확인합니다.
 
-## 9. Rendered Artifact 및 문제 해결
+## 10. Rendered Artifact 및 문제 해결
 
 선택된 각 Helm component는 준비된 Release 아래에 chart default, effective Helm input, resolved
 Helm values, source metadata를 보관합니다. effective 및 resolved 파일에는 Secret 값이 포함될 수
@@ -383,7 +352,7 @@ Helm values, source metadata를 보관합니다. effective 및 resolved 파일�
 private values 및 handoff 파일을 붙여 넣거나 커밋하지 않습니다. license, SSO, database,
 registry credential이 포함될 수 있습니다.
 
-## 10. 변경 및 재시도
+## 11. 변경 및 재시도
 
 단일 설정 또는 Release version을 변경하고 `eva install --config ...`를 다시 실행하면
 Helm upgrade를 수행하며 기존 database와 영속 데이터를 보존합니다. 일반 upgrade는 `/eva-app`
@@ -396,7 +365,7 @@ Helm upgrade를 수행하며 기존 database와 영속 데이터를 보존합니
 sudo eva retry --yes
 ```
 
-## 11. 비GPU 테스트 환경
+## 12. 비GPU 테스트 환경
 
 CPU-only 서버는 제한된 테스트를 위한 예외 환경입니다. 단일 설정의 `components`에서 `agent`와 `vision`을
 `false`로 설정하면 Infra와 Config가 NVIDIA runtime/CDI 작업을 건너뜁니다. 이 가이드의 기본

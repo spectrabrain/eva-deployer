@@ -204,9 +204,9 @@ func parseBranchHead(output string) (string, error) {
 	return fields[0], nil
 }
 
-func gitRemovalCommand(plan GitRemovalPlan, server string) string {
-	// The script never emits the Secret content. kubectl's client-side parser
-	// validates the single YAML document and exposes only its metadata.
+// gitCheckoutCommand prepares a private temporary checkout at the verified
+// branch HEAD. Credentials arrive on stdin and are never embedded in commands.
+func gitCheckoutCommand(plan GitRemovalPlan) string {
 	return "set -euo pipefail; umask 077; base=\"$HOME/tmp\"; mkdir -p \"$base\"; root=$(mktemp -d \"$base/eva-argocd-handoff.XXXXXX\"); trap 'rm -rf \"$root\"' EXIT; " +
 		"username_file=\"$root/git-username\"; secret_file=\"$root/git-secret\"; askpass=\"$root/git-askpass\"; work=\"$root/repository\"; " +
 		"IFS= read -r git_username; IFS= read -r git_secret; [ -n \"$git_username\" ] && [ -n \"$git_secret\" ]; " +
@@ -214,7 +214,13 @@ func gitRemovalCommand(plan GitRemovalPlan, server string) string {
 		"printf '%s\\n' '#!/bin/sh' 'case \"$1\" in' '*Username*) cat \"$EVA_GIT_USERNAME_FILE\" ;;' '*Password*) cat \"$EVA_GIT_SECRET_FILE\" ;;' '*) false ;;' 'esac' >\"$askpass\"; chmod 700 \"$askpass\"; " +
 		"export LC_ALL=C GIT_ASKPASS=\"$askpass\" GIT_TERMINAL_PROMPT=0 EVA_GIT_USERNAME_FILE=\"$username_file\" EVA_GIT_SECRET_FILE=\"$secret_file\"; unset git_username git_secret; " +
 		"timeout 60s git clone --depth 1 --branch " + shellQuote(plan.Branch) + " " + shellQuote(plan.Repository) + " \"$work\"; cd \"$work\"; " +
-		"[ \"$(timeout 30s git rev-parse HEAD)\" = " + shellQuote(plan.ExpectedHead) + " ]; " +
+		"[ \"$(timeout 30s git rev-parse HEAD)\" = " + shellQuote(plan.ExpectedHead) + " ]; "
+}
+
+func gitRemovalCommand(plan GitRemovalPlan, server string) string {
+	// The script never emits the Secret content. kubectl's client-side parser
+	// validates the single YAML document and exposes only its metadata.
+	return gitCheckoutCommand(plan) +
 		"timeout 30s git ls-files --error-unmatch -- " + shellQuote(plan.Manifest) + " >/dev/null; " +
 		"[ -f " + shellQuote(plan.Manifest) + " ] && [ ! -L " + shellQuote(plan.Manifest) + " ]; " +
 		"[ \"$(timeout 30s kubectl create --dry-run=client -f " + shellQuote(plan.Manifest) + " -o name | wc -l)\" -eq 1 ]; " +
@@ -404,6 +410,10 @@ func verifyRecordedRemoval(session Session, cluster clusterRegistration, commit 
 }
 
 func verifyRemovalWindow(session Session, cluster clusterRegistration, commit string, requireCommit bool) error {
+	return verifyRemovalWindowWithSource(session, cluster, commit, requireCommit, nil)
+}
+
+func verifyRemovalWindowWithSource(session Session, cluster clusterRegistration, commit string, requireCommit bool, expectedSource *registrationSource) error {
 	// Thirteen observations separated by twelve five-second waits prove a
 	// full sixty-second absence window rather than a one-shot deletion.
 	for attempt := 0; attempt < 13; attempt++ {
@@ -414,6 +424,15 @@ func verifyRemovalWindow(session Session, cluster clusterRegistration, commit st
 		registration, err := parseRegistrationApplication(registrationOutput)
 		if err != nil {
 			return err
+		}
+		if expectedSource != nil {
+			source, err := validatedRegistrationSource(registration)
+			if err != nil {
+				return err
+			}
+			if source != *expectedSource {
+				return errors.New("registration Application source changed during absence verification")
+			}
 		}
 		revision := registration.Status.Sync.Revision
 		if requireCommit && revision != commit {

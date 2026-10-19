@@ -503,6 +503,21 @@ func RunPreflight(
 		return nil
 	}
 
+	// Workloads keep tracking metadata after a non-cascade disconnect. When
+	// every detected Application is already gone, verify desired and live
+	// absence instead of requiring a destination from a deleted Application.
+	if detectedApplicationsAbsent(detection.Applications, applications) {
+		receipt, err := recoverDetachedHandoff(session, prompt, detection, applications, registrations)
+		if err != nil {
+			return fmt.Errorf("verify already disconnected Argo CD cluster: %w", err)
+		}
+		if err := recordReceipt(prompt, receipt); err != nil {
+			return fmt.Errorf("record already disconnected Argo CD handoff receipt: %w", err)
+		}
+		reportProgress(prompt, "[OK] Verified already disconnected Argo CD cluster and recorded ownership handoff; no Git or Kubernetes mutation was performed.")
+		return nil
+	}
+
 	target, err := resolveHandoffTarget(
 		detection.Applications,
 		applications,

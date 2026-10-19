@@ -8,6 +8,8 @@ verify="$repo_root/src/solution/roles/eva_app/tasks/verify_app_ownership.yaml"
 
 python3 - "$main" "$reconcile" "$verify" <<'PY'
 import copy
+import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -118,6 +120,172 @@ for name, changes in invalid_receipts.items():
     receipt.update(changes)
     if validates(receipt).returncode == 0:
         raise SystemExit(f"[ERROR] invalid {name} receipt was accepted")
+
+if documents[reconcile_path][0]["environment"].get("EVA_APP_TLS_JOB_ENABLED") != "{{ eva_app_tls_job_enabled | bool | lower }}":
+    raise SystemExit("[ERROR] actual TLS Job gating fact is not passed to reconciliation")
+
+# Execute the production assessment shell against local, read-only CLI mocks.
+# In particular, old TLS helpers must not bypass the common ownership validator.
+def resource(kind, name, api):
+    group = api.split("/")[0] if "/" in api else ""
+    return {
+        "apiVersion": api,
+        "kind": kind,
+        "metadata": {
+            "name": name,
+            "namespace": "eva-app",
+            "uid": "uid-" + name,
+            "resourceVersion": "1",
+            "labels": {"app.kubernetes.io/managed-by": "Helm"},
+            "annotations": {
+                "meta.helm.sh/release-name": "eva-app",
+                "meta.helm.sh/release-namespace": "eva-app",
+                "argocd.argoproj.io/tracking-id": f"cluster-a-eva-app:{group}/{kind}:eva-app/{name}",
+            },
+            "managedFields": [{"manager": "argocd-controller"}],
+        },
+    }
+
+deployment = resource("Deployment", "eva-app", "apps/v1")
+tls_helpers = [
+    resource("Job", "eva-app-tls-job", "batch/v1"),
+    resource("Role", "eva-app-tls-job-role", "rbac.authorization.k8s.io/v1"),
+    resource("RoleBinding", "eva-app-tls-job-rolebinding", "rbac.authorization.k8s.io/v1"),
+    resource("ServiceAccount", "eva-app-tls-job-sa", "v1"),
+]
+stored = [deployment, *tls_helpers]
+mock_cli = '''
+import json
+import os
+from pathlib import Path
+import sys
+
+fixture = json.loads(Path(os.environ["ASSESSMENT_FIXTURE"]).read_text())
+tool, args = Path(sys.argv[0]).name, sys.argv[1:]
+with Path(os.environ["ASSESSMENT_LOG"]).open("a") as stream:
+    stream.write(tool + " " + " ".join(args) + "\\n")
+if tool == "helm":
+    if args[:2] == ["status", "eva-app"]:
+        if fixture["status"] is None:
+            sys.exit(1)
+        print(json.dumps({"name": "eva-app", "namespace": "eva-app", "version": 1,
+                          "info": {"status": fixture["status"]}}))
+    elif args[:2] == ["get", "manifest"]:
+        print(json.dumps({"kind": "List", "items": fixture["stored"]}))
+    elif args[:2] == ["template", "eva-app"]:
+        print(json.dumps({"kind": "List", "items": fixture["rendered"]}))
+    else:
+        raise SystemExit("unexpected Helm command")
+elif args[:2] == ["create", "--dry-run=client"]:
+    print(Path(args[args.index("-f") + 1]).read_text())
+elif args[0] == "get":
+    if "," in args[1]:
+        print(json.dumps({"items": fixture["live"] + fixture["scan_extra"]}))
+    elif args[1] == "secret" and "-l" in args:
+        print(json.dumps({"items": [{"metadata": {"labels": {
+            "owner": "helm", "name": "eva-app", "status": "failed"}}}]}))
+    else:
+        for item in fixture["live"]:
+            if args[1] == item["kind"] + "/" + item["metadata"]["name"]:
+                print(json.dumps(item))
+                break
+else:
+    raise SystemExit("forbidden kubectl mutation or unexpected command")
+'''
+
+def assess(name, *, status="deployed", old=None, live=None, rendered=None,
+           enabled="false", receipt=valid_receipt, scan_extra=None, mode="cloud_repository",
+           error=None):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for tool in ("helm", "kubectl"):
+            executable = root / tool
+            executable.write_text("#!" + sys.executable + "\n" + mock_cli)
+            executable.chmod(0o755)
+        fixture = root / "fixture.json"
+        fixture.write_text(json.dumps({
+            "status": status,
+            "stored": stored if old is None else old,
+            "live": stored if live is None else live,
+            "rendered": [deployment] if rendered is None else rendered,
+            "scan_extra": scan_extra or [],
+        }))
+        receipt_path = root / "handoff.yaml"
+        if receipt is not None:
+            receipt_path.write_text(yaml.safe_dump(receipt))
+        env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                   ASSESSMENT_FIXTURE=str(fixture), ASSESSMENT_LOG=str(root / "commands.log"),
+                   EVA_APP_NAMESPACE="eva-app", EVA_APP_RELEASE="eva-app",
+                   EVA_APP_CHART_SOURCE="eva-app/eva-app", EVA_APP_CHART_VERSION="3.3.0-beta.3",
+                   EVA_APP_VALUES_FILE=str(root / "values.yaml"),
+                   EVA_APP_EFFECTIVE_VALUES_FILE=str(root / "effective.yaml"),
+                   EVA_APP_HANDOFF_FILE=str(receipt_path), EVA_APP_USE_CHART_VERSION="1",
+                   EVA_APP_REPOSITORY_MODE=mode, EVA_APP_HELM_SET_JSON="[]", EVA_APP_SITE_ID="site-a")
+        env.pop("EVA_APP_TLS_JOB_ENABLED", None)
+        if enabled is not None:
+            env["EVA_APP_TLS_JOB_ENABLED"] = enabled
+        result = subprocess.run(["bash", "-c", reconcile_shell], env=env, text=True,
+                                capture_output=True, check=False)
+        output = result.stdout + result.stderr
+        if error is None:
+            if result.returncode != 0 or "take_ownership=true" not in result.stdout:
+                raise SystemExit(f"[ERROR] {name}: expected verified reconciliation\n{output}")
+        elif result.returncode == 0 or error not in output:
+            raise SystemExit(f"[ERROR] {name}: expected rejection containing {error!r}\n{output}")
+        commands = (root / "commands.log").read_text()
+        if re.search(r"kubectl (delete|patch|apply)|helm upgrade", commands):
+            raise SystemExit(f"[ERROR] {name}: assessment mutated cluster state")
+    print(f"[OK] App assessment: {name}")
+
+assess("deployed TLS generation disabled")
+assess("failed TLS generation disabled", status="failed")
+assess("TTL-expired old TLS Job", live=[deployment, *tls_helpers[1:]])
+assess("all old TLS helpers already absent", live=[deployment])
+assess("unchanged TLS enabled", enabled="true", rendered=stored)
+assess("rendered TLS helpers are not obsolete", rendered=stored)
+assess("disabled helpers require receipt", receipt=None, error="require a verified Argo CD handoff receipt")
+assess("invalid receipt", receipt={**valid_receipt, "site_id": "other"}, error="Git-backed EVA App identity contract")
+assess("enabled TLS cannot lose helpers", enabled="true", error="manifest is incompatible")
+assess("missing TLS fact fails closed", enabled=None, error="manifest is incompatible")
+assess("no live rendered candidates", live=tls_helpers, error="no live rendered resource candidates")
+
+for helper in tls_helpers:
+    foreign = copy.deepcopy(stored)
+    index = stored.index(helper)
+    foreign[index]["metadata"]["annotations"]["meta.helm.sh/release-name"] = "other"
+    assess("foreign " + helper["kind"], live=foreign, error="foreign Helm ownership")
+
+for name, mutate, expected in (
+    ("partial ownership", lambda m: m["annotations"].pop("meta.helm.sh/release-namespace"), "partial Helm ownership"),
+    ("wrong tracking", lambda m: m["annotations"].update({"argocd.argoproj.io/tracking-id": "other:batch/Job:eva-app/eva-app-tls-job"}), "tracking identity mismatch"),
+    ("controller owner", lambda m: m.update({"ownerReferences": [{"controller": True}]}), "unexpected controller ownership"),
+    ("wrong namespace", lambda m: m.update({"namespace": "other"}), "unsafe EVA App legacy resource identity"),
+    ("deployed helper lacks Helm owner", lambda m: [m["annotations"].pop(key) for key in ("meta.helm.sh/release-name", "meta.helm.sh/release-namespace")], "lacks current Helm ownership"),
+):
+    changed = copy.deepcopy(stored)
+    mutate(changed[1]["metadata"])
+    assess(name, live=changed, error=expected)
+
+wrong_api = copy.deepcopy(stored)
+wrong_api[1]["apiVersion"] = "other/v1"
+assess("wrong live TLS API", live=wrong_api, error="unsafe live EVA App TLS helper identity")
+assess("wrong stored TLS API", old=wrong_api, error="unsafe stored EVA App TLS helper identity")
+unrelated = resource("Job", "eva-app-unrelated", "batch/v1")
+assess("unrelated old Job remains blocked", old=[*stored, unrelated], error="manifest is incompatible")
+assess("TLS helper not in deployed manifest", old=[deployment], error="absent from stored Helm manifest")
+assess("late TLS helper appearance", live=[deployment], scan_extra=[tls_helpers[0]],
+       error="obsolete TLS helper changed during assessment")
+assess("unrendered legacy Secret remains blocked", scan_extra=[resource("Secret", "eva-app-secret-tls", "v1")],
+       error="legacy EVA App resource is absent from rendered chart")
+legacy = copy.deepcopy(stored)
+for item in legacy:
+    item["metadata"]["annotations"].pop("meta.helm.sh/release-name")
+    item["metadata"]["annotations"].pop("meta.helm.sh/release-namespace")
+assess("legacy Argo CD-only helpers validated", status=None, live=legacy)
+ecr = resource("Job", "eva-app-ecr-job-once", "batch/v1")
+assess("repository ECR cleanup contract preserved", old=[*stored, ecr], live=[*stored, ecr], mode="remote_repository")
+assess("repository ECR-only cleanup preserved", old=[*stored, ecr], live=[ecr], mode="remote_repository")
+assess("local repository ECR cleanup contract preserved", old=[*stored, ecr], live=[*stored, ecr], mode="local_repository")
 PY
 
 for required in \

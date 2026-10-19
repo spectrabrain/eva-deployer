@@ -41,8 +41,11 @@ func TestConfigureSampleProfileMatrix(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						if resolved.Config.TargetComponents["node-a"]["iam"] != (iam == "install") {
-							t.Fatal("target IAM scope lost")
+						if resolved.Config.TargetComponents != nil {
+							t.Fatal("single-target sample should inherit global components without redundant target scope")
+						}
+						if resolved.Config.Components["iam"] != (iam == "install") {
+							t.Fatal("global IAM scope lost")
 						}
 					})
 				}
@@ -70,6 +73,51 @@ func TestConfigureSampleIndependentTargetPlaceholders(t *testing.T) {
 		if !strings.HasPrefix(fmt.Sprint(host), fmt.Sprintf("<TARGET_%d_", index+1)) {
 			t.Fatal("target placeholders collide")
 		}
+	}
+}
+
+func TestConfigureSampleOmitsRedundantTargetComponents(t *testing.T) {
+	contents, err := ConfigureSample("cloud", []ConfigureTarget{{
+		Name:     "node-a",
+		Ansible:  map[string]any{"ansible_connection": "local"},
+		Solution: true,
+		IAM:      "install",
+		Protocol: "https",
+		Address:  "shared",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input Installer
+	if err := yaml.Unmarshal(contents, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.Targets["node-a"].Components != nil {
+		t.Fatal("single target sample should omit redundant target components")
+	}
+	if !input.Components["infra"] || !input.Components["iam"] || !input.Components["app"] {
+		t.Fatal("global components should retain selected solution scope")
+	}
+}
+
+func TestConfigureSampleKeepsTargetComponentsWhenNarrowerThanGlobal(t *testing.T) {
+	contents, err := ConfigureSample("cloud", []ConfigureTarget{
+		{Name: "node-a", Ansible: map[string]any{"ansible_connection": "local"}, Solution: true, IAM: "install", Protocol: "https", Address: "shared"},
+		{Name: "node-b", Ansible: map[string]any{"ansible_connection": "local"}, Solution: false, IAM: "install", Protocol: "https", Address: "shared"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input Installer
+	if err := yaml.Unmarshal(contents, &input); err != nil {
+		t.Fatal(err)
+	}
+	if input.Targets["node-a"].Components != nil {
+		t.Fatal("target with global-equivalent components should inherit from root")
+	}
+	components := input.Targets["node-b"].Components
+	if components == nil || !components["infra"] || components["app"] || components["iam"] {
+		t.Fatal("narrower target components must remain explicit")
 	}
 }
 

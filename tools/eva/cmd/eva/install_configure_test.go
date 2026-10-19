@@ -50,6 +50,14 @@ func configureTest(t *testing.T, answers string, passwords ...string) (workspace
 	return installer, messages.String(), path
 }
 
+func effectiveTargetComponents(input workspace.Installer, name string) map[string]bool {
+	target := input.Targets[name]
+	if target.Components != nil {
+		return target.Components
+	}
+	return input.Components
+}
+
 func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 	for choice, mode := range map[string]string{"1": "cloud", "2": "remote", "3": "local"} {
 		for _, scope := range []string{"1", "2"} {
@@ -67,10 +75,11 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 					t.Fatal("repository inputs do not follow the environment selection")
 				}
 				target := input.Targets["server-a"]
+				components := effectiveTargetComponents(input, "server-a")
 				if len(input.Targets) != 1 || target.Ansible["ansible_connection"] != "local" || target.Ansible["ansible_user"] != "eva" {
 					t.Fatal("local install must target the current account and server only")
 				}
-				if target.Components["app"] != (scope == "2") || (len(target.Values) != 0) != (scope == "2") {
+				if components["app"] != (scope == "2") || (len(target.Values) != 0) != (scope == "2") {
 					t.Fatal("infra-only sample retained solution components/values")
 				}
 				if scope == "2" {
@@ -101,9 +110,10 @@ func TestInstallConfigureCloudHTTP(t *testing.T) {
 	// Cloud/current server/Solution/HTTP/IP/IAM+App/no Agent or Vision.
 	input, messages, _ := configureTest(t, "1\n1\n2\n1\n3\n1\n4\n")
 	target := input.Targets["server-a"]
+	components := effectiveTargetComponents(input, "server-a")
 	if input.Repository.Mode != "cloud" || target.Ansible["ansible_connection"] != "local" ||
-		!target.Components["infra"] || !target.Components["iam"] || !target.Components["app"] ||
-		target.Components["agent"] || target.Components["vision"] {
+		!components["infra"] || !components["iam"] || !components["app"] ||
+		components["agent"] || components["vision"] {
 		t.Fatal("single-server Cloud HTTP component selection changed")
 	}
 	for _, component := range []string{"iam", "app"} {
@@ -141,7 +151,7 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 			t.Fatal("password leaked to wizard output")
 		}
 	}
-	if len(input.Targets) != 3 || len(input.Targets["infra-a"].Values) != 0 || input.Targets["external-app"].Components["iam"] {
+	if len(input.Targets) != 3 || len(input.Targets["infra-a"].Values) != 0 || effectiveTargetComponents(input, "external-app")["iam"] {
 		t.Fatal("mixed scope/SSO selections were not preserved")
 	}
 	for index, name := range []string{"infra-a", "iam-app", "external-app"} {
@@ -247,28 +257,53 @@ func TestInstallConfigureRetriesInvalidChoicesAndTargetIdentity(t *testing.T) {
 
 func TestInstallConfigureProtectsExistingFilesAndSymlinks(t *testing.T) {
 	for _, kind := range []string{"existing", "symlink"} {
-		t.Run(kind, func(t *testing.T) {
-			home := t.TempDir()
-			path := filepath.Join(home, "eva-install.yaml")
-			original := []byte("private-original")
-			if kind == "existing" {
-				if err := os.WriteFile(path, original, 0o600); err != nil {
+		for _, location := range []string{"default", "absolute-output", "relative-output"} {
+			t.Run(kind+"/"+location, func(t *testing.T) {
+				home := t.TempDir()
+				path := filepath.Join(home, "eva-install.yaml")
+				var args []string
+				if location != "default" {
+					path = filepath.Join(home, "custom install's.yaml")
+					outputPath := path
+					if location == "relative-output" {
+						cwd, err := os.Getwd()
+						if err != nil {
+							t.Fatal(err)
+						}
+						outputPath, err = filepath.Rel(cwd, path)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					args = []string{"--output", outputPath}
+				}
+				original := []byte("private-original")
+				if kind == "existing" {
+					if err := os.WriteFile(path, original, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Symlink(filepath.Join(home, "missing"), path); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := os.Symlink(filepath.Join(home, "missing"), path); err != nil {
-				t.Fatal(err)
-			}
-			var output bytes.Buffer
-			if err := runInstallConfigure(nil, strings.NewReader(""), &output, home, "eva", nil); err == nil || output.Len() != 0 {
-				t.Fatal("must reject existing outputs before asking questions")
-			}
-			if kind == "existing" {
-				contents, err := os.ReadFile(path)
-				if err != nil || !bytes.Equal(contents, original) {
-					t.Fatal("existing file changed")
+				var output bytes.Buffer
+				err := runInstallConfigure(args, strings.NewReader(""), &output, home, "eva", nil)
+				if err == nil || output.Len() != 0 {
+					t.Fatal("must reject existing outputs before asking questions")
 				}
-			}
-		})
+				if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "--output") {
+					t.Fatalf("existing file error must show the absolute path and alternative output option: %v", err)
+				}
+				if strings.Contains(err.Error(), string(original)) {
+					t.Fatal("existing file contents leaked to the error")
+				}
+				if kind == "existing" {
+					contents, err := os.ReadFile(path)
+					if err != nil || !bytes.Equal(contents, original) {
+						t.Fatal("existing file changed")
+					}
+				}
+			})
+		}
 	}
 }
 

@@ -866,7 +866,7 @@ func (session *fakeSession) Run(
 	)
 
 	if err := session.failures[command]; err != nil {
-		return "", err
+		return session.outputs[command], err
 	}
 
 	fixtureCommand := command

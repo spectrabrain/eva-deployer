@@ -111,10 +111,15 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	if flags.NArg() != 0 || *path == "" {
 		return errors.New("install configure accepts only --output FILE")
 	}
+	absolutePath, err := filepath.Abs(*path)
+	if err != nil {
+		return fmt.Errorf("resolve output location: %w", err)
+	}
+	*path = absolutePath
 	// Refuse before collecting any password. OpenFile(O_EXCL) checks again at
 	// publication time, including dangling symlinks and concurrent creators.
 	if _, err := os.Lstat(*path); err == nil {
-		return errors.New("설정 파일이 이미 있습니다. 기존 파일은 덮어쓰지 않습니다; --output으로 다른 위치를 지정하세요")
+		return fmt.Errorf("설정 파일이 이미 있습니다: %s\n기존 파일을 확인하거나 --output으로 다른 위치를 지정하세요. 기존 파일은 덮어쓰지 않습니다", *path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect output location: %w", err)
 	}

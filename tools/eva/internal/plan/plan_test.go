@@ -89,3 +89,34 @@ func TestWriteUsesOwnerOnlyPermissions(t *testing.T) {
 		t.Fatalf("plan permissions = %o, want 600", got)
 	}
 }
+
+func TestScopedStepsIntersectCLISelection(t *testing.T) {
+	resolved := workspace.Resolved{Config: workspace.Config{
+		Components: map[string]bool{"infra": true, "iam": true, "app": true, "agent": true},
+		TargetComponents: map[string]map[string]bool{
+			"infra-only":   {"infra": true},
+			"iam-app":      {"infra": true, "iam": true, "app": true, "agent": true},
+			"external-app": {"infra": true, "app": true},
+		},
+	}}
+	for component, want := range map[string][]string{
+		"app":   {"external-app", "iam-app"},
+		"iam":   {"iam-app"},
+		"agent": {"iam-app"},
+		"infra": {"external-app", "iam-app", "infra-only"},
+	} {
+		selected, err := resolved.SelectComponents([]string{component})
+		if err != nil {
+			t.Fatal(err)
+		}
+		document := Build(selected, release.Resolved{}, time.Now())
+		for _, step := range document.Steps {
+			if !reflect.DeepEqual(step.Targets, want) {
+				t.Fatalf("%s selection, %s targets = %v, want %v", component, step.Component, step.Targets, want)
+			}
+		}
+		if !resolved.Config.Components["app"] || !resolved.Config.Components["infra"] {
+			t.Fatal("component selection mutated source config")
+		}
+	}
+}

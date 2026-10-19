@@ -1,0 +1,28 @@
+# Local/Airgap 기본 틀. <...>는 필수 입력입니다. AWS credential을 넣지 않습니다.
+schema_version: v1
+site:
+  id: "<SITE_ID>" # 필수: 설치 환경 식별자. ex) customer-a
+repository:
+  mode: local
+  registry: "<HARBOR_HOST>:32080" # 필수: Local Harbor의 도달 가능한 IP/도메인. ex) 192.0.2.20:32080
+  project: eva
+components:
+  infra: true
+  iam: true
+  agent: true
+  vision: true
+  app: true
+  n8n: false
+targets:
+  server-a:
+    ansible:
+      ansible_connection: local
+      ansible_user: "<TARGET_USER>" # 필수: 대상 서버 사용자. ex) eva
+      ansible_become: true
+      ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호, passwordless sudo이면 제거. ex) demo-sudo-only (예시 전용)
+    values:
+      iam:
+        keycloak:
+          realmConfig:
+            substitutions:
+              EVA_IAM_ADMIN_EMAIL: "admin@eva.com" # 기본 관리자 이메일. 사이트 정책에 맞게 변경합니다.

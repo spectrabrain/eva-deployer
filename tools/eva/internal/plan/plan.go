@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"eva-deployer/tools/eva/internal/fieldoverride"
@@ -15,8 +16,9 @@ import (
 const SchemaVersion = "v1"
 
 type Step struct {
-	Component string `yaml:"component"`
-	Playbook  string `yaml:"playbook"`
+	Component string   `yaml:"component"`
+	Playbook  string   `yaml:"playbook"`
+	Targets   []string `yaml:"targets,omitempty"`
 }
 
 type Document struct {
@@ -53,12 +55,40 @@ func BuildWithOverrides(workspaceResolved workspace.Resolved, releaseResolved re
 		RepositoryMode:    workspaceResolved.AnsibleMode,
 		Repository:        config.Repository.Registry,
 		RepositoryProject: config.Repository.Project,
-		Steps:             steps(config.Components),
+		Steps:             scopedSteps(config),
 		AnsibleExtraVars:  workspaceResolved.AnsibleExtraVars(),
 		Environment:       workspaceResolved.Environment(),
 		Overrides:         overrides.Public(),
 		OverrideInputs:    overrides,
 	}
+}
+
+func scopedSteps(config workspace.Config) []Step {
+	result := steps(config.Components)
+	if len(config.TargetComponents) == 0 {
+		return result
+	}
+	scoped := make([]Step, 0, len(result))
+	for _, step := range result {
+		for name, components := range config.TargetComponents {
+			include := components[step.Component] && config.Components[step.Component]
+			if step.Component == "precondition" || step.Component == "config" {
+				for component, enabled := range components {
+					if enabled && config.Components[component] && (step.Component == "precondition" || component == "agent" || component == "vision" || component == "app") {
+						include = true
+					}
+				}
+			}
+			if include {
+				step.Targets = append(step.Targets, name)
+			}
+		}
+		if len(step.Targets) != 0 {
+			sort.Strings(step.Targets)
+			scoped = append(scoped, step)
+		}
+	}
+	return scoped
 }
 
 func Marshal(document Document) ([]byte, error) {

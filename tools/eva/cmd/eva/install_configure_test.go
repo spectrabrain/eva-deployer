@@ -1,0 +1,267 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"eva-deployer/tools/eva/internal/plan"
+	"eva-deployer/tools/eva/internal/release"
+	"eva-deployer/tools/eva/internal/workspace"
+	"gopkg.in/yaml.v3"
+)
+
+func configureTest(t *testing.T, answers string, passwords ...string) (workspace.Installer, string, string) {
+	t.Helper()
+	home := t.TempDir()
+	var messages bytes.Buffer
+	read := func() (string, error) {
+		if len(passwords) == 0 {
+			t.Fatal("unexpected password prompt")
+		}
+		value := passwords[0]
+		passwords = passwords[1:]
+		return value, nil
+	}
+	if err := runInstallConfigure(nil, strings.NewReader(answers), &messages, home, "eva", read); err != nil {
+		t.Fatal(err)
+	}
+	if len(passwords) != 0 {
+		t.Fatal("password prompt skipped")
+	}
+	path := filepath.Join(home, "eva-install.yaml")
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal("wizard did not create a private config in the current account's home")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var installer workspace.Installer
+	if err := yaml.Unmarshal(contents, &installer); err != nil {
+		t.Fatal(err)
+	}
+	return installer, messages.String(), path
+}
+
+func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
+	for choice, mode := range map[string]string{"1": "cloud", "2": "remote", "3": "local"} {
+		for _, scope := range []string{"1", "2"} {
+			t.Run(mode+"/scope-"+scope, func(t *testing.T) {
+				answers := choice + "\n"
+				if mode == "cloud" {
+					answers += "1\n"
+				}
+				answers += scope + "\n"
+				if scope == "2" {
+					answers += "2\n1\n1\n1\n" // HTTPS/shared/co-install/Agent+Vision
+				}
+				input, messages, path := configureTest(t, answers)
+				if input.Repository.Mode != mode || (input.Credentials.AWS != nil) != (mode == "cloud") {
+					t.Fatal("repository inputs do not follow the environment selection")
+				}
+				target := input.Targets["server-a"]
+				if len(input.Targets) != 1 || target.Ansible["ansible_connection"] != "local" || target.Ansible["ansible_user"] != "eva" {
+					t.Fatal("local install must target the current account and server only")
+				}
+				if target.Components["app"] != (scope == "2") || (len(target.Values) != 0) != (scope == "2") {
+					t.Fatal("infra-only sample retained solution components/values")
+				}
+				if !strings.Contains(messages, path) || !strings.Contains(messages, "workspace validate") || !strings.Contains(messages, "<UPPER_CASE>") {
+					t.Fatal("wizard lost completion instructions")
+				}
+				if scope == "1" && strings.Contains(messages, "Solution 접속 프로토콜") {
+					t.Fatal("infra-only selection must skip all solution questions")
+				}
+			})
+		}
+	}
+}
+
+func TestInstallConfigureMixedBastionTargets(t *testing.T) {
+	answers := strings.Join([]string{
+		"1", "2", // Cloud + Bastion
+		"infra-a", "192.0.2.10", "eva", "1", "1", // Infra-only, add another
+		"iam-app", "192.0.2.11", "eva", "2", // don't reuse Infra-only
+		"2", "2", "3", "1", "1", "1", // Solution/HTTPS/IP/co-install/Agent+Vision/add
+		"external-app", "192.0.2.12", "eva", "2", // different solution
+		"2", "1", "2", "2", "4", "2", // Solution/HTTP/separate/external/no extras/done
+	}, "\n") + "\n"
+	secrets := []string{"001 # ssh ' first", "private-second", "private-third"}
+	input, messages, path := configureTest(t, answers, secrets...)
+	for _, secret := range secrets {
+		if strings.Contains(messages, secret) {
+			t.Fatal("password leaked to wizard output")
+		}
+	}
+	if len(input.Targets) != 3 || len(input.Targets["infra-a"].Values) != 0 || input.Targets["external-app"].Components["iam"] {
+		t.Fatal("mixed scope/SSO selections were not preserved")
+	}
+	for index, name := range []string{"infra-a", "iam-app", "external-app"} {
+		vars := input.Targets[name].Ansible
+		if vars["ansible_connection"] != "ssh" || vars["ansible_password"] != secrets[index] || vars["ansible_become_password"] != secrets[index] || vars["ansible_ssh_private_key_file"] != nil {
+			t.Fatal("Bastion connection password contract changed")
+		}
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fill all required markers, including independently named per-target inputs.
+	var document yaml.Node
+	if err := yaml.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	var fill func(*yaml.Node)
+	fill = func(node *yaml.Node) {
+		if node.Kind == yaml.ScalarNode && strings.Contains(node.Value, "<TARGET_") {
+			node.Value = "filled-target-input"
+		}
+		for _, child := range node.Content {
+			fill(child)
+		}
+	}
+	fill(&document)
+	contents, err = yaml.Marshal(&document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, fillInstallerSample(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := workspace.Resolve(workspace.Options{ConfigFile: path, CacheRoot: filepath.Join(t.TempDir(), "cache")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := plan.Build(resolved, release.Resolved{}, time.Now())
+	for _, step := range draft.Steps {
+		want := []string{"external-app", "iam-app", "infra-a"}
+		switch step.Component {
+		case "config", "app":
+			want = []string{"external-app", "iam-app"}
+		case "iam", "agent", "vision":
+			want = []string{"iam-app"}
+		}
+		if !reflect.DeepEqual(step.Targets, want) {
+			t.Fatalf("%s targets = %v, want %v", step.Component, step.Targets, want)
+		}
+	}
+	public, err := plan.Marshal(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range secrets {
+		if strings.Contains(string(public), secret) {
+			t.Fatal("Bastion password leaked into Plan")
+		}
+	}
+}
+
+func TestInstallConfigureReusesOptionsNotConnections(t *testing.T) {
+	answers := "1\n2\nfirst\n192.0.2.10\neva\n2\n2\n1\n1\n4\n1\nsecond\n192.0.2.11\n\n1\n2\n"
+	input, messages, _ := configureTest(t, answers, "first-private", "second-private")
+	first, second := input.Targets["first"], input.Targets["second"]
+	if !reflect.DeepEqual(first.Components, second.Components) || second.Ansible["ansible_host"] != "192.0.2.11" || second.Ansible["ansible_password"] != "second-private" {
+		t.Fatal("reusing choices must not reuse target identity or credentials")
+	}
+	if strings.Count(messages, "Solution 접속 프로토콜") != 1 {
+		t.Fatal("reuse should not repeat all profile questions")
+	}
+}
+
+func TestInstallConfigureRejectsInvalidAndCancelledInputWithoutSaving(t *testing.T) {
+	for name, answers := range map[string]string{
+		"EOF":           "",
+		"after choices": "1\n2\nnode-a\n192.0.2.10\neva\n",
+		"control":       "\x1b\n",
+		"long line":     strings.Repeat("x", 4097) + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			var output bytes.Buffer
+			err := runInstallConfigure(nil, strings.NewReader(answers), &output, home, "eva", func() (string, error) { return "", errors.New("do-not-print-password") })
+			if err == nil || strings.Contains(err.Error(), "do-not-print-password") {
+				t.Fatal("cancelled input must fail without secret-bearing errors")
+			}
+			if _, err := os.Lstat(filepath.Join(home, "eva-install.yaml")); !os.IsNotExist(err) {
+				t.Fatal("cancelled wizard created a file")
+			}
+		})
+	}
+}
+
+func TestInstallConfigureRetriesInvalidChoicesAndTargetIdentity(t *testing.T) {
+	answers := "9\n1\n2\nall\nnode-a\nlocalhost\n127.0.0.1\n192.0.2.10\n-invalid-user\neva\n1\n1\nnode-a\nnode-b\n192.0.2.10\n192.0.2.11\n\n1\n2\n"
+	input, _, _ := configureTest(t, answers, "first-secret", "second-secret")
+	if len(input.Targets) != 2 || input.Targets["node-b"].Ansible["ansible_host"] != "192.0.2.11" {
+		t.Fatal("wizard did not reprompt for invalid/duplicate identity")
+	}
+}
+
+func TestInstallConfigureProtectsExistingFilesAndSymlinks(t *testing.T) {
+	for _, kind := range []string{"existing", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "eva-install.yaml")
+			original := []byte("private-original")
+			if kind == "existing" {
+				if err := os.WriteFile(path, original, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Symlink(filepath.Join(home, "missing"), path); err != nil {
+				t.Fatal(err)
+			}
+			var output bytes.Buffer
+			if err := runInstallConfigure(nil, strings.NewReader(""), &output, home, "eva", nil); err == nil || output.Len() != 0 {
+				t.Fatal("must reject existing outputs before asking questions")
+			}
+			if kind == "existing" {
+				contents, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(contents, original) {
+					t.Fatal("existing file changed")
+				}
+			}
+		})
+	}
+}
+
+func TestInstallConfigureDispatchHelpAndNonTTY(t *testing.T) {
+	if err := run([]string{"install", "configure", "--help"}); err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdin
+	file, err := os.CreateTemp(t.TempDir(), "input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	os.Stdin = file
+	t.Cleanup(func() { os.Stdin = previous })
+	if err := run([]string{"install", "configure"}); err == nil || !strings.Contains(err.Error(), "interactive terminal") {
+		t.Fatal("configure must not read passwords from redirected input or treat configure as a Release")
+	}
+}
+
+func TestInstallConfigureOutputOverride(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, "custom install's.yaml")
+	var output bytes.Buffer
+	if err := runInstallConfigure([]string{"--output", path}, strings.NewReader("1\n1\n1\n"), &output, home, "eva", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, "eva-install.yaml")); !os.IsNotExist(err) {
+		t.Fatal("--output also created the default path")
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal("override path was not created privately")
+	}
+	if !strings.Contains(output.String(), shellQuoteConfigurePath(path)) {
+		t.Fatal("completion command must shell-quote spaces and apostrophes")
+	}
+}

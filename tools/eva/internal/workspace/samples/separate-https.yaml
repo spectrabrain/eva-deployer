@@ -1,0 +1,42 @@
+# v3.3 대상 로컬 App/IAM 소스 기준.
+# 다른 도메인 + HTTPS: App /, IAM /. ex) https://app.eva.com/, https://iam.eva.com/
+# APP_HOST와 IAM_HOST는 서로 다른 도메인입니다. scheme, port, path 없이 작성합니다.
+iam:
+  config:
+    host: "<IAM_HOST>" # 필수: IAM 도메인. ex) iam.eva.com
+  keycloak:
+    realmPatch:
+      realmAdmin:
+        password: "<REALM_ADMIN_PASSWORD>" # 필수: IAM realm 관리자 비밀번호. ex) Demo-Realm-Only!42 (예시 전용)
+      evaApp:
+        redirectUris:
+          - "https://<APP_HOST>/*" # 필수: IAM이 아니라 App 도메인. ex) https://app.eva.com/*
+  ingress:
+    path: /
+    tls:
+      enabled: true
+      create: true
+      hostPath: "<IAM_TLS_CERT_DIRECTORY>" # 필수: 대상 서버의 IAM_HOST SAN 인증서 tls.crt + tls.key. ex) /etc/eva/iam-certs
+  redis:
+    tls:
+      enabled: true # HTTPS 구성에 맞춰 Redis TLS도 켭니다. IAM 인증서 Secret을 재사용합니다.
+    external:
+      enabled: true # 고정 기본 틀: Redis 외부 접속을 사용합니다.
+app:
+  ingress:
+    path: /
+    tls:
+      enabled: true
+      create: true
+      hostPath: "<APP_TLS_CERT_DIRECTORY>" # 필수: 대상 서버의 APP_HOST SAN 인증서 tls.crt + tls.key. ex) /etc/eva/app-certs
+  app:
+    backendHost: "<APP_HOST>" # 필수: App 도메인. ex) app.eva.com
+    backendSecure: true
+    backendSecurePort: 443 # HTTPS 외부 포트. 비표준 포트 사용 시 IAM redirectUris에도 동일하게 반영합니다.
+    browserTitleName: EVA # 선택: 브라우저 제목
+    # SSO baseUrl/adminClientSecret은 함께 설치하는 IAM에서 자동 전달됩니다.
+    license:
+      activation_mode: online
+      product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 승인된 license 제품 코드. ex) eva
+      api_key: "<LICENSE_API_KEY>" # 필수: 발급된 license API key. ex) demo-license-api-key (예시 전용)
+      shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 license shared key. ex) demo-license-shared-key (예시 전용)

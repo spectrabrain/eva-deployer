@@ -1,0 +1,12 @@
+app:
+  app:
+    sso:
+      brokerMode: false # 외부 SSO(IdP)를 IAM broker로 연동할 경우 true로 변경합니다. 외부 IAM 서버 사용 여부와는 별개입니다.
+      brokerIdpHint: "" # 외부 SSO 연동 시 IAM에 등록한 Identity Provider alias를 입력합니다. ex) company-sso
+      redis:
+        port: 32079 # IAM Redis 외부 NodePort. 실제 서버 설정에 맞춥니다.
+        db: 0
+        password: eva-redis-pass # 기본 구성값. IAM Redis와 동일하게 맞추고 운영 비밀번호로 변경합니다.
+        url: "" # 선택 override. 비우면 App이 SSO baseUrl의 host/TLS와 위 port/db/password로 URL을 조합합니다.
+        # Redis host 또는 TLS가 SSO baseUrl과 다르면 전체 redis:// 또는 rediss:// URL을 지정합니다.
+        # ex) rediss://:encoded-password@redis.eva.com:32079/0 (비밀번호 특수문자는 URL 인코딩)

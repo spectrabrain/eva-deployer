@@ -202,36 +202,36 @@ installer는 checksum과 Tool version을 검증한 뒤 이 게시 Release를 Cur
 파일을 수정하거나 일반 사용자가 inbox Release directory로 이동할 필요가 없습니다. 검증에
 실패하면 Main에서 다시 준비·게시합니다.
 
-## 8. [Target] Workspace 입력 준비
+## 8. [Target] 단일 설치 설정 준비
 
-Target의 site 입력은 Release 밖에 둡니다. Remote Target에는
-`credentials/aws_key.ini`를 만들지 않습니다.
+Target의 원하는 위치에 설치 설정 YAML 하나만 둡니다. Tool에 내장된 Remote 샘플을 꺼내고
+site, Main Harbor, 접속·TLS·license·IAM 값을 수정합니다. 기존 파일은 덮어쓰지 않습니다.
 
 ```bash
-mkdir -p /home/eva/site-remote-196/{inventory,site-values}
+eva install configure
 ```
 
-```text
-/home/eva/site-remote-196/
-├── inventory/
-│   └── inventory.ini
-└── site-values/
-    ├── site.yaml
-    ├── iam.yaml
-    └── app.yaml
-```
+sudo 없이 Target에서 실행하고 설치환경 **remote**를 고릅니다. 현재 Target의 Infra-only/Solution,
+HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 선택합니다. 결과는 사용자 홈의
+`eva-install.yaml`입니다. 기존 옵션/자동화용 `eva config sample --mode remote`도 유지합니다.
+이 기존 명령에서 IAM만 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
+App의 외부 SSO·Redis 연결값을 입력합니다. Target에서 IAM/Redis로의 내부망 접근이 필요합니다.
+샘플은 v3.3 대상 로컬 App/IAM 소스 기준입니다. HTTP도 입력 검증은 가능하지만 실제 설치에는
+Release Chart 전환과 Deployer TLS 실행 연동이 별도로 필요합니다. 기존 Release 설치는 HTTPS를
+선택합니다. 기존 `config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
+명시합니다. `--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
+제거하기 전에는 검증에 실패합니다.
 
-`site-values/site.yaml`에는 Main Harbor를 지정합니다.
+다음은 다른 도메인 + HTTPS 예시입니다. 동일 주소 틀은 IAM `/iam`, App `/`를 사용합니다.
 
 ```yaml
+schema_version: v1
 site:
-  id: site-remote-196
-
+  id: customer-a
 repository:
   mode: remote
-  registry: 10.159.57.172:32080
+  registry: harbor.example.com:32080
   project: eva
-
 components:
   infra: true
   iam: true
@@ -239,13 +239,66 @@ components:
   vision: true
   app: true
   n8n: false
+targets:
+  server-a:
+    ansible:
+      ansible_connection: local
+      ansible_user: eva
+      ansible_become: true
+      ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호. ex) demo-sudo-only (예시 전용)
+    values:
+      iam:
+        config:
+          host: iam.example.com
+        keycloak:
+          realmConfig:
+            substitutions:
+              EVA_IAM_ADMIN_EMAIL: "admin@eva.com"
+          realmPatch:
+            realmAdmin:
+              password: "<REALM_ADMIN_PASSWORD>" # 필수: realm 관리자 비밀번호. ex) Demo-Realm-Only!42 (예시 전용)
+            evaApp:
+              redirectUris:
+                - "https://app.example.com/*"
+        ingress:
+          tls:
+            enabled: true
+            create: true
+            hostPath: /etc/eva/certs
+        redis:
+          tls:
+            enabled: true # HTTPS 구성에 맞춰 IAM Redis TLS도 사용합니다.
+          external:
+            enabled: true
+      app:
+        ingress:
+          path: /
+          tls:
+            enabled: true
+            create: true
+            hostPath: /etc/eva/certs
+        app:
+          backendHost: app.example.com
+          backendSecure: true
+          backendSecurePort: 443
+          license:
+            activation_mode: online
+            product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 승인된 제품 코드. ex) eva
+            api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key. ex) demo-license-api-key (예시 전용)
+            shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key. ex) demo-license-shared-key (예시 전용)
 ```
 
-`inventory.ini`, `iam.yaml`, `app.yaml`에는 이 site에 승인된 inventory, TLS 및 제품
-입력을 둡니다. Secret은 승인된 관리 절차를 사용하며 Release나 source control에 넣지
-않습니다. Agent 또는 Vision chart override가 필요한 경우에만 해당 values 파일을
-추가합니다. Workspace에 repository-derived image override나 AWS/S3/ECR 설정을 넣지
-않습니다.
+TLS certificate/key는 target의 `hostPath`에 별도로 준비합니다. `targets`는 inventory alias별
+mapping이며 `ansible_host`를 지정하면 Deployer가 해당 주소를 기존 Values target key로
+자동 변환합니다. SSH private key의 상대 경로는 설정 파일 기준입니다.
+필요한 Agent/Vision Chart override만 `values.agent`/`values.vision`에 추가하고,
+GPU/MIG/profile과 repository-derived image 설정은 고정하지 않습니다.
+
+Remote/Local 설정의 `credentials.aws`는 거부됩니다. AWS/S3/ECR credential은 Main에만
+관리하며 Target 입력과 Release에 넣지 않습니다. 원본 설정과 내부 생성 Workspace는
+Secret이며 커밋하지 않습니다. Deployer가 내부 Workspace를
+`/var/lib/eva/workspaces/<site-id>/<content-sha256>/`에 생성하므로 폴더와 여러 파일을
+직접 만들 필요가 없습니다. 디렉터리 `0700`, 파일 `0600`이며 기존 `--workspace`도 지원합니다.
 
 ## 9. [Target] GPU 사전 조건 확인
 
@@ -266,7 +319,7 @@ k3s와 NVIDIA Device Plugin을 구성하며 이후 Config가 사용 가능한 GP
 
 ```bash
 sudo eva preflight argocd \
-  --workspace /home/eva/site-remote-196
+  --config /home/eva/eva-install.yaml
 ```
 
 발견된 관리 연결을 해제할지 묻는 경우 현재 상태와 승인 내용을 확인합니다. 거절하거나
@@ -278,14 +331,15 @@ artifact로 먼저 설치합니다.
 
 ## 11. [Target] EVA 설치
 
-Workspace와 게시된 Release를 검증한 뒤 설치를 실행합니다.
+단일 설정과 게시된 Release를 검증한 뒤 설치를 실행합니다. 설정 검증은 Workspace를 생성하지
+않으며 설치 시 검증된 snapshot을 생성·재사용합니다.
 
 ```bash
 sudo eva workspace validate \
-  --workspace /home/eva/site-remote-196
+  --config /home/eva/eva-install.yaml
 
 sudo eva install \
-  --workspace /home/eva/site-remote-196 \
+  --config /home/eva/eva-install.yaml \
   --yes
 ```
 
@@ -295,7 +349,7 @@ Current Release를 변경하지 않습니다.
 ```bash
 sudo eva verify --release /var/lib/eva/inbox/releases/<another-version>
 sudo eva install --release /var/lib/eva/inbox/releases/<another-version> \
-  --workspace /home/eva/site-remote-196 \
+  --config /home/eva/eva-install.yaml \
   --yes
 ```
 
@@ -319,12 +373,13 @@ Plugin readiness 및 workload의 할당 상태도 확인합니다. workload imag
 
 ## 13. 재실행 및 문제 해결
 
-안전한 입력 수정 후에는 동일 Release와 Workspace로 설치를 다시 실행하거나 실패한 작업을
-재시도합니다.
+입력 수정 후에는 동일 Release와 단일 설정으로 `install`을 다시 실행합니다. 설정이 바뀌면
+새 Workspace snapshot을 사용합니다. 입력 변경이 없는 실패는 `retry`로 재시도합니다.
+`retry`는 원래 snapshot을 사용하며 원본 YAML을 다시 읽지 않습니다.
 
 ```bash
 sudo eva install \
-  --workspace /home/eva/site-remote-196 \
+  --config /home/eva/eva-install.yaml \
   --yes
 
 sudo eva retry --yes

@@ -58,6 +58,7 @@ var (
 	runArgoCDHandoff                  = argoCDPreflightHandoff
 	defaultCurrentReleaseReceiptPath  = release.DefaultCurrentReceiptPath
 	defaultRemoteInboxRoot            = release.DefaultRemoteInboxRoot
+	defaultWorkspaceCacheRoot         = workspace.DefaultCacheRoot
 	currentReleaseNow                 = time.Now
 )
 
@@ -73,18 +74,17 @@ func usage() {
 	fmt.Println("EVA CLI")
 	fmt.Println("")
 	fmt.Println("Available commands:")
-	fmt.Println("  workspace validate [--site ID] [--workspace PATH]")
-	fmt.Println("  workspace show     [--site ID] [--workspace PATH]")
-	fmt.Println("  workspace ansible-vars [--site ID] [--workspace PATH]")
-	fmt.Println("  workspace env      [--site ID] [--workspace PATH]")
+	fmt.Println("  config sample [--mode cloud|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE]")
+	fmt.Println("  workspace <validate|show|ansible-vars|env> [--config FILE | --site ID | --workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
 	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
 	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET")
 	fmt.Println("  remote target list | <add|verify> NAME | remove NAME [--yes]")
 	fmt.Println("  remote prepare [RELEASE_PATH] [--registry HOST[:PORT]]")
 	fmt.Println("  remote verify [RELEASE_PATH] [--registry HOST[:PORT]]")
-	fmt.Println("  install [--release PATH|RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
-	fmt.Println("  plan [RELEASE_PATH] --site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
+	fmt.Println("  install configure [--output FILE]  (interactive installer scaffold; defaults to $HOME/eva-install.yaml)")
+	fmt.Println("  install [--release PATH|RELEASE_PATH] --config FILE|--site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--yes]")
+	fmt.Println("  plan [RELEASE_PATH] --config FILE|--site ID|--workspace PATH [--component NAME] [--chart COMPONENT=PATH] [--values COMPONENT=PATH] [--set COMPONENT:KEY=VALUE] [--output PATH | --save]")
 	fmt.Println("  apply [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
@@ -100,6 +100,7 @@ func usage() {
 	fmt.Println("  help")
 	fmt.Println("")
 	fmt.Println("Without --workspace, --site resolves /etc/eva/sites/<site-id>.")
+	fmt.Println("--config accepts one private installer YAML and generates a managed Workspace.")
 	fmt.Println("Install orchestration and Runtime bootstrap are added incrementally.")
 }
 
@@ -135,6 +136,8 @@ func run(args []string) error {
 	case "help", "--help", "-h":
 		usage()
 		return nil
+	case "config":
+		return runConfig(args[1:])
 	case "workspace":
 		return runWorkspace(args[1:])
 	case "release":
@@ -941,6 +944,7 @@ func runWorkspace(args []string) error {
 	flags.SetOutput(os.Stderr)
 	siteID := flags.String("site", "", "site identifier")
 	root := flags.String("workspace", "", "workspace path")
+	configFile := flags.String("config", "", "single installer YAML file (0600)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -948,7 +952,21 @@ func runWorkspace(args []string) error {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 
-	resolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root})
+	if command != "validate" && command != "show" && command != "ansible-vars" && command != "env" {
+		return fmt.Errorf("unknown workspace command %q", command)
+	}
+	if *configFile != "" && command == "validate" {
+		if *root != "" {
+			return errors.New("use either --config or --workspace, not both")
+		}
+		input, err := workspace.LoadInstaller(*configFile, *siteID)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("installer config is valid (site=%s, mode=%s); no Workspace was written\n", input.Site.ID, input.Repository.Mode)
+		return nil
+	}
+	resolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
 	if err != nil {
 		return err
 	}
@@ -973,10 +991,11 @@ func runWorkspace(args []string) error {
 }
 
 func workspaceUsage() {
-	fmt.Println("Usage: eva workspace <validate|show|ansible-vars|env> [--site ID] [--workspace PATH]")
+	fmt.Println("Usage: eva workspace <validate|show|ansible-vars|env> [--config FILE | --site ID | --workspace PATH]")
 	fmt.Println("")
 	fmt.Println("--site selects /etc/eva/sites/<site-id> when --workspace is not set.")
 	fmt.Println("An external --workspace must contain site-values/site.yaml.")
+	fmt.Println("--config validates one installer YAML; validate writes nothing, other commands generate a private Workspace.")
 }
 
 func runRelease(args []string) error {
@@ -1081,6 +1100,9 @@ func releaseEnvironment(resolved release.Resolved) map[string]string {
 }
 
 func runInstall(args []string) error {
+	if len(args) != 0 && args[0] == "configure" {
+		return runInstallConfigureCommand(args[1:])
+	}
 	normalizedArgs, err := normalizeInstallArgs(args)
 	if err != nil {
 		return err
@@ -1089,6 +1111,7 @@ func runInstall(args []string) error {
 	flags.SetOutput(os.Stderr)
 	siteID := flags.String("site", "", "site identifier")
 	workspaceRoot := flags.String("workspace", "", "workspace path")
+	configFile := flags.String("config", "", "single installer YAML file (0600)")
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	installRoot := flags.String("install-root", release.DefaultInstallRoot, "prepared Release installation directory")
 	artifactRoot := flags.String("artifact-root", release.DefaultArtifactRoot, "Airgap artifact cache directory")
@@ -1115,7 +1138,7 @@ func runInstall(args []string) error {
 		*releaseInput = flags.Arg(0)
 	}
 
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot})
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
 	if err != nil {
 		return err
 	}
@@ -1252,7 +1275,7 @@ func offlineRepositoryMode(repositoryMode string) bool {
 
 func normalizeInstallArgs(args []string) ([]string, error) {
 	return normalizeCommandArgs(args, map[string]bool{
-		"--site": true, "--workspace": true, "--release": true, "--install-root": true,
+		"--site": true, "--workspace": true, "--config": true, "--release": true, "--install-root": true,
 		"--artifact-root": true, "--state-root": true, "--log-root": true, "--runtime-root": true,
 		"--component": true,
 		"--chart":     true, "--values": true, "--set": true,
@@ -1261,7 +1284,7 @@ func normalizeInstallArgs(args []string) ([]string, error) {
 
 func normalizePlanArgs(args []string) ([]string, error) {
 	return normalizeCommandArgs(args, map[string]bool{
-		"--site": true, "--workspace": true, "--release": true, "--output": true,
+		"--site": true, "--workspace": true, "--config": true, "--release": true, "--output": true,
 		"--state-root": true, "--component": true, "--chart": true, "--values": true, "--set": true,
 	}, "plan")
 }
@@ -1333,6 +1356,7 @@ func runPlan(args []string) error {
 	flags.SetOutput(os.Stderr)
 	siteID := flags.String("site", "", "site identifier")
 	root := flags.String("workspace", "", "workspace path")
+	configFile := flags.String("config", "", "single installer YAML file (0600)")
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	output := flags.String("output", "", "write the plan to this path")
 	save := flags.Bool("save", false, "save the plan as an operation")
@@ -1359,7 +1383,7 @@ func runPlan(args []string) error {
 		*releaseInput = flags.Arg(0)
 	}
 
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root})
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
 	if err != nil {
 		return err
 	}
@@ -1559,7 +1583,7 @@ type gpuPreflight struct {
 func runPreflight(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
 		fmt.Println("Usage: eva preflight gpu")
-		fmt.Println("       eva preflight argocd --site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
+		fmt.Println("       eva preflight argocd --config FILE|--site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 		return nil
 	}
 	if args[0] == "argocd" {
@@ -1596,6 +1620,7 @@ func runArgoCDPreflight(args []string) error {
 	flags.SetOutput(os.Stderr)
 	siteID := flags.String("site", "", "site identifier")
 	workspaceRoot := flags.String("workspace", "", "workspace path")
+	configFile := flags.String("config", "", "single installer YAML file (0600)")
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	installRoot := flags.String("install-root", release.DefaultInstallRoot, "prepared Release installation directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
@@ -1608,7 +1633,7 @@ func runArgoCDPreflight(args []string) error {
 			strings.Join(flags.Args(), " "),
 		)
 	}
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot})
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
 	if err != nil {
 		return err
 	}

@@ -24,8 +24,10 @@ var ansibleRepositoryModes = map[string]string{
 }
 
 type Options struct {
-	SiteID    string
-	Workspace string
+	SiteID     string
+	Workspace  string
+	ConfigFile string
+	CacheRoot  string
 }
 
 type Config struct {
@@ -38,6 +40,8 @@ type Config struct {
 		Project  string `yaml:"project"`
 	} `yaml:"repository"`
 	Components map[string]bool `yaml:"components"`
+	// Generated scope metadata contains aliases and switches only, never credentials.
+	TargetComponents map[string]map[string]bool `yaml:"target_components,omitempty"`
 }
 
 type Resolved struct {
@@ -51,6 +55,16 @@ type Resolved struct {
 func Resolve(options Options) (Resolved, error) {
 	if err := validateRequestedSiteID(options.SiteID); err != nil {
 		return Resolved{}, err
+	}
+	if options.ConfigFile != "" {
+		if options.Workspace != "" {
+			return Resolved{}, errors.New("use either --config or --workspace, not both")
+		}
+		input, err := LoadInstaller(options.ConfigFile, options.SiteID)
+		if err != nil {
+			return Resolved{}, err
+		}
+		return input.Materialize(options.CacheRoot)
 	}
 
 	root, err := resolveRoot(options)
@@ -78,11 +92,17 @@ func Resolve(options Options) (Resolved, error) {
 }
 
 func (resolved Resolved) AnsibleExtraVars() []string {
+	enabled := selectedComponents(resolved.Config.Components)
+	if len(resolved.Config.TargetComponents) != 0 {
+		// Extra vars outrank host vars: intersect the global CLI selection with
+		// each target's scope lazily in Ansible, rather than replacing host scope.
+		enabled = "{{ (eva_target_enabled_components | default('" + enabled + "')).split(',') | intersect('" + enabled + "'.split(',')) | sort | join(',') }}"
+	}
 	values := []string{
 		"eva_workspace_root=" + resolved.Root,
 		"eva_site_id=" + resolved.SiteID,
 		"repository_mode=" + resolved.AnsibleMode,
-		"eva_enabled_components=" + selectedComponents(resolved.Config.Components),
+		"eva_enabled_components=" + enabled,
 	}
 	if registry := resolved.Config.Repository.Registry; registry != "" {
 		values = append(values, "repository_registry="+registry)
@@ -139,7 +159,7 @@ func (resolved Resolved) SelectComponents(requested []string) (Resolved, error) 
 			return Resolved{}, fmt.Errorf("component %q was selected more than once", name)
 		}
 		if !components[name] {
-			return Resolved{}, fmt.Errorf("component %q is not enabled in site-values/site.yaml", name)
+			return Resolved{}, fmt.Errorf("component %q is not enabled in site configuration", name)
 		}
 		selected[name] = true
 	}
@@ -172,7 +192,7 @@ func resolveRoot(options Options) (string, error) {
 		return root, nil
 	}
 	if options.SiteID == "" {
-		return "", errors.New("--site is required unless --workspace points to a workspace containing site-values/site.yaml")
+		return "", errors.New("provide --config FILE, --site ID, or --workspace PATH containing site-values/site.yaml")
 	}
 	return filepath.Join(DefaultRoot, options.SiteID), nil
 }
@@ -200,7 +220,7 @@ func loadConfig(path string) (Config, error) {
 
 func validateConfig(config Config, requestedSiteID string) error {
 	if config.Site.ID == "" {
-		return errors.New("site.id is required in site-values/site.yaml")
+		return errors.New("site.id is required in site configuration")
 	}
 	if err := validateRequestedSiteID(config.Site.ID); err != nil {
 		return err
@@ -230,6 +250,28 @@ func validateConfig(config Config, requestedSiteID string) error {
 	}
 	if !selected {
 		return errors.New("at least one component must be enabled in components")
+	}
+	for name, components := range config.TargetComponents {
+		if !siteIDPattern.MatchString(name) || name == "all" || name == "ungrouped" || name == "eva" {
+			return errors.New("target_components contains an unsafe inventory alias")
+		}
+		if err := validateTargetComponents(name, components, config.Components); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateTargetComponents(name string, components, global map[string]bool) error {
+	selected := false
+	for component, enabled := range components {
+		if !validComponent(component) || (enabled && !global[component]) {
+			return fmt.Errorf("target %s components must be a subset of enabled global components", name)
+		}
+		selected = selected || enabled
+	}
+	if !selected {
+		return fmt.Errorf("target %s requires at least one enabled component", name)
 	}
 	return nil
 }

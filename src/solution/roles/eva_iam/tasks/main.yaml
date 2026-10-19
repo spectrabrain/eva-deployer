@@ -486,7 +486,7 @@
     name: eva_traefik_tls
   vars:
     eva_traefik_tls_host: "{{ eva_iam_effective_host }}"
-    eva_traefik_tls_host_path: "{{ eva_iam_tls_host_path }}"
+    eva_traefik_tls_host_path: "{{ eva_iam_effective_user_values.ingress.tls.hostPath | default(eva_iam_tls_host_path) }}"
     eva_traefik_tls_kubeconfig: "{{ eva_iam_kubeconfig }}"
   when: not ansible_check_mode
 

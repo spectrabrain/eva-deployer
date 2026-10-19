@@ -6,6 +6,46 @@ vision은 같은 bundle·Harbor 준비 절차를 사용합니다.
 
 호스트가 두 개라는 점이 이 작업의 핵심입니다.
 
+## 단일 설정 파일로 CLI 설치
+
+검증된 Release/Airgap Bundle, Local Harbor와 설치 자산을 준비한 환경에서는 Workspace를
+수동 작성하지 않고 단일 설정으로 설치할 수 있습니다. 아래 상세 수동 Ansible 절차와
+CLI 설치를 같은 작업에서 섞지 않습니다.
+
+```bash
+eva install configure
+```
+
+sudo 없이 실행하여 설치환경 **local**을 고릅니다. 현재 Target의 Infra-only/Solution,
+HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 고릅니다. 기본 결과는 사용자 홈의
+`eva-install.yaml`입니다. 외부 IAM은 App의 SSO·Redis 연결값을 파일에서 입력합니다.
+기존 옵션/자동화용 `eva config sample --mode local --iam external --protocol https`도 유지합니다.
+이 경우 IAM 설치와 Values는 제외되며 내부망에서 기존 IAM/Redis까지 도달할 수 있어야 합니다. 샘플은
+v3.3 대상 로컬 App/IAM 소스 기준입니다. HTTP도 입력 검증은 가능하지만 실제 설치에는 Release
+Chart 전환과 Deployer TLS 실행 연동이 별도로 필요합니다. 기존 Release 설치는 HTTPS를 선택합니다.
+기존 `config sample`의 메뉴 생략은 `--address shared|separate --protocol https`로 지정합니다.
+파일은 `0600`으로 생성하며 덮어쓰지 않습니다. `<...>` 필수 입력이 남으면 검증이 중단됩니다.
+
+샘플의 `site.id`, `repository.registry`를 대상 site와 Local Harbor의 도달 가능한
+`host:port`로 바꾸고, `targets.server-a.ansible`에 local/SSH 접속·sudo 정보를,
+`targets.server-a.values.iam`과 `values.app`에 승인된 TLS·IAM·license 값을 작성합니다.
+인증서/key는 target의 `ingress.tls.hostPath`에 따로 준비합니다. Agent/Vision override가
+필요할 때만 `values.agent`/`values.vision`을 추가합니다. Cloud용 `credentials.aws`는
+Local 입력에서 거부되며 AWS credential을 대상에 복사하지 않습니다.
+
+```bash
+sudo eva workspace validate --config /home/eva/eva-install.yaml
+sudo eva install --release /path/to/verified-release-or-airgap-bundle \
+  --config /home/eva/eva-install.yaml --yes
+```
+
+검증 명령은 파일을 생성하지 않습니다. 설치는 private Workspace snapshot을
+`/var/lib/eva/workspaces/<site-id>/<content-sha256>/`에 생성하며 내부 Ansible은 기존
+Workspace 계약을 그대로 사용합니다. 설정 수정 후에는 `install --config`를 다시 실행하고,
+입력 변경 없는 실패는 `sudo eva retry --yes`로 원래 snapshot을 재사용합니다.
+Secret이 포함된 원본 설정과 생성 Workspace는 커밋하거나 Release/Bundle에 넣지 않습니다.
+기존 `--workspace`와 아래 수동 설치 절차는 호환 경로로 유지합니다.
+
 | 표기 | 의미 |
 |---|---|
 | **[준비]** | 인터넷 · docker · helm · ECR 자격증명이 되는 서버. bundle 을 만듭니다 |

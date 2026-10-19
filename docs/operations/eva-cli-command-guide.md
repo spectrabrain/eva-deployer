@@ -6,7 +6,7 @@
 [Local](../installation/local-repository-runbook.md) Runbook을 따른다.
 이 문서는 현재 소스에 구현된 명령을 기준으로 하며, 기존 설치 binary에는 새 명령이 없을 수 있다.
 `eva version`과 `eva help`로 설치된 Tool의 버전과 지원 명령을 먼저 확인한다.
-새 `inspect` 명령을 현장에서 사용하려면 이 변경이 포함된 Tool을 빌드·배포해야 한다.
+새 `inspect`, `install configure`, `config sample`, `--config`를 현장에서 사용하려면 해당 변경이 포함된 Tool을 빌드·배포해야 한다.
 
 ## 1. 가장 자주 쓰는 조회
 
@@ -180,6 +180,10 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | --- | --- | --- |
 | `eva version` | Tool 버전·commit·build date | 조회 |
 | `eva help` | 공개 명령 목록 | 조회 |
+| `eva install configure [--output FILE]` | 환경·Cloud Bastion·타겟별 설치 옵션 질문 후 사용자 홈에 private YAML 생성 | 로컬 파일 생성 |
+| `eva config sample --mode cloud` | mode별 단일 설치 설정 샘플 출력 | 조회 |
+| `eva config sample --mode remote --output FILE` | 주소/프로토콜 선택 후 private 샘플 저장 | 로컬 파일 생성 |
+| `eva install --config FILE` | private YAML을 내부 Workspace로 변환해 설치 | 변경 |
 | `eva install [RELEASE_PATH] --site ID` | Workspace와 Release로 설치 | 변경 |
 | `eva install --workspace PATH` | 명시적 Workspace로 설치 | 변경 |
 | `eva plan --release PATH --workspace PATH` | Plan YAML 출력, 설치하지 않음 | 조회 |
@@ -190,6 +194,35 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva status [OPERATION_ID]` | Operation 상태와 경로 조회 | 조회 |
 | `eva check [--verbose]` | 관리 Runtime, 설치 상태와 실제 서비스 점검 | 조회 |
 | `eva inspect ...` | 저장된 설정·결과·로그 조회 | 조회 |
+
+일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Cloud/Remote/Local → Cloud 현재 서버/Bastion →
+타겟별 Infra-only/Solution·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
+Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입력하며 sudo도 같은 비밀번호를 쓴다.
+다음 타겟은 이전 설치 옵션을 재사용하거나 별도로 고른다. 서비스 주소/Secret은 복사하지 않는다.
+기본 결과는 사용자 홈의 `eva-install.yaml`(`0600`)이며, 필수 입력을 채우라는 안내만 하고 설치하지 않는다.
+기존 파일은 덮어쓰지 않으며 `--output FILE`로 다른 위치를 고른다. 타겟별 컴포넌트 선택은 Plan의
+Ansible `--limit`에 보존된다. Bastion은 설치 대상이 아니고 타겟의 Cloud 접근이 별도로 필요하다.
+기존 `eva check`/`preflight gpu`는 실행 서버 기준이지 원격 타겟 일괄 검사 명령이 아니다.
+
+설치 입력을 파일 하나로 관리하려면 `--config FILE`을 사용한다. 옵션/자동화용 Cloud/Remote/Local 샘플은
+`eva config sample --mode cloud|remote|local`로 얻으며 원본 설정은 `0600`으로 관리한다.
+터미널에서는 IAM 함께 설치/외부 IAM 연동을 먼저 선택하고 함께 설치인 경우 주소 구성도 고른다.
+`--iam external --protocol https`는 IAM 설치를 끄고 App에 외부 IAM·client·Redis 연결값을 입력하는 틀을 만든다.
+외부 모드에서 `--protocol`은 App에만 적용되고 IAM/Redis 연결은 독립적이다. `--address shared`는 사용하지 않는다.
+App SSO의 `brokerMode: false`, `brokerIdpHint: ""`은 외부 IdP broker 연동 시 true와 alias로 변경한다.
+Redis는 `port: 32079`, `db: 0`, `password: eva-redis-pass`를 실제 IAM과 맞추며 `url`은 선택 override이다.
+빈 URL은 App 런타임이 SSO baseUrl의 host/TLS와 Redis 필드로 조합한다.
+`--address shared|separate --protocol https`로 질문을 생략할 수 있고 `--non-interactive` 또는
+비TTY 입력의 기본값은 `install`/`separate`/`https`이다. `--output FILE`은 기존 파일을 덮어쓰지 않는다.
+샘플은 v3.3 대상 로컬 App/IAM 소스 기준이다. HTTP도 입력 검증은 가능하지만 실제 설치에는
+Release Chart 전환과 Deployer TLS SAN/TLSStore 실행 연동이 별도로 필요하다. 기존 Release는 HTTPS를 쓴다.
+`<...>` 필수 입력 옆에는 예시 주석이 있으며 모두 실제 값으로 교체해야 한다.
+미입력은 Secret 값 대신 필드 경로로 안내한다.
+`--config`는 install/plan, `preflight argocd`, Workspace 명령에 적용되고 `--workspace`와
+동시에 사용하지 않는다. `workspace validate --config`는 입력만 검사한다. 그 외 명령은
+private 관리 Workspace를 생성할 수 있으며 `plan --config`도 예외가 아니다.
+설정 수정 후에는 새 install을 시작하고 retry는 이전 snapshot을 사용한다.
+전체 schema와 수명 규칙은 [단일 설치 설정](../installation/single-file-configuration.md)을 참고한다.
 
 `--workspace` 생략 시 `--site ID`는 `/etc/eva/sites/<ID>`를 선택한다.
 Site 입력의 component는 `infra`, `iam`, `agent`, `vision`, `app`, `n8n`이다.
@@ -227,6 +260,7 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 | `eva release env [--release PATH \| PATH]` | Release 환경변수 표시 |
 | `eva release prepare --release PATH [--install-root PATH]` | 검증 Release를 실행 소스로 추출 |
 | `eva release import-airgap --bundle PATH [--artifact-root PATH]` | Airgap Bundle 검증·반입 |
+| `eva workspace validate --config FILE` | 단일 설정 검증; Workspace 생성 없음 |
 | `eva workspace validate --site ID \| --workspace PATH` | Site 입력 검증 |
 | `eva workspace show --site ID \| --workspace PATH` | Workspace 경로·모드·component 표시 |
 | `eva workspace ansible-vars --site ID \| --workspace PATH` | Ansible 전달 변수 표시 |

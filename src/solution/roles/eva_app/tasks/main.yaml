@@ -747,7 +747,7 @@
     name: eva_traefik_tls
   vars:
     eva_traefik_tls_host: "{{ eva_app_effective_values.app.backendHost | default(eva_app_backend_host) }}"
-    eva_traefik_tls_host_path: "{{ eva_app_tls_host_path }}"
+    eva_traefik_tls_host_path: "{{ eva_app_effective_values.ingress.tls.hostPath | default(eva_app_tls_host_path) }}"
     eva_traefik_tls_kubeconfig: "{{ eva_app_kubeconfig }}"
   when: not ansible_check_mode
 

@@ -95,6 +95,40 @@ func TestExecuteStopsAfterFailedStep(t *testing.T) {
 	}
 }
 
+func TestExecuteAndRetryPreserveTargetLimits(t *testing.T) {
+	stateRoot := t.TempDir()
+	record := createOperation(t, stateRoot, createWorkspace(t), createReleaseSource(t, ""), []plan.Step{
+		{Component: "iam", Playbook: expectedPlaybooks["iam"], Targets: []string{"iam-a", "iam-b"}},
+		{Component: "app", Playbook: expectedPlaybooks["app"], Targets: []string{"app-a"}},
+	})
+	// Retry copies the persisted Plan, not the current editable config.
+	record.Status = operation.Failed
+	if err := operation.Update(stateRoot, record); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := operation.Retry(stateRoot, record, fixedClock()())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if _, err := Execute(Options{StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: createRuntime(t), Stdout: &output, Stderr: &output}, retried); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "--limit iam-a,iam-b") || !strings.Contains(output.String(), "--limit app-a") {
+		t.Fatal("apply/retry lost per-step target limits")
+	}
+}
+
+func TestExecuteRejectsTargetPatterns(t *testing.T) {
+	for _, target := range []string{"all", "eva", "node-a:all", "*", "node-a,node-b", "!node-a", "node-a\n"} {
+		stateRoot := t.TempDir()
+		record := createOperation(t, stateRoot, createWorkspace(t), createReleaseSource(t, ""), []plan.Step{{Component: "app", Playbook: expectedPlaybooks["app"], Targets: []string{target}}})
+		if _, err := Execute(Options{StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: createRuntime(t)}, record); err == nil {
+			t.Fatalf("unsafe target pattern accepted: %q", target)
+		}
+	}
+}
+
 func TestRunPreconditionRunsOnlyPreconditionWithoutOperationState(t *testing.T) {
 	workspace := createWorkspace(t)
 	releaseRoot := createReleaseSource(t, "")

@@ -37,6 +37,9 @@ workspace/site-values/*
 
 *.ini
 
+# Default single-file installer inputs contain site credentials.
+eva-install*.yaml
+
 # Deployment-specific EVA App host values (contains license credentials)
 values/app.yaml
 workspace/site-values/app.yaml

@@ -25,6 +25,8 @@ app_install_line="$(grep -n -m1 'Install EVA App from online Helm repo' "$app_ta
 [[ -n "$iam_include_line" && -n "$iam_install_line" && "$iam_include_line" -lt "$iam_install_line" ]]
 [[ -n "$app_include_line" && -n "$app_install_line" && "$app_include_line" -lt "$app_install_line" ]]
 grep -Fq 'eva_app_effective_values.app.backendHost' "$app_tasks"
+grep -Fq 'eva_app_effective_values.ingress.tls.hostPath | default(eva_app_tls_host_path)' "$app_tasks"
+grep -Fq 'eva_iam_effective_user_values.ingress.tls.hostPath | default(eva_iam_tls_host_path)' "$iam_tasks"
 
 # IAM-to-App handoff must follow the same public URL contract as the IAM chart:
 # explicit publicUrl wins, otherwise the scheme follows effective ingress TLS.

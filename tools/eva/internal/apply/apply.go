@@ -14,6 +14,7 @@ import (
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
 	"eva-deployer/tools/eva/internal/runtime"
+	"eva-deployer/tools/eva/internal/workspace"
 )
 
 const DefaultLogRoot = "/var/log/eva/operations"
@@ -55,6 +56,12 @@ func RunPrecondition(options Options, document plan.Document) (string, error) {
 	}
 	preconditionDocument := document
 	preconditionDocument.Steps = []plan.Step{{Component: "precondition", Playbook: expectedPlaybooks["precondition"]}}
+	for _, step := range document.Steps {
+		if step.Component == "precondition" {
+			preconditionDocument.Steps[0].Targets = step.Targets
+			break
+		}
+	}
 	resolvedRuntime, inventory, releaseRoot, err := preflight(options.RuntimeRoot, preconditionDocument)
 	if err != nil {
 		return "", err
@@ -63,7 +70,11 @@ func RunPrecondition(options Options, document plan.Document) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	command := exec.Command(ansiblePath, ansibleArgs(inventory, filepath.Join(releaseRoot, expectedPlaybooks["precondition"]), document.AnsibleExtraVars, "")...)
+	args := ansibleArgs(inventory, filepath.Join(releaseRoot, expectedPlaybooks["precondition"]), document.AnsibleExtraVars, "")
+	if targets := preconditionDocument.Steps[0].Targets; len(targets) != 0 {
+		args = append(args, "--limit", strings.Join(targets, ","))
+	}
+	command := exec.Command(ansiblePath, args...)
 	command.Dir = releaseRoot
 	command.Env = commandEnvironment(document, releaseRoot, "", resolvedRuntime)
 	command.Stdout = options.Stdout
@@ -145,7 +156,11 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 	result := operation.Result{Status: operation.Running, StartedAt: startedAt}
 	for _, step := range document.Steps {
 		stepStartedAt := options.Now().UTC()
-		command := exec.Command(ansiblePath, ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars, overrideVars[step.Component])...)
+		args := ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars, overrideVars[step.Component])
+		if len(step.Targets) != 0 {
+			args = append(args, "--limit", strings.Join(step.Targets, ","))
+		}
+		command := exec.Command(ansiblePath, args...)
 		command.Dir = releaseRoot
 		command.Env = commandEnvironment(
 			document,
@@ -197,6 +212,13 @@ func preflight(runtimeRoot string, document plan.Document) (runtime.Resolved, st
 		expected, ok := expectedPlaybooks[step.Component]
 		if !ok || step.Playbook != expected {
 			return runtime.Resolved{}, "", "", fmt.Errorf("operation plan has invalid step %q (%s)", step.Component, step.Playbook)
+		}
+		seen := make(map[string]bool)
+		for _, target := range step.Targets {
+			if workspace.ValidateConfigureTargetName(target) != nil || seen[target] {
+				return runtime.Resolved{}, "", "", errors.New("operation step targets must be distinct literal inventory aliases")
+			}
+			seen[target] = true
 		}
 		playbook, err := playbookPath(releaseRoot, step.Playbook)
 		if err != nil {

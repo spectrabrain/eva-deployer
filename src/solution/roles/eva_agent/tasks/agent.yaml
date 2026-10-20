@@ -83,6 +83,15 @@
     eva_agent_image_tag: "{{ eva_agent_deploy_version }}"
   when: eva_agent_image_tag | length == 0
 
+- name: Preserve existing EVA Agent Helm user Values
+  ansible.builtin.include_role:
+    name: eva_helm_values_backup
+  vars:
+    eva_helm_backup_namespace: "{{ eva_agent_namespace }}"
+    eva_helm_backup_release: eva-agent
+    eva_helm_backup_component: agent
+    eva_helm_backup_kubeconfig: "{{ eva_agent_kubeconfig }}"
+
 - name: Ensure EVA Agent workspace exists
   ansible.builtin.file:
     path: "{{ item }}"

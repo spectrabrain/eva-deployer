@@ -187,6 +187,15 @@
                    ~ (ansible_host | default(inventory_hostname)) ~ '/iam') }}
     eva_iam_values_dest: "{{ (eva_iam_workdir | default(eva_iam_base_dir)) ~ '/eva-iam-host-override.yaml' }}"
 
+- name: Preserve existing EVA IAM Helm user Values
+  ansible.builtin.include_role:
+    name: eva_helm_values_backup
+  vars:
+    eva_helm_backup_namespace: "{{ eva_iam_namespace }}"
+    eva_helm_backup_release: "{{ eva_iam_name }}"
+    eva_helm_backup_component: iam
+    eva_helm_backup_kubeconfig: "{{ eva_iam_kubeconfig }}"
+
 - name: Ensure EVA IAM workspace exists on target
   ansible.builtin.file:
     path: "{{ eva_iam_workdir }}"

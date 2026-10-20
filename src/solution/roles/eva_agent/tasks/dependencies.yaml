@@ -228,6 +228,22 @@
       }}
     eva_agent_vllm_router_image_tag: "{{ eva_agent_vllm_router_image_tag | default('v0.1.10') }}"
 
+- name: Preserve existing EVA Agent dependency Helm user Values
+  ansible.builtin.include_role:
+    name: eva_helm_values_backup
+  vars:
+    eva_helm_backup_namespace: "{{ eva_agent_namespace }}"
+    eva_helm_backup_release: "{{ eva_helm_backup_dependency.release }}"
+    eva_helm_backup_component: "{{ eva_helm_backup_dependency.component }}"
+    eva_helm_backup_kubeconfig: "{{ eva_agent_kubeconfig }}"
+  loop:
+    - {release: eva-agent-init, component: agent-init}
+    - {release: eva-agent-qdrant, component: qdrant}
+    - {release: eva-agent-vllm, component: vllm}
+  loop_control:
+    loop_var: eva_helm_backup_dependency
+    label: "{{ eva_helm_backup_dependency.release }}"
+
 - name: Detect local disk mount candidates from facts
   ansible.builtin.set_fact:
     eva_agent_supported_vllm_profiles:

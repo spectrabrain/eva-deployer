@@ -19,6 +19,7 @@ import (
 
 	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/apt"
+	"eva-deployer/tools/eva/internal/backup"
 	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/health"
 	"eva-deployer/tools/eva/internal/inspect"
@@ -89,6 +90,7 @@ func usage() {
 	fmt.Println("  retry [--yes] [--state-root PATH] [--log-root PATH] [--runtime-root PATH] [OPERATION_ID]")
 	fmt.Println("  status [--state-root PATH] [OPERATION_ID]")
 	fmt.Println("  inspect [paths|operations|files|values|config|plan|result|logs] [options]")
+	fmt.Println("  backup [list|show|values] [--root PATH] [--site ID] [--component NAME] [--namespace NS] [--version VERSION] [--release NAME] [--latest | --path DIR]")
 	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
 	fmt.Println("  preflight <gpu|argocd>")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
@@ -158,6 +160,8 @@ func run(args []string) error {
 		return runStatus(args[1:])
 	case "inspect":
 		return inspect.Run(args[1:], os.Stdout, os.Stderr)
+	case "backup":
+		return backup.Run(args[1:], os.Stdout, os.Stderr)
 	case "check":
 		return runCheck(args[1:])
 	case "preflight":

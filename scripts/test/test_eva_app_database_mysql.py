@@ -4,7 +4,9 @@ Set EVA_TEST_MYSQL_IMAGE to an already-cached MySQL 8 image. No pulls, published
 ports, host mounts or live cluster access. Uses the production SQL/dump/CSV code.
 """
 
+import base64
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -94,8 +96,88 @@ class RealMySQLTests(unittest.TestCase):
             self.t.run()
         self.assertEqual(self.t.sql("SELECT id FROM eva_v3_0.unrelated;"), "42")
 
+    def conflicting_databases(self):
+        self.t.sql("""CREATE DATABASE eva_v3_0;
+        CREATE TABLE eva_v3_0.config LIKE eva.config;
+        INSERT INTO eva_v3_0.config VALUES ('eva_id','unrelated-test-id');
+        CREATE TABLE eva_v3_0.alembic_version LIKE eva.alembic_version;
+        INSERT INTO eva_v3_0.alembic_version VALUES ('different-schema');""")
+        # Model a previous install switching the App connection to the new DB.
+        secret = self.t.objects[("secret", "app-secret")]
+        secret["data"]["MYSQL_NAME"] = self.t.resources[2]["data"]["MYSQL_NAME"]
+
+    def test_populated_destination_retained_despite_different_legacy_id(self):
+        self.conflicting_databases()
+        before = {name: self.t.snapshot(name) for name in ("eva", "eva_v3_0")}
+        result = self.t.run()
+        self.assertFalse(result["copied"])
+        self.assertTrue(result["existing_destination_retained"])
+        self.assertEqual({name: self.t.snapshot(name) for name in before}, before)
+
+    def test_license_identity_correction_changes_only_one_config_value(self):
+        self.conflicting_databases()
+        self.t.sql("""INSERT INTO eva_v3_0.config VALUES ('target-setting','do-not-touch');
+        CREATE TABLE eva_v3_0.camera (seq INT PRIMARY KEY, name VARCHAR(80));
+        INSERT INTO eva_v3_0.camera VALUES (42,'existing-target-camera');
+        CREATE TABLE eva_v3_0.payload (seq INT PRIMARY KEY,content LONGBLOB);
+        INSERT INTO eva_v3_0.payload VALUES (99,0x00FFAABB);""")
+        original_legacy = self.t.snapshot("eva")
+        cache = b"encrypted-private-fixture"
+        self.t.license_evidence = {"status": "present", "product": "test-product",
+                                   "eva_id_hex": b"preserved-test-id".hex().upper(),
+                                   "cache_sha256": hashlib.sha256(cache).hexdigest(),
+                                   "encrypted_cache_base64": base64.b64encode(cache).decode()}
+        result = self.t.run()
+        self.assertEqual(result["license_identity"], "corrected")
+        self.assertFalse(result["copied"])
+        self.assertEqual(self.t.eva_id("eva_v3_0"), b"preserved-test-id".hex().upper())
+        self.assertEqual(self.t.snapshot("eva"), original_legacy)
+        self.assertEqual(self.t.sql("SELECT value FROM eva_v3_0.config WHERE `key`='target-setting';"), "do-not-touch")
+        self.assertEqual(self.t.sql("SELECT name FROM eva_v3_0.camera WHERE seq=42;"), "existing-target-camera")
+        self.assertEqual(self.t.sql("SELECT HEX(content) FROM eva_v3_0.payload;"), "00FFAABB")
+        directory = Path(result["backup_directory"])
+        self.assertTrue((directory / "identity-complete.json").is_file())
+        self.assertIn("unrelated-test-id", (directory / "eva_v3_0-before-identity.sql").read_text())
+        again = self.t.run()
+        self.assertEqual(again["license_identity"], "matched")
+        self.assertFalse(again["identity_updated"])
+
+    def test_reviewed_original_db_retained_with_full_legacy_backup(self):
+        self.conflicting_databases()
+        before = {name: self.t.snapshot(name) for name in ("eva", "eva_v3_0")}
+        self.t.explicit_source = "eva"
+        self.t.resources[2]["data"]["MYSQL_NAME"] = base64.b64encode(b"eva").decode()
+        result = self.t.run()
+        self.assertFalse(result["copied"])
+        self.assertEqual(result["source"], "eva")
+        self.assertEqual(result["destination"], "eva")
+        self.assertEqual({name: self.t.snapshot(name) for name in before}, before)
+        self.assertEqual(len(result["legacy_user_csv"]), 1)
+        self.assertTrue((Path(result["backup_directory"]) / "eva.sql").is_file())
+
+    def test_identity_correction_refuses_real_foreign_key_cascade(self):
+        self.conflicting_databases()
+        self.t.sql("""ALTER TABLE eva_v3_0.config ADD INDEX config_value (value);
+        CREATE TABLE eva_v3_0.linked_identity (
+            id INT PRIMARY KEY, identity_value VARCHAR(256),
+            FOREIGN KEY (identity_value) REFERENCES eva_v3_0.config(value) ON UPDATE CASCADE
+        ) ENGINE=InnoDB;
+        INSERT INTO eva_v3_0.linked_identity VALUES (42,'unrelated-test-id');""")
+        cache = b"encrypted-private-fixture"
+        self.t.license_evidence = {"status": "present", "product": "test-product",
+                                   "eva_id_hex": b"preserved-test-id".hex().upper(),
+                                   "cache_sha256": hashlib.sha256(cache).hexdigest(),
+                                   "encrypted_cache_base64": base64.b64encode(cache).decode()}
+        with self.assertRaisesRegex(MODULE.UnsafeTransition, "references"):
+            self.t.run()
+        self.assertEqual(self.t.eva_id("eva_v3_0"), b"unrelated-test-id".hex().upper())
+        self.assertEqual(self.t.sql("SELECT identity_value FROM eva_v3_0.linked_identity WHERE id=42;"), "unrelated-test-id")
+
 
 class LiveTransition(MODULE.Transition):
+    def cached_license(self, current_app, desired):
+        return getattr(self, "license_evidence", {"status": "absent", "product": "test-product"})
+
     def get(self, kind, name):
         return self.objects.get((kind, name))
 
@@ -107,6 +189,44 @@ class LiveTransition(MODULE.Transition):
     def mysql(self, args, **kwargs):
         shell = 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec "$@"'
         return self.run_command(["docker", "exec", "-i", self.test_container, "sh", "-c", shell, "sh", *args], **kwargs)
+
+
+@unittest.skipUnless(os.environ.get("EVA_TEST_APP_IMAGE"), "set EVA_TEST_APP_IMAGE to a cached App image")
+class AppImageLicenseReaderTests(unittest.TestCase):
+    def test_actual_sdk_cache_format_with_readonly_image_and_no_network(self):
+        reader = Path(__file__).resolve().parents[2] / "src/solution/roles/eva_app/files/read_license_identity.py"
+        code = '''
+import ast, importlib.util, json, tempfile
+from pathlib import Path
+from licensespring.licensefile.default_crypto import DefaultCryptoProvider
+config = Path('/apps/backend/app/app/core/config.py')
+defaults = {}
+for node in ast.walk(ast.parse(config.read_text())):
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        if node.target.id in ('LICENSE_FILE_KEY', 'LICENSE_FILE_IV'):
+            defaults[node.target.id] = ast.literal_eval(node.value)
+spec = importlib.util.spec_from_file_location('reader', '/tool/read_license_identity.py')
+reader = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(reader)
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    (root / 'test-product').mkdir()
+    crypto = DefaultCryptoProvider(defaults['LICENSE_FILE_KEY'], defaults['LICENSE_FILE_IV'])
+    cache = root / 'test-product/License.key'
+    cache.write_text(crypto.encrypt(json.dumps({'product': 'test-product', 'hardware_id': 'eva_id:fixture-only-id'})))
+    before = cache.read_bytes()
+    result = reader.read_identity(root, 'test-product', config, {})
+    assert result['eva_id_hex'] == b'fixture-only-id'.hex().upper()
+    assert before == cache.read_bytes()
+print('SDK_READER_FORMAT_OK')
+'''
+        result = subprocess.run(["docker", "run", "--rm", "-i", "--pull=never", "--network=none", "--read-only",
+                                 "--tmpfs", "/tmp:rw,size=32m", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                                 "--mount", "type=bind,src=" + str(reader) + ",dst=/tool/read_license_identity.py,readonly",
+                                 "--entrypoint", "python", os.environ["EVA_TEST_APP_IMAGE"], "-B", "-"],
+                                input=code.encode(), capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertIn(b"SDK_READER_FORMAT_OK", result.stdout)
 
 
 if __name__ == "__main__":

@@ -6,9 +6,16 @@ ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 TMP_ROOT="$(mktemp -d)"
 
 cleanup() {
+  local status=$?
+  if (( status != 0 )) && [[ -n "${root:-}" && -f "$root/ansible.log" ]]; then
+    printf '\n[ERROR] Last Config fixture Ansible diagnostics:\n' >&2
+    tail -60 "$root/ansible.log" >&2
+  fi
   rm -rf "$TMP_ROOT"
+  return "$status"
 }
 trap cleanup EXIT
+trap 'printf "[ERROR] Config GPU CDI test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 if ! command -v "$ANSIBLE_PLAYBOOK" >/dev/null 2>&1 && [[ ! -x "$ANSIBLE_PLAYBOOK" ]]; then
   echo "ansible-playbook was not found: $ANSIBLE_PLAYBOOK" >&2
@@ -89,28 +96,42 @@ grep -Fq 'roles/gpu/tasks/detect.yaml' "$REPO_ROOT/src/solution/roles/config/tas
 grep -Fq 'gpu_has_nvidia | default(false) | bool' "$REPO_ROOT/src/solution/roles/config/tasks/main.yaml"
 grep -Fq "config_gpu_cdi_status | default('enabled')" "$REPO_ROOT/src/solution/roles/config/tasks/main.yaml"
 
-root="$(make_fixture cpu-only)"
-if ! ANSIBLE_ROLES_PATH="$REPO_ROOT/src/infra/roles:$REPO_ROOT/src/solution/roles" \
-  PATH="$root/bin:$PATH" \
-  GPU_MODE=cpu \
-  "$ANSIBLE_PLAYBOOK" -i "$root/inventory.ini" "$root/playbook.yaml" \
-  -e expected_gpu_has_nvidia=false >"$root/ansible.log" 2>&1; then
-  echo 'CPU-only Config Ansible execution failed' >&2
-  cat "$root/ansible.log" >&2
-  false
-fi
-if grep -Fq 'Check nvidia-ctk binary exists' "$root/ansible.log"; then
-  echo 'CPU-only Config unexpectedly executed NVIDIA CDI tasks' >&2
-  false
-fi
-grep -Fq 'gpu_count: 0' "$root/config/site/localhost/eva.yaml"
-grep -Fq 'backendHost: "localhost"' "$root/config/site/localhost/eva.yaml"
-grep -Fq 'workerNum: 16' "$root/config/site/localhost/eva.yaml"
-grep -Fq 'workerNum: 2' "$root/config/site/localhost/eva.yaml"
-if grep -Fq 'workerNum: 0' "$root/config/site/localhost/eva.yaml"; then
-  echo 'CPU-only eva.yaml contains workerNum: 0' >&2
-  false
-fi
+# Public backendHost is independent of the inventory alias used in the output
+# directory: explicit App host > detected default IPv4 > loopback fallback.
+for scenario in cpu-only cpu-detected-ip cpu-explicit-host; do
+  root="$(make_fixture "$scenario")"
+  expected_host=127.0.0.1
+  host_args=()
+  if [[ "$scenario" != cpu-only ]]; then
+    host_args+=(-e '{"ansible_default_ipv4":{"address":"192.0.2.10"}}')
+    expected_host=192.0.2.10
+  fi
+  if [[ "$scenario" == cpu-explicit-host ]]; then
+    host_args+=(-e eva_app_backend_host=public.example.test)
+    expected_host=public.example.test
+  fi
+  if ! ANSIBLE_ROLES_PATH="$REPO_ROOT/src/infra/roles:$REPO_ROOT/src/solution/roles" \
+    PATH="$root/bin:$PATH" \
+    GPU_MODE=cpu \
+    "$ANSIBLE_PLAYBOOK" -i "$root/inventory.ini" "$root/playbook.yaml" \
+    -e expected_gpu_has_nvidia=false "${host_args[@]}" >"$root/ansible.log" 2>&1; then
+    echo "CPU-only Config Ansible execution failed: $scenario" >&2
+    false
+  fi
+  if grep -Fq 'Check nvidia-ctk binary exists' "$root/ansible.log"; then
+    echo 'CPU-only Config unexpectedly executed NVIDIA CDI tasks' >&2
+    false
+  fi
+  grep -Fq 'gpu_count: 0' "$root/config/site/localhost/eva.yaml"
+  grep -Fq "backendHost: \"$expected_host\"" "$root/config/site/localhost/eva.yaml"
+  grep -Fq 'workerNum: 16' "$root/config/site/localhost/eva.yaml"
+  grep -Fq 'workerNum: 2' "$root/config/site/localhost/eva.yaml"
+  if grep -Fq 'workerNum: 0' "$root/config/site/localhost/eva.yaml"; then
+    echo 'CPU-only eva.yaml contains workerNum: 0' >&2
+    false
+  fi
+  printf '[OK] Config %s (backendHost=%s; NVIDIA CDI skipped)\n' "$scenario" "$expected_host"
+done
 
 root="$(make_fixture gpu-without-ctk)"
 if ANSIBLE_ROLES_PATH="$REPO_ROOT/src/infra/roles:$REPO_ROOT/src/solution/roles" \

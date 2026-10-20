@@ -241,6 +241,9 @@ EOF
     eva_app_kubeconfig: $root/kubeconfig
     eva_app_tls_host_path: $root/certs
     eva_app_rollout_stabilization_seconds: 0
+    # Listener/HelmChart behavior is tested by test_traefik_ports.py. This
+    # existing Values fixture intentionally has no rendered Ingress/ConfigMap.
+    eva_traefik_ports_manage: false
     repository_mode: cloud_repository
   tasks:
     - ansible.builtin.import_role:
@@ -313,6 +316,11 @@ localhost:
 EOF
 cat >"$root/config/site/localhost/eva.yaml" <<'EOF'
 app:
+  backendHost: server-a
+  vision:
+    ml: http://generated-vision:8000
+  agent:
+    requestTimeoutSeconds: 300
   pipeline:
     detector:
       workerNum: 11
@@ -334,11 +342,40 @@ app:
   browserTitleName: CLI title
 EOF
 workspace_checksum_before="$(sha256sum "$root/workspace/site-values/app.yaml")"
-run_app "$root" 'app,iam' 'app.browserTitleName=set-title' >"$root/ansible.log" 2>&1
+run_app "$root" 'app,iam' 'app.browserTitleName=set-title' \
+  -e '{"eva_cli_helm_set":["app.browserTitleName=set-title","app.sso.realm=set-realm","app.sso.clientId=set-client"]}' >"$root/ansible.log" 2>&1
 workspace_checksum_after="$(sha256sum "$root/workspace/site-values/app.yaml")"
 
 [[ "$workspace_checksum_before" == "$workspace_checksum_after" ]]
 assert_database_values "$root" eva_v3_0 '' ''
+python3 - "$root/rendered/effective-input-values.yaml" <<'PY'
+from pathlib import Path
+import sys
+import yaml
+
+values = yaml.safe_load(Path(sys.argv[1]).read_text())
+assert not ({"backendHost", "vision", "agent", "pipeline"} & values.keys())
+app = values["app"]
+assert app["backendHost"] == "127.0.0.1", "inventory alias became the public host"
+assert app["vision"]["ml"] == "http://generated-vision:8000"
+assert app["agent"]["requestTimeoutSeconds"] == 300
+assert app["pipeline"]["detector"]["workerNum"] == 11
+assert app["pipeline"]["perceptor"]["workerNum"] == 7
+assert app["sso"]["realm"] == "eva-iam"
+assert app["sso"]["clientId"] == "eva-app"
+PY
+python3 - "$root/helm.log" <<'PY'
+from pathlib import Path
+import shlex
+import sys
+
+commands = [shlex.split(line) for line in Path(sys.argv[1]).read_text().splitlines()]
+install_inputs = [cmd for cmd in commands if cmd[0] in {"upgrade", "template"}]
+assert install_inputs
+for args in install_inputs:
+  supplied = [args[index + 1] for index, arg in enumerate(args) if arg == "--set"]
+  assert supplied == ["app.browserTitleName=set-title", "app.sso.realm=set-realm", "app.sso.clientId=set-client"], args
+PY
 grep -Fq 'show values eva-app/eva-app --version 3.1.8' "$root/helm.log"
 grep -Fq 'delete job eva-app-tls-job -n eva-app --ignore-not-found=true --wait=true --timeout=120s' "$root/kubectl.log"
 grep -Fq 'wait --for=condition=Complete job/eva-app-tls-job -n eva-app --timeout=120s' "$root/kubectl.log"
@@ -413,11 +450,14 @@ fi
 grep -Fq 'EVA App SSO 입력이 필요합니다' "$root/ansible.log"
 
 root="$(make_fixture app-only-workspace-sso)"
-printf '%s\n' 'localhost:' '  database:' '    name: eva' '  app:' '    sso:' '      baseUrl: https://workspace.example' '      adminClientSecret: workspace-secret' >"$root/workspace/site-values/app.yaml"
+printf '%s\n' 'localhost:' '  database:' '    name: eva' '  app:' '    backendHost: public.example.test' '    sso:' '      realm: workspace-realm' '      clientId: workspace-client' '      baseUrl: https://workspace.example' '      adminClientSecret: workspace-secret' >"$root/workspace/site-values/app.yaml"
 printf '%s\n' 'schema_version: v1' 'site_id: another-site' 'target: another-target' 'iam_public_host: stale-iam.example' 'generated_at: "2026-09-15T00:00:00Z"' 'sso:' '  baseUrl: https://stale-iam.example' '  adminClientSecret: stale-secret' >"$root/state/site/localhost/eva-iam.yaml"
 printf '%s\n' 'app: {}' >"$root/cli.yaml"
 run_app "$root" 'app' 'app.replicaCount=2' -e eva_app_db_name=role_db >"$root/ansible.log" 2>&1
 assert_database_values "$root" eva_v3_0 role_db eva
+grep -Fq 'backendHost: public.example.test' "$root/rendered/effective-input-values.yaml"
+grep -Fq 'realm: workspace-realm' "$root/rendered/effective-input-values.yaml"
+grep -Fq 'clientId: workspace-client' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'adminClientSecret: workspace-secret' "$root/rendered/effective-input-values.yaml"
 if grep -Fq 'stale-iam.example' "$root/rendered/effective-input-values.yaml"; then
   echo 'Stale IAM base URL was applied to effective values' >&2
@@ -435,13 +475,16 @@ fi
 
 root="$(make_fixture app-only-matching-handoff)"
 printf '%s\n' 'localhost:' '  database:' '    name: workspace_db' '  app: {}' >"$root/workspace/site-values/app.yaml"
-printf '%s\n' 'schema_version: v1' 'site_id: site' 'target: localhost' 'iam_public_host: iam.example' 'generated_at: "2026-09-15T00:00:00Z"' 'sso:' '  baseUrl: https://iam.example' '  adminClientSecret: matching-secret' >"$root/state/site/localhost/eva-iam.yaml"
-printf '%s\n' 'database:' '  name: cli_db' >"$root/cli.yaml"
+printf '%s\n' 'schema_version: v1' 'site_id: site' 'target: localhost' 'iam_public_host: iam.example' 'generated_at: "2026-09-15T00:00:00Z"' 'sso:' '  realm: handoff-realm' '  clientId: handoff-client' '  adminClientId: handoff-admin' '  baseUrl: https://iam.example' '  adminClientSecret: matching-secret' >"$root/state/site/localhost/eva-iam.yaml"
+printf '%s\n' 'database:' '  name: cli_db' 'app:' '  sso:' '    clientId: cli-client' >"$root/cli.yaml"
 run_app "$root" 'app' 'database.name=set_db' -e eva_app_db_name=role_db >"$root/ansible.log" 2>&1
 assert_database_values "$root" eva_v3_0 role_db cli_db
 grep -Fq -- '--set database.name=set_db' "$root/helm.log"
 grep -Fq 'baseUrl: https://iam.example' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'adminClientSecret: matching-secret' "$root/rendered/effective-input-values.yaml"
+grep -Fq 'realm: handoff-realm' "$root/rendered/effective-input-values.yaml"
+grep -Fq 'clientId: cli-client' "$root/rendered/effective-input-values.yaml"
+grep -Fq 'adminClientId: handoff-admin' "$root/rendered/effective-input-values.yaml"
 grep -Fq 'iam_handoff: true' "$root/rendered/values-sources.yaml"
 
 for scenario in explicit-role-db empty-role-db; do

@@ -90,7 +90,8 @@
     config_eva_replica_count: "{{ (config_effective_gpu_count | int) - 1 if (config_effective_gpu_count | int) > 1 else 1 }}"
     config_eva_nfs_share_path: "{{ nfs_share_path | default('/share/eva-agent') }}"
     config_eva_aws_dir: "{{ (awscli_target_home | default('/home/' ~ (ansible_user | default(ansible_ssh_user | default(lookup('env', 'USER')))))) ~ '/.aws' }}"
-    config_eva_backend_host: "{{ ansible_host | default(inventory_hostname) }}"
+    # Match the App role's public-host default, not the SSH inventory alias.
+    config_eva_backend_host: "{{ eva_app_backend_host | default(ansible_default_ipv4.address | default('127.0.0.1')) }}"
     config_eva_auto_update_status: "{{ config_auto_update_status | default('disabled') }}"
     config_eva_auto_login_status: "{{ config_auto_login_status | default('enabled') }}"
     config_eva_gpu_cdi_status: "{{ config_gpu_cdi_status | default('enabled') }}"

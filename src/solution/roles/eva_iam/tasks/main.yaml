@@ -460,11 +460,65 @@
   delegate_to: localhost
   become: false
 
+- name: Clear previous EVA IAM resolved values before deployment
+  no_log: true
+  ansible.builtin.file:
+    path: "{{ eva_iam_deploy_values_dir }}/resolved-values.yaml"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA IAM chart defaults on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_iam_chart_defaults.stdout }}"
+    dest: "{{ eva_iam_deploy_values_dir }}/chart-defaults.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
 - name: Render eva-iam k3s override values on control node
   no_log: true
   ansible.builtin.template:
     src: "{{ eva_template_values_root }}/eva-iam-k3s-override.yaml.j2"
     dest: "{{ eva_iam_deploy_values_dir }}/eva-iam-k3s-override.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Resolve EVA IAM effective input values
+  no_log: true
+  ansible.builtin.set_fact:
+    # Chart defaults are a separate first -f layer; --set is applied by Helm.
+    eva_iam_effective_values: >-
+      {{ (lookup('ansible.builtin.file', eva_iam_deploy_values_dir ~ '/eva-iam-k3s-override.yaml') | from_yaml)
+         | combine(eva_iam_effective_user_values, recursive=true) }}
+  when: not ansible_check_mode
+
+- name: Record private EVA IAM effective input values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_iam_effective_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_iam_deploy_values_dir }}/effective-input-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA IAM values source metadata on control node
+  ansible.builtin.copy:
+    content: |
+      workspace_override: {{ (eva_iam_user_values | length > 0) | lower }}
+      cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}
+      rendered_artifacts:
+        chart_defaults: {{ (eva_iam_deploy_values_dir ~ '/chart-defaults.yaml') | to_json }}
+        role_override: {{ (eva_iam_deploy_values_dir ~ '/eva-iam-k3s-override.yaml') | to_json }}
+        effective_input_values: {{ (eva_iam_deploy_values_dir ~ '/effective-input-values.yaml') | to_json }}
+        resolved_values: {{ (eva_iam_deploy_values_dir ~ '/resolved-values.yaml') | to_json }}
+    dest: "{{ eva_iam_deploy_values_dir }}/values-sources.yaml"
     mode: "0600"
   delegate_to: localhost
   become: false
@@ -477,8 +531,8 @@
     mode: "0600"
   when: not ansible_check_mode
 
-# Site-specific values, applied last so they win over the rendered override.
-# Written straight to the target so no copy is left on the control node.
+# Site-specific/CLI Values, applied last so they win over the rendered override.
+# The complete merged input is also recorded privately on the control node.
 - name: Copy host-specific eva-iam values to remote workspace
   no_log: true
   ansible.builtin.copy:
@@ -488,6 +542,33 @@
   when:
     - not ansible_check_mode
     - eva_iam_effective_user_values | length > 0
+
+- name: Reconcile EVA IAM public Traefik listeners
+  ansible.builtin.include_role:
+    name: eva_traefik_ports
+  vars:
+    eva_traefik_ports_component: iam
+    eva_traefik_ports_namespace: "{{ eva_iam_namespace }}"
+    eva_traefik_ports_release: "{{ eva_iam_name }}"
+    eva_traefik_ports_workdir: "{{ eva_iam_workdir }}"
+    eva_traefik_ports_chart: "{{ eva_iam_chart_source }}"
+    eva_traefik_ports_version: "{{ eva_iam_chart_version if (eva_iam_chart_version_arg | length > 0) else '' }}"
+    eva_traefik_ports_values: >-
+      {{ [eva_iam_workdir ~ '/values.yaml', eva_iam_workdir ~ '/eva-iam-k3s-override.yaml']
+         + ([eva_iam_values_dest] if (eva_iam_effective_user_values | length > 0) else []) }}
+    eva_traefik_ports_set: "{{ eva_cli_helm_set | default([]) }}"
+    eva_traefik_ports_kubeconfig: "{{ eva_iam_kubeconfig }}"
+  when: not ansible_check_mode
+
+- name: Use verified EVA IAM ingress post-renderer
+  ansible.builtin.set_fact:
+    eva_iam_traefik_args: >-
+      {{ ('--post-renderer ' ~ (eva_traefik_ports_result.renderer | quote)
+          ~ ' --post-renderer-args ' ~ ((eva_iam_workdir ~ '/traefik-router.json') | quote))
+         if (eva_traefik_ports_result.isolated | default(false)) else '' }}
+    eva_iam_traefik_env: "{{ eva_traefik_ports_result.environment | default({}) }}"
+    eva_iam_app_sso_base_url: "{{ eva_traefik_ports_result.iam_base_url | default(eva_iam_app_sso_base_url) }}"
+  when: not ansible_check_mode
 
 - name: Check k3s API accessibility for eva-iam
   ansible.builtin.command:
@@ -501,15 +582,18 @@
   ansible.builtin.import_role:
     name: eva_traefik_tls
   vars:
-    eva_traefik_tls_host: "{{ eva_iam_effective_host }}"
-    eva_traefik_tls_host_path: "{{ eva_iam_effective_user_values.ingress.tls.hostPath | default(eva_iam_tls_host_path) }}"
+    eva_traefik_tls_host: "{{ eva_traefik_ports_result.endpoint.host if (eva_traefik_ports_result.isolated | default(false)) else eva_iam_effective_host }}"
+    eva_traefik_tls_host_path: "{{ eva_traefik_ports_result.tls_host_path if (eva_traefik_ports_result.isolated | default(false)) else (eva_iam_effective_user_values.ingress.tls.hostPath | default(eva_iam_tls_host_path)) }}"
     eva_traefik_tls_kubeconfig: "{{ eva_iam_kubeconfig }}"
   when:
     - not ansible_check_mode
-    - eva_iam_effective_tls_enabled | bool
-    - eva_iam_effective_user_values.ingress.enabled | default(true) | bool
-    - eva_iam_effective_user_values.ingress.tls.create | default(true) | bool
-    - (eva_iam_effective_user_values.ingress.tls.authType | default('hostPath')) == 'hostPath'
+    - "(eva_traefik_ports_result.endpoint.scheme == 'https') if (eva_traefik_ports_result.isolated | default(false)) else (eva_iam_effective_tls_enabled | bool)"
+    - "eva_traefik_ports_result.tls_job_enabled if (eva_traefik_ports_result.isolated | default(false)) else (eva_iam_effective_user_values.ingress.enabled | default(true) | bool)"
+    - "eva_traefik_ports_result.tls_job_enabled if (eva_traefik_ports_result.isolated | default(false)) else (eva_iam_effective_user_values.ingress.tls.create | default(true) | bool)"
+    - >-
+      (eva_traefik_ports_result.tls_host_path | length > 0)
+      if (eva_traefik_ports_result.isolated | default(false))
+      else ((eva_iam_effective_user_values.ingress.tls.authType | default('hostPath')) == 'hostPath')
 
 - name: Detect NodePort collision from another namespace
   ansible.builtin.shell: >-
@@ -552,15 +636,52 @@
     -f {{ eva_iam_workdir }}/values.yaml
     -f {{ eva_iam_workdir }}/eva-iam-k3s-override.yaml
     {% if eva_iam_effective_user_values | length > 0 %}-f {{ eva_iam_values_dest }}{% endif %}
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    {{ eva_iam_traefik_args | default('') }}
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
   register: eva_iam_install
   changed_when: >-
     'has been upgraded' in eva_iam_install.stdout
     or 'has been installed' in eva_iam_install.stdout
   when: not ansible_check_mode
+  environment: "{{ {'KUBECONFIG': eva_iam_kubeconfig} | combine(eva_iam_traefik_env | default({})) }}"
+
+- name: Capture effective EVA IAM Helm values
+  no_log: true
+  ansible.builtin.command:
+    argv:
+      - helm
+      - get
+      - values
+      - "{{ eva_iam_name }}"
+      - --namespace
+      - "{{ eva_iam_namespace }}"
+      - --all
+      - --output
+      - yaml
+  register: eva_iam_resolved_values_result
+  changed_when: false
+  when: not ansible_check_mode
   environment:
     KUBECONFIG: "{{ eva_iam_kubeconfig }}"
+
+- name: Record private EVA IAM resolved values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_iam_resolved_values_result.stdout }}"
+    dest: "{{ eva_iam_deploy_values_dir }}/resolved-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Resolve deployed EVA IAM App client identity
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_iam_app_client_id: >-
+      {{ (eva_iam_resolved_values_result.stdout | from_yaml).keycloak.realmPatch.evaApp.clientId
+         | default('eva-app') }}
+  when: not ansible_check_mode
 
 - name: Wait for keycloak rollout
   ansible.builtin.command: >-
@@ -692,6 +813,9 @@
       generated_at: {{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') | to_json }}
       sso:
         baseUrl: {{ eva_iam_app_sso_base_url | to_json }}
+        realm: {{ eva_iam_realm | to_json }}
+        clientId: {{ eva_iam_app_client_id | to_json }}
+        adminClientId: {{ eva_iam_admin_api_client_id | to_json }}
       {% if eva_iam_admin_api_client_secret | length > 0 %}
         # {{ eva_iam_admin_api_client_id }} client 시크릿. 배포 직후 Keycloak 에서 읽어온
         # 현재 값입니다. 콘솔에서 재생성(Regenerate)하면 이 값은 무효가 됩니다.

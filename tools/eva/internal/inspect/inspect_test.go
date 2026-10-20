@@ -96,6 +96,27 @@ func TestValuesSourcesAndNoSilentFallback(t *testing.T) {
 	}
 }
 
+func TestIAMValuesAllSources(t *testing.T) {
+	root := t.TempDir()
+	state, releaseRoot := filepath.Join(root, "state"), filepath.Join(root, "release")
+	fixture(t, state, "site-a", releaseRoot, time.Now())
+	directory := filepath.Join(releaseRoot, "out/work/rendered/site-a/node-a/iam")
+	for source, name := range map[string]string{
+		"resolved": "resolved-values.yaml", "effective": "effective-input-values.yaml",
+		"defaults": "chart-defaults.yaml", "override": "eva-iam-k3s-override.yaml",
+		"sources": "values-sources.yaml",
+	} {
+		write(t, filepath.Join(directory, name), "source: "+source+"\n")
+		out, _, err := execute(t, "values", "--state-root", state, "--component", "iam", "--source", source)
+		if err != nil || out != "source: "+source+"\n" {
+			t.Fatalf("IAM source %s: out=%q err=%v", source, out, err)
+		}
+	}
+	if out, _, err := execute(t, "values", "--state-root", state, "--component", "iam"); err != nil || out != "source: resolved\n" {
+		t.Fatalf("IAM default source: out=%q err=%v", out, err)
+	}
+}
+
 func TestOperationSelectionUsesCreationTimeAndSiteFilter(t *testing.T) {
 	root := t.TempDir()
 	state := filepath.Join(root, "state")

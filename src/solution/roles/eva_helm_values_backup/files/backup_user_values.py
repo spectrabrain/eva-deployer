@@ -29,6 +29,21 @@ def segment(value):
     return value
 
 
+def backup_version(record):
+    """Use the OLD release only; blank/non-path-safe app versions are legitimate."""
+    app_version = record.get("app_version")
+    if (isinstance(app_version, str) and len(app_version) <= 255
+            and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.+-]*", app_version)):
+        return app_version, "app_version"
+    # Match the chart's SemVer suffix, not a hyphen-separated prerelease fragment.
+    chart_version = re.search(
+        r"-(v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+        r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$", record["chart"])
+    if chart_version and len(chart_version[1]) <= 255:
+        return chart_version[1], "chart"
+    return "unknown-revision-" + str(record["revision"]), "revision"
+
+
 def private_directory(path):
     """Do not follow symlinks, including in pre-existing ancestors."""
     require(path.is_absolute() and ".." not in path.parts and path != Path("/"),
@@ -114,7 +129,8 @@ def backup(namespace, release, component, root, site):
     root = Path(root)
     private_directory(root)
     parent = root
-    for part in (site, namespace, release):
+    version, version_source = backup_version(before)
+    for part in (site, namespace, version):
         parent = parent / part
         private_directory(parent)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -139,6 +155,7 @@ def backup(namespace, release, component, root, site):
         "created_at": timestamp, "site": site, "namespace": namespace,
         "release": release, "component": component, "revision": revision,
         "chart": before["chart"], "app_version": before.get("app_version", ""),
+        "version": version, "version_source": version_source,
         "release_status": before["status"], "values_kind": "user-supplied",
         "values_file": values_path.name,
         "sha256": hashlib.sha256(values).hexdigest(),

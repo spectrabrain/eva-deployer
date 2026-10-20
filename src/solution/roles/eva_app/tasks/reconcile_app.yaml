@@ -149,6 +149,12 @@
     if [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]]; then
       helm_template+=(--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false)
     fi
+    if [[ -n "${EVA_APP_TRAEFIK_POST_RENDERER:-}" ]]; then
+      if [[ -n "${EVA_APP_HELM_PLUGINS:-}" ]]; then
+        export HELM_PLUGINS="$EVA_APP_HELM_PLUGINS"
+      fi
+      helm_template+=(--post-renderer "$EVA_APP_TRAEFIK_POST_RENDERER" --post-renderer-args "$EVA_APP_TRAEFIK_ROUTER")
+    fi
     "${helm_template[@]}" > "$rendered_file"
 
     kubectl create --dry-run=client --namespace "$namespace" -f "$rendered_file" -o json |
@@ -550,6 +556,9 @@
     EVA_APP_CHART_VERSION: "{{ eva_app_chart_version }}"
     EVA_APP_VALUES_FILE: "{{ eva_app_workdir }}/values.yaml"
     EVA_APP_EFFECTIVE_VALUES_FILE: "{{ eva_app_effective_values_dest }}"
+    EVA_APP_TRAEFIK_POST_RENDERER: "{{ eva_traefik_ports_result.renderer | default('') if (eva_app_traefik_args | default('') | length > 0) else '' }}"
+    EVA_APP_TRAEFIK_ROUTER: "{{ eva_app_workdir }}/traefik-router.json"
+    EVA_APP_HELM_PLUGINS: "{{ (eva_app_traefik_env | default({})).HELM_PLUGINS | default('') }}"
     EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
     EVA_APP_SITE_ID: "{{ eva_site_id }}"
     EVA_APP_REPOSITORY_MODE: "{{ repository_mode }}"

@@ -83,6 +83,10 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(path.name, "iam-user-values.yaml")
         metadata = json.loads((path.parent / "metadata.json").read_text())
         self.assertEqual(metadata["revision"], "4")
+        self.assertEqual(path.parent.parent, self.root / "site-1" / "custom-ns" / "3.1.8")
+        self.assertEqual(metadata["release"], "custom-iam")
+        self.assertEqual(metadata["version"], "3.1.8")
+        self.assertEqual(metadata["version_source"], "app_version")
         self.assertEqual(metadata["sha256"], hashlib.sha256(VALUES).hexdigest())
         self.assertEqual(metadata["values_kind"], "user-supplied")
         self.assertTrue(metadata["sensitive"])
@@ -90,6 +94,45 @@ class BackupTests(unittest.TestCase):
         self.assertIn(["helm", "get", "values", "custom-iam", "--namespace", "custom-ns",
                        "--revision", "4", "--output", "yaml"], self.calls)
         self.assertIn("^custom\\-iam$", self.calls[0])
+
+    def test_old_app_version_wins_over_chart_including_build(self):
+        self.records[0].update(app_version="3.3.0-beta.1+build.7", chart="eva-iam-9.0.0")
+        result = self.backup()
+        directory = Path(result["backup_directory"])
+        self.assertEqual(directory.parent, self.root / "site-1" / "custom-ns" / "3.3.0-beta.1+build.7")
+        metadata = json.loads((directory / "metadata.json").read_text())
+        self.assertEqual(metadata["version"], "3.3.0-beta.1+build.7")
+        self.assertEqual(metadata["version_source"], "app_version")
+
+    def test_missing_blank_or_unsafe_app_version_falls_back_to_chart(self):
+        for app_version in (None, "", "../unsafe", "/absolute", "..", "bad\nversion", "x" * 257):
+            with self.subTest(app_version=app_version):
+                self.records[0].update(chart="eva-iam-3.3.0-beta.1+build.7", app_version=app_version)
+                if app_version is None:
+                    self.records[0].pop("app_version")
+                directory = Path(self.backup()["backup_directory"])
+                self.assertEqual(directory.parent, self.root / "site-1" / "custom-ns" / "3.3.0-beta.1+build.7")
+                metadata = json.loads((directory / "metadata.json").read_text())
+                self.assertEqual(metadata["version_source"], "chart")
+
+    def test_unavailable_versions_use_explicit_revision_label(self):
+        for chart in ("eva-iam", "eva-iam-not-a-version", "eva-iam-../escape"):
+            with self.subTest(chart=chart):
+                self.records[0].update(chart=chart, app_version="")
+                directory = Path(self.backup()["backup_directory"])
+                self.assertEqual(directory.parent, self.root / "site-1" / "custom-ns" / "unknown-revision-4")
+                metadata = json.loads((directory / "metadata.json").read_text())
+                self.assertEqual(metadata["version"], "unknown-revision-4")
+                self.assertEqual(metadata["version_source"], "revision")
+
+    def test_releases_sharing_version_keep_identity_without_overwrite(self):
+        first = self.backup()
+        self.records = [record(release="another-iam")]
+        second = self.backup(release="another-iam")
+        self.assertEqual(Path(first["backup_directory"]).parent, Path(second["backup_directory"]).parent)
+        self.assertNotEqual(first["backup_directory"], second["backup_directory"])
+        metadata = json.loads((Path(second["backup_directory"]) / "metadata.json").read_text())
+        self.assertEqual(metadata["release"], "another-iam")
 
     def test_private_permissions(self):
         path = Path(self.backup()["values_file"])

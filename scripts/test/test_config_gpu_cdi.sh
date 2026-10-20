@@ -7,12 +7,13 @@ TMP_ROOT="$(mktemp -d)"
 
 cleanup() {
   local status=$?
+  trap - ERR
   if (( status != 0 )) && [[ -n "${root:-}" && -f "$root/ansible.log" ]]; then
     printf '\n[ERROR] Last Config fixture Ansible diagnostics:\n' >&2
     tail -60 "$root/ansible.log" >&2
   fi
   rm -rf "$TMP_ROOT"
-  return "$status"
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'printf "[ERROR] Config GPU CDI test failed at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR

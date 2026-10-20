@@ -25,10 +25,6 @@ revision의 Values를 보존한다. API/RBAC/인증 오류, Helm 조회 실패, 
 간주하지 않고 **설치를 중단**한다. Check mode에서는 백업 조회와 파일 생성을 하지 않는다.
 Helm 이력이 없는 Argo CD 전용 설치는 `helm get values`로 기존 사용자 설정을 복원할 수 없다.
 
-release 목록은 Helm 3·4 공통 상태 옵션(`--deployed`, `--failed`, `--pending`,
-`--uninstalled`, `--uninstalling`, `--superseded`)으로 조회한다. Helm 4에서는
-`helm list --all`이 제거되었으므로 사용하지 않는다. Values export도 `--all`을 쓰지 않는다.
-
 ## 저장 내용과 경로
 
 `helm get values <release> -n <namespace> --revision <기존 revision> -o yaml` 결과를 그대로 저장한다.
@@ -60,7 +56,7 @@ revision은 Ansible 출력에 표시하지만 **Values 내용은 출력하지 �
 - 디렉터리 권한 `0700`, 파일 권한 `0600`; 기본 설치에서는 root 소유이다.
 - 비밀번호·토큰·라이선스 키 등이 **원문 포함될 수 있다**. Git 등록, 일반 로그 첨부, 공유 폴더 복사를 하지 않는다.
 - metadata에는 release, namespace, revision, Chart/App 버전, 상태, UTC 시각과 Values SHA-256을 기록한다.
-  새 백업에는 선택된 `version`과 `version_source`(`app_version`/`chart`/`revision`)도 추가한다.
+  선택된 `version`과 `version_source`(`app_version`/`chart`/`revision`)도 기록한다.
 - 조회 중 다른 작업이 release를 변경하면 중단한다. 남은 `.partial`은 완료된 백업이 아니다.
   `metadata.json`까지 생성된 백업을 사용한다. 동시 설치 자체를 허용하거나 잠그는 기능은 아니다.
 - 백업 경로의 symlink는 거부한다. 백업 실패 원인에 Secret이 섞일 수 있어 Helm 상세 오류는 로그에 노출하지 않는다.
@@ -71,12 +67,9 @@ revision은 Ansible 출력에 표시하지만 **Values 내용은 출력하지 �
 `kubernetes-connection-failed` / `kubernetes-unreachable`은 API 연결,
 `kubeconfig-error`는 kubeconfig를 확인한다. 원문 stderr나 Values는 노출하지 않는다.
 
-`0.1.0-ci.124`에서 `Helm backup query failed; ... diagnostics suppressed`로 IAM 설치가
-중단되는 알려진 원인은 위의 `helm list --all` 호환성 오류이다. 해당 실패는 IAM Helm upgrade
-이전이며, 설치 작업의 앞선 Infra/Config 단계는 이미 실행되었을 수 있다. 수정된 helper가 포함된
-Release를 설치한 뒤 같은 설치 설정으로 새 `eva install --config ...` 작업을 시작한다.
-기존 Current Release는 저장소 소스 수정만으로 갱신되지 않는다. 이 문제를 피하기 위해
-기존 release를 삭제하거나 백업 실패를 무시하지 않는다.
+백업 실패 시 해당 컴포넌트의 Helm upgrade는 진행하지 않는다. 앞선 Infra/Config 단계는 이미
+실행되었을 수 있으므로 Operation 결과를 함께 확인한다. 기존 release를 삭제하거나 백업 실패를
+무시해서 우회하지 않는다. 원인을 해결하고 설정을 변경했다면 새 설치 Operation으로 실행한다.
 
 저장 root를 바꾸려면 설치 YAML의 해당 Target `ansible` 설정에
 `eva_helm_values_backup_root: /보호된/절대경로`를 지정한다. Chart Values에 넣지 않는다.

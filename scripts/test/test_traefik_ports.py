@@ -29,6 +29,7 @@ HELPER = ROLE / "files/traefik_ports.py"
 spec = importlib.util.spec_from_file_location("traefik_ports", HELPER)
 ports = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ports)
+TRAEFIK_CHARTS = [Path(path) for path in os.environ.get("EVA_TEST_TRAEFIK_CHARTS", "").split(os.pathsep) if path]
 
 
 def setUpModule():
@@ -58,12 +59,26 @@ def setUpModule():
     environment = patch.dict(os.environ, PATH=temporary.name + os.pathsep + os.environ.get("PATH", ""))
     environment.start()
     unittest.addModuleCleanup(environment.stop)
+    # Exercise actual schemas and Helm merge semantics, not just fake rendering.
+    for version, checksum in (
+        ("27.0.2", "271298d9b089b502eeb93552034ee6767b3529af57c8f9e60665c3a61c15c974"),
+        ("34.4.1", "8c3ec98f82eb38d84aa330e2e4b067f2889595b566e130ab4bb7545d51978015"),
+        ("40.1.0", "328e20a46bf2f0546c0761f0df3c6bd5b99c2ada180be4d3e18287d14e90d1fc"),
+    ):
+        with urlopen(f"https://traefik.github.io/charts/traefik/traefik-{version}.tgz", timeout=120) as response:
+            data = response.read()
+        if hashlib.sha256(data).hexdigest() != checksum:
+            raise AssertionError("Traefik chart archive checksum mismatch")
+        archive = Path(temporary.name) / f"traefik-{version}.tgz"
+        archive.write_bytes(data)
+        TRAEFIK_CHARTS.append(archive)
 
 
 def defaults(modern=True):
     return {"ports": {
         "traefik": {"port": 9000, "expose": {"default": False} if modern else False},
-        "web": {"port": 8000, "exposedPort": 80, "expose": {"default": True} if modern else True},
+        "web": {"port": 8000, "exposedPort": 80, "expose": {"default": True} if modern else True,
+                **({"redirections": {"entryPoint": {}}} if modern else {})},
         "websecure": {"port": 8443, "exposedPort": 443, "expose": {"default": True} if modern else True}},
         "service": {"type": "LoadBalancer"}}
 
@@ -120,15 +135,30 @@ class FakeCluster:
         self.pod_foreign_owner = False
         self.extra_args = False
         self.duplicate_args = False
+        self.stale_redirect = False
+        self.stale_pod_redirect = False
 
     def install(self, manifest):
         name = manifest[-1]["metadata"]["namespace"]
         self.live = [obj for obj in self.live if obj["metadata"].get("namespace") != name] + copy.deepcopy(manifest)
         self.history[name] = copy.deepcopy(manifest)
 
+    def effective_values(self):
+        base = yaml.safe_load(self.chart.get("spec", {}).get("valuesContent", "")) or {}
+        overrides = yaml.safe_load((self.config or {}).get("spec", {}).get("valuesContent", "")) or {}
+        return ports.merge(ports.merge(self.defaults, base), overrides)
+
     def controller_args(self):
-        effective = ports.merge(self.defaults, yaml.safe_load((self.config or {}).get("spec", {}).get("valuesContent", "")) or {})
+        effective = self.effective_values()
         args = [f"--entrypoints.{name}.address=:{item['port']}" for name, item in effective["ports"].items()]
+        for name, item in effective["ports"].items():
+            redirects = [item.get("redirectTo"), (item.get("redirections") or {}).get("entryPoint"),
+                         ((item.get("http") or {}).get("redirections") or {}).get("entryPoint")]
+            if any(redirects):
+                args.append(f"--entryPoints.{name}.http.redirections.entryPoint.to=:443")
+        args += effective.get("additionalArguments", []) + effective.get("globalArguments", [])
+        if self.stale_redirect:
+            args.append("--entryPoints.web.http.redirections.entryPoint.to=:443")
         if self.extra_args:
             args.append("--entrypoints.foreign.address=:12345")
         if self.duplicate_args:
@@ -136,8 +166,7 @@ class FakeCluster:
         return [] if self.bad_args else args
 
     def state_ports(self):
-        values = yaml.safe_load((self.config or {}).get("spec", {}).get("valuesContent", "")) or {}
-        effective = ports.merge(self.defaults, values)
+        effective = self.effective_values()
         if self.stale:
             effective = self.defaults
         return {name: {"port": item.get("exposedPort", item["port"]), "targetPort": name, "protocol": "TCP"}
@@ -182,7 +211,8 @@ class FakeCluster:
                                "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
                               {"metadata": {"namespace": "kube-system", "name": "traefik-pod", "ownerReferences": [
                                   {"kind": "ReplicaSet", "uid": "foreign" if self.pod_foreign_owner else "rs-1", "controller": True}]},
-                               "spec": {"containers": [{"name": "traefik", "args": [] if self.pod_args_stale else self.controller_args()}]},
+                               "spec": {"containers": [{"name": "traefik", "args": [] if self.pod_args_stale else self.controller_args() + (
+                                   ["--entryPoints.web.http.redirections.entryPoint.to=:443"] if self.stale_pod_redirect else [])}]},
                                "status": {"conditions": [{"type": "Ready", "status": "False" if self.pod_not_ready else "True"}]}}]}
         if resource == "replicasets":
             return {"items": [{"metadata": {"uid": "rs-1", "ownerReferences": [{"kind": "Deployment", "uid": "traefik-uid", "controller": True}]}}]}
@@ -597,6 +627,253 @@ class TraefikPortsTests(unittest.TestCase):
         self.assertIs(config["ports"]["web"]["expose"], True)
         self.assertIs(config["ports"]["websecure"]["expose"], False)
 
+    def test_empty_redirect_defaults_are_inactive_and_preserved(self):
+        # Official Traefik chart v34 uses ports.web.redirections.entryPoint;
+        # v40 nests it under http. Both gate argument generation on the inner
+        # entryPoint map, not the truthiness of its outer redirections map.
+        idle_values = [
+            {"redirectTo": None}, {"redirectTo": ""}, {"redirectTo": {}},
+            {"redirections": None}, {"redirections": {}},
+            {"redirections": {"entryPoint": None}},
+            {"redirections": {"entryPoint": {}}},
+            {"http": None}, {"http": {}},
+            {"http": {"redirections": None}},
+            {"http": {"redirections": {}}},
+            {"http": {"redirections": {"entryPoint": None}}},
+            {"http": {"redirections": {"entryPoint": {}}}},
+        ]
+        for source in ("defaults", "chart", "config"):
+            for idle in idle_values:
+                with self.subTest(source=source, idle=idle):
+                    self.cluster = FakeCluster(self.directory)
+                    values = {"ports": {"web": idle}}
+                    if source == "defaults":
+                        # Embedded archive is read by reconcile, not the fake
+                        # controller defaults. Supply the same parsed defaults.
+                        self.cluster.defaults = ports.merge(self.cluster.defaults, values)
+                    elif source == "chart":
+                        self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                    else:
+                        self.cluster.config = {"metadata": {"resourceVersion": "7"},
+                                               "spec": {"valuesContent": yaml.safe_dump(values)}}
+                    before_chart = copy.deepcopy(self.cluster.chart)
+                    planned = endpoint("iam", 32011)
+                    result = ports.reconcile(self.cluster, self.request, planned, self.cluster.defaults)
+                    self.assertTrue(result["isolated"])
+                    self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32011})
+                    after = yaml.safe_load(self.cluster.config["spec"]["valuesContent"])
+                    self.assertEqual(self.cluster.chart, before_chart)
+                    for key, value in idle.items():
+                        if source == "config":
+                            self.assertEqual(after["ports"]["web"][key], value)
+                        else:
+                            self.assertNotIn(key, after["ports"]["web"])
+                    self.assertFalse(ports.reconcile(self.cluster, self.request, planned, self.cluster.defaults)["changed"])
+
+    def test_http_install_removes_redirects_from_all_values_layers(self):
+        redirects = [
+            {"redirectTo": "websecure"}, {"redirectTo": {"port": "websecure"}},
+            {"redirectTo": {"priority": 10}},
+            {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}},
+            {"http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https", "permanent": True}}}},
+            {"redirections": {"entryPoint": {"to": ""}}},
+            {"http": {"redirections": {"entryPoint": {"permanent": False}}}},
+        ]
+        for source in ("defaults", "chart", "config"):
+            for redirect in redirects:
+                for installed in (False, True):
+                    with self.subTest(source=source, redirect=redirect, installed=installed):
+                        self.cluster = FakeCluster(self.directory)
+                        values = {"ports": {"web": redirect}}
+                        if source == "defaults":
+                            self.cluster.defaults = ports.merge(self.cluster.defaults, values)
+                        elif source == "chart":
+                            self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                        else:
+                            self.cluster.config = {"metadata": {"resourceVersion": "7"},
+                                                   "spec": {"valuesContent": yaml.safe_dump(values)}}
+                        if installed:
+                            self.cluster.install(objects())
+                        before_chart = copy.deepcopy(self.cluster.chart)
+                        before_config = copy.deepcopy(self.cluster.config)
+                        result = ports.reconcile(self.cluster, self.request, endpoint(), self.cluster.defaults)
+                        self.assertTrue(result["isolated"])
+                        self.assertFalse(any(".http.redirections." in arg.lower() for arg in self.cluster.controller_args()))
+                        self.assertEqual(self.cluster.chart, before_chart)
+                        backup = json.loads(Path(result["backup"]).read_text())
+                        self.assertEqual(backup["helmchartconfig"], before_config)
+                        self.assertEqual(backup["helmchart"], before_chart)
+                        self.assertFalse(ports.reconcile(self.cluster, self.request, endpoint(), self.cluster.defaults)["changed"])
+
+    def test_unknown_redirects_fail_before_any_mutation(self):
+        unsafe_values = [
+            {"redirectTo": ["websecure"]}, {"redirectTo": True},
+            {"redirections": {"entryPoint": "websecure"}},
+            {"redirections": {"futureRedirect": {}}},
+            {"http": {"redirections": {"entrypoint": {}}}},
+            {"http": {"redirections": []}},
+            {"http": {"redirections": False}},
+        ]
+        for source in ("defaults", "chart", "config"):
+            for name in ("web", "websecure", "foreign"):
+                for unsafe in unsafe_values:
+                    with self.subTest(source=source, port=name, unsafe=unsafe):
+                        self.cluster = FakeCluster(self.directory)
+                        if name == "foreign":
+                            self.cluster.defaults["ports"][name] = {"port": 12345, "exposedPort": 12345,
+                                                                   "expose": {"default": False}}
+                        values = {"ports": {name: unsafe}}
+                        if source == "defaults":
+                            self.cluster.defaults = ports.merge(self.cluster.defaults, values)
+                        elif source == "chart":
+                            self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                        else:
+                            self.cluster.config = {"metadata": {"resourceVersion": "7"},
+                                                   "spec": {"valuesContent": yaml.safe_dump(values)}}
+                        self.cluster.install(objects("iam", 32011))
+                        before = copy.deepcopy(self.cluster.config)
+                        live = copy.deepcopy(self.cluster.live)
+                        with self.assertRaisesRegex(ports.Unsafe, "redirect"):
+                            ports.reconcile(self.cluster, self.request, endpoint(), self.cluster.defaults)
+                        self.assertEqual(self.cluster.config, before)
+                        self.assertEqual(self.cluster.live, live)
+                        self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create"))
+                                             for call in self.cluster.calls))
+        self.assertFalse((self.directory / "backups").exists())
+
+    def test_https_install_preserves_redirects_and_listener_exposure(self):
+        redirects = [
+            {"redirectTo": "websecure"}, {"redirectTo": {"port": "websecure"}},
+            {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}},
+            {"http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https", "permanent": True}}}},
+        ]
+        for source in ("defaults", "chart", "config"):
+            for redirect in redirects:
+                with self.subTest(source=source, redirect=redirect):
+                    self.cluster = FakeCluster(self.directory)
+                    values = {"ports": {"web": redirect}}
+                    if source == "defaults":
+                        self.cluster.defaults = ports.merge(self.cluster.defaults, values)
+                    elif source == "chart":
+                        self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                    else:
+                        self.cluster.config = {"metadata": {"resourceVersion": "7"},
+                                               "spec": {"valuesContent": yaml.safe_dump(values)}}
+                    before_chart = copy.deepcopy(self.cluster.chart)
+                    before_config = copy.deepcopy(self.cluster.config)
+                    result = ports.reconcile(self.cluster, self.request, endpoint(number=32443, secure=True), self.cluster.defaults)
+                    effective = self.cluster.effective_values()
+                    for key, value in redirect.items():
+                        self.assertEqual(effective["ports"]["web"][key], value)
+                    self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {80, 32443})
+                    self.assertTrue(any(".http.redirections." in arg.lower() for arg in self.cluster.controller_args()))
+                    self.assertEqual(self.cluster.chart, before_chart)
+                    self.assertEqual(json.loads(Path(result["backup"]).read_text())["helmchartconfig"], before_config)
+                    self.assertFalse(ports.reconcile(self.cluster, self.request, endpoint(number=32443, secure=True),
+                                                     self.cluster.defaults)["changed"])
+
+    def test_redirects_without_https_or_http_ownership_remain_guarded(self):
+        for name in ("websecure", "foreign"):
+            with self.subTest(name=name):
+                self.cluster = FakeCluster(self.directory)
+                if name == "foreign":
+                    self.cluster.defaults["ports"][name] = {"port": 12345, "expose": {"default": False}}
+                self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump({
+                    "ports": {name: {"http": {"redirections": {"entryPoint": {"to": "websecure"}}}}}})
+                with self.assertRaisesRegex(ports.Unsafe, "redirect"):
+                    self.reconcile()
+                self.assertIsNone(self.cluster.config)
+
+    def test_https_install_preserves_explicit_redirect_arguments(self):
+        for field in ("additionalArguments", "globalArguments"):
+            with self.subTest(field=field):
+                self.cluster = FakeCluster(self.directory)
+                arguments = ["--log.level=INFO", "--entryPoints.web.http.redirections.entryPoint.to=:443",
+                             "--entrypoints.web.http.redirections.entrypoint.scheme=https"]
+                self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump({field: arguments})
+                self.reconcile(endpoint(number=443, secure=True))
+                self.assertEqual(self.cluster.effective_values()[field], arguments)
+                self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {80, 443})
+
+    def test_mixed_install_clears_http_and_preserves_other_redirects(self):
+        first = self.reconcile(endpoint(number=443, secure=True))
+        self.cluster.install(ports.isolate(objects(number=443, secure=True), first["endpoint"]))
+        redirect = {"http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}}
+        values = {"ports": {"web": redirect,
+                            "eva-h-12345": {"port": 12345, "expose": {"default": False}, **redirect}}}
+        self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+        self.reconcile(endpoint("iam", 32011))
+        after = self.cluster.effective_values()
+        self.assertEqual(after["ports"]["eva-h-12345"]["http"], redirect["http"])
+        self.assertFalse(ports.check_redirects(after["ports"]["web"]))
+        self.assertTrue(any("--entryPoints.eva-h-12345.http.redirections." in arg for arg in self.cluster.controller_args()))
+        self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {443, 32011})
+
+    def test_https_existing_redirect_source_and_target_remain_exposed(self):
+        self.cluster.install(objects(number=443, secure=True))
+        self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump({
+            "ports": {"web": {"http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}}}})
+        self.reconcile(endpoint(number=32443, secure=True))
+        self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {80, 443, 32443})
+        self.assertFalse(self.reconcile(endpoint(number=32443, secure=True))["changed"])
+
+    def test_http_redirect_arguments_removed_without_losing_other_settings(self):
+        for field in ("additionalArguments", "globalArguments"):
+            with self.subTest(field=field):
+                self.cluster = FakeCluster(self.directory)
+                values = {field: ["--log.level=INFO", "--entryPoints.web.http.redirections.entryPoint.to=websecure",
+                                  "--entrypoints.web.http.redirections.entrypoint.scheme=https"],
+                          "ports": {"web": {"http": {"middlewares": ["auth@kubernetescrd"],
+                                                    "redirections": {"entryPoint": {"to": "websecure"}}},
+                                            "forwardedHeaders": {"trustedIPs": ["10.0.0.0/8"]}}}}
+                self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                self.reconcile()
+                effective = self.cluster.effective_values()
+                self.assertEqual(effective[field], ["--log.level=INFO"])
+                self.assertEqual(effective["ports"]["web"]["http"]["middlewares"], ["auth@kubernetescrd"])
+                self.assertEqual(effective["ports"]["web"]["forwardedHeaders"], values["ports"]["web"]["forwardedHeaders"])
+                self.assertFalse(any(".http.redirections." in arg.lower() for arg in self.cluster.controller_args()))
+
+    def test_stale_redirect_arguments_never_succeed(self):
+        for field in ("stale_redirect", "stale_pod_redirect"):
+            with self.subTest(field=field):
+                self.cluster = FakeCluster(self.directory)
+                setattr(self.cluster, field, True)
+                with self.assertRaisesRegex(ports.Unsafe, "Timeout"):
+                    self.reconcile()
+
+    def test_shared_listener_redirect_policy_is_not_silently_changed(self):
+        for values in ({"ports": {"web": {"http": {"redirections": {"entryPoint": {"to": "websecure"}}}}}},
+                       {"additionalArguments": ["--entryPoints.web.http.redirections.entryPoint.to=websecure"]}):
+            with self.subTest(values=values):
+                self.cluster = FakeCluster(self.directory)
+                self.cluster.live = [{"kind": "Ingress", "metadata": {"name": "foreign", "namespace": "other"},
+                                      "spec": {"rules": [{"host": "other.example"}]}}]
+                self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                before = copy.deepcopy(self.cluster.live)
+                with self.assertRaisesRegex(ports.Unsafe, "shared listener redirects"):
+                    self.reconcile(endpoint(number=80))
+                self.assertIsNone(self.cluster.config)
+                self.assertEqual(self.cluster.live, before)
+                self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def test_http_cleanup_preserves_https_and_owned_extra_listeners(self):
+        first = self.reconcile(endpoint(number=32443, secure=True))
+        self.cluster.install(ports.isolate(objects(number=32443, secure=True), first["endpoint"]))
+        before = yaml.safe_load(self.cluster.config["spec"]["valuesContent"])
+        before["ports"]["web"]["http"] = {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}
+        before["ports"]["websecure"]["http"] = {"tls": {"enabled": True, "options": "keep"}}
+        self.cluster.config["spec"]["valuesContent"] = yaml.safe_dump(before)
+        second = self.reconcile(endpoint("iam", 32011))
+        self.assertEqual(second["endpoint"]["entrypoint"], "eva-h-32011")
+        self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32011, 32443})
+        values = yaml.safe_load(self.cluster.config["spec"]["valuesContent"])
+        self.assertEqual(values["ports"]["websecure"]["http"], before["ports"]["websecure"]["http"])
+        values["ports"]["eva-h-32011"]["http"] = {"redirections": {"entryPoint": {"to": "websecure"}}}
+        self.cluster.config["spec"]["valuesContent"] = yaml.safe_dump(values)
+        self.reconcile(endpoint("iam", 32011))
+        self.assertFalse(any(".http.redirections." in arg.lower() for arg in self.cluster.controller_args()))
+
     def test_stale_ready_controller_or_pods_never_succeed(self):
         for field in ("stale", "stale_pod", "wrong_target", "bad_args", "bad_owner", "pod_args_stale",
                   "pod_not_ready", "pod_foreign_owner", "extra_args", "duplicate_args"):
@@ -649,7 +926,7 @@ class TraefikPortsTests(unittest.TestCase):
 
     def test_actual_ansible_app_iam_callers_dns_ip_and_opt_out(self):
         for component in ("app", "iam"):
-            for case in ("dns", "ip", "opt-out"):
+            for case in ("dns", "ip", "ip-nested-default", "ip-redirect", "ip-https-redirect", "opt-out"):
                 with self.subTest(component=component, case=case):
                     self.run_ansible(component, case)
 
@@ -663,6 +940,11 @@ class TraefikPortsTests(unittest.TestCase):
         kubectl.write_text(f"#!{sys.executable}\nimport runpy, sys\nsys.argv = [{str(Path(__file__).resolve())!r}, '--fake-kubectl'] + sys.argv[1:]\nrunpy.run_path(sys.argv[0], run_name='__main__')\n")
         kubectl.chmod(0o700)
         fake = FakeCluster(directory)
+        if case in ("ip-nested-default", "ip-redirect", "ip-https-redirect"):
+            fake.chart["spec"]["valuesContent"] = yaml.safe_dump({
+                "ports": {"web": {"http": {"redirections": {"entryPoint": (
+                    {"to": "websecure", "scheme": "https"} if case != "ip-nested-default" else {})}}}},
+            })
         fake.bad_args = case == "helper-failure"
         state = directory / "cluster.json"
         state.write_text(json.dumps(fake.__dict__))
@@ -670,7 +952,8 @@ class TraefikPortsTests(unittest.TestCase):
         (chart / "templates").mkdir(parents=True)
         (chart / "Chart.yaml").write_text("apiVersion: v2\nname: eva-fixture\nversion: 1.0.0\n")
         (chart / "values.yaml").write_text("{}\n")
-        manifest = objects(component, host="app.example" if case == "dns" else "10.159.56.197")
+        manifest = objects(component, secure=case == "ip-https-redirect",
+                   host="app.example" if case == "dns" else "10.159.56.197")
         (chart / "templates/resources.yaml").write_text(yaml.safe_dump_all(manifest))
         (directory / "values.yaml").write_text("{}\n")
         (directory / "eva-iam-k3s-override.yaml").write_text("{}\n")
@@ -686,7 +969,8 @@ class TraefikPortsTests(unittest.TestCase):
                      "eva_app_effective_values_dest": str(directory / "values.yaml"), "eva_iam_chart_version_arg": "",
                      "eva_iam_app_sso_base_url": "http://10.159.56.197:32010",
                      "eva_iam_effective_user_values": {}, "eva_iam_values_dest": str(directory / "values.yaml")}
-        assertion = {"ansible.builtin.assert": {"that": ["eva_traefik_ports_result.isolated == " + ("true" if case == "ip" else "false")]}}
+        isolated = case in ("ip", "ip-nested-default", "ip-redirect", "ip-https-redirect")
+        assertion = {"ansible.builtin.assert": {"that": ["eva_traefik_ports_result.isolated == " + ("true" if isolated else "false")]}}
         play = [{"hosts": "localhost", "gather_facts": False, "vars": variables, "tasks": [caller, result, assertion],
                  "environment": {"PATH": str(binary) + ":" + os.environ["PATH"], "FAKE_TRAEFIK_STATE": str(state)}}]
         playbook = directory / "play.yaml"
@@ -702,11 +986,75 @@ class TraefikPortsTests(unittest.TestCase):
             return
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         saved = json.loads(state.read_text())
-        self.assertEqual(saved["config"] is not None, case == "ip")
+        self.assertEqual(saved["config"] is not None, isolated)
+        if case == "ip-redirect":
+            fake.__dict__.update(saved)
+            self.assertFalse(any(".http.redirections." in arg.lower() for arg in fake.controller_args()))
+        elif case == "ip-https-redirect":
+            fake.__dict__.update(saved)
+            self.assertTrue(any(".http.redirections." in arg.lower() for arg in fake.controller_args()))
+            self.assertIn(80, {item["port"] for item in fake.state_ports().values()})
 
 
 class PublishedChartTests(unittest.TestCase):
     """Optional real archived-chart proof; missing archives are explicit skips."""
+    def test_traefik_redirect_policy_with_actual_helm_schema_and_templates(self):
+        if not TRAEFIK_CHARTS or not shutil.which("helm"):
+            self.skipTest("Provide EVA_TEST_TRAEFIK_CHARTS or EVA_TEST_HELM_DOWNLOAD=1 for real Traefik renders")
+        for archive in TRAEFIK_CHARTS:
+            with tarfile.open(archive) as tar:
+                original_defaults = yaml.safe_load(tar.extractfile("traefik/values.yaml").read())
+            web = original_defaults["ports"]["web"]
+            redirect = ({"http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}}
+                        if "http" in web else {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}
+                        if "redirections" in web else {"redirectTo": {"port": "websecure"}})
+            for source, secure in ((source, secure) for source in ("defaults", "chart", "config", "owned-extra") for secure in (False, True)):
+                with self.subTest(chart=archive.name, source=source, secure=secure), tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    chart_defaults = copy.deepcopy(original_defaults)
+                    chart = {"spec": {}}
+                    values = {"ports": {"web": redirect}}
+                    config = None
+                    if source == "defaults":
+                        chart_defaults = ports.merge(chart_defaults, values)
+                    elif source == "chart":
+                        chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                    else:
+                        if source == "owned-extra":
+                            extra = {"port": 32010, "exposedPort": 32010,
+                                     "expose": copy.deepcopy(web["expose"]), **redirect}
+                            values["ports"]["eva-h-32010"] = extra
+                        config = {"spec": {"valuesContent": yaml.safe_dump(values)}}
+                    if source == "owned-extra":
+                        config["metadata"] = {"annotations": {ports.STATE: json.dumps({"app": {"entrypoint": "eva-h-32010"}})}}
+                    desired, _, expected = ports.plan(chart_defaults, chart, config, {"app": endpoint(number=32443 if secure else 32010, secure=secure)}, [],
+                                                      preserve_primary=source == "owned-extra")
+                    base = root / "base.yaml"
+                    overrides = root / "hcc.yaml"
+                    # Passing modified defaults as a values layer reproduces
+                    # inherited Chart leaves without rewriting its archive.
+                    inherited = ports.merge(chart_defaults, yaml.safe_load(chart["spec"].get("valuesContent", "")) or {})
+                    base.write_text(yaml.safe_dump(inherited))
+                    overrides.write_text(yaml.safe_dump(desired))
+                    command = ["helm", "template", "traefik", str(archive), "-n", "kube-system", "-f", str(base)]
+                    before_values = root / "before.yaml"
+                    before_values.write_text(yaml.safe_dump(values if config else {}))
+                    before = subprocess.run(command + ["-f", str(before_values)], capture_output=True, text=True)
+                    self.assertEqual(before.returncode, 0, before.stderr)
+                    self.assertIn("http.redirections.entryPoint.to", before.stdout)
+                    rendered = subprocess.run(command + ["-f", str(overrides)], capture_output=True, text=True)
+                    self.assertEqual(rendered.returncode, 0, rendered.stderr)
+                    manifests = ports.documents(rendered.stdout)
+                    deployment = next(obj for obj in manifests if obj["kind"] == "Deployment")
+                    args = deployment["spec"]["template"]["spec"]["containers"][0]["args"]
+                    self.assertEqual(any(".http.redirections." in arg.lower() for arg in args), secure)
+                    if secure and source != "owned-extra":
+                        self.assertTrue(any(".http.redirections.entrypoint.to=:32443" in arg.lower() for arg in args))
+                    service = next(obj for obj in manifests if obj["kind"] == "Service" and obj["metadata"]["name"] == "traefik")
+                    actual = {item["name"]: {key: item[key] for key in ("port", "targetPort", "protocol")}
+                              for item in service["spec"]["ports"]}
+                    self.assertEqual(actual, expected)
+
     def test_exact_offline_charts_and_installed_helm_postrenderer(self):
         charts = {
             "app": Path(os.environ.get("EVA_TEST_APP_CHART", "/mnt/storage/home/sunghyuns.park/eva-app-3.3.0-beta.3-airgap/charts/eva-app-3.3.0-beta.3.tgz")),

@@ -147,10 +147,8 @@ Values에 비밀번호가 포함될 수 있으므로 파일 권한은 `0600`이�
 role override < Workspace < CLI Values 순으로 병합한 입력이며, Chart 기본값과 CLI `--set`까지
 포함한 최종 값은 `resolved`에서 확인한다.
 
-**기존 Release 주의:** 이 수정 이전의 `0.1.0-ci.125` 등에서 IAM은 override만 저장했다.
-새 CLI로 조회해도 없는 산출물이 자동 생성되거나 기존 설치 Values가 바뀌지는 않는다.
-수정 Release로 IAM을 다시 설치해야 해당 Operation에 파일이 기록된다.
-기존 설치를 변경하지 않고 확인하려면 대상 클러스터에서
+**산출물이 없는 경우:** 선택한 Operation에 기록되지 않은 파일은 조회 시 자동 생성하지 않는다.
+`inspect files`로 저장 여부를 확인한다. 기존 설치를 변경하지 않고 Values를 확인하려면 대상 클러스터에서
 `sudo eva exec helm get values eva-iam -n eva-iam --all -o yaml`로 직접 조회할 수 있다.
 release/namespace는 실제 설치 이름에 맞추고, 출력에는 secret이 마스킹 없이 포함되므로 공유하지 않는다.
 
@@ -161,16 +159,15 @@ n8n은 현재 Helm Values 방식이 아니라 Kubernetes manifest 방식으로 �
 ### App SSO 기본값과 생성 Config
 
 App SSO의 기본 식별자는 `app.sso.realm: eva-iam`, `app.sso.clientId: eva-app`이다.
-Chart에 과거 환경의 기본 식별자가 남아 있어도 Deployer의 role override에서 올바른 기본값을 준다.
+Deployer의 role override에서 이 기본값을 적용한다.
 유효한 IAM handoff는 realm/client/admin-client 식별자를 함께 넘기며,
 Workspace, CLI Values, CLI `--set`에 명시한 값은 기존 우선순위대로 보존한다.
 완전한 Workspace SSO(URL과 admin secret)를 지정하면 handoff를 사용하지 않는다.
 
 Config가 생성한 `app.vision`, `app.agent`, `app.pipeline`은 Chart의 `app` 아래로 병합한다.
-이전 구현이 이들을 Chart 최상위에 넣어 만든 `backendHost: server-a` 등은 잘못된 병합의 흔적이다.
 생성 Config의 `backendHost`는 요약 정보로만 사용하며, 실제 공개 호스트는 App role의 설정
 (기본: 대상 서버의 기본 IPv4), Workspace `app.backendHost`, CLI 순으로 결정한다.
-기존 `resolved` 파일은 당시 Helm 기록이므로 조회 단계에서 잘못된 필드를 숨기거나 재작성하지 않는다.
+`resolved` 파일은 설치 당시 Helm 기록이며 조회 단계에서 필드를 숨기거나 재작성하지 않는다.
 
 ### App MySQL DB 이름
 
@@ -184,18 +181,17 @@ Chart 자체의 기본값을 사용한다.
 덮어쓴다. 이름을 지정하지 않았다면 `effective`/`override`에 `database.name`이 없는 것이
 정상이다. 기본값은 `defaults`, 설치 후 최종 계산값은 `resolved`에서 확인한다.
 
-**기존 설치 주의:** DB 이전 기능이 포함된 Release는 기존 내부 MySQL의 DB 이름이 바뀌면
+**기존 설치 주의:** 기존 내부 MySQL의 DB 이름이 바뀌면
 새 App 기동 전에 원본을 dump/restore하고 `eva_id`를 검증한다. 원본 DB는 삭제하지 않으며,
 정상 대상 DB가 이미 있으면 그 데이터를 유지하고 로컬 license cache와 다를 때만 백업 후
 `config.eva_id` 한 행을 정합화한다. 다른 DB를 덮어쓰거나 병합하지 않는다. v3.2 이전 로컬 사용자 schema의 전체 CSV도
 DB 이름 변경 여부와 무관하게 먼저 백업한다. 위치·옵션·제약은
 [App DB 이전과 사용자 백업](app-database-migration.md)을 따른다.
-이 기능이 없는 기존 Release에서는 `database.name: eva`를 명시해 유지하거나 별도 이관이 필요하다.
 MySQL 초기화 환경 변수 변경은 데이터 이관이 아니다. PVC·MySQL·license 디렉터리를 삭제하지 않는다.
 
 ### IP 공개 포트와 Traefik
 
-IP 기반 App/IAM은 ClusterIP의 `service.port`만으로 외부 포트가 열리지 않는다. 수정된 Release는
+IP 기반 App/IAM은 ClusterIP의 `service.port`만으로 외부 포트가 열리지 않는다. Deployer는
 최종 공개 URL에 맞춰 k3s HelmChartConfig listener와 App/IAM router를 정합화하고, 필요 없는
 기본 80/443의 ServiceLB hostPort를 해제한다. 양쪽이 HTTP여도 서로 다른 공개 포트를 사용할 수 있다.
 `kubectl get ingress`의 `PORTS`가 80/443으로 표시되는 것만으로 실패를 판정하지 않는다.

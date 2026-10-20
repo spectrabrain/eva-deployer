@@ -1,7 +1,7 @@
 # App DB 보존·라이선스 identity 정합화와 이전 사용자 백업
 
-이 기능이 포함된 **Deployer Release의 App role**을 실행할 때 적용된다. Helm 직접 설치나 기존
-Release에는 적용되지 않는다. Cloud/Remote/Local 모두 같은 절차이며 인터넷 연결은 필요 없다.
+**Deployer의 App 설치 단계**에서 적용된다. Helm 직접 설치에는 적용되지 않는다.
+Cloud/Remote/Local 모두 같은 절차이며 인터넷 연결은 필요 없다.
 DB 복사, 라이선스 identity 정합화, 제품의 Alembic schema upgrade는 서로 다른 단계다.
 **정상적인 `eva_v3_0`이 이미 있으면 삭제하거나 이전 DB로 덮어쓰지 않고 그대로 사용한다.**
 
@@ -128,7 +128,7 @@ schema migration 이후 Helm rollback만으로 DB/user 테이블이 복구되지
 ## 기존 `eva`와 `eva_v3_0`의 ID가 다른 경우
 
 예를 들어 `eva_v3_0`에 유지할 데이터가 있고 기존 license cache가 다른 ID를 가리켜도,
-이 수정본은 대상 DB를 비우거나 `eva` 데이터를 덮어쓰지 않는다. `eva_v3_0`의 전체 백업을
+Deployer는 대상 DB를 비우거나 `eva` 데이터를 덮어쓰지 않는다. `eva_v3_0`의 전체 백업을
 보관하고 cache에 저장된 ID로 `eva_v3_0.config.eva_id`만 보정한 다음 설치를 계속한다.
 남아 있는 `eva`와 license cache는 변경하지 않는다. 따라서 정상 대상 DB를 삭제할 필요가 없다.
 
@@ -136,9 +136,6 @@ cache와 대상 ID가 이미 같으면 ID 수정 없이 진행한다. cache가 �
 대체 근거로 삼지 않는다. 로그 결과의 `license_identity`는 `corrected` / `matched` /
 `no-local-license`이며 실제 ID와 복호화된 license 내용은 일반 로그에 출력하지 않는다.
 
-이 동작은 **수정된 App role이 포함된 새 Deployer Release**에서 적용된다. 기존 `ci.125`는
-계속 이전 충돌 중단 동작을 한다. 그 Release에 `from_json` 표시 오류만 고치는 것으로는
-이 정책이 적용되지 않는다. 수정본은 helper의 `rc == 0`일 때만 결과 JSON을 파싱한다.
 실패 시 기존 Deployment UID가 같으면 이전 replica 복구를 시도하지만 이는 DB ID 보정이나
 제품 migration을 되돌리는 rollback이 아니다. `replica restoration rc=0, rollout rc=0`도
 로그인·license 정상 동작을 보증하지 않는다.

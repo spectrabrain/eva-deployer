@@ -149,17 +149,68 @@ def set_exposure(port, value, modern):
         port["expose"] = value
 
 
+def check_redirects(port):
+    """Validate known redirect shapes and report whether any redirect is configured."""
+    active = bool(port.get("redirectTo"))
+    require(port.get("redirectTo") is None or isinstance(port["redirectTo"], (str, dict)), "Unknown Traefik redirectTo schema")
+    http = port.get("http")
+    require(http is None or isinstance(http, dict), "Unknown Traefik HTTP redirect schema")
+    # Chart v34 uses port.redirections; v40 uses port.http.redirections.
+    # Both render a redirect only within `with redirections.entryPoint`.
+    # {entryPoint: {}} is a normal INACTIVE default, but its outer map is truthy.
+    for redirections in (port.get("redirections"), (http or {}).get("redirections")):
+        require(redirections is None or isinstance(redirections, dict), "Unknown Traefik redirect schema")
+        if redirections is None:
+            continue
+        require(not (redirections.keys() - {"entryPoint"}), "Unknown Traefik redirect schema")
+        entry = redirections.get("entryPoint")
+        require(entry is None or isinstance(entry, dict), "Unknown Traefik redirect entryPoint schema")
+        active = active or bool(entry)
+    return active
+
+
+def without_redirects(port, inherited, override):
+    """Remove HCC redirects; tombstone inherited leaves so Helm cannot merge them back."""
+    for path in (("redirectTo",), ("redirections", "entryPoint"), ("http", "redirections", "entryPoint")):
+        current, lower = port, inherited
+        for key in path:
+            current = (current or {}).get(key)
+            lower = (lower or {}).get(key)
+        if not current:
+            continue
+        target = override
+        for key in path[:-1]:
+            if not isinstance(target.get(key), dict):
+                target[key] = {}
+            target = target[key]
+        if lower:
+            target[path[-1]] = None
+        else:
+            target.pop(path[-1], None)
+
+
+def managed_http_entries(selected, owned_entries, unrelated):
+    entries = {item["entrypoint"] for item in selected.values() if item["scheme"] == "http"}
+    if entries:
+        # Non-exposed entrypoints still render static redirect arguments.
+        entries |= {name for name in owned_entries if name and re.fullmatch(r"eva-h-\d+", name)}
+        if not unrelated:
+            entries.add("web")
+    return entries
+
+
 def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
     """Preserve the entire config, modifying only owned port leaves + state annotation."""
     for source in (chart, config or {}):
         spec = source.get("spec", {})
         require(not spec.get("valuesSecrets"), "Traefik valuesSecrets override cannot be safely reconciled")
-        require(not any(re.match(r"^(ports|service|hostNetwork|additionalArguments|deployment|providers)(\.|\[|$)", key) for key in spec.get("set", {})),
+        require(not any(re.match(r"^(ports|service|hostNetwork|additionalArguments|globalArguments|deployment|providers)(\.|\[|$)", key) for key in spec.get("set", {})),
                 "Traefik spec.set overrides managed listener configuration")
     base = yaml.safe_load(chart.get("spec", {}).get("valuesContent", "")) or {}
     original = yaml.safe_load((config or {}).get("spec", {}).get("valuesContent", "")) or {}
     require(isinstance(defaults, dict) and isinstance(base, dict) and isinstance(original, dict), "Traefik values must be mappings")
-    effective = merge(merge(defaults, base), original)
+    inherited = merge(defaults, base)
+    effective = merge(inherited, original)
     ports = effective.get("ports", {})
     require("web" in ports and "websecure" in ports, "Unknown installed Traefik chart port schema")
     modern = isinstance(defaults.get("ports", {}).get("web", {}).get("expose"), dict)
@@ -170,8 +221,7 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
     require(not effective.get("providers", {}).get("kubernetesGateway", {}).get("enabled"), "Gateway API listeners must be managed externally")
     for item in ports.values():
         require(not item.get("hostPort") and not item.get("nodePort") and not item.get("http3", {}).get("enabled"), "Traefik hostPort/nodePort/HTTP3 overrides are unsupported")
-    require(not ports["web"].get("redirectTo") and not ports["web"].get("redirections") and not ports["web"].get("http", {}).get("redirections"), "Existing HTTP entrypoint redirects must be managed externally")
-    require(not any("entrypoints." in str(arg).lower() or "entrypoints=" in str(arg).lower() for arg in effective.get("additionalArguments", [])), "Traefik additionalArguments override entrypoints")
+        check_redirects(item)
     updated = copy.deepcopy(original)
     old_state = json.loads((config or {}).get("metadata", {}).get("annotations", {}).get(STATE, "{}"))
     owned_entries = {item.get("entrypoint") for item in old_state.values() if isinstance(item, dict)}
@@ -212,7 +262,47 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
     for name in original.get("ports", {}):
         if name in owned_entries and re.fullmatch(r"eva-[hs]-\d+", name) and name not in owned_names:
             set_exposure(overrides.setdefault(name, {}), False, modern)
-    resulting = merge(effective, updated)
+    http_entries = managed_http_entries(selected, owned_entries, unrelated)
+    has_https = any(item["scheme"] == "https" for item in selected.values())
+    retained_redirects = set()
+    for name, item in ports.items():
+        if check_redirects(item):
+            if name in http_entries:
+                require(not unrelated or name != "web", "Unrelated Traefik ingresses prevent clearing shared listener redirects")
+                without_redirects(item, inherited.get("ports", {}).get(name, {}), overrides.setdefault(name, {}))
+            else:
+                require(has_https, "Existing redirects on unmanaged listeners must be managed externally")
+                retained_redirects.add(name)
+                legacy = item.get("redirectTo")
+                targets = [legacy if isinstance(legacy, str) else (legacy or {}).get("port"),
+                           ((item.get("redirections") or {}).get("entryPoint") or {}).get("to"),
+                           (((item.get("http") or {}).get("redirections") or {}).get("entryPoint") or {}).get("to")]
+                retained_redirects.update(target for target in targets if isinstance(target, str) and target in ports)
+    for field in ("additionalArguments", "globalArguments"):
+        arguments = effective.get(field, [])
+        filtered = []
+        for arg in arguments:
+            redirect = re.fullmatch(r"--entrypoints\.([\w-]+)\.http\.redirections\.entrypoint\.(to|scheme|permanent|priority)=(.*)", str(arg), re.I)
+            if redirect and redirect[1] in http_entries:
+                require(not unrelated or redirect[1] != "web", "Unrelated Traefik ingresses prevent clearing shared listener redirects")
+                continue
+            if redirect:
+                require(has_https and redirect[1] in ports, "Traefik redirect argument uses an unmanaged listener")
+                retained_redirects.add(redirect[1])
+                if redirect[2].lower() == "to":
+                    retained_redirects.update(name for name, item in ports.items()
+                                             if redirect[3] == name or redirect[3].lstrip(":") == str(item.get("exposedPort")))
+            else:
+                require("entrypoints." not in str(arg).lower() and "entrypoints=" not in str(arg).lower(), "Traefik argument overrides unmanaged entrypoints")
+            filtered.append(arg)
+        if filtered != arguments:
+            updated[field] = filtered
+    # A preserved redirect must not silently lose its existing source/target
+    # Service exposure merely because no EVA router is attached there.
+    for name in retained_redirects:
+        if enabled(ports[name]):
+            set_exposure(overrides.setdefault(name, {}), True, modern)
+    resulting = merge(inherited, updated)
     expected = {}
     bound = {}
     for name, item in resulting["ports"].items():
@@ -220,7 +310,7 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
             number = port_number(item.get("exposedPort", item.get("port")))
             require(number not in bound, "Conflicting Traefik exposed ports")
             bound[number] = name
-            expected[name] = {"port": number, "targetPort": item.get("targetPort", name), "protocol": item.get("protocol", "TCP")}
+            expected[name] = {"port": number, "targetPort": item.get("targetPort") or name, "protocol": item.get("protocol", "TCP")}
         container_port = item.get("port")
         for other_name, other in resulting["ports"].items():
             require(other_name == name or not container_port or container_port != other.get("port"), "Conflicting Traefik container entrypoint ports")
@@ -459,7 +549,7 @@ def check_service(service):
     require(not service["spec"].get("loadBalancerClass") and not service["spec"].get("externalIPs") and not service["spec"].get("loadBalancerIP"), "External LoadBalancer configuration is unsupported")
 
 
-def ready(cluster, expected, previous_ports, addresses):
+def ready(cluster, expected, previous_ports, addresses, http_entries=()):
     service = cluster.get("services", name="traefik")
     check_service(service)
     actual = {item["name"]: {key: item.get(key, "TCP" if key == "protocol" else None) for key in ("port", "targetPort", "protocol")} for item in service["spec"]["ports"]}
@@ -528,6 +618,9 @@ def ready(cluster, expected, previous_ports, addresses):
     def exact_addresses(arguments):
         found = {}
         for arg in arguments:
+            redirect = re.match(r"--entrypoints\.([\w-]+)\.http\.redirections(?:[.=]|$)", arg, re.I)
+            if redirect and redirect[1] in http_entries:
+                return False
             if arg.lower().startswith("--entrypoints.") and ".address" in arg.lower():
                 match = re.fullmatch(r"--entrypoints\.([\w-]+)\.address=:(\d+)(?:/tcp)?", arg.lower())
                 if not match or match[1] in found:
@@ -566,6 +659,8 @@ def reconcile(cluster, request, planned, defaults=None):
     require(isinstance(old_state, dict), "Invalid EVA endpoint ownership annotation")
     selected, unrelated, originals, evidence = discover(cluster, planned, old_state)
     values, selected, expected = plan(defaults, chart, config, selected, unrelated, preserve_primary=bool(originals))
+    owned_entries = {item.get("entrypoint") for item in old_state.values() if isinstance(item, dict)}
+    http_entries = managed_http_entries(selected, owned_entries, unrelated)
     effective = merge(merge(defaults, yaml.safe_load(chart.get("spec", {}).get("valuesContent", "")) or {}), values)
     # Even non-exposed entrypoints (e.g. the dashboard) exist in Traefik args.
     addresses = {name: item["port"] for name, item in effective["ports"].items()}
@@ -612,7 +707,7 @@ def reconcile(cluster, request, planned, defaults=None):
         raise Unsafe(f"EVA router/HCC CAS migration stopped; no blind retry or rollback. Review private original backup: {backup}") from exc
     try:
         return converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
-                        addresses, current_key, changed, backup, timeout)
+                        addresses, current_key, changed, backup, timeout, http_entries)
     except Unsafe as exc:
         raise Unsafe(f"{exc}. Original backup: {backup}") from exc
     except Exception as exc:
@@ -620,7 +715,7 @@ def reconcile(cluster, request, planned, defaults=None):
 
 
 def converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
-             addresses, current_key, changed, backup, timeout):
+             addresses, current_key, changed, backup, timeout, http_entries=()):
     deadline = time.monotonic() + timeout
     while True:
         observed = cluster.get(RESOURCE, name="traefik")
@@ -633,7 +728,7 @@ def converge(cluster, chart, values, selected, originals, evidence, expected, ol
         verify_endpoint_maps(cluster, evidence)
         conditions = chart_now.get("status", {}).get("conditions", [])
         require(not any(c.get("type") == "Failed" and c.get("status") == "True" for c in conditions), f"Traefik Helm controller failed; original backup: {backup}")
-        if ready(cluster, expected, old_ports, addresses):
+        if ready(cluster, expected, old_ports, addresses, http_entries):
             verify_routers(cluster, originals, selected)
             verify_endpoint_maps(cluster, evidence)
             return {"changed": changed, "isolated": True, "endpoint": selected[current_key], "backup": backup}

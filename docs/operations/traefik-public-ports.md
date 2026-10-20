@@ -1,9 +1,46 @@
-# IP 기반 EVA App·IAM 공개 포트와 Traefik
+# EVA App·IAM 공개 포트와 Traefik
 
-수정된 Deployer Release는 **IP 기반 App/IAM Ingress 설치 시** 실제 공개 URL에 맞춰 k3s
-`kube-system/traefik` HelmChartConfig를 자동 정합화한다. Cloud/Remote/Local 공통이다.
-기존 Release나 Helm 직접 설치에는 적용되지 않는다. DNS 기반 또는 Ingress 비활성 설치는
-이 자동 변경을 수행하지 않는다.
+App/IAM Ingress의 공개 포트는 k3s `kube-system/traefik`의 listener 설정과 함께 확인한다.
+Cloud/Remote/Local 공통이며, 아래에서는 설정 조회와 Deployer의 포트 정합화 절차를 설명한다.
+
+## `web`·`websecure` 설정 위치
+
+`web`과 `websecure`는 Traefik의 entrypoint 이름이다. 설정은 다음 순서로 병합된다.
+
+1. **Traefik Chart 기본 Values**: `HelmChart/traefik.spec.chart`가 가리키는 아카이브의
+    `traefik/values.yaml` 안에 `ports.web`·`ports.websecure`가 있다. k3s 서버에서는
+    `/var/lib/rancher/k3s/server/static/charts/` 아래의 해당 아카이브로 확인한다.
+2. **HelmChart 재정의**: `kube-system/traefik`의 `spec.valuesContent`.
+3. **HelmChartConfig 재정의**: 같은 namespace/name의 `spec.valuesContent`. 필요한 경우에만 존재한다.
+
+`spec.set`은 위 Values보다 우선하며, `valuesSecrets`도 추가 입력이 될 수 있다. 자동 관리는
+관리 대상 설정과 충돌하는 `spec.set`이나 `valuesSecrets`가 있으면 중단한다.
+
+**HelmChartConfig가 없다는 것은 별도 재정의가 없다는 뜻이지, 포트 설정이 없다는 뜻이 아니다.**
+HelmChart에도 포트 재정의가 없으면 Chart 기본값을 사용한다. 일반적인 기본값은 다음과 같다.
+
+| entrypoint | `port` (Traefik 내부) | `exposedPort` (Service 공개) |
+| --- | --- | --- |
+| `web` | `8000` | `80` |
+| `websecure` | `8443` | `443` |
+
+실제 설치 Chart에 따라 달라질 수 있다. `expose.default`는 해당 entrypoint를 Service에 공개할지
+결정한다. 구형 Chart의 `expose`는 boolean이다. `websecure`의 이름만으로 App/IAM의 프로토콜을
+정하지 않으며, TLS와 공개 URL을 함께 확인한다.
+
+대상 서버에서 **현재 Helm에 기록된 계산값의 포트 필드만** 조회한다(`jq` 필요).
+
+```bash
+sudo eva exec helm get values traefik -n kube-system --all -o json \
+   | jq '.ports | {web: (.web | {port, exposedPort, expose}), websecure: (.websecure | {port, exposedPort, expose})}'
+
+sudo eva exec kubectl -n kube-system get svc traefik \
+   -o jsonpath='{range .spec.ports[*]}{.name}{" port="}{.port}{" targetPort="}{.targetPort}{"\n"}{end}'
+```
+
+Helm 계산값은 설치 이력이고 Service는 현재 리소스이므로, controller 반영 대기 중에는 다를 수 있다.
+HelmChartConfig는 Deployer가 포트를 정합화할 때 없으면 생성한다. 별도 manifest 파일이 없어도
+정상이며, k3s가 관리하는 Traefik 기본 manifest나 Service를 직접 수정할 필요가 없다.
 
 ## ClusterIP의 32010만으로 외부에서 접근할 수 없는 이유
 
@@ -21,16 +58,23 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
    App HTTP는 `app.backendPublicPort`, HTTPS는 `app.backendSecurePort`, IAM은
    `config.publicPort`가 렌더링된 runtime URL을 따른다. App의 `service.port`에서 추측하지 않는다.
 2. 기존 App/IAM이 있으면 Ingress·endpoint ConfigMap의 정확한 Helm 소유권과 Helm 저장 이력을
-   대조한다. 기존 양쪽이 hostless IP Ingress여도 확인된 공개 포트를 함께 보존한다.
+   대조한다. 기존 양쪽이 hostless Ingress여도 확인된 공개 포트를 함께 보존한다.
 3. 변경 전 HelmChart·HelmChartConfig·해당 Ingress 원본을 대상 서버의
    `/var/lib/eva/backups/traefik-ports/`에 private snapshot으로 저장한다.
 4. App/IAM router를 서로 필요한 entrypoint에만 연결한다. `web`/`websecure`를 사용하거나
    추가 `eva-h-<port>`/`eva-s-<port>` entrypoint를 만들어 **양쪽 모두 HTTP인 경우에도 다른 포트로
    분리**한다. `websecure`라는 이름만 보고 HTTP IAM을 연결하지 않는다.
-5. HelmChartConfig의 필요한 포트만 노출하고, 더 이상 필요 없는 기본 80/443 노출은 끈다.
+5. HTTP로 사용하는 entrypoint의 리다이렉트를 해제한다. HelmChartConfig에 직접 있으면 제거하고,
+   Chart/HelmChart에서 상속되면 재병합되지 않도록 비활성 override를 기록한다. HTTP 설치에서
+   사용하지 않는 기본 `web`과 이전 EVA HTTP entrypoint도 정리하되, 다른 서비스가 사용하는
+   기본 listener나 HTTPS·외부 관리 listener의 리다이렉트를 임의로 해제하지 않는다.
+   **HTTPS 설치에서는 기존 리다이렉트를 보존하며, 설정이 있다는 이유로 설치를 중단하지 않는다.**
+   유지하는 리다이렉트의 source·target listener가 이미 공개되어 있으면 그 공개도 유지한다.
+6. HelmChartConfig의 필요한 포트만 노출하고, 더 이상 필요 없는 기본 80/443 노출은 끈다.
    내부 container 포트와 외부 `exposedPort`는 같을 필요가 없다. Service를 직접 patch하지 않는다.
-6. k3s Helm controller 반영 후 Traefik Service·Deployment·실제 Pod 인자와 readiness, ServiceLB
-   DaemonSet/Pod의 새 hostPort와 이전 hostPort 해제를 확인한다. 기본 대기 한도는 300초다.
+7. k3s Helm controller 반영 후 Traefik Service·Deployment·실제 Pod 인자와 readiness, ServiceLB
+   DaemonSet/Pod의 새 hostPort와 이전 hostPort 해제를 확인한다. HTTP 관리 listener에 리다이렉트
+   인자가 남으면 완료로 처리하지 않는다. 기본 대기 한도는 300초다.
 
 예를 들어 App HTTP 32010, IAM HTTP 32011이면 둘 다 HTTP listener로 공개하고 각 Ingress를
 자기 listener에만 연결한다. 80/443을 사용하는 다른 Traefik 경로가 없고 해당 포트가 요청되지
@@ -40,9 +84,15 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
 ## 보호 조건과 운영 주의사항
 
 - 기본 bundled k3s Traefik + LoadBalancer + ServiceLB 구성을 지원한다. 외부 LB/custom Chart,
-  직접 hostNetwork/hostPort/nodePort override, HTTP3, 별도 listener redirect, 관리 대상
+   직접 hostNetwork/hostPort/nodePort override, HTTP3, 관리 대상
   `spec.set` 또는 `valuesSecrets` 충돌은 추측해서 덮어쓰지 않는다.
-- 다른 서비스의 NodePort/LoadBalancer 포트, workload hostPort 또는 IP hostless 경로가 충돌하면
+   Chart 기본값의 `ports.web.redirections.entryPoint: {}` 또는
+   `ports.web.http.redirections.entryPoint: {}`는 **리다이렉트 비활성**이다.
+   HTTP 관리 listener의 `redirectTo`, `redirections.entryPoint`, `http.redirections.entryPoint`와
+   명시적인 entrypoint redirect 인자는 해제한다. HTTPS 설치의 기존 리다이렉트 설정·인자와
+   다른 HTTP 옵션·TLS 설정은 보존한다. 혼합 설치에서는 HTTP 관리 listener의 해제를 우선한다.
+   알 수 없는 redirect schema나 다른 entrypoint 인자 재정의는 자동 변경 전에 중단한다.
+- 다른 서비스의 NodePort/LoadBalancer 포트, workload hostPort 또는 hostless 경로가 충돌하면
   중단한다. 무관한 Ingress/IngressRoute가 공유 listener를 사용하면 임의로 80/443을 옮기지 않는다.
 - Helm 이력 없는 Argo CD 전용 설치, 소유권 불일치, 작업 중 ConfigMap/Ingress/HCC 변경도 중단한다.
   기존 설정의 다른 필드는 보존하며 UID/resourceVersion 검사를 사용한다.
@@ -58,9 +108,36 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
 
 | 변수 | 기본값 | 의미 |
 | --- | --- | --- |
-| `eva_traefik_ports_manage` | `true` | IP 공개 listener/router 자동 관리. `false`면 운영자가 양쪽을 직접 책임짐 |
+| `eva_traefik_ports_manage` | `true` | 공개 listener/router 자동 관리. `false`면 운영자가 양쪽을 직접 책임짐 |
 | `eva_traefik_ports_timeout` | `300` | controller·ServiceLB 반영 대기 초 |
 | `eva_traefik_ports_backup_root` | `/var/lib/eva/backups/traefik-ports` | 대상 서버의 private snapshot 디렉터리 |
+
+## HTTP·HTTPS 리다이렉트 확인
+
+HTTP로 설치한 App/IAM의 listener에는 HTTPS 강제 전환 리다이렉트가 없어야 한다.
+Deployer는 위 관리 범위의 리다이렉트를 백업 후 해제한다. HTTPS 설치에서는 기존 리다이렉트를
+그대로 보존한다. 리다이렉트에 사용 중인 80/443은 해제 대상이 아닐 수 있다.
+공개 포트를 변경했다면 기존 redirect의 목적지 URL도 올바른지 확인한다. 명시적인 redirect
+포트·목적지 정책을 다른 App/IAM으로 자동 재지정하지는 않는다.
+
+현재 실행 중인 Traefik의 **리다이렉트 인자만** 확인하려면 대상 서버에서 다음을 실행한다.
+전체 HCC/Values에는 민감정보가 포함될 수 있으므로 원문을 공유하지 않는다.
+
+```bash
+sudo eva exec kubectl -n kube-system get deployment traefik \
+   -o jsonpath='{range .spec.template.spec.containers[?(@.name=="traefik")].args[*]}{.}{"\n"}{end}' \
+   | grep -i 'entrypoints\..*\.http\.redirections\.'
+```
+
+조회 자체가 성공했고 일치하는 인자가 없다면 실행 중인 Deployment에는 해당 리다이렉트 인자가
+없는 상태다(`grep` 종료 코드 1). 다만 HCC/HelmChart의 아직 반영되지 않은 설정까지 없다는 뜻은
+아니다. HTTP 관리 listener에 인자가 계속 남으면 Helm controller 상태와 해당 entrypoint의
+설정 출처를 확인한다. HTTP 설치의 관리 범위 밖 redirect나 알 수 없는 schema로 중단되면 운영 정책과
+설정을 먼저 검토한다. `eva_traefik_ports_manage=false`는 단순 오류 우회가 아니며, 공개 listener·
+80/443 hostPort 해제·App/IAM router 분리를 운영자가 모두 관리할 때만 사용한다.
+
+설정 검증 단계에서 중단되면 해당 실행의 Ingress/HCC 변경은 수행하지 않는다. 반영 대기 중
+실패했다면 일부 변경이 적용되었을 수 있으므로 private snapshot과 현재 상태를 비교한다.
 
 ## 설치 후 확인
 
@@ -79,6 +156,5 @@ curl --connect-timeout 5 -I http://<IP>:32010/
 Ingress/Service가 정상이어도 App readiness·IAM 기동·노드 방화벽·접근 경로 문제는 별도로 남을 수 있다.
 `ss`에 80/443 listener가 없다는 사실만으로 ServiceLB의 iptables/hostPort 해제를 판정하지 않는다.
 
-이 기능을 포함한 **새 Release로 설치**해야 적용된다. 저장소 수정만으로 현장의 Current Release나
-기존 Tool binary가 바뀌지 않는다. 설정도 수정했다면 이전 snapshot을 쓰는 `eva retry` 대신
-원본을 다시 읽는 새 `eva install --config ...` 작업을 시작한다.
+설치에는 대상 서버에 배포된 Deployer Release를 사용한다. 설정을 수정했다면 이전 snapshot을
+쓰는 `eva retry` 대신 원본을 다시 읽는 새 `eva install --config ...` 작업을 시작한다.

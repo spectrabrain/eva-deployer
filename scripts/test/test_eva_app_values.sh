@@ -6,7 +6,13 @@ ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 TMP_ROOT="$(mktemp -d)"
 
 cleanup() {
+  local status=$?
+  if (( status != 0 )) && [[ -n "${root:-}" && -f "$root/ansible.log" ]]; then
+    printf '\n[ERROR] App fixture failed; last Ansible diagnostics:\n' >&2
+    tail -60 "$root/ansible.log" >&2
+  fi
   rm -rf "$TMP_ROOT"
+  return "$status"
 }
 trap cleanup EXIT
 
@@ -16,11 +22,17 @@ if ! command -v "$ANSIBLE_PLAYBOOK" >/dev/null 2>&1 && [[ ! -x "$ANSIBLE_PLAYBOO
 fi
 
 python3 - "$REPO_ROOT/src/solution/roles/eva_app/tasks/main.yaml" <<'PY'
+import copy
+import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 import textwrap
 import yaml
+from jinja2 import Environment, StrictUndefined
 
 tasks = yaml.safe_load(Path(sys.argv[1]).read_text())
 task = next(
@@ -39,6 +51,88 @@ match = re.search(
 if match is None:
     raise SystemExit("[ERROR] internal Service Python validator is absent")
 compile(textwrap.dedent(match.group(1)), "internal-service-validator", "exec")
+
+# Exercise the actual post-rollout shell, not a reimplementation of its jq.
+# Fake time advances by five seconds per observation; no real sleeps or extra
+# full-role Ansible fixtures are needed for these failure cases.
+health_task = next(t for t in tasks if t.get("name") == "Verify EVA App pod remains healthy after rollout")
+assert health_task.get("when") == "not ansible_check_mode"
+assert not health_task.get("failed_when", False)
+rendered_shell = Environment(undefined=StrictUndefined).from_string(health_task["ansible.builtin.shell"]).render(
+  eva_app_namespace="eva-app", eva_app_name="eva-app", eva_app_rollout_stabilization_seconds=10,
+)
+subprocess.run(["bash", "-n"], input=rendered_shell, text=True, check=True)
+healthy = {"items": [{"metadata": {"name": "eva-app-pod", "uid": "pod-1"}, "status": {
+  "phase": "Running", "conditions": [{"type": "Ready", "status": "True"}],
+  "containerStatuses": [{"name": "eva-app", "containerID": "container-1", "ready": True,
+               "restartCount": 0, "state": {"running": {}}}],
+}}]}
+
+def pod_with(status_changes=None, container_changes=None):
+  result = copy.deepcopy(healthy)
+  status = result["items"][0]["status"]
+  status.update(status_changes or {})
+  if container_changes:
+    status["containerStatuses"][0].update(container_changes)
+  return result
+
+terminated = pod_with(container_changes={"ready": False, "restartCount": 4,
+  "state": {"terminated": {"reason": "Error", "exitCode": 3}}})
+restarted = pod_with(container_changes={"restartCount": 1, "containerID": "container-2"})
+backoff = pod_with(container_changes={"ready": False, "restartCount": 4,
+  "state": {"waiting": {"reason": "CrashLoopBackOff"}}})
+pulling = pod_with(container_changes={"ready": False, "state": {"waiting": {"reason": "ImagePullBackOff"}}})
+
+def check_health(name, responses, succeeds, expected=""):
+  with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    for index, response in enumerate(responses):
+      (root / f"pods-{index}.json").write_text(json.dumps(response))
+    scripts = {
+      "kubectl": '''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$TEST_ROOT/commands"
+index=0
+[[ ! -f "$TEST_ROOT/count" ]] || index="$(cat "$TEST_ROOT/count")"
+printf '%s' "$((index + 1))" > "$TEST_ROOT/count"
+(( index < TEST_RESPONSES_COUNT )) || index="$((TEST_RESPONSES_COUNT - 1))"
+cat "$TEST_ROOT/pods-$index.json"
+''',
+      "date": '''#!/usr/bin/env bash
+set -euo pipefail
+now=0
+[[ ! -f "$TEST_ROOT/time" ]] || now="$(cat "$TEST_ROOT/time")"
+printf '%s' "$((now + 5))" > "$TEST_ROOT/time"
+printf '%s\\n' "$now"
+''',
+      "sleep": "#!/usr/bin/env bash\ntrue\n",
+    }
+    for tool, content in scripts.items():
+      path = root / tool
+      path.write_text(content)
+      path.chmod(0o755)
+    result = subprocess.run(["bash", "-c", rendered_shell], text=True, capture_output=True, timeout=10,
+      env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+           TEST_ROOT=str(root), TEST_RESPONSES_COUNT=str(len(responses))))
+    output = result.stdout + result.stderr
+    assert (result.returncode == 0) == succeeds, (name, result.returncode, output)
+    assert expected in output, (name, expected, output)
+    commands = (root / "commands").read_text().splitlines()
+    assert all(command.startswith("get pods -n eva-app -l app.kubernetes.io/instance=eva-app,component=eva-app -o json")
+           for command in commands), commands
+  print("[OK] App rollout health: " + name)
+
+check_health("stable ready pod", [healthy], True)
+check_health("Running phase but Terminated Error exit 3", [terminated], False, "exit_code=3")
+check_health("initially ready then exit 3", [healthy, terminated], False, "exit_code=3")
+check_health("CrashLoopBackOff", [backoff], False, "CrashLoopBackOff")
+check_health("restart during observation", [healthy, restarted], False, "restarted-or-replaced")
+check_health("historical restart already recovered", [restarted], True)
+check_health("image pull transient recovered", [pulling, healthy], True)
+check_health("missing pods", [{"items": []}], False, "pods: none")
+check_health("missing container statuses", [pod_with({"containerStatuses": []})], False, "not-ready")
+check_health("missing Ready condition", [pod_with({"conditions": []})], False, "not-ready")
+check_health("Ready flag without running state", [pod_with(container_changes={"state": {}})], False, "not-ready")
 PY
 
 make_fixture() {
@@ -56,11 +150,17 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_HELM_LOG:?}"
 case "$1 $2" in
   "repo add"|"repo update") exit 0 ;;
+  "list --namespace") printf '[]\n' ;;
   "show values")
     printf 'database:\n  name: %s\napp:\n  sso:\n    baseUrl: https://chart.example\n    adminClientSecret: chart-default-secret\n' "${FAKE_CHART_DB_NAME:-eva_v3_0}"
     ;;
   "status eva-app") exit 1 ;;
-  "template eva-app") exit 0 ;;
+  "template eva-app")
+    # Production DB preparation resolves the intended DB from the rendered
+    # App container, including the Helm --set layer. Other mocks have no DB.
+    printf '%s\n' '{"kind":"Deployment","metadata":{"name":"eva-app"},"spec":{"template":{"spec":{"containers":[{"name":"eva-app","env":[{"name":"MYSQL_NAME","value":"eva_v3_0"}]}]}}}}'
+    printf '%s\n' '---' '{"kind":"Deployment","metadata":{"name":"eva-app-mysql"}}'
+    ;;
   "upgrade --install") echo 'has been installed' ;;
   "get values") printf 'app:\n  installed: true\n' ;;
   *) exit 0 ;;
@@ -72,6 +172,11 @@ set -euo pipefail
 printf '%s\n' "$*" >>"${FAKE_KUBECTL_LOG:?}"
 case "$1 $2" in
   "get deployment")
+    # These Values fixtures model no existing database for the transition
+    # helper's optional lookups. DB migration has its own stateful tests.
+    if [[ " $* " == *' --ignore-not-found=true '* ]]; then
+      exit 0
+    fi
     if [[ "${FAKE_DEPLOYMENT_EXISTS:-false}" == true ]]; then
       case " $* " in
         *' -o jsonpath={.metadata.uid} '*) printf 'test-deployment-uid' ;;
@@ -91,7 +196,19 @@ case "$1 $2" in
     echo 'condition met'
     ;;
   "get all") echo resources ;;
-  "get pods") echo eva-app-pod ;;
+  "get pods")
+    case " $* " in
+      *' -o jsonpath={.items[0].metadata.name} '*)
+        printf 'eva-app-pod'
+        ;;
+      *' -o json '*)
+        printf '%s\n' '{"items":[{"metadata":{"name":"eva-app-pod","uid":"pod-1"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"eva-app","ready":true,"restartCount":0,"containerID":"container-1","state":{"running":{}}}]}}]}'
+        ;;
+      *)
+        echo eva-app-pod
+        ;;
+    esac
+    ;;
   "rollout status") echo 'rollout complete' ;;
   "patch deployment") echo patched ;;
   *) exit 0 ;;
@@ -123,6 +240,7 @@ EOF
     eva_app_deploy_version: 3.1.3-rc.3
     eva_app_kubeconfig: $root/kubeconfig
     eva_app_tls_host_path: $root/certs
+    eva_app_rollout_stabilization_seconds: 0
     repository_mode: cloud_repository
   tasks:
     - ansible.builtin.import_role:
@@ -538,6 +656,9 @@ if grep -Eq 'kubectl delete (secret|pvc|deployment|statefulset)' "$REPO_ROOT/src
   echo 'EVA App TLS Job cleanup deletes a protected resource type' >&2
   exit 1
 fi
+
+grep -Fq 'Verify EVA App pod remains healthy after rollout' "$REPO_ROOT/src/solution/roles/eva_app/tasks/main.yaml"
+grep -Fq 'app.kubernetes.io/instance={{ eva_app_name }},component=eva-app' "$REPO_ROOT/src/solution/roles/eva_app/tasks/main.yaml"
 
 grep -Fq 'eva_iam_app_handoff_path' "$REPO_ROOT/src/solution/roles/eva_iam/tasks/main.yaml"
 grep -Fq 'eva_persistent_state_root' "$REPO_ROOT/src/solution/roles/eva_iam/tasks/main.yaml"

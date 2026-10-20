@@ -139,6 +139,15 @@
         )
       }}
 
+- name: Preserve existing EVA App Helm user Values
+  ansible.builtin.include_role:
+    name: eva_helm_values_backup
+  vars:
+    eva_helm_backup_namespace: "{{ eva_app_namespace }}"
+    eva_helm_backup_release: "{{ eva_app_name }}"
+    eva_helm_backup_component: app
+    eva_helm_backup_kubeconfig: "{{ eva_app_kubeconfig }}"
+
 - name: Remove EVA App workspace if it exists
   ansible.builtin.file:
     path: "{{ eva_app_workdir }}"
@@ -963,6 +972,38 @@
 
 - name: Install EVA App and restore prior replicas if Helm fails
   block:
+    - name: Prepare EVA App database transition tooling
+      ansible.builtin.include_tasks: prepare_database.yaml
+      when: not ansible_check_mode
+
+    - name: Preserve EVA App database identity and legacy local users before upgrade
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ eva_app_workdir }}/database_transition.py"
+          - --namespace
+          - "{{ eva_app_namespace }}"
+          - --release
+          - "{{ eva_app_name }}"
+          - --manifest
+          - "{{ eva_app_workdir }}/db-target-manifest.yaml"
+          - --backup-root
+          - "{{ eva_app_db_backup_root | default('/var/lib/eva/backups/app-db/' ~ eva_site_id ~ '/' ~ eva_app_name) }}"
+          - --source
+          - "{{ eva_app_db_migration_source | default('') }}"
+          - --auto-migrate
+          - "{{ eva_app_db_auto_migrate | default(true) | bool | lower }}"
+      register: eva_app_database_transition
+      changed_when: (eva_app_database_transition.stdout | from_json).changed | bool
+      when: not ansible_check_mode
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Show private EVA App DB backup location
+      ansible.builtin.debug:
+        msg: "{{ eva_app_database_transition.stdout | from_json }}"
+      when: not ansible_check_mode
+
     - name: Install EVA App from online Helm repo
       no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
       ansible.builtin.command: >-
@@ -1043,7 +1084,10 @@
     - name: Fail with Helm error and EVA App restoration result
       ansible.builtin.fail:
         msg: >-
-          EVA App Helm installation failed: {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('unknown Helm error')) }}.
+          EVA App DB preparation or Helm installation failed.
+          {{ 'Private Chart rendering failed; details suppressed.'
+             if ansible_failed_task.name | default('') == 'Render exact EVA App target manifest for DB preparation'
+             else ansible_failed_result.stderr | default(ansible_failed_result.msg | default('unknown installation error')) }}.
           expected deployment UID={{ eva_app_preinstall_deployment_uid | default('not-recorded') }},
           observed UID={{ eva_app_restore_identity.stdout | default('not-checked') }}.
           replica restoration rc={{ eva_app_replica_restore.rc | default('not-attempted') }},
@@ -1128,6 +1172,98 @@
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
+- name: Verify EVA App pod remains healthy after rollout
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="{{ eva_app_namespace }}"
+    selector='app.kubernetes.io/instance={{ eva_app_name }},component=eva-app'
+    stabilization_seconds="{{ eva_app_rollout_stabilization_seconds | default(45) | int }}"
+    (( stabilization_seconds >= 0 )) || { echo '[ERROR] invalid App stabilization duration'; exit 1; }
+    deadline="$(( $(date +%s) + 2 * stabilization_seconds ))"
+    healthy_since=''
+    baseline=''
+
+    while true
+    do
+      now="$(date +%s)"
+      pods_json="$(kubectl get pods -n "$namespace" -l "$selector" -o json --request-timeout=15s)"
+      summary="$(jq -r '
+        [.items[] | select((.metadata.deletionTimestamp // "") == "")] as $pods
+        | if ($pods | length) == 0 then
+            "missing"
+          elif any($pods[]; any(.status.containerStatuses[]?; (.state.waiting.reason // "") == "CrashLoopBackOff" or (.state.waiting.reason // "") == "Error")) then
+            "waiting-error"
+          elif any($pods[]; any(.status.containerStatuses[]?; .state.terminated != null)) then
+            "terminated"
+          elif any($pods[]; (.status.phase // "") == "Failed" or (.status.phase // "") == "Unknown") then
+            "failed-phase"
+          elif any($pods[];
+            (.status.phase // "") != "Running"
+            or ([.status.containerStatuses[]?] | length) == 0
+            or any(.status.containerStatuses[]?; .ready != true or .state.running == null)
+            or (any(.status.conditions[]?; .type == "Ready" and .status == "True") | not)
+          ) then
+            "not-ready"
+          else
+            "healthy"
+          end
+      ' <<< "$pods_json")"
+
+      if [[ "$summary" == 'healthy' ]]; then
+        # Historical restarts are not a permanent failure. Require the same
+        # live pods/containers to stay ready without a new restart in this window.
+        snapshot="$(jq -c '
+          [.items[] | select((.metadata.deletionTimestamp // "") == "")
+            | {uid: .metadata.uid, containers: [.status.containerStatuses[]
+                | {name, restartCount, containerID}] | sort_by(.name)}]
+          | sort_by(.uid)
+        ' <<< "$pods_json")"
+        if [[ -n "$baseline" && "$snapshot" != "$baseline" ]]; then
+          summary='restarted-or-replaced'
+        elif [[ -z "$healthy_since" ]]; then
+          baseline="$snapshot"
+          healthy_since="$now"
+        fi
+        if [[ "$summary" == 'healthy' ]] && (( now - healthy_since >= stabilization_seconds )); then
+          exit 0
+        fi
+      fi
+
+      if [[ "$summary" == 'healthy' || "$summary" == 'missing' || "$summary" == 'not-ready' ]]; then
+        [[ "$summary" == 'healthy' ]] || healthy_since=''
+        if (( now < deadline )); then
+          sleep 5
+          continue
+        fi
+      fi
+
+      echo "[ERROR] EVA App pod became unhealthy after rollout: $summary"
+      jq -r '
+        [.items[] | select((.metadata.deletionTimestamp // "") == "")]
+        | if length == 0 then
+            "pods: none"
+          else
+            .[]
+            | "pod=" + (.metadata.name // "")
+              + " phase=" + (.status.phase // "")
+              + " restarts=" + (([.status.containerStatuses[]? | (.restartCount // 0)] | add // 0) | tostring)
+              + " waiting=" + ([.status.containerStatuses[]? | (.state.waiting.reason // empty)] | join(","))
+              + " terminated=" + ([.status.containerStatuses[]? | (.state.terminated.reason // empty)] | join(","))
+              + " exit_code=" + ([.status.containerStatuses[]? | select(.state.terminated != null) | (.state.terminated.exitCode | tostring)] | join(","))
+          end
+      ' <<< "$pods_json"
+      echo "Inspect private App logs on the target: kubectl logs -n $namespace -l $selector -c eva-app --previous --tail=120"
+      exit 1
+    done
+  args:
+    executable: /bin/bash
+  register: eva_app_rollout_stability
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
 - name: Check EVA App resources
   ansible.builtin.command: kubectl get all -n {{ eva_app_namespace }}
   register: eva_app_resources
@@ -1142,7 +1278,7 @@
 - name: Find EVA App pod name
   ansible.builtin.shell: >-
     kubectl get pods -n {{ eva_app_namespace }}
-    -l app.kubernetes.io/instance={{ eva_app_name }}
+    -l app.kubernetes.io/instance={{ eva_app_name }},component=eva-app
     -o jsonpath='{.items[0].metadata.name}'
   args:
     executable: /bin/bash

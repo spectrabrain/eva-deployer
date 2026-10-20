@@ -67,6 +67,10 @@ Release/Site/Target/Component별 작업 산출물이다. 같은 경로로 재설
 `inspect plan`은 저장된 Plan 원문을 조회하고 `inspect result`는 해당 Operation 실행 결과를 조회한다.
 `resolved`는 자동으로 `effective`에 fallback하지 않으며, 파일이 없으면 이유와 조회 방법을 안내한다.
 
+기존 Helm release의 사용자 Values는 변경 전 별도 private 영구 백업으로 보존한다.
+이 파일은 `inspect values` 조회 대상과 별개이며, 경로·대상·제약은
+[Helm 사용자 Values 백업](helm-user-values-backup.md)을 참고한다.
+
 ### Operation 없이 직접 Ansible로 생성한 파일
 
 ```bash
@@ -149,12 +153,13 @@ Chart 자체의 기본값을 사용한다.
 덮어쓴다. 이름을 지정하지 않았다면 `effective`/`override`에 `database.name`이 없는 것이
 정상이다. 기본값은 `defaults`, 설치 후 최종 계산값은 `resolved`에서 확인한다.
 
-**기존 설치 주의:** 이전 Deployer로 `eva` DB를 사용 중이라면 수정된 Release 재설치 전에
-Workspace의 App Values에서 해당 target 아래 `database.name: eva`를 명시하여 유지하거나,
-백업과 별도 데이터 이관 계획을 준비한다. Values 변경은 기존 DB 이름 변경이나 데이터 이관을
-수행하지 않는다. MySQL 영속 데이터가 있으면 초기화용 환경 변수만 바꿔도 새 DB가 자동 생성되지
-않을 수 있으며, App만 새 DB 이름을 바라보게 되어 연결에 실패할 수 있다.
-이름을 맞추려고 PVC 또는 MySQL 데이터 디렉터리를 삭제하지 않는다.
+**기존 설치 주의:** DB 이전 기능이 포함된 Release는 기존 내부 MySQL의 DB 이름이 바뀌면
+새 App 기동 전에 원본을 dump/restore하고 `eva_id`를 검증한다. 원본 DB는 삭제하지 않으며,
+대상이 이미 populated이면 덮어쓰지 않고 중단한다. v3.2 이전 로컬 사용자 schema의 전체 CSV도
+DB 이름 변경 여부와 무관하게 먼저 백업한다. 위치·옵션·제약은
+[App DB 이전과 사용자 백업](app-database-migration.md)을 따른다.
+이 기능이 없는 기존 Release에서는 `database.name: eva`를 명시해 유지하거나 별도 이관이 필요하다.
+MySQL 초기화 환경 변수 변경은 데이터 이관이 아니다. PVC·MySQL·license 디렉터리를 삭제하지 않는다.
 
 ### Config, 결과, 로그
 

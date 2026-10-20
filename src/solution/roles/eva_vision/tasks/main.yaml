@@ -60,6 +60,15 @@
 - name: Resolve EVA Vision accelerator resource
   ansible.builtin.import_tasks: gpu_resource.yaml
 
+- name: Preserve existing EVA Vision Helm user Values
+  ansible.builtin.include_role:
+    name: eva_helm_values_backup
+  vars:
+    eva_helm_backup_namespace: "{{ eva_vision_namespace }}"
+    eva_helm_backup_release: "{{ eva_vision_name }}"
+    eva_helm_backup_component: vision
+    eva_helm_backup_kubeconfig: "{{ eva_vision_kubeconfig }}"
+
 - name: Remove EVA Vision workspace if it exists
   ansible.builtin.file:
     path: "{{ eva_vision_workdir }}"

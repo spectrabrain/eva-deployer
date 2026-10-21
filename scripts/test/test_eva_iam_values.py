@@ -19,7 +19,20 @@ TASKS = yaml.safe_load((ROLES / "eva_iam/tasks/main.yaml").read_text())
 
 
 def task_named(name):
-    return copy.deepcopy(next(task for task in TASKS if task.get("name") == name))
+    def find(tasks):
+        for task in tasks:
+            if task.get("name") == name:
+                return task
+            for section in ("block", "rescue", "always"):
+                found = find(task.get(section, []))
+                if found is not None:
+                    return found
+        return None
+
+    task = find(TASKS)
+    if task is None:
+        raise AssertionError(f"task not found: {name}")
+    return copy.deepcopy(task)
 
 
 class IAMValuesTests(unittest.TestCase):
@@ -65,6 +78,8 @@ class IAMValuesTests(unittest.TestCase):
             "eva_iam_name": "custom-iam",
             "eva_iam_namespace": "custom-sso",
             "eva_iam_write_app_config": False,
+            "eva_iam_client_secret_retries": 2,
+            "eva_iam_client_secret_retry_delay": 0,
             "eva_traefik_ports_manage": False,
             "deploy_versions": {"eva_iam_chart_version": "3.3.0-beta.1"},
         }
@@ -119,7 +134,24 @@ case "$1 $2" in
     "rollout restart") echo 'restarted' ;;
   "rollout status") echo 'rollout complete' ;;
   "get all") echo resources ;;
-  "exec -i") cat >/dev/null; echo fixture-generated-client-secret ;;
+    "exec -i")
+        cat >/dev/null
+        count=0
+        if [[ -f "$FIXTURE_ROOT/fetch-count" ]]; then
+            read -r count <"$FIXTURE_ROOT/fetch-count"
+        fi
+        count=$((count + 1))
+        printf '%s\\n' "$count" >"$FIXTURE_ROOT/fetch-count"
+        if [[ "$count" -le "${FETCH_FAILURES:-0}" ]]; then
+            echo fixture-sensitive-fetch-error >&2
+            exit 1
+        fi
+        if [[ "$count" -le "${FETCH_EMPTY:-0}" ]]; then
+            printf '%s\\n' "${FETCH_EMPTY_OUTPUT-   }"
+            exit 0
+        fi
+        echo fixture-generated-client-secret
+        ;;
   *) echo "Unexpected fixture kubectl command" >&2; exit 99 ;;
 esac
 ''')
@@ -150,8 +182,18 @@ esac
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode == 0, succeeds, output[-12000:])
         self.assertNotIn("fixture-generated-client-secret", output)
+        self.assertNotIn("fixture-sensitive-fetch-error", output)
         self.assertNotIn("fixture-db-secret", output)
         return output
+
+    def handoff_writer(self):
+        # Run the real publication task without requiring root in the fixture.
+        handoff = task_named("Write eva-iam.yaml (eva-app SSO hand-off) on control node")
+        handoff["become"] = False
+        handoff.pop("when")
+        for field in ("owner", "group"):
+            handoff["ansible.builtin.copy"].pop(field)
+        return handoff
 
     def read_values(self, name):
         return yaml.safe_load((self.rendered / name).read_text())
@@ -214,11 +256,7 @@ esac
         chart.touch()
         # Execute the real handoff copy without root ownership requirements.
         # The full role still performs the real Keycloak fetch/identity resolution.
-        handoff = task_named("Write eva-iam.yaml (eva-app SSO hand-off) on control node")
-        handoff["become"] = False
-        handoff.pop("when")
-        for field in ("owner", "group"):
-            handoff["ansible.builtin.copy"].pop(field)
+        handoff = self.handoff_writer()
         (self.root / "state/localhost").mkdir(parents=True)
         self.run_play([
             {"ansible.builtin.import_role": {"name": "eva_iam"}}, handoff,
@@ -255,6 +293,52 @@ esac
         ], env={"FAIL_CAPTURE": "1"}, succeeds=False)
         self.assertFalse(path.exists())
 
+    def test_client_secret_fetch_retries_startup_failures(self):
+        handoff = self.root / "state/localhost/eva-iam.yaml"
+        handoff.parent.mkdir(parents=True)
+        self.run_play(
+            [{"ansible.builtin.import_role": {"name": "eva_iam"}}, self.handoff_writer()],
+            env={"FETCH_FAILURES": "2"},
+        )
+        self.assertEqual((self.root / "fetch-count").read_text().strip(), "3")
+        self.assertEqual(yaml.safe_load(handoff.read_text())["sso"]["adminClientSecret"],
+                         "fixture-generated-client-secret")
+
+    def test_client_secret_fetch_retries_empty_success(self):
+        for empty in ("", "   "):
+            with self.subTest(output=repr(empty)):
+                (self.root / "fetch-count").unlink(missing_ok=True)
+                self.run_play(
+                    [{"ansible.builtin.import_role": {"name": "eva_iam"}}],
+                    env={"FETCH_EMPTY": "2", "FETCH_EMPTY_OUTPUT": empty},
+                )
+                self.assertEqual((self.root / "fetch-count").read_text().strip(), "3")
+
+    def test_client_secret_failure_preserves_handoff_and_stops_iam(self):
+        handoff = self.root / "state/localhost/eva-iam.yaml"
+        handoff.parent.mkdir(parents=True)
+        existing = "existing-private-handoff\n"
+        handoff.write_text(existing)
+        handoff.chmod(0o600)
+        output = self.run_play([
+            {"ansible.builtin.import_role": {"name": "eva_iam"}}, self.handoff_writer(),
+        ], env={"FETCH_FAILURES": "99"}, succeeds=False)
+        self.assertEqual((self.root / "fetch-count").read_text().strip(), "3")
+        self.assertEqual(handoff.read_text(), existing)
+        self.assertEqual(handoff.stat().st_mode & 0o777, 0o600)
+        self.assertIn("IAM client Secret 조회에 실패", output)
+        self.assertNotIn("Show eva-iam deployment summary", output)
+
+    def test_empty_client_secret_stops_before_new_handoff(self):
+        handoff = self.root / "state/localhost/eva-iam.yaml"
+        handoff.parent.mkdir(parents=True)
+        output = self.run_play([
+            {"ansible.builtin.import_role": {"name": "eva_iam"}}, self.handoff_writer(),
+        ], env={"FETCH_EMPTY": "99", "FETCH_EMPTY_OUTPUT": ""}, succeeds=False)
+        self.assertEqual((self.root / "fetch-count").read_text().strip(), "3")
+        self.assertFalse(handoff.exists())
+        self.assertIn("IAM client Secret 조회에 실패", output)
+
     def test_artifact_tasks_do_not_write_in_check_mode(self):
         self.rendered.mkdir()
         path = self.rendered / "resolved-values.yaml"
@@ -272,6 +356,9 @@ esac
             "Restart EVA IAM deployments to load installed configuration",
             "Wait for keycloak rollout",
             "Wait for dispatcher rollout",
+            "Wait for Keycloak Admin API and read the generated client secret",
+            "Ensure persistent IAM handoff directories exist on control node",
+            "Write eva-iam.yaml (eva-app SSO hand-off) on control node",
         ]
         self.run_play([task_named(name) for name in names], check=True)
         self.assertEqual(path.read_text(), "previous: true\n")

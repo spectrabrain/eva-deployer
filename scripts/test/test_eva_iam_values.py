@@ -112,9 +112,11 @@ elif args[:2] == ["get", "values"]:
 ''')
         self.write_command("kubectl", '''#!/usr/bin/env bash
 set -euo pipefail
+printf '%s|%s\\n' "${KUBECONFIG:?}" "$*" >>"${FIXTURE_ROOT:?}/kubectl.log"
 case "$1 $2" in
   "get nodes") echo fixture-node ;;
   "get svc") exit 0 ;;
+    "rollout restart") echo 'restarted' ;;
   "rollout status") echo 'rollout complete' ;;
   "get all") echo resources ;;
   "exec -i") cat >/dev/null; echo fixture-generated-client-secret ;;
@@ -166,12 +168,26 @@ esac
         commands = [json.loads(line) for line in (self.root / "helm.log").read_text().splitlines()]
         self.assertIn(["get", "values", "custom-iam", "--namespace", "custom-sso",
                        "--all", "--output", "yaml"], commands)
+        kubectl = [line.split("|", 1) for line in (self.root / "kubectl.log").read_text().splitlines()]
+        self.assertTrue(all(config == self.variables["eva_iam_kubeconfig"] for config, _ in kubectl))
+        rollouts_and_fetch = ["exec" if command.startswith("exec ") else command
+                              for _, command in kubectl
+                              if command.startswith(("rollout ", "exec "))]
+        installs = sum(command[:2] == ["upgrade", "--install"] for command in commands)
+        self.assertEqual(rollouts_and_fetch, [
+            "rollout restart deployment/custom-iam-keycloak deployment/custom-iam-dispatcher --namespace custom-sso",
+            "rollout status deployment/custom-iam-keycloak -n custom-sso --timeout=600s",
+            "rollout status deployment/custom-iam-dispatcher -n custom-sso --timeout=600s",
+            "exec",
+        ] * installs)
         return commands
 
     def test_defaults_and_pinned_chart(self):
-        self.run_play([{"ansible.builtin.import_role": {"name": "eva_iam"}}], {
-            "eva_iam_values_file": str(self.root / "missing.yaml"),
-        })
+        # Identical reinstall still replaces both workloads before secret fetch.
+        for _ in range(2):
+            self.run_play([{"ansible.builtin.import_role": {"name": "eva_iam"}}], {
+                "eva_iam_values_file": str(self.root / "missing.yaml"),
+            })
         commands = self.assert_artifacts()
         self.assertIn(["show", "values", "eva-iam/eva-iam", "--version", "3.3.0-beta.1"], commands)
         effective = self.read_values("effective-input-values.yaml")
@@ -253,11 +269,15 @@ esac
             "Capture effective EVA IAM Helm values",
             "Record private EVA IAM resolved values on control node",
             "Resolve deployed EVA IAM App client identity",
+            "Restart EVA IAM deployments to load installed configuration",
+            "Wait for keycloak rollout",
+            "Wait for dispatcher rollout",
         ]
         self.run_play([task_named(name) for name in names], check=True)
         self.assertEqual(path.read_text(), "previous: true\n")
         self.assertEqual(list(self.rendered.iterdir()), [path])
         self.assertFalse((self.root / "helm.log").exists())
+        self.assertFalse((self.root / "kubectl.log").exists())
 
     def test_public_host_defaults_without_fact_injection(self):
         cases = [

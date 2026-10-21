@@ -683,12 +683,40 @@
          | default('eva-app') }}
   when: not ansible_check_mode
 
+# envFrom is read only at container startup. Restart on every installation so
+# ConfigMap/Secret updates take effect even when Helm leaves Pod templates intact.
+- name: Restart EVA IAM deployments to load installed configuration
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - rollout
+      - restart
+      - "deployment/{{ eva_iam_name }}-keycloak"
+      - "deployment/{{ eva_iam_name }}-dispatcher"
+      - --namespace
+      - "{{ eva_iam_namespace }}"
+  changed_when: true
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_iam_kubeconfig }}"
+
 - name: Wait for keycloak rollout
   ansible.builtin.command: >-
     kubectl rollout status deployment/{{ eva_iam_name }}-keycloak
     -n {{ eva_iam_namespace }}
     --timeout=600s
   register: eva_iam_keycloak_rollout
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_iam_kubeconfig }}"
+
+- name: Wait for dispatcher rollout
+  ansible.builtin.command: >-
+    kubectl rollout status deployment/{{ eva_iam_name }}-dispatcher
+    -n {{ eva_iam_namespace }}
+    --timeout=600s
+  register: eva_iam_dispatcher_rollout
   changed_when: false
   when: not ansible_check_mode
   environment:

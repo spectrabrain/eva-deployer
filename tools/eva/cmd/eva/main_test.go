@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"eva-deployer/tools/eva/internal/airgap"
 	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/health"
@@ -27,6 +28,71 @@ import (
 	"eva-deployer/tools/eva/internal/runtime"
 	"eva-deployer/tools/eva/internal/workspace"
 )
+
+func TestRunAirgapHelpAndValidation(t *testing.T) {
+	for _, args := range [][]string{{"airgap"}, {"airgap", "help"}, {"airgap", "prepare", "--help"}} {
+		if err := run(args); err != nil {
+			t.Fatalf("help %q: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"airgap", "unknown"},
+		{"airgap", "prepare"},
+		{"airgap", "prepare", "--yes"},
+		{"airgap", "prepare", "--yes", "--output", "out.tar.gz", "--vllm-profile", "unsupported"},
+		{"airgap", "prepare", "--yes", "--output", "out.tar.gz", "--vllm-profile", "L40sx1", "--release", "input.tar.gz"},
+		{"airgap", "prepare", "--yes", "--output", "out.tar.gz", "--vllm-profile", "L40sx1", "extra"},
+	} {
+		if err := run(args); err == nil {
+			t.Fatalf("accepted invalid args %q", args)
+		}
+	}
+}
+
+func TestRunAirgapPrepareDoesNotRequireHarbor(t *testing.T) {
+	root := writeRemotePublishRelease(t)
+	previousPrepare, previousValidate := prepareAirgapBundle, validateRemoteAWSCredential
+	previousCredential, previousHarbor := defaultRemoteAWSCredentialPath, defaultRemoteBootstrapReceiptPath
+	defer func() {
+		prepareAirgapBundle, validateRemoteAWSCredential = previousPrepare, previousValidate
+		defaultRemoteAWSCredentialPath, defaultRemoteBootstrapReceiptPath = previousCredential, previousHarbor
+	}()
+	defaultRemoteAWSCredentialPath = filepath.Join(t.TempDir(), "credential", "aws_key.ini")
+	defaultRemoteBootstrapReceiptPath = filepath.Join(t.TempDir(), "no-harbor-receipt.yaml")
+	credential := remotecommand.AWSCredential{AccessKeyID: "fixture-access", SecretAccessKey: "fixture-private", Region: "ap-northeast-2"}
+	if err := remotecommand.WriteAWSCredential(defaultRemoteAWSCredentialPath, credential); err != nil {
+		t.Fatal(err)
+	}
+	validateRemoteAWSCredential = func(context.Context, remotecommand.AWSCredential) error { return nil }
+	var received airgap.Options
+	prepareAirgapBundle = func(_ context.Context, options airgap.Options) (string, error) {
+		received = options
+		return options.Output, nil
+	}
+	output := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	if err := run([]string{"airgap", "prepare", "--release", root, "--output", output, "--vllm-profile", "L40sx1", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if received.Release.Root != root || received.Output != output || received.VLLMProfile != "L40sx1" || received.DriverPackage != "nvidia-driver-580" || received.AWSCredential != credential {
+		t.Fatalf("incorrect preparation inputs: release=%s output=%s profile=%s driver=%s", received.Release.Root, received.Output, received.VLLMProfile, received.DriverPackage)
+	}
+}
+
+func TestRunAirgapMissingCredentialDoesNotStartPreparation(t *testing.T) {
+	root := writeRemotePublishRelease(t)
+	previousPrepare, previousCredential, previousStat := prepareAirgapBundle, defaultRemoteAWSCredentialPath, stdinStat
+	defer func() {
+		prepareAirgapBundle, defaultRemoteAWSCredentialPath, stdinStat = previousPrepare, previousCredential, previousStat
+	}()
+	defaultRemoteAWSCredentialPath = filepath.Join(t.TempDir(), "missing-aws.ini")
+	stdinStat = func() (os.FileInfo, error) { return os.Stat(filepath.Join(root, "release.yaml")) }
+	called := false
+	prepareAirgapBundle = func(context.Context, airgap.Options) (string, error) { called = true; return "", nil }
+	err := run([]string{"airgap", "prepare", "--release", root, "--output", filepath.Join(t.TempDir(), "bundle.tar.gz"), "--vllm-profile", "L40sx1", "--yes"})
+	if err == nil || !strings.Contains(err.Error(), "Airgap preparation") || called {
+		t.Fatalf("missing credential: error=%v called=%v", err, called)
+	}
+}
 
 func TestRunRemoteHelpAndUnknownCommand(t *testing.T) {
 	for _, arguments := range [][]string{{"remote"}, {"remote", "help"}, {"remote", "--help"}, {"remote", "bootstrap", "--help"}, {"remote", "publish", "--help"}, {"remote", "prepare", "--help"}, {"remote", "verify", "--help"}} {

@@ -51,4 +51,4 @@ Secret이 포함된 원본 설정은 권한 `0600`으로 관리하고 Git이나 
 
 - [단일 설치 설정](docs/installation/single-file-configuration.md): 입력 schema, 여러 target, Values와 snapshot 규칙
 - [EVA Tool 명령어 가이드](docs/operations/eva-cli-command-guide.md): 설치 상태, 최종 Values, 생성 파일, 작업 이력과 로그 조회
-- [Airgap Bundle 준비](docs/preparation/airgap-bundle-preparation.md): Local 설치용 자산 준비·반입
+- [Local Repository 준비·설치](docs/installation/local-repository-runbook.md): 인터넷 준비 서버의 `eva airgap prepare`부터 폐쇄망 반입·캐시 배치·Harbor 준비와 설치까지

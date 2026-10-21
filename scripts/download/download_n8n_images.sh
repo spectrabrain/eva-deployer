@@ -21,7 +21,7 @@ if ! command -v "${DOCKER_CMD_ARR[0]}" >/dev/null 2>&1; then
 fi
 
 echo "[pull] ${N8N_IMAGE}"
-"${DOCKER_CMD_ARR[@]}" pull "${N8N_IMAGE}"
+"${DOCKER_CMD_ARR[@]}" pull --platform "${PULL_PLATFORM:-linux/amd64}" "${N8N_IMAGE}"
 
 echo "${N8N_IMAGE}" > "${IMAGE_DIR}/n8n-images.txt"
 

@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/term"
 
+	"eva-deployer/tools/eva/internal/airgap"
 	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/apt"
 	"eva-deployer/tools/eva/internal/backup"
@@ -61,6 +62,9 @@ var (
 	defaultRemoteInboxRoot            = release.DefaultRemoteInboxRoot
 	defaultWorkspaceCacheRoot         = workspace.DefaultCacheRoot
 	currentReleaseNow                 = time.Now
+	prepareAirgapBundle               = func(ctx context.Context, options airgap.Options) (string, error) {
+		return airgap.NewService().Prepare(ctx, options)
+	}
 )
 
 type displayedError struct {
@@ -78,6 +82,7 @@ func usage() {
 	fmt.Println("  config sample [--mode online|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE]")
 	fmt.Println("  workspace <validate|show|ansible-vars|env> [--config FILE | --site ID | --workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
+	fmt.Println("  airgap prepare [--release PATH] --output FILE.tar.gz --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes")
 	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
 	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET")
 	fmt.Println("  remote target list | <add|verify> NAME | remove NAME [--yes]")
@@ -144,6 +149,8 @@ func run(args []string) error {
 		return runWorkspace(args[1:])
 	case "release":
 		return runRelease(args[1:])
+	case "airgap":
+		return runAirgap(args[1:])
 	case "internal":
 		return runInternal(args[1:])
 	case "remote":
@@ -687,6 +694,10 @@ func runRemotePrepare(args []string) error {
 }
 
 func resolveRemoteAWSCredential(ctx context.Context) (remote.AWSCredential, error) {
+	return resolvePreparationAWSCredential(ctx, "Remote")
+}
+
+func resolvePreparationAWSCredential(ctx context.Context, scope string) (remote.AWSCredential, error) {
 	if credential, err := remote.LoadAWSCredential(defaultRemoteAWSCredentialPath); err == nil {
 		fmt.Fprintf(os.Stderr, "[INFO] AWS credential found: source=%s region=%s\n", defaultRemoteAWSCredentialPath, credential.Region)
 		fmt.Fprintln(os.Stderr, "[INFO] Validating AWS credential...")
@@ -697,9 +708,9 @@ func resolveRemoteAWSCredential(ctx context.Context) (remote.AWSCredential, erro
 	}
 	info, err := stdinStat()
 	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-		return remote.AWSCredential{}, fmt.Errorf("AWS credential is required for Remote preparation. No usable credential was found at: %s. Run from an interactive terminal to configure it, or provision the file through the approved secret-management process. Remote preparation was not started.", defaultRemoteAWSCredentialPath)
+		return remote.AWSCredential{}, fmt.Errorf("AWS credential is required for %s preparation. No usable credential was found at: %s. Run from an interactive terminal to configure it, or provision the file through the approved secret-management process. %s preparation was not started.", scope, defaultRemoteAWSCredentialPath, scope)
 	}
-	fmt.Fprintln(os.Stderr, "AWS credential is required for Remote preparation.")
+	fmt.Fprintf(os.Stderr, "AWS credential is required for %s preparation.\n", scope)
 	fmt.Fprintf(os.Stderr, "No usable AWS credential was found at: %s\n", defaultRemoteAWSCredentialPath)
 	reader := bufio.NewReader(os.Stdin)
 	read := func(label string) (string, error) {

@@ -1,952 +1,440 @@
-# EVA Local Repository Runbook
+# EVA Local Repository 설치 가이드
 
-인터넷이 닫힌 k3s 노드에 EVA 스택(iam · app · agent · vision)을 올리는 절차입니다.
-**iam · app 및 Agent/Qdrant의 Harbor snapshot 경로는 실제 서버에서 검증**했고,
-vision은 같은 bundle·Harbor 준비 절차를 사용합니다.
+## 1. Airgap Bundle 준비 — 인터넷 준비 서버에서 먼저 실행
 
-호스트가 두 개라는 점이 이 작업의 핵심입니다.
+폐쇄망 반입 전에 **인터넷에 연결된 별도 준비 서버**에서 `eva airgap prepare`로 Bundle을 만듭니다.
+이 명령이 포함된 Tool을 설치하고 `eva airgap prepare --help`로 지원 여부를 확인합니다.
+대상 서버에서 자산을 다운로드하거나 `eva remote prepare`를 대신 실행하지 않습니다.
 
-## 단일 설정 파일로 CLI 설치
+### 준비 서버의 필수 조건과 승인
 
-검증된 Release/Airgap Bundle, Local Harbor와 설치 자산을 준비한 환경에서는 Workspace를
-수동 작성하지 않고 단일 설정으로 설치할 수 있습니다. 아래 상세 수동 Ansible 절차와
-CLI 설치를 같은 작업에서 섞지 않습니다.
+| 항목 | 진행 조건 |
+| --- | --- |
+| OS·권한 | Ubuntu 24.04, `linux/amd64`, **root 실행(`sudo`)** |
+| Release | checksum 검증을 통과한 완전한 **원본 Release 디렉터리**; metadata에 installer artifact 포함 |
+| Docker | 동작하는 `linux/amd64` Docker daemon; 이미지 pull·save 가능 |
+| 외부 접근 | Release가 참조하는 패키지·Chart·Registry·모델·snapshot 다운로드 경로와 AWS STS 접근 |
+| APT | Ubuntu·Docker·NVIDIA 저장소와 최신 인덱스 구성; 필요한 패키지 candidate 및 대상 kernel 호환성 확인 |
+| 공간 | 출력 파일 외에도 다운로드 cache, Runtime, staging 복사본과 검증용 압축 해제를 수용할 여유 공간 |
+| 승인 | 다운로드, Docker image pull/export, 누락 Runtime의 온라인 bootstrap에 따른 준비 서버 APT/pip 변경 승인 |
+
+필수 명령은 `bash`, `curl`, `docker`, `aws`(AWS CLI), `sudo`, `apt-get`, `apt-cache`, `apt`,
+`dpkg`, `dpkg-scanpackages`(`dpkg-dev`), `gpg`, `tar`, `gzip`, `unzip`, `sha256sum`,
+`find`, `awk`, `sed`, `sort`, `python3`입니다. **Docker와 AWS CLI는 이 명령이 설치하지 않습니다.**
+준비 서버와 대상 서버의 Ubuntu·패키지 의존성·kernel을 맞춥니다. 출력 파일시스템과 임시
+검증 공간(`/tmp` 또는 `TMPDIR`)을 모두 확인하며, 고정된 용량·소요 시간을 전제로 계획하지 않습니다.
+
+AWS credential은 준비 서버의 `/var/lib/eva/credentials/aws_key.ini`를 재사용하고 STS로 검증합니다.
+사용 가능한 credential이 없으면 대화형 터미널에서 key를 **숨김 입력**받습니다. 비대화형 실행은
+승인된 Secret 관리 절차로 해당 파일을 먼저 준비합니다. `--yes`는 credential 입력을 대신하지
+않으며, Secret을 명령행·환경 설정 예시·로그에 직접 적지 않습니다.
+
+### Bundle 생성과 검증
+
+다음 경로·GPU profile은 실제 반입 계획에 맞게 바꿉니다. `--release`를 생략하면 준비 서버의
+**Current Release**를 사용합니다. prepared Release, 반입(import)한 Release, Bundle archive는
+입력으로 사용할 수 없습니다. 원본의 모든 선언 artifact가 유효해야 하며 원본은 수정하지 않습니다.
+
+```bash
+original_release="/data/eva/base-releases/<version>"
+bundle="/data/eva/export/eva-airgap-bundle_<version>_linux_amd64.tar.gz"
+
+sudo eva verify --release "$original_release"
+sudo eva airgap prepare --release "$original_release" \
+  --output "$bundle" --vllm-profile L40sx1 \
+  --driver-package nvidia-driver-580 --yes
+```
+
+- `--output FILE.tar.gz`, `--vllm-profile`, `--yes`는 필수입니다. 기존 출력은 덮어쓰지 않습니다.
+- profile은 `A6000x1`, `L40sx1`, `PRO5000x3`, `PRO6000-MIGx4` 중 하나입니다.
+  **해당 profile의 vLLM 이미지만** 포함하며 Values는 모든 profile용을 받습니다. 대상의 실제
+  GPU/MIG와 설치 시 선택되는 profile이 같아야 합니다. 다른 profile이면 새 Bundle을 준비합니다.
+- `--driver-package` 기본값은 `nvidia-driver-580`이며 `nvidia-driver-NNN` 또는
+  `nvidia-driver-NNN-open` 형식을 지원합니다. 전체 의존성 repo를 준비하며 누락은 오류로 처리합니다.
+  패키지 이름을 지정하는 것만으로 대상 kernel/GPU 호환성이 보장되지는 않습니다.
+- 특정 GPU의 Display Mode 전환에 필요한 경우에만 승인된 NVIDIA 독점 배포 ZIP을
+  `--display-mode-selector /secure/approved.zip`으로 추가합니다. 생략 가능한 옵션이며,
+  포함 여부와 관계없이 모든 하드웨어의 Display Mode·GPU·MIG 준비 완료를 보장하지 않습니다.
+
+명령은 선택한 원본 Release의 Infra/Solution version catalog를 기준으로 **Infra·App·IAM·Agent·Vision의
+패키지·Chart·helper, n8n 이미지, 선택한 vLLM 이미지, 모델, Harbor용 Qdrant snapshot,
+Harbor offline installer, NVIDIA driver 의존성 repo**를 준비합니다. 유효한 Managed Runtime은
+재사용하고 없으면 온라인으로 bootstrap합니다. 손상된 기존 Runtime은 먼저 복구해야 합니다.
+
+**Harbor 배포·이미지/snapshot 게시, GPU driver 설치·Display Mode/MIG 전환, Docker daemon 설정
+변경은 수행하지 않습니다.** 출력 옆의 격리된 임시 작업 디렉터리는 성공·실패 시 정리하며
+resume을 지원하지 않습니다. 중단 후에는 원인을 해결하고 처음부터 다시 실행합니다.
+강제 종료·서버 장애 시에는 private 임시 디렉터리가 남을 수 있으므로 담당자가 실행 중인 작업이
+없는지와 내용을 확인한 뒤 정리합니다. 남은 staging 파일을 완성된 Bundle로 사용하지 않습니다.
+다운로드 backend 출력은 숨기고 단계명과 최종 결과를 표시합니다. 누락 Runtime을 bootstrap할 때는
+기존 Runtime 설치기의 APT/pip 진행 출력이 추가될 수 있습니다. credential을 기록하려고
+shell trace나 backend 디버그 출력을 켜지 않습니다. 검증이 끝난 Bundle만 최종 출력 경로에 나타납니다.
+
+완료 후 archive와 반입용 SHA-256을 확인합니다. 실패한 명령 이후에는 다음 단계로 진행하지 않습니다.
+
+```bash
+sudo eva verify --release "$bundle"
+sudo sha256sum "$bundle"
+```
+
+Bundle은 다음처럼 **Release root가 평탄한 구조**입니다. installer와 Tool archive가 같은
+디렉터리에 있어야 하며, 다른 선언 artifact도 함께 보존합니다.
+
+```text
+release.yaml
+checksums.sha256
+README.md
+eva-tool-installer.sh
+eva-tool_<version>_linux_amd64.tar.gz
+eva-infra_…tar.gz
+eva-solution_…tar.gz
+eva-offline_<version>_linux_amd64.tar.gz
+```
+
+`eva-offline` 내부에는 `runtime/`과 `out/cache/`가 있습니다. Bundle용 metadata와 checksum은
+새로 생성하며 원본 Release는 그대로 둡니다. Bundle과 함께 Release/version, GPU profile,
+driver package, 대상 OS/kernel 조건 및 SHA-256을 인계합니다. **기대 checksum은 별도의 신뢰할 수
+있는 경로로 전달**합니다. AWS·Docker·SSH credential, 고객 설치 YAML·TLS private key는
+Bundle에 넣지 않습니다. 준비 서버의 인터넷 credential은 대상에 반입하지 않으며,
+대상용 설치 설정·TLS 키는 별도 승인된 Secret 관리 경로로 전달합니다.
+
+## 2. 준비 범위와 담당 구분
+
+인터넷과 Main Harbor에 접근할 수 없는 폐쇄망에 EVA를 설치하는 절차입니다.
+검증된 Release와 오프라인 자산을 반입하고, 내부 Harbor를 공급원으로 사용합니다.
+이 가이드는 **대상 서버에서 EVA Tool과 단일 설치 설정으로 설치**하는 흐름을 따릅니다.
+수동 Ansible·Helm 배포를 같은 작업에 섞지 않습니다.
+
+Main 서버의 Harbor와 게시 경로에 접근할 수 있다면
+[Remote Repository 설치 가이드](remote-repository-runbook.md)를 사용합니다.
+Local은 Repository 공급 방식이며, 서비스의 HTTP/HTTPS나 IAM 함께 설치 여부와는 별개입니다.
+
+| 담당 | 설치 전 완료할 작업 |
+| --- | --- |
+| 자산 준비 담당자 | 대상 OS·플랫폼·GPU와 설치할 component에 맞는 Release, Runtime, 패키지, Chart, 이미지, 모델 및 snapshot 준비·검증·반입 |
+| 내부 Repository 담당자 | Harbor 설치, 이미지 적재, 필요한 Qdrant snapshot OCI artifact 게시, endpoint·인증·접근 권한 인계 |
+| 설치 담당자 | 대상 서버 사전 확인, 설정·인증서·라이선스 준비, CLI 설치 실행과 결과 검증 |
+
+**현재 `eva install`은 Local Harbor 생성, 제품 이미지 load/push, snapshot artifact 게시,
+전체 오프라인 캐시 배치를 대신하지 않습니다.** 이 준비가 끝나지 않았다면 설치를 시작하지 않습니다.
+Docker가 필요한 Harbor·이미지 적재 작업과 EVA Managed Runtime 준비는 별개입니다.
+
+앞 절의 Bundle 생성과 아래의 대상 캐시 배치·Harbor 인계를 모두 완료해야 합니다.
+Base Release만 받은 상태나 Bundle 검증만 통과한 상태를 폐쇄망 설치 준비 완료로 판단하지 않습니다.
+
+## 3. 설치 전 확인
+
+| 항목 | 진행 조건 |
+| --- | --- |
+| 서버 | Ubuntu 24.04, `linux/amd64`, 설치 계정과 sudo 권한, 충분한 디스크·메모리 |
+| 작업 승인 | Docker·k3s·GPU 실행 환경·영구 저장소 변경과 서비스 재시작이 가능한 시간 확보, 기존 데이터 백업 |
+| Release | Tool·Infra·Solution·오프라인 자산의 버전과 checksum 일치, 설치할 모든 component의 자산 포함 |
+| OS 패키지 | 대상 Ubuntu·Python 환경에 맞는 의존 패키지와 필요한 GPU driver·Container Toolkit 자산 포함 |
+| Harbor | node와 Pod에서 모두 접근 가능한 DNS/IP:port, 승인된 project와 인증 정보, 필요한 이미지 적재 완료 |
+| GPU | Agent/Vision 설치 시 지원 GPU·driver·`nvidia-smi`, 의도한 MIG 구성과 해당 모델·vLLM 이미지 준비 |
+| 서비스 | App/IAM 공개 주소, 내부 DNS·라우팅·방화벽, 인증서, IAM·Redis 연결값과 발급된 라이선스 준비 |
+| 데이터 | 영구 저장소 경로·용량·권한과 보존 정책 확인 |
+
+- Harbor 주소는 `192.0.2.20:32080`처럼 **scheme 없는 `host:port`**로 지정합니다.
+  `localhost`나 loopback 주소는 Pod에서 다른 대상을 가리키므로 사용하지 않습니다.
+- Harbor에는 제품 이미지뿐 아니라 선택한 Infra와 Chart가 참조하는 보조 이미지도 있어야 합니다.
+  원본 Docker Hub 경로를 사용하는 이미지의 mirror와 적재 경로도 준비 담당자가 확인합니다.
+- Agent를 선택하면 Agent Init·vLLM·Qdrant 자산도 필요합니다. 모델 캐시와 이미지의 GPU profile은
+  대상 서버의 실제 GPU/MIG 구성과 일치해야 합니다. IAM/App만 설치할 때는 이 자산이 필요하지 않습니다.
+- Harbor snapshot 방식을 사용한다면 snapshot은 **일반 이미지와 별도로 게시한 OCI artifact**여야 합니다.
+  준비 시 선택한 Qdrant Values의 artifact tag·파일·collection과 설치 설정을 맞춥니다.
+  `local_pv` 방식과 혼합하지 않습니다.
+- Local 설정에는 `credentials.aws`를 넣지 않습니다. 대상 서버에 AWS credential을 복사해
+  외부 Registry나 S3에서 빠진 자산을 받는 방식으로 진행하지 않습니다.
+
+## 4. 대상 서버 반입·Tool 설치·캐시 배치
+
+### 최초 반입: eva 없이 archive부터 검증
+
+대상 서버에는 아직 `eva`가 없으므로 OS 명령으로 먼저 검증합니다. 준비 담당자가 **별도 경로로
+전달한 기대 SHA-256**과 비교한 뒤, 새 영구 Release 디렉터리에 압축을 풉니다. 다음 변수의
+`<...>`를 실제 값으로 바꾸고 Bash에서 실행합니다. 블록은 오류가 나면 중단합니다.
+
+```bash
+bundle="/data/eva/inbox/eva-airgap-bundle_<version>_linux_amd64.tar.gz"
+expected_sha256="<별도-신뢰-경로로-받은-SHA256>"
+release_root="/data/eva/releases/<version>"
+
+(
+  set -eu
+  printf '%s  %s\n' "$expected_sha256" "$bundle" | sudo sha256sum --check --strict -
+  sudo install -d -m 0755 "$(dirname "$release_root")"
+  sudo mkdir -- "$release_root"
+  sudo tar --extract --gzip --file "$bundle" --directory "$release_root" \
+    --no-same-owner --keep-old-files
+  cd "$release_root"
+  sudo sha256sum --check --strict checksums.sha256
+  sudo bash ./eva-tool-installer.sh
+  eva version
+  sudo eva verify --release "$release_root"
+)
+```
+
+기존 디렉터리에는 덮어쓰지 않습니다. 중간 실패로 디렉터리가 남아도 내용을 확인하지 않고
+명령을 반복하거나 기존 Release와 합치지 않습니다. Current Release가 참조하므로 설치 후에도
+이 디렉터리를 보존하고, 임시 USB mount 경로만 등록한 채 매체를 제거하지 않습니다.
+최초 Local 설치에서 Managed Runtime이 없으면 이 원본 형태의 Release에 **`eva-offline`이 필요**합니다.
+installer는 Tool과 Release checksum을 검증하고 해당 Release를 Current Release로 등록합니다.
+
+이미 Tool이 있는 서버에서는 `sudo eva verify --release "$bundle"`로 archive도 검증할 수 있습니다.
+archive 검증이나 `release import-airgap`은 Harbor 적재·전체 설치 캐시 배치를 수행하지 않습니다.
+
+### 실행 소스 준비 후 cache만 배치
+
+먼저 반입 Release의 Infra·Solution 실행 소스를 준비합니다. 이 명령은 **offline cache를
+추출하지 않습니다.**
+
+```bash
+sudo eva release prepare --release "$release_root"
+```
+
+`prepared_root`는 **위 명령이 출력한 경로**로 지정합니다. 기본값은 `/opt/eva/releases/<version>`이며
+`v` 접두사를 포함해 출력과 정확히 맞춥니다. `offline_archive`도 검증한 Release의 metadata에
+선언된 정확한 `eva-offline` 파일을 지정하며 wildcard나 다른 버전의 archive를 사용하지 않습니다.
+
+새 cache 또는 비어 있는 cache인지 확인한 뒤 **`out/cache`만** 추출합니다. `runtime/`을 여기에
+풀거나 source·metadata를 덮어쓰지 않습니다.
+
+```bash
+prepared_root="/opt/eva/releases/<version>"
+offline_archive="$release_root/eva-offline_<version>_linux_amd64.tar.gz"
+
+(
+  set -eu
+  sudo test -d "$prepared_root/src"
+  sudo test -f "$offline_archive"
+  sudo test ! -L "$prepared_root"
+  sudo test ! -L "$prepared_root/out"
+  sudo test ! -L "$prepared_root/out/cache"
+  if sudo test -e "$prepared_root/out/cache"; then
+    sudo test -d "$prepared_root/out/cache"
+    cache_entry="$(sudo find "$prepared_root/out/cache" -mindepth 1 -maxdepth 1 -print -quit)"
+    if [ -n "$cache_entry" ]; then
+      printf '%s\n' 'cache가 비어 있지 않습니다. 기존 내용과 Release를 확인한 뒤 별도로 조치하세요.' >&2
+      exit 1
+    fi
+  fi
+  sudo install -d -m 0755 "$prepared_root/out/cache"
+  sudo tar --extract --gzip --file "$offline_archive" --directory "$prepared_root" \
+    --no-same-owner --keep-old-files out/cache
+)
+```
+
+추출 도중 실패하면 부분 cache를 설치에 쓰지 않습니다. 준비 담당자가 원인과 기존 내용을
+확인하고 승인된 새/빈 cache로 배치합니다. 캐시 경로를 임의 override하지 않습니다.
+
+캐시 배치를 위해 prepare한 경로와 installer가 등록한 **원본 Current Release는 별개**입니다.
+최초 설치에서는 Runtime을 읽을 수 있도록 원본 Release 선택을 유지합니다.
+이후 설치 명령이 이미 준비한 실행 소스와 cache를 사용합니다.
+
+### Harbor·이미지·snapshot 준비 — 별도 승인 작업
+
+내부 Repository 담당자가 **Docker/Compose 준비 → Harbor 설치/접근 확인 → image load/push →
+snapshot OCI artifact 게시**를 완료합니다. 이 작업은 `eva airgap prepare`나 `eva install`의
+일부가 아닙니다. Harbor 설치·재구성은 서비스 중단이나 저장소 경로 변경을 일으킬 수 있으므로
+기존 Harbor의 설정·데이터 보존 계획과 변경 승인을 먼저 확인합니다.
+
+검증한 Tool에 포함된 helper root는 기본 설치 시 `/opt/eva/tool/libexec/remote-root`입니다.
+custom Tool root에서는 설치된 binary의 실제 경로로 찾습니다. 실행 소스에 `scripts/`가 있을
+것으로 가정하거나 별도 Git checkout의 helper와 혼용하지 않습니다.
+
+```bash
+tool_binary="$(readlink -f "$(command -v eva)")"
+tool_libexec="$(dirname "$(dirname "$tool_binary")")/libexec/remote-root"
+```
+
+| 설치된 helper (`$tool_libexec` 기준) | 사전 조건·입력 |
+| --- | --- |
+| `scripts/install/install_docker.sh --airgap` | Docker가 없을 때만 승인 후 사용; cache의 Docker DEB와 대상 OS 의존성 필요 |
+| `scripts/install/setup_harbor.sh` | 동작하는 Docker/Compose, cache의 Harbor offline installer, Site ID, 영구 설치·데이터 경로, hostname·registry endpoint·project 및 승인된 인증 정보 |
+| `scripts/publish/push_images_to_repository.sh` | Harbor project·권한·Docker 인증과 load된 이미지; `PULL_SOURCE_IMAGES=false`, `IMAGE_LIST`는 cache의 `images/airgap-images.txt` |
+| `scripts/publish/push_qdrant_snapshots_to_harbor.sh` | 위 image push 후 실행; cache의 snapshot·ORAS·Harbor Values, 게시 권한 필요 |
+
+helper에는 `EVA_CACHE_ROOT="$prepared_root/out/cache"`를 전달합니다. version catalog를 읽는 helper에는
+`EVA_INFRA_VERSION_FILE="$prepared_root/src/infra/version.yaml"`,
+`EVA_SOLUTION_VERSION_FILE="$prepared_root/src/solution/version.yaml"`도 전달해 같은 Release를 유지합니다.
+이들은 **helper 입력**이며 `eva install`의 cache 우회 옵션이 아닙니다. Harbor 설정 helper에는
+실제 `EVA_SITE_ID`, cache의 Harbor installer와 일치하는 `HARBOR_VERSION`, 영구 install/data 경로와
+endpoint metadata 출력 경로를 명시합니다. 기본 HTTP `32080` helper를 쓴다면 승인된 내부망과
+Docker client의 해당 Registry 접근 설정이 필요하며 daemon 설정을 자동 변경하는 절차로 취급하지 않습니다.
+
+Docker가 준비된 Repository 서버에서 다음은 **load만** 수행합니다. Harbor가 별도 서버라면
+검증된 cache/image archive를 그 서버에 인계하고 그 경로를 사용합니다.
+
+```bash
+sudo docker load --input "$prepared_root/out/cache/images/eva-images.tar"
+```
+
+push helper는 실제 `REPOSITORY_REGISTRY`(`host:port`)·`REPOSITORY_PROJECT`와 승인된 인증 경로를
+사용합니다. 비밀번호를 명령행에 쓰거나 기본 비밀번호로 운영하지 않습니다. snapshot helper는
+`EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml`을 사용하며, 해당 Values의 `SNAPSHOT_SPECS`
+(tag·파일·collection)와 대상 설정을 일치시킵니다. 이미지 push만으로 snapshot이 게시되지는 않습니다.
+helper 종료만 믿지 말고 필요한 태그·Docker Hub mirror 경로와 snapshot artifact의 실제 pull을 확인합니다.
+
+설치 전 준비 담당자에게 다음을 확인받습니다.
+
+- 사용할 Release와 실행 경로, 캐시 배치·무결성 검증 결과
+- 선택한 component의 패키지·Chart·모델·helper 누락 여부
+- Harbor image 적재 결과와, 해당 시 Qdrant snapshot artifact 게시 결과
+- node와 Pod용 Harbor endpoint·인증·mirror 구성 및 필요한 방화벽 허용
+
+`eva verify` 성공은 Release artifact 무결성 확인입니다. OS 의존성, 전체 cache 완전성,
+Harbor 실제 pull, 서비스 접속이나 설치 E2E 성공을 보장하지 않습니다.
+
+## 5. 단일 설치 설정 작성
+
+대상 서버의 **일반 계정**으로 실행합니다. 기본 결과는 사용자 홈의
+`eva-install.yaml`이며 새 파일만 권한 `0600`으로 생성합니다.
 
 ```bash
 eva install configure
 ```
 
-sudo 없이 실행하여 설치환경 **local**을 고릅니다. 현재 Target의 Infra-only/Solution,
-HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 고릅니다. 기본 결과는 사용자 홈의
-`eva-install.yaml`입니다. 외부 IAM은 App의 SSO·Redis 연결값을 파일에서 입력합니다.
-기존 옵션/자동화용 `eva config sample --mode local --iam external --protocol https`도 유지합니다.
-이 경우 IAM 설치와 Values는 제외되며 내부망에서 기존 IAM/Redis까지 도달할 수 있어야 합니다. 샘플은
-게시 App `3.3.0-beta.3` / IAM `3.3.0-beta.1` 기준입니다. 이 변경을 포함한 Tool·Release·offline 자산을
-함께 준비합니다. HTTP는 격리 테스트용으로 인증서 검사·TLS 생성을 생략하며 HTTPS 검증은 유지합니다.
-실제 설치 E2E는 별도 검증 대상입니다.
-기존 `config sample`의 메뉴 생략은 `--address shared|separate --protocol https`로 지정합니다.
-파일은 `0600`으로 생성하며 덮어쓰지 않습니다. `<...>` 필수 입력이 남으면 검증이 중단됩니다.
+1. 설치환경 **local**을 선택합니다.
+2. **Infra-only / Infra + Solution**을 선택합니다.
+3. Solution이면 HTTP/HTTPS, 동일 주소·별도 도메인·IP 직접 접속을 선택합니다.
+4. IAM+App 함께 설치 또는 App+외부 IAM을 선택하고, 필요한 Agent/Vision을 고릅니다.
+5. 생성 파일을 열어 남은 필수 입력과 고객사 설정을 채웁니다.
 
-샘플의 `site.id`, `repository.registry`를 대상 site와 Local Harbor의 도달 가능한
-`host:port`로 바꾸고, `targets.server-a.ansible`에 local/SSH 접속·sudo 정보를,
-`targets.server-a.values.iam`과 `values.app`에 승인된 TLS·IAM·license 값을 작성합니다.
-인증서/key는 target의 `ingress.tls.hostPath`에 따로 준비합니다. Agent/Vision override가
-필요할 때만 `values.agent`/`values.vision`을 추가합니다. Online용 `credentials.aws`는
-Local 입력에서 거부되며 AWS credential을 대상에 복사하지 않습니다.
+| 설정 | 입력할 내용 |
+| --- | --- |
+| `site.id` | 고객사·설치 환경의 고유 Site ID |
+| `repository` | `mode: local`, 실제 내부 Harbor의 `registry`, 승인된 `project` |
+| `targets.server-a.ansible` | 대상 사용자, local 접속·sudo 정보, 필요한 Infra/Harbor 옵션 |
+| `targets.server-a.values.iam` | 함께 설치할 IAM의 주소·관리자 설정·TLS·Redis |
+| `targets.server-a.values.app` | App 공개 주소·TLS·라이선스, 외부 IAM 사용 시 SSO·Redis 연결값 |
+| `values.agent` / `values.vision` | 승인된 Chart override가 있을 때만 추가 |
 
-```bash
-sudo eva workspace validate --config /home/eva/eva-install.yaml
-sudo eva install --release /path/to/verified-release-or-airgap-bundle \
-  --config /home/eva/eva-install.yaml --yes
-```
+`<...>` 필수 입력은 모두 실제 값으로 바꿉니다. 대상의 인증서·데이터 경로는 절대 경로로 씁니다.
+Values는 생성된 `values.<component>` 아래에 그대로 작성하며 `localhost`나 IP key로 다시
+감싸지 않습니다. Release 기본 Values나 GPU profile 전체를 복사해 고정하지 않습니다.
 
-검증 명령은 파일을 생성하지 않습니다. 설치는 private Workspace snapshot을
-`/var/lib/eva/workspaces/<site-id>/<content-sha256>/`에 생성하며 내부 Ansible은 기존
-Workspace 계약을 그대로 사용합니다. 설정 수정 후에는 `install --config`를 다시 실행하고,
-입력 변경 없는 실패는 `sudo eva retry --yes`로 원래 snapshot을 재사용합니다.
-Secret이 포함된 원본 설정과 생성 Workspace는 커밋하거나 Release/Bundle에 넣지 않습니다.
-기존 `--workspace`와 아래 수동 설치 절차는 호환 경로로 유지합니다.
+Harbor 인증이나 snapshot 방식은 준비 담당자가 인계한 값에 맞춥니다. 다음 항목은 필요할 때
+`targets.server-a.ansible`에 지정하는 **배포 옵션**이며 Chart Values가 아닙니다.
 
-| 표기 | 의미 |
-|---|---|
-| **[준비]** | 인터넷 · docker · helm · ECR 자격증명이 되는 서버. bundle 을 만듭니다 |
-| **[대상]** | airgap 서버. Harbor 와 k3s 가 여기 있습니다 |
-| **⚑** | 검증 지점 — 통과하지 못하면 다음으로 가면 안 됩니다 |
+- `harbor_admin_user`, `harbor_admin_password`: 실제 Harbor 인증 정보를 이 private YAML에 입력합니다.
+  별도 `docker login`만으로 k3s와 snapshot pull 인증이 구성되지는 않습니다.
+- `k3s_dockerhub_mirror_enabled: true`: 원본 Docker Hub 경로의 이미지도 Harbor에서 공급할 때 사용;
+  준비한 mirror 경로에 이미지가 있어야 합니다.
+- Harbor snapshot 사용 시 `eva_agent_qdrant_snapshot_source: harbor`와
+  `eva_agent_qdrant_values_file: values-k3s.harbor.yaml`을 함께 지정합니다.
+- Agent 설치 시 선택되는 `eva_agent_vllm_profile`은 Bundle 생성 때의 `--vllm-profile`과
+  실제 GPU/MIG 구성에 맞춥니다. 모든 profile의 Values가 있다는 이유로 다른 이미지를 선택하지 않습니다.
 
-검증 환경 (2026-08-27)
+전체 schema와 자동화용 샘플 옵션은 [단일 설치 설정](single-file-configuration.md)을 참고합니다.
+설정과 비밀번호를 Git·Release·Bundle·채팅에 넣지 않습니다.
 
-| | |
-|---|---|
-| 대상 노드 | evashee / 10.158.200.113 |
-| 서비스 host | magok.eva.lge.com |
-| Registry | `<NODE_IP_OR_DNS>:32080` / project `eva` |
-| eva-app | chart 3.1.4 · app 3.1.2 · 경로 `/` |
-| eva-iam | chart 3.1.0 · 경로 `/iam` |
-| eva-agent | chart / deploy 3.1.0 · agent · agent-init · vllm · qdrant |
-| Qdrant | chart 1.18.2 · Harbor OCI snapshot restore |
-| eva-vision | chart / deploy 3.1.0 |
-| Ingress | traefik |
+### 주소·TLS·IAM·라이선스
 
----
+- **HTTPS 권장:** hostPath 인증서를 사용할 때 대상의 `ingress.tls.hostPath` 디렉터리에 PEM 형식의
+  `tls.crt`와 `tls.key`를 준비합니다. 인증서 SAN은 실제 접속 DNS/IP와 일치해야 합니다.
+  개인 키는 제한된 권한으로 관리합니다. 기존 TLS Secret 방식은 승인된 Secret을 먼저 준비합니다.
+- **HTTP:** 격리된 테스트에만 사용합니다. wizard가 생성한 HTTP 설정을 사용하며 TLS 생성 여부만
+  꺼서 전환하지 않습니다. Repository 모드와 TLS 설정은 별개입니다.
+- **동일 주소:** App은 `/`, IAM은 `/iam`을 사용합니다. 비표준 외부 포트는 실제 Ingress/LB 노출,
+  App 주소, IAM 공개 URL과 client redirect URI를 함께 맞춥니다.
+- **IAM 함께 설치:** 같은 target의 SSO URL·client Secret은 Deployer가 자동 전달합니다.
+  Secret을 터미널에 출력하거나 App 명령행으로 복사하지 않습니다.
+- **외부 IAM:** App의 SSO URL·realm·client·관리 API Secret·Redis 연결값을 입력합니다.
+  App Pod에서도 IAM/Redis에 접근할 수 있어야 하며, 외부 IAM의 App redirect URI·권한은 별도로
+  승인·구성합니다. Deployer가 외부 IAM을 변경하지는 않습니다.
+- **라이선스:** Local 기본 활성화 방식은 `offline`입니다. 발급된 제품 코드·API key·shared key와
+  방식을 맞춥니다. `online` 라이선스를 의도적으로 사용한다면 App의 라이선스 서버 접근이 필요합니다.
+  차트 공개 기본 비밀번호는 운영 정책에 맞게 변경하고 IAM Redis와 App 연결값도 함께 맞춥니다.
 
-## Site 산출물 namespace
-
-이 runbook의 명령은 대상 또는 배포 controller에서 동일한 `EVA_SITE_ID`를 사용한다는 전제입니다. 이 값은 필수이며, 테스트를 포함해 `default`를 사용하려면 명시적으로 지정해야 합니다. 고객 또는 설치 환경별로 실행 전 한 번 지정하세요.
+## 6. 입력과 사전 조건 확인
 
 ```bash
-export EVA_SITE_ID=customer-a
+sudo eva workspace validate --config "$HOME/eva-install.yaml"
 ```
 
-생성 config는 `out/work/config/$EVA_SITE_ID/<host>/`, 렌더링 values는 `out/work/rendered/$EVA_SITE_ID/<host>/<component>/`, 실행 로그는 `out/work/logs/$EVA_SITE_ID/` 아래에 저장됩니다. 이전 `out/work/config/<host>/` 경로의 결과물은 사용하지 않으므로, 전환 후 Harbor metadata와 `site_eva_config.yaml`을 다시 생성합니다. 이 재실행은 이전 `scret.yaml`을 해당 host의 pre-site 경로와 현재 site 경로에서 모두 제거합니다.
+이 명령은 필수 입력·형식·설정 구조만 검증하며 Workspace를 생성하지 않습니다.
+Harbor·외부 IAM·Redis 접근, credential 권한, GPU, 인증서의 실제 유효성은 별도로 확인합니다.
 
----
-
-## Qdrant snapshot 방식
-
-Agent 3.1.0의 Qdrant snapshot은 기존 `local_pv`와 Harbor OCI artifact 방식 중 하나를 선택합니다.
-이 runbook은 USB 설치에서 node hostPath를 미리 seed하지 않아도 되는 **`harbor` 방식을 권장**합니다.
-
-| 구분 | `local_pv` (기존 호환) | `harbor` (권장) |
-|---|---|---|
-| Qdrant values | `values-k3s.yaml` | `values-k3s.harbor.yaml` |
-| snapshot 전달 | 대상 노드 hostPath/PV 사전 시딩 | Local Harbor OCI artifact |
-| 배포 변수 | `eva_agent_qdrant_snapshot_source=local_pv` | `eva_agent_qdrant_snapshot_source=harbor` |
-| 새 PVC의 노드 제약 | 단일 노드 사전 시딩 필요 | Pod와 모든 node가 Harbor endpoint에 도달해야 함 |
-
-두 방식을 섞으면 안 됩니다. 준비 서버의 `EVA_AGENT_QDRANT_SNAPSHOT_SOURCE`/
-`EVA_AGENT_QDRANT_VALUES_FILE`와 대상 서버의
-`eva_agent_qdrant_values_file`/`eva_agent_qdrant_snapshot_source`를 모두 같은 방식으로 맞춥니다.
-
-Harbor profile의 `SNAPSHOT_SPECS`는 아래 형식이며, values 파일이 artifact tag·snapshot 파일·collection의
-단일 기준입니다. 파일명이나 tag를 임의로 바꾸지 말고 values와 snapshot 파일을 함께 갱신합니다.
-
-```text
-<artifact-tag>|<snapshot-file>|<logical-collection>
-
-eva_manual_qwen3vl_collections|eva_manual_qwen3vl_20260824.snapshot|eva_manual_qwen3vl
-```
-
-Local Harbor(`repository_registry=<NODE_IP_OR_DNS>:32080`, `repository_project=eva`)에는 다음 네 항목이
-있어야 합니다. 이 주소는 Harbor 노드와 Pod에서 모두 도달 가능해야 하며 `localhost`를 사용하지 않습니다.
-
-| 항목 | Harbor 주소 |
-|---|---|
-| Qdrant 본체 이미지 | `<NODE_IP_OR_DNS>:32080/eva/qdrant:v1.18.2` |
-| snapshot-sync sidecar 이미지 | `<NODE_IP_OR_DNS>:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0` |
-| chart test 이미지 | `<NODE_IP_OR_DNS>:32080/eva/bci-base:latest` |
-| snapshot OCI artifact | `<NODE_IP_OR_DNS>:32080/eva/qdrant-snapshots:<artifact-tag>` |
-
-`bci-base`는 일반 Pod가 아니라 `helm test`에 쓰입니다. Airgap test에서도 외부 registry를 찾지 않게
-image 목록과 Harbor에 함께 준비합니다.
-
----
-
-## 시작점에 따라 순서가 달라집니다
-
-| 시작 상태 | 순서 |
-|---|---|
-| **A. k3s · Harbor 가 이미 있음** | 아래 번호 그대로 (07 → 08 → 09 → 10 → 11 …) |
-| **B. bare Ubuntu 24.04 (k3s · Harbor · docker 없음)** | **10번을 09번보다 먼저** — `site_infra.yaml` 이 ansible 로 실행되기 때문입니다 |
-
-B 의 실제 순서
-
-```
-07 load + 무결성 확인
-08 docker 설치 → Harbor 설치 → 이미지 push
-10 ansible 설치                 ← 먼저
-09 site_infra.yaml              ← k3s + registries.yaml 을 여기서 함께 설치
-11 인증서 …
-```
-
-B 에서 추가로 필요한 것
-
-1. **wheelhouse 에 full `ansible`** — `site_infra.yaml` 의 nfs role 이 `ansible.posix.mount` 를 씁니다.
-   `ANSIBLE_AIRGAP_REQUIREMENTS="ansible-core==..."` 단축로는 쓸 수 없습니다
-2. **NVIDIA 드라이버 offline 리포** — gpu role 이 `lspci` 로 NVIDIA GPU를 감지하면 드라이버를 설치합니다 (03번 참고).
-   GPU가 없는 서버는 NVIDIA 관련 단계를 자동으로 건너뜁니다. `-e gpu_skip_driver_update=true`는 드라이버 설치/업데이트만 생략하며, 감지된 GPU의 Container Toolkit, K3s NVIDIA runtime, device plugin은 계속 구성합니다.
-3. **Ubuntu 릴리스 일치** — `base` role 이 `out/cache/apt/debs` 의 `.deb` 를 dpkg 로 설치합니다.
-   준비 서버와 대상 서버의 릴리스·패치 레벨이 다르면 `libc6` 같은 버전 의존성에서 깨집니다
+GPU를 사용할 서버에서는 실행합니다. driver가 없거나 GPU/MIG 구성이 의도와 다르면
+승인된 오프라인 준비 절차를 완료한 뒤 계속합니다.
 
 ```bash
-# 양쪽에서 비교
-lsb_release -a
-
-# bundle 이 이 서버와 맞는지 진단
-./scripts/install/validate_offline_debs.sh ./out/cache/apt/debs
-sudo ./scripts/install/repair_offline_debs.sh ./out/cache/apt/debs
+sudo eva preflight gpu
 ```
 
-B 에서는 09번의 수동 `registries.yaml` 작성이 필요 없습니다 — `site_infra.yaml` 이 써줍니다.
-
----
-
-## Phase 0 — 준비 서버 점검
-
-이걸 건너뛰면 옮긴 tar 가 깨져 있습니다.
-
-### 01. docker 이미지 스토어 확인 · **[준비]** ⚑
-
-containerd 이미지 스토어를 쓰는 docker 는 `docker save` 에서 레이어를 빼먹은 tar 를 만듭니다.
-대상 서버에서 `docker load` 는 성공한 듯 보이지만 push 가 `failed to read config content` 로 실패합니다.
+기존 Argo CD가 관리하던 서버라면 연결 해제를 먼저 확인합니다. Git 등록 변경에는 별도 승인이
+필요하며 `--yes`로 우회할 수 없습니다. 필요한 관리 서버 접근이 없으면 먼저 운영 담당자와 조치합니다.
 
 ```bash
-docker info --format '{{.DriverStatus}}'
+sudo eva preflight argocd --config "$HOME/eva-install.yaml"
 ```
 
-**판단 기준은 하나입니다 — 이 머신에서 `docker save` 로 tar 를 만들어 옮기는가?**
+## 7. 설치 실행
 
-- 그렇다 → 아래처럼 끕니다
-- 아니다 (online 설치 대상, 이미지 빌드 전용 머신 등) → 기본값 그대로 두세요
+준비가 완료된 Current Release로 설치합니다.
 
 ```bash
-sudo cat /etc/docker/daemon.json 2>/dev/null   # 기존 insecure-registries 등 보존
-
-sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
-{ "features": { "containerd-snapshotter": false } }
-EOF
-sudo systemctl restart docker
+sudo eva install --config "$HOME/eva-install.yaml" --yes
 ```
 
-주의할 점
+Managed Runtime이 없으면 원본 Release의 `eva-offline`에서 구성합니다.
+인터넷용 `eva runtime bootstrap`이나 별도 pip/Ansible 설치를 정상 절차에 추가하지 않습니다.
+검증된 다른 Release·Bundle을 쓸 때만 `--release <절대 경로>`를 명시합니다.
+Release를 바꿨다면 **해당 버전의 cache와 Harbor 자산도 먼저 준비**해야 합니다.
 
-- 스토어가 갈리므로 전환 후 기존 이미지가 `docker images` 에 안 보입니다. 다시 pull 해야 하고, 되돌리면 다시 보입니다
-- `docker buildx` 로 멀티아키 빌드를 하는 머신이면 끄면 안 됩니다
-- 그 머신에서 docker 로 도는 서비스(Harbor 등)가 재시작됩니다
-- daemon 설정을 건드리지 않는 대안: `skopeo copy --override-arch amd64 docker://<image> docker-archive:/tmp/x.tar:<image>` 또는 `crane pull --platform linux/amd64`
+선택한 component에 따라 precondition → Infra → Config → IAM → Agent → Vision → App 순으로
+실행합니다. Agent/Vision/App을 선택하면 Config가 자동 포함되며, Infra-only는 Solution을
+배포하지 않습니다. Workspace와 component별 Values는 내부에서 생성하므로 별도 작성하지 않습니다.
+IAM/App 재설치 시 workload 재시작에 따른 일시 중단이 발생할 수 있습니다.
 
-### 02. version catalog 짝 맞추기 · **[준비]**
-
-다운로드 스크립트가 이 파일들을 읽어 **무엇을 받을지** 정합니다. 나중에 고치면 bundle 에는 옛 버전이 들어갑니다.
+## 8. 결과 확인과 인계
 
 ```bash
-cd <repo 루트>
-grep -E "eva_app_(chart|deploy)_version|eva_iam_chart_version" src/solution/version.yaml
-#   eva_app_chart_version  : 3.1.4
-#   eva_app_deploy_version : 3.1.2   ← 차트 3.1.4 의 appVersion
-#   eva_iam_chart_version  : 3.1.0
+sudo eva status
+sudo eva check --verbose
+sudo eva inspect operations
+sudo eva inspect logs --tail 200
 ```
 
-> eva-app 은 role 이 이미지 태그를 `eva_app_deploy_version` 으로 **강제**합니다.
-> 차트만 올리고 이 값을 두면 Harbor 에 없는 태그를 찾습니다. eva-iam 은 태그를 건드리지 않아 이 문제가 없습니다.
+완료 조건은 명령 종료뿐 아니라 다음 서비스 검증까지 포함합니다.
 
----
+- 설정한 App 주소로 접속하고 새 브라우저 세션에서 로그인·로그아웃 확인
+- IAM/Redis 연결과 발급된 라이선스의 활성 상태 확인
+- 선택한 Agent/Vision의 GPU 할당과 실제 카메라·분석 요청 확인
+- Qdrant snapshot 사용 시 대상 collection·복원 데이터 확인
+- 데이터 저장·조회, 영구 저장소와 재기동 후 보존 확인
 
-## Phase 1 — bundle 만들기
+설치 Site·Release·Operation ID, 서비스 주소와 검증 결과를 운영 담당자에게 인계합니다.
+`inspect values`와 `inspect config`는 **Secret을 마스킹하지 않고 출력**하므로 일반 로그 수집이나
+채팅 공유에 사용하지 않습니다. 상세 조회는 [EVA Tool 명령어 가이드](../operations/eva-cli-command-guide.md)를 따릅니다.
 
-### 03. 차트 · 패키지 · wheel · **[준비]**
+## 9. 실패 처리와 변경 설치
 
-Agent/Qdrant를 Harbor snapshot 방식으로 설치한다면 **처음 assets를 받을 때부터** profile을 정합니다.
-`values-k3s.harbor.yaml`에는 snapshot-sync sidecar와 Harbor OCI artifact 정보가 있으므로,
-기본 `local_pv` profile로 받으면 이후 image 목록에 sidecar가 빠질 수 있습니다.
+| 상황 | 다음 조치 |
+| --- | --- |
+| cache·Chart·모델 누락 또는 OS 패키지 불일치 | 준비 담당자가 같은 Release 기준의 자산·배치를 보완; 인터넷 fallback이나 버전 혼합 금지 |
+| image pull 실패 | Harbor endpoint·인증·적재 태그·mirror 경로와 node/Pod 접근 확인 |
+| Qdrant artifact 조회 실패 | 일반 이미지와 별도로 snapshot 게시 여부·profile·tag·인증 확인 |
+| IAM Secret 조회 실패 | IAM 단계 로그와 기동·관리자 인증·realm/client 구성 확인; 빈 handoff 수동 작성 금지 |
+| 인증서·로그인·Redis 오류 | 실제 공개 URL·SAN·redirect URI·Redis endpoint/TLS·방화벽 정합성 확인 |
+| 원본 설정 또는 Release 변경 | 자산을 맞춘 뒤 `install --config`로 새 Operation 시작 |
+
+원인은 해당 Operation의 상태·로그에서 확인합니다. 다른 작업과 혼동하지 않도록 ID를 지정합니다.
+입력을 바꾸지 않고 외부 원인만 해결했다면 재시도합니다.
 
 ```bash
-export EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor
-export EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml
-
-sudo -v
-./scripts/download/download_offline_assets.sh
-./scripts/download/download_infra_images.sh
-./scripts/install/setup_harbor.sh --download-only
-
-# wheelhouse — 반드시 별도 실행
-./scripts/download/download_python_venv_debs.sh
-TARGET_PYTHON=3.12 ./scripts/download/download_ansible_wheels.sh
-ls out/cache/wheels/*.whl | wc -l
-
-# Harbor profile · Qdrant chart · post-renderer · ORAS가 bundle에 있는지 확인
-test -f out/cache/qdrant/qdrant-1.18.2.tgz
-test -f out/cache/eva-agent/release/3.1.0/eva-agent-qdrant/values-k3s.harbor.yaml
-test -x out/cache/eva-agent/release/3.1.0/plugins/eva-agent-qdrant/post-renderer.sh
-test -f out/cache/eva-agent/release/3.1.0/plugins/eva-agent-qdrant/plugin.yaml
-test -x out/cache/tools/oras
-
-grep -A4 -F 'SNAPSHOT_SPECS' \
-  out/cache/eva-agent/release/3.1.0/eva-agent-qdrant/values-k3s.harbor.yaml
+operation_id="<operation-id>"
+sudo eva status "$operation_id"
+sudo eva inspect logs --operation "$operation_id" --tail 200
+sudo eva retry --yes "$operation_id"
 ```
 
-대상 서버가 **bare Ubuntu 이고 GPU 를 쓴다면** 드라이버 offline 리포도 만들어야 합니다.
-`download_offline_assets.sh` 가 받는 container-toolkit 과는 별개입니다.
-
-```bash
-./scripts/download/build_nvidia_driver_repo.sh nvidia-driver-580
-ls out/cache/nvidia/
-#   nvidia-driver-repo/      ← 이 스크립트가 만듦
-#   container-toolkit-debs/  ← download_offline_assets.sh 가 받음
-```
-
-> 마지막 두 줄을 `&&` 로 묶지 마세요. 앞 명령이 sudo 로 실패하면 wheel 다운로드가 조용히 건너뛰어지고,
-> 그 사실은 대상 서버에서 pip 에러로만 드러납니다. `TARGET_PYTHON` 은 **대상 서버**의 Python 버전입니다.
-
-### 04. 모델 캐시 · **[준비]**
-
-eva-agent 와 vllm 이 쓰는 HuggingFace 모델입니다. bundle 에서 가장 큰 덩어리이고,
-eva_agent role 이 대상 서버에서 두 경로의 존재를 assert 합니다.
-
-```bash
-AWS_PROFILE=default ./scripts/download/download_eva_models.sh
-du -sh out/cache/models/*
-#   out/cache/models/agent/hf
-#   out/cache/models/vllm/hf
-```
-
-iam · app 만 설치할 계획이면 생략합니다.
-
-### 04a. Qdrant snapshot · **[준비]**
-
-Harbor snapshot profile에서는 Qdrant Pod가 USB의 snapshot 파일을 직접 읽지 않습니다. 이 파일은
-대상 Local Harbor에 OCI artifact로 seed할 입력입니다. `SNAPSHOT_SPECS`는 선택한
-`values-k3s.harbor.yaml`에서 읽으므로 파일명·artifact tag를 별도로 입력하지 않습니다.
-
-```bash
-EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
-EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
-AWS_PROFILE=default ./scripts/download/download_qdrant_snapshots.sh
-
-cat out/cache/qdrant-snapshots/manifest.txt
-find out/cache/qdrant-snapshots -maxdepth 1 -type f -name '*.snapshot' -size +0c \
-  -printf '%f %s bytes\n'
-```
-
-현재 3.1.0 profile의 artifact는
-`eva/qdrant-snapshots:eva_manual_qwen3vl_collections`이고, 원본 파일은
-`eva_manual_qwen3vl_20260824.snapshot`입니다. 릴리스가 바뀌면 위 values의
-`SNAPSHOT_SPECS`를 기준으로 다시 받습니다.
-
-### 05. 이미지 · **[준비]** ⚑
-
-```bash
-rm -rf out/cache/images
-
-# 전체 스택 (Agent/Qdrant Harbor snapshot 포함)
-EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
-EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
-AWS_PROFILE=default ./scripts/download/download_eva_images.sh
-
-# Agent · Vision만
-# COMPONENTS="eva-agent eva-vision" \
-# EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
-# EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
-# AWS_PROFILE=default ./scripts/download/download_eva_images.sh
-
-# 일부만 — iam · app 만 볼 때
-# COMPONENTS="eva-app eva-iam" AWS_PROFILE=default ./scripts/download/download_eva_images.sh
-```
-
-`COMPONENTS="eva-agent"`만 지정해도 downloader가 `eva-agent-init`, `eva-agent-vllm`,
-`eva-agent-qdrant`를 함께 포함합니다. Harbor profile에서는 Qdrant 본체, chart test용
-`bci-base`, `eva-agent-qdrant-snapshot-sync` sidecar도 `images-pulled.txt`에 있어야 합니다.
-
-```bash
-grep -E 'qdrant|snapshot-sync|bci-base' out/cache/images/images-pulled.txt
-test ! -s out/cache/images/images-missing.txt
-```
-
-Qdrant만 점검하려면 `COMPONENTS="eva-agent-qdrant"`로 범위를 줄일 수 있습니다. 다만 이 경우
-Agent 본체와 vLLM 이미지는 포함되지 않으므로 전체 `site_eva_agent.yaml` 설치에는 사용할 수 없습니다.
-
-**GPU 프로파일 — vllm 이미지가 여기서 갈립니다.**
-`download_offline_assets.sh` 는 vllm values 4종(`A6000x1`, `L40sx1`, `PRO5000x3`, `PRO6000-MIGx4`)을 모두 받지만,
-이미지 목록은 그중 하나로 렌더해서 만듭니다. 기본값은 `PRO6000-MIGx4` 입니다.
-
-```bash
-ssh <대상 서버> 'nvidia-smi --query-gpu=name --format=csv,noheader'
-
-EVA_AGENT_VLLM_VALUES_FILE=values-k3s.L40sx1.yaml \
-  AWS_PROFILE=default ./scripts/download/download_eva_images.sh
-```
-
-끝에 무결성 검사가 돕니다. **모든 줄이 `amd64/linux` 여야 합니다.**
-
-```
-[verify] 이미지 무결성 확인
-  ...eva-app:3.1.2         amd64/linux
-  mysql:8.0.42-bookworm    amd64/linux
-[verify] 이상 없음
-```
-
-`/` 처럼 앞이 빈 줄이 있으면 01번으로 돌아가세요. 그래도 남으면 그 이미지만 digest 로 받습니다.
-
-```bash
-REPO=<레지스트리>/<경로>/<이미지>
-docker manifest inspect "$REPO:<태그>" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-for m in d.get("manifests",[]):
-    p=m.get("platform",{}); print(p.get("os"),p.get("architecture"),m["digest"])'
-
-docker rmi -f "$REPO:<태그>"          # 먼저 지워야 "Image is up to date" 로 건너뛰지 않습니다
-docker pull "$REPO@sha256:<linux amd64 digest>"
-docker tag  "$REPO@sha256:<...>" "$REPO:<태그>"
-docker image inspect "$REPO:<태그>" --format '{{.Architecture}}/{{.Os}}'
-```
-
-### 06. tar 로 묶어 전송 · **[준비]**
-
-```bash
-docker save -o out/cache/images/repository-images.tar \
-  $(cat out/cache/images/images-pulled.txt)
-ls -lh out/cache/images/repository-images.tar     # 수 GB — 10K 면 01번 문제
-
-# Qdrant Harbor artifact seed의 입력도 같은 bundle에 포함되어야 합니다.
-test -s out/cache/qdrant-snapshots/eva_manual_qwen3vl_20260824.snapshot
-
-rsync -a --info=progress2 --partial \
-  --exclude '.venv' --exclude '.git' --exclude 'out/cache/images/rendered' \
-  ./ eva@10.158.200.113:/home/eva/eva-deployer-jj/
-
-du -sh out/cache/*
-ssh eva@10.158.200.113 'du -sh ~/eva-deployer-jj/out/cache/*'
-```
-
-대용량 단일 `docker save`가 멈추거나 USB/rsync 재개 단위를 작게 해야 하면 image별 tar를 대신 씁니다.
-완성된 파일은 `[skip]`하므로 중단 후 같은 블록을 다시 실행할 수 있습니다.
-
-```bash
-mkdir -p out/cache/images/tars
-n=0
-while IFS= read -r image; do
-  n=$((n + 1))
-  archive=$(printf 'out/cache/images/tars/%02d-%s.tar' "$n" "$(basename "${image%%:*}")")
-  if [ -s "$archive" ]; then echo "[skip] $archive"; continue; fi
-  echo "[save] $image"
-  docker save "$image" > "$archive"
-  ls -lh "$archive"
-done < out/cache/images/images-pulled.txt
-
-find out/cache/images/tars -name '*.tar*' -size -10M -print
-```
-
-마지막 `find`는 아무것도 출력하지 않아야 합니다. 수동으로 USB bundle을 구성한다면 `images-pulled.txt`,
-image tar(또는 `repository-images.tar`), `out/cache/qdrant-snapshots/`, `out/cache/qdrant/`,
-`out/cache/eva-agent/`, `out/cache/tools/oras`, Agent 모델과 deployer의 role/playbook 전체를 함께 복사합니다.
-
----
-
-## Phase 2 — 대상 서버 준비
-
-### 07. load 후 무결성 재확인 · **[대상]** ⚑
-
-```bash
-cd ~/eva-deployer-jj
-docker load -i out/cache/images/repository-images.tar
-
-while read -r i; do
-  printf '%-72s %s\n' "$i" \
-    "$(docker image inspect "$i" --format '{{.Architecture}}/{{.Os}}' 2>/dev/null)"
-done < out/cache/images/images-pulled.txt
-```
-
-image별 tar를 만든 경우에는 위 첫 줄 대신 다음을 실행합니다.
-
-```bash
-for archive in out/cache/images/tars/*.tar*; do
-  echo "[load] $archive"
-  docker load -i "$archive"
-done
-```
-
-전부 `amd64/linux` 여야 합니다. 한 줄이라도 `/` 면 그 이미지는 push · 배포가 실패합니다.
-이 서버에 예전 기록이 남아 있으면 새 tar 를 load 해도 건너뛰므로 `docker rmi -f <이미지>` 를 먼저 하세요.
-
-### 08. Harbor 로 push · **[대상]**
-
-docker · Harbor 가 없을 때만 앞 두 줄을 실행합니다.
-
-```bash
-sudo ./scripts/install/install_docker.sh --airgap        # 후 SSH 재접속
-export HARBOR_HOST=<NODE_IP_OR_DNS>
-export HARBOR_REGISTRY="${HARBOR_HOST}:32080"
-./scripts/install/setup_harbor.sh \
-  --hostname "$HARBOR_HOST" \
-  --registry-endpoint "$HARBOR_REGISTRY" \
-  --install-root ~/.local/share/eva-harbor
-
-PULL_SOURCE_IMAGES=false IMAGE_LIST=out/cache/images/images-pulled.txt \
-  REPOSITORY_REGISTRY="$HARBOR_REGISTRY" REPOSITORY_PROJECT=eva \
-  ./scripts/publish/push_images_to_repository.sh
-
-PULL_SOURCE_IMAGES=false IMAGE_LIST=out/cache/images/infra-images-pulled.txt \
-  REPOSITORY_REGISTRY="$HARBOR_REGISTRY" REPOSITORY_PROJECT=eva \
-./scripts/publish/push_images_to_repository.sh
-```
-
-Harbor 설치가 `out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`을 생성합니다. 이 파일에는 `harbor_registry`,
-`repository_registry`, `repository_project`가 기록됩니다. 이후 `site_infra.yaml`과 모든 Solution playbook에
-`-e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml`을 추가해 k3s image pull과 Qdrant snapshot sidecar가 동일한
-Pod 접근 endpoint를 사용하게 하세요. Harbor와 k3s 서버가 다르면 이 파일도 배포 controller로 옮깁니다.
-metadata에는 비밀번호를 넣지 않으므로 별도 Harbor 서버의 agent 배포에는
-`-e harbor_admin_password='<Harbor 비밀번호>'`도 지정합니다.
-
-Harbor 서버에서 image/snapshot seed를 실행할 때는 `harbor.yml`의 hostname과 registry endpoint가
-일치하면 스크립트가 관리자 비밀번호를 자동으로 읽습니다. 다른 Harbor endpoint 또는 Harbor 설정 파일이
-없는 controller에서는 `REPOSITORY_PASSWORD` 또는 `HARBOR_ADMIN_PASSWORD`를 명시하세요.
-
-스크립트가 `eva/<이름>` 으로 올리면서, **레지스트리 주소가 없는 이미지는 Docker Hub 원본 경로로도**
-한 벌 더 올립니다 (`library/busybox`, `library/mysql`, `bitnami/kubectl` …). 다음 단계의 mirror 가 그 경로를 찾습니다.
-필요한 Harbor project 도 자동으로 만듭니다.
-
-Qdrant 본체·sidecar·chart test 이미지가 평탄화된 `eva` project에 있는지 매핑 파일로 확인합니다.
-
-```bash
-grep -E 'qdrant|snapshot-sync|bci-base' out/cache/images/repository-mapping.txt
-```
-
-Qdrant snapshot은 Docker image가 아니라 `eva/qdrant-snapshots:<tag>` OCI artifact입니다. 따라서
-`push_images_to_repository.sh`만으로는 올라가지 않으며, 다음 독립 seed 단계를 한 번 실행해야 합니다.
-
-`adorsys/keycloak-config-cli`, `amazon/aws-cli` 의 mirror push 가 실패해도 무해합니다 —
-전자는 role 이 `eva/keycloak-config-cli` 로 주소를 지정하고, 후자는 airgap 에서 쓰이지 않습니다.
-
-### 08a. Qdrant snapshot OCI artifact seed · **[대상]** ⚑
-
-이 단계는 `setup_harbor.sh`나 `site_eva_agent.yaml`의 일부가 아닙니다. Harbor 설치와 image seed가 끝난 뒤,
-Qdrant를 배포하기 전에 한 번 수행하는 별도 준비 단계입니다. Harbor snapshot profile을 쓰지 않는 경우에는
-생략합니다. 순서는 반드시 **Harbor 설치 → 일반 image push → snapshot OCI artifact push → Agent/Qdrant 배포**입니다.
-일반 image push가 먼저 끝나 `eva` project가 만들어져 있어야 합니다.
-
-```bash
-EVA_AGENT_QDRANT_VALUES_FILE=values-k3s.harbor.yaml \
-  REPOSITORY_REGISTRY="$HARBOR_REGISTRY" REPOSITORY_PROJECT=eva \
-  ./scripts/publish/push_qdrant_snapshots_to_harbor.sh
-
-cat out/cache/qdrant-snapshots/harbor-artifacts.txt
-```
-
-표준 Local Harbor(`~/.local/share/eva-harbor/harbor/harbor.yml`)에서는 helper가 실제 관리자 비밀번호를
-자동으로 읽어 ORAS login을 합니다. 별도 Harbor이거나 기본 설치 경로가 아니면
-Pod와 대상 node에서 도달 가능한 registry endpoint 및 비밀번호를 함께 지정합니다.
-
-```bash
-REPOSITORY_PASSWORD='<Harbor 관리자 비밀번호>' \
-REPOSITORY_REGISTRY=<Pod와-node에서-도달-가능한-host:32080> \
-REPOSITORY_PROJECT=eva \
-./scripts/publish/push_qdrant_snapshots_to_harbor.sh
-```
-
-artifact가 이미 있으면 `[skip]`으로 끝나므로, 이전 Local Harbor/bundle을 새 deployer로 갱신한 경우에도
-안전하게 다시 실행할 수 있습니다. `harbor-artifacts.txt`에 기록된 artifact 주소의 마지막 tag가 values의
-`SNAPSHOT_SPECS` 첫 필드와 일치해야 하며, 현재는 다음 주소입니다.
-
-```text
-<NODE_IP_OR_DNS>:32080/eva/qdrant-snapshots:eva_manual_qwen3vl_collections
-```
-
-이 단계를 통과해야 이후 Qdrant sidecar의 `oras pull`이 외부가 아닌 Harbor의
-`eva/qdrant-snapshots:<tag>`를 찾습니다. `site_eva_agent.yaml`은 artifact를 push하지 않으므로,
-이미지들이 Harbor에 있어도 이 단계를 생략하면 sidecar가 `artifact not found`로 실패합니다.
-
-### 09. docker.io mirror · **[대상]** · 1회만 ⚑
-
-일부 차트는 `busybox:latest`, `mysql:8.0.42-bookworm` 처럼 이미지를 주소 없이 적어둡니다.
-kubelet 은 그런 이름을 docker.io 로 해석하므로 폐쇄망에서 실패합니다.
-mirror 는 차트를 건드리지 않고 그 요청을 Harbor 로 돌립니다.
-
-> **bare Ubuntu 에서 시작한다면 10번(ansible 설치)을 먼저 하세요.**
-> `site_infra.yaml` 은 ansible 로 실행되므로, 이 단계보다 ansible 이 먼저 있어야 합니다.
-
-**k3s 를 새로 깔 때** — `site_infra.yaml` 이 k3s 와 registries.yaml 을 함께 설치합니다.
-
-```bash
-ansible-playbook -i 'localhost,' -c local src/infra/playbooks/site_infra.yaml -K \
-  -e repository_mode=local_repository \
-  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml
-```
-
-**k3s 가 이미 있을 때** — 직접 씁니다.
-
-```bash
-sudo tee /etc/rancher/k3s/registries.yaml >/dev/null <<EOF
-mirrors:
-  "${HARBOR_REGISTRY}":
-    endpoint:
-      - "http://${HARBOR_REGISTRY}"
-  "docker.io":
-    endpoint:
-      - "http://${HARBOR_REGISTRY}"
-configs:
-  "${HARBOR_REGISTRY}":
-    auth:
-      username: "admin"
-      password: "${HARBOR_ADMIN_PASSWORD:-EVA123@}"
-    tls:
-      insecure_skip_verify: true
-EOF
-
-sudo systemctl restart k3s
-sleep 25
-sudo k3s crictl pull docker.io/library/busybox:latest        && echo "busybox OK"
-sudo k3s crictl pull docker.io/bitnami/kubectl:latest        && echo "kubectl OK"
-sudo k3s crictl pull docker.io/library/mysql:8.0.42-bookworm && echo "mysql OK"
-sudo k3s crictl pull "${HARBOR_REGISTRY}/eva/eva-app:3.1.2" && echo "eva-app OK"
-sudo k3s crictl pull "${HARBOR_REGISTRY}/eva/qdrant:v1.18.2" && echo "qdrant OK"
-sudo k3s crictl pull "${HARBOR_REGISTRY}/eva/eva-agent-qdrant-snapshot-sync:0.1.0" \
-  && echo "qdrant snapshot-sync OK"
-```
-
-네 줄 모두 OK 여야 합니다. **`ctr` 로는 검증되지 않습니다** — registries.yaml 을 읽지 않아 항상 인증 실패합니다.
-k3s 재시작은 재설치가 아니고 컨테이너는 containerd 가 계속 돌립니다 (control plane 만 20~30초 끊김).
-
-### 10. ansible · **[대상]**
-
-```bash
-./scripts/install/install_python_venv_airgap.sh
-./scripts/install/install_ansible_airgap.sh
-source .venv/bin/activate
-ansible --version
-```
-
-`site_infra.yaml` 을 돌릴 계획이면 **full `ansible` 이 필요합니다** — nfs role 이 `ansible.posix.mount` 를 쓰기 때문입니다.
-`requirements-airgap.txt` 전체로 받은 wheelhouse 면 그대로 됩니다.
-
-iam · app 만 배포하고 `site_infra.yaml` 을 건너뛸 때는 `ansible-core` 만으로도 충분합니다
-(두 role 은 `ansible.builtin.*` 만 씁니다).
-
-```bash
-ANSIBLE_AIRGAP_REQUIREMENTS="ansible-core==2.20.5" ./scripts/install/install_ansible_airgap.sh
-```
-**SSH 세션마다 `source` 를 다시 하세요.**
-
----
-
-## Phase 3 — 배포
-
-### 11. 인증서와 kubeconfig · **[대상]**
-
-파일명은 `tls.crt` / `tls.key` 고정이고 내용이 PEM 이어야 합니다. eva-iam 과 eva-app 이 같은 디렉터리를 씁니다.
-
-```bash
-sudo install -d /home/eva/certs
-sudo cp fullchain.pem /home/eva/certs/tls.crt
-sudo cp privkey.pem   /home/eva/certs/tls.key
-sudo chmod 600 /home/eva/certs/tls.key
-sudo head -1 /home/eva/certs/tls.crt        # BEGIN CERTIFICATE
-
-sudo test -f /root/.kube/config \
-  || sudo install -Dm600 /etc/rancher/k3s/k3s.yaml /root/.kube/config
-```
-
-### 12. values 두 개 · **[대상]** ⚑
-
-heredoc 이 붙여넣기에서 자주 깨지므로 줄 단위로 씁니다.
-
-```bash
-mkdir -p workspace/site-values
-printf 'ingress:\n  ingressClassName: traefik\n' > workspace/site-values/iam.yaml
-
-printf '%s\n' \
-'localhost:' \
-'  app:' \
-'    license:' \
-'      activation_mode: "offline"' \
-'      product_code: "eva-prod"' \
-'      api_key: "<라이선스 api_key>"' \
-'      shared_key: "<라이선스 shared_key>"' \
-'    sso:' \
-'      realm: "eva-iam"' \
-'      clientId: "eva-app"' \
-'  ingress:' \
-'    tls:' \
-'      hostPath: /home/eva/certs' \
-> workspace/site-values/app.yaml
-```
-
-ansible 이 읽기 전에 검증합니다.
-
-```bash
-python3 -c "
-import yaml,json
-for f in ('workspace/site-values/iam.yaml','workspace/site-values/app.yaml'):
-    d=yaml.safe_load(open(f)); print(f, json.dumps(d, ensure_ascii=False))
-assert 'localhost' in yaml.safe_load(open('workspace/site-values/app.yaml')), 'app.yaml host 키 없음'
-print('OK')"
-```
-
-두 파일의 차이
-
-- **eva-iam** — host 키 없이 최상위에 씁니다
-- **eva-app** — **host 키가 필수**입니다. 없으면 파일 전체가 조용히 무시됩니다.
-  `localhost` 는 `-i 'localhost,'` 로 돌릴 때의 이름입니다
-- `sso.realm` / `clientId` 는 차트 기본값이 `eva-sso` / `eva-app-kr-2` 라 반드시 덮어써야 합니다
-  (role 의 `-e` 노브가 없어 이 파일에서만 지정 가능)
-- 현재 Tool/Release에서 `activation_mode` 기본값은 Online `online`, Remote/Local `offline`입니다.
-  이전 Release나 기존 Values에 `online`이 남아 있으면 폐쇄망 설치 전에 `offline`으로 변경합니다.
-  `product_code`는 발급된 라이선스의 `eva-dev`/`eva-prod`와 일치시킵니다.
-
-### 13. eva-iam 배포 · **[대상]**
-
-eva-app 이 루트를 쓰므로 eva-iam 은 `/iam` 서브패스로 둡니다.
-그리고 eva-app 의 SSO 세션 저장소가 eva-iam 의 Redis 이므로 NodePort 를 열어야 합니다.
-
-```bash
-ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_iam.yaml -K \
-  -e repository_mode=local_repository \
-  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
-  -e eva_iam_host=magok.eva.lge.com \
-  -e eva_iam_node_user=eva \
-  -e eva_iam_ingress_path=/iam \
-  -e eva_iam_redis_external_enabled=true \
-  -e eva_iam_redis_tls_enabled=true \
-  -e eva_iam_redis_nodeport=32070 \
-  -e '{"eva_iam_app_redirect_uris": ["https://magok.eva.lge.com/*"]}'
-
-sudo cat /var/lib/eva/sites/$EVA_SITE_ID/localhost/eva-iam.yaml     # ssoBaseUrl / adminClientSecret
-```
-
-- 같은 host 에서 eva-iam 과 eva-app 이 모두 `/` 를 쓰면 Keycloak 요청이 eva-app 으로 가서
-  `{"detail":{"code":"csrf_failed"}}` 같은 엉뚱한 응답이 돌아옵니다
-- eva-iam 차트는 `redis.tls.enabled=true` 일 때만 external 을 허용합니다
-- `--check` 를 붙이면 아무것도 설치되지 않습니다 (dry-run)
-
-`adminClientSecret` 이 비어 있으면 직접 조회합니다.
-
-```bash
-kubectl exec -n eva-iam deploy/eva-iam-keycloak -- bash -c '
-set -eu
-kc=/opt/keycloak/bin/kcadm.sh
-cfg=$(mktemp); trap "rm -f $cfg" EXIT
-$kc config credentials --config "$cfg" --server "http://localhost:8080${KC_HTTP_RELATIVE_PATH%/}" \
-  --realm master --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
-id=$($kc get clients --config "$cfg" -r eva-iam \
-  -q clientId=eva-admin-api --fields id --format csv --noquotes)
-$kc get clients/$id/client-secret --config "$cfg" -r eva-iam \
-  --fields value --format csv --noquotes
-'
-```
-
-### 14. eva-app 배포 · **[대상]**
-
-```bash
-ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_app.yaml -K \
-  -e repository_mode=local_repository \
-  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
-  -e eva_app_backend_host=magok.eva.lge.com \
-  -e eva_app_backend_secure=true \
-  -e eva_app_sso_base_url=https://magok.eva.lge.com/iam \
-  -e eva_app_sso_admin_client_secret='<13번 hand-off 파일의 값>'
-```
-
-- `sso_base_url` 에 **`/iam` 을 빼먹으면** OIDC discovery 를 못 찾습니다
-- `backend_host` 는 브라우저가 실제로 쓰는 주소여야 프론트가 백엔드를 찾습니다
-- eva-app 이 이미 있으면 upgrade 가 되고 role 이 replicas=0 으로 내린 뒤 올리므로 다운타임이 생깁니다.
-  버전을 건너뛰는 재설치라면 `/eva-app` hostPath(MySQL) 를 지우는 편이 안전합니다
-
-### 15. eva.yaml 생성 · **[대상]**
-
-agent · vision role 은 `out/work/config/<site>/<host>/eva.yaml` 이 없으면 assert 로 멈춥니다.
-GPU 개수와 MIG 상태를 `nvidia-smi` 로 자동 감지해 만들어지므로 별도 값은 필요 없습니다.
-
-```bash
-ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_config.yaml -K \
-  -e repository_mode=local_repository \
-  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml
-
-cat out/work/config/$EVA_SITE_ID/localhost/eva.yaml
-```
-
-airgap 이면 `awscli` role 은 자동으로 건너뜁니다. `nfs_share_path` 기본값은 `/share/eva-agent` 입니다.
-iam · app 만 설치할 때는 이 단계가 필요 없습니다.
-
-### 16. eva-agent 배포 · **[대상]**
-
-agent · agent-init · vllm · qdrant 네 릴리스가 함께 올라갑니다.
-
-```bash
-ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_agent.yaml -K \
-  -e repository_mode=local_repository \
-  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
-  -e eva_agent_vllm_profile=PRO6000-MIGx4 \
-
-```
-
-- 모델 캐시(`out/cache/models/agent/hf`, `out/cache/models/vllm/hf`)가 대상 서버에 있어야 합니다
-- GPU 프로파일이 05번 다운로드 때와 다르면 Harbor 에 없는 vllm 이미지를 찾게 됩니다
-- role은 offline Qdrant chart, 선택한 Harbor values, post-renderer를 workspace로 복사하고,
-  `<harbor_base_url>`/`<harbor_registry>`/`<harbor_project>` placeholder를
-  `repository_registry`/`repository_project`로 치환해 Qdrant·chart test image를 Harbor로 고정합니다.
-- Qdrant Harbor snapshot profile에서는 `repository_registry`와 `repository_project`가 Qdrant 본체,
-  snapshot-sync sidecar, OCI snapshot artifact의 registry/repository가 됩니다. Local Harbor도
-  `<NODE_IP_OR_DNS>:32080`을 사용하며, `harbor-endpoint.yaml`을 전달하면 이 endpoint가 image와
-  ORAS artifact pull에 함께 적용됩니다.
-- `qdrant-snapshot-harbor`는 Harbor 설치 과정에서 생기는 값이 아니라, Qdrant Harbor snapshot
-  mode에서 role이 Helm 설치 직전에 만드는 Qdrant 전용 Kubernetes Secret입니다. 이름은 고정이고
-  사용자/비밀번호는 `harbor_admin_user`/`harbor_admin_password`를 사용합니다. 표준 Local Harbor
-  경로의 `harbor.yml`이 있으면 role이 실제 관리자 비밀번호를 자동으로 읽으며, 명시한
-  `harbor_admin_password`가 있으면 그 값이 우선합니다. Harbor를 기본 경로 이외에 설치했다면
-  `eva_agent_harbor_config_path`에 해당 `harbor.yml` 경로를 지정합니다.
-- Harbor snapshot OCI artifact는 08a의 별도 준비 단계에서 seed합니다. 이 playbook은 기존 artifact를
-  `oras pull`하는 Kubernetes Secret과 Qdrant workload만 구성하며 Harbor에 artifact를 push하지 않습니다.
-
-단일/다중 k3s node와 별도 Harbor 모두 **Pod와 모든 node에서 도달 가능한** DNS/IP:port를 사용합니다.
-Harbor endpoint metadata가 있는 deployment controller에서는 다음처럼 실행합니다.
-
-```bash
-ansible-playbook -i inventory.ini src/solution/playbooks/site_eva_agent.yaml \
-  -e repository_mode=remote_repository \
-  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml \
-  -e harbor_admin_password='<Harbor 관리자 비밀번호>' \
-
-```
-
-Pod 내부의 `localhost`는 Harbor host가 아니라 그 Pod 자신입니다. snapshot sidecar에는 metadata에 기록된
-`<NODE_IP_OR_DNS>:32080` endpoint를 사용합니다.
-
-배포가 끝나기 전에 Qdrant snapshot sidecar가 artifact를 pull하고 collection을 restore합니다. 다음 검증에서
-`pulling`, `restoring`, Ready와 collection 응답을 모두 확인합니다.
-
-```bash
-kubectl get pods -n eva-agent -l app.kubernetes.io/instance=eva-agent-qdrant -w
-
-kubectl get pods -n eva-agent -l app.kubernetes.io/instance=eva-agent-qdrant \
-  -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}' \
-  | sort -u
-
-kubectl logs -n eva-agent statefulset/eva-agent-qdrant \
-  -c qdrant-snapshot-sync --tail=100
-
-kubectl rollout status statefulset/eva-agent-qdrant \
-  -n eva-agent --timeout=900s
-
-kubectl exec -n eva-agent statefulset/eva-agent-qdrant \
-  -c qdrant-snapshot-sync -- \
-  curl -fsS http://127.0.0.1:6333/collections/eva_manual_qwen3vl
-```
-
-현재 검증 collection은 `status: green`, `points_count: 62`였습니다. `ErrImagePull`이면 위 image 목록이
-모두 선택한 Harbor를 가리키는지 확인한 뒤 일반 image push를 다시 실행합니다. sidecar log의
-`oras pull` 401은 `qdrant-snapshot-harbor` Secret의 비밀번호 또는 Pod용 Harbor endpoint 문제이고,
-`artifact not found`는 08a seed 누락 또는 profile/tag 불일치입니다.
-
-정상 sidecar log 순서는 `pulling <Harbor>/eva/qdrant-snapshots:<artifact-tag>` →
-`/qdrant/snapshots/bootstrap`에 snapshot 저장 →
-`restoring <snapshot-file> into <logical-collection>` → readiness file 생성 후 StatefulSet Ready입니다.
-
-| 증상 | 원인 | 조치 |
-|---|---|---|
-| `ErrImagePull` / `NotFound` | 새 `images-pulled.txt` 기준으로 Harbor image push를 다시 하지 않음 | tar load 후 `push_images_to_repository.sh`를 재실행하고 mapping·`crictl pull`로 확인 |
-| Pod image에 `<harbor_base_url>`가 남음 | 오래된 Harbor values bundle 또는 role 대신 수동 Helm 배포 | 최신 bundle/role로 재배포하고 image·artifact를 다시 seed |
-| snapshot source/profile 불일치 | `harbor` source와 `values-k3s.yaml` 또는 그 반대를 섞음 | 준비·push·배포를 모두 `values-k3s.harbor.yaml` + `harbor`로 통일 |
-
-Qdrant만 재배포하더라도 `images-pulled.txt` 또는 `SNAPSHOT_SPECS`가 바뀌었다면 일반 image push와
-08a snapshot artifact push를 **둘 다** 다시 실행합니다.
-
-### 17. eva-vision 배포 · **[대상]**
-
-```bash
-ansible-playbook -i 'localhost,' -c local src/solution/playbooks/site_eva_vision.yaml -K \
-  -e repository_mode=local_repository \
-  -e @out/work/config/$EVA_SITE_ID/harbor-endpoint.yaml
-```
-
-MIG 설정은 `eva.yaml` 에서 읽습니다.
-eva-app 은 `http://eva-vision.eva-vision:8000` 과 `http://eva-agent.eva-agent` 로 이 둘을 찾으므로,
-배포되면 주소가 그대로 맞아떨어집니다.
-
-> `site_eva.yaml` 은 agent → vision → app 을 한 번에 돌립니다.
-> app 을 이미 올린 뒤라면 개별 playbook(16 · 17번)을 쓰는 게 app 재시작을 피합니다.
-
----
-
-## Phase 4 — 접속과 검증
-
-### 18. 경로와 응답 확인 · **[대상]**
-
-```bash
-kubectl get ingress -A -o custom-columns='NS:.metadata.namespace,HOST:.spec.rules[0].host,PATH:.spec.rules[0].http.paths[0].path'
-#   eva-app   magok.eva.lge.com  /
-#   eva-iam   magok.eva.lge.com  /iam
-
-curl -sk https://magok.eva.lge.com/iam/realms/eva-iam/.well-known/openid-configuration \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["issuer"])'
-#   https://magok.eva.lge.com/iam/realms/eva-iam
-
-curl -sk https://magok.eva.lge.com/ -o /dev/null -w 'app %{http_code}\n'
-nc -vz 10.158.200.113 32070          # redis 열렸는지
-
-sudo KUBECONFIG=/root/.kube/config helm get values eva-app -n eva-app | grep -A5 -E "sso|license"
-```
-
-`helm get values` 가 values 파일 적용 여부를 가장 확실하게 보여줍니다.
-
-### 19. 브라우저 로그인 ⚑
-
-**반드시 `https://magok.eva.lge.com/` 로, 새 시크릿 창에서** 접속하세요.
-
-```
-https://magok.eva.lge.com/           # eva-app
-https://magok.eva.lge.com/iam/admin/ # Keycloak 콘솔 (master admin/adminpass)
-```
-
-- NodePort(`:32010`) 로 직접 붙지 마세요 — traefik 을 우회해 TLS 가 없고,
-  uvicorn 로그에 `Invalid HTTP request received` 가 찍힙니다
-- `http://` 로 로그인을 시작하면 `redirect_uri` 가 등록값과 달라져 `invalid_grant / Code not valid` 가 납니다
-- 인가 코드는 **한 번만** 쓸 수 있어서, 실패한 콜백 URL 을 새로고침하면 같은 에러가 반복됩니다.
-  캐시를 비우거나 시크릿 창에서 처음부터 시도하세요
-
-```bash
-kubectl logs -n eva-app deploy/eva-app --tail=50 | grep -iE "sso|redis|token"
-```
-
-### 20. 지우고 다시 · **[대상]**
-
-hostPath 를 남기면 DB 가 복원됩니다 — realm · 사용자 · client secret 이 그대로 살아납니다.
-
-```bash
-sudo KUBECONFIG=/root/.kube/config helm uninstall eva-iam -n eva-iam
-kubectl delete ns eva-iam --wait=true
-sudo rm -rf /home/eva/.eva-iam/host-path     # keycloak DB
-
-sudo KUBECONFIG=/root/.kube/config helm uninstall eva-app -n eva-app
-kubectl delete ns eva-app --wait=true
-sudo rm -rf /eva-app                          # eva-app / mysql
-```
-
-Harbor 이미지 · registries.yaml mirror · 인증서 · `.venv` · values 파일은 남으므로,
-재설치는 **11번부터** 하면 됩니다.
-
----
-
-## 겪었던 함정
-
-전부 “조용히 실패”하는 종류였습니다.
-
-| 증상 | 실제 원인 | 확인 |
-|---|---|---|
-| push 가 `failed to read config content` | 준비 서버가 containerd 스토어 → tar 에 레이어 누락 | `docker image inspect … {{.Architecture}}` |
-| 새 tar 를 load 해도 그대로 | 깨진 기록이 남아 load 가 건너뜀 | `docker rmi -f` 후 재시도 |
-| 대상 서버 pip 이 ansible 을 못 찾음 | `&&` 로 묶어 wheel 다운로드가 실행되지 않음 | `ls out/cache/wheels/*.whl \| wc -l` |
-| realm-config Job 5분 타임아웃 | `busybox:latest` 가 docker.io 로 해석 → mirror 없음 | `crictl pull docker.io/library/busybox:latest` |
-| mysql Pod 만 ErrImagePull | eva-app 3.1.4 가 mysql 이미지를 하드코딩 (2.1.3 엔 키가 있었음) | Pod spec 의 image 값 |
-| ImagePullBackOff · 태그 없음 | version catalog를 다운로드 *후* 에 고침 | Harbor artifacts API |
-| values 가 안 먹은 듯한 배포 | helm `-f` 가 2개 — host values 없음/빈 파일 | `helm get values` |
-| namespace 조차 안 생김 | `--check` dry-run | PLAY RECAP 의 skipped 수 |
-| Keycloak 이 `csrf_failed` 를 반환 | eva-iam · eva-app 이 같은 host 의 `/` — 요청이 eva-app 으로 | 응답 본문 형식 (`detail` = eva-app) |
-| Redis `Connection refused` | eva-iam redis external 이 꺼져 있음 (TLS 필요) | `nc -vz <host> 32070` |
-| `invalid_grant` · `Invalid HTTP request` | http 로 시작 · NodePort 직접 접속 · 코드 재사용 | https + 시크릿 창으로 재시도 |
-
----
-
-## 보안 조치
-
-### `site_eva_config.yaml` cluster Secret 생성물 권한 및 파일명 정정
-
-- **위치:** `src/solution/roles/config/tasks/secret.yaml`
-- **현재 동작:** `out/work/config/<site>/<host>/secret.yaml`을 권한 `0600`으로 생성합니다.
-- **보호 대상:** 이 파일에는 cluster-admin 권한의 `argocd-manager` ServiceAccount bearer token이 들어 있습니다.
-- **마이그레이션:** 실행 시 이전 오타 파일 `scret.yaml`을 제거한 뒤 올바른 이름의 `secret.yaml`을 생성합니다.
-- **확인:** `stat -c '%a %n' out/work/config/$EVA_SITE_ID/<host>/secret.yaml` 결과가 `600`인지 확인합니다. 파일 내용은 출력하지 않습니다.
-
----
-
-## 차트 쪽 미해결 과제
-
-이미지 주소를 values 로 바꿀 수 없게 하드코딩된 곳이 네 군데 있습니다.
-같은 차트의 다른 컨테이너들은 `.Values.*.image.repository` 패턴을 쓰므로, 그 패턴에 맞추면 mirror 우회가 불필요해집니다.
-
-| 차트 | 파일 | 이미지 |
-|---|---|---|
-| eva-iam 3.1.0 / 3.1.1 | `templates/keycloak/deployment.yaml:31` | `busybox:latest` |
-| eva-iam 3.1.0 / 3.1.1 | `templates/keycloak/realm-config-job.yaml:195` | `busybox:latest` |
-| eva-iam 3.1.0 / 3.1.1 | `templates/tls-secret-job.yaml:49` | `bitnami/kubectl:latest` |
-| eva-app 3.1.4 | `templates/mysql/deployment.yaml:25` | `mysql:8.0.42-bookworm` (2.1.3 에는 `database.internal.image` 키가 있었음) |
-
-수정안 (eva-iam `ecr-cronjob.yaml:79` 가 이미 쓰는 방식과 동일)
-
-```yaml
-# values.yaml
-images:
-  busybox: ""     # 비우면 기존 동작 유지
-  kubectl: ""
-
-# templates
-image: {{ .Values.images.busybox | default "busybox:latest" | quote }}
-imagePullPolicy: IfNotPresent
-```
-
-`imagePullPolicy` 를 함께 지정하는 이유는 `:latest` 태그에 쿠버네티스가 `Always` 를 적용해서,
-노드에 이미지가 있어도 매번 레지스트리를 조회하기 때문입니다.
-가능하면 `:latest` 대신 버전 고정(`busybox:1.37` 등)도 함께 검토하면 좋습니다 — 폐쇄망에서는 재현성 문제가 됩니다.
-
----
-
-**비밀번호는 아직 전부 차트 공개 기본값입니다** — realm `admin`/`EVAEVA123@`, master `admin`/`adminpass`,
-postgres `strongpassword`, redis `eva-redis-pass`. 운영 전에 교체해야 합니다.
+`retry`는 원래 Workspace snapshot과 Release를 재사용합니다. 수정한 원본 설정이나 새 Current
+Release를 다시 읽지 않으며, 실패 task부터 이어가는 resume·전체 rollback 기능도 아닙니다.
+설정 수정이나 수정 Release 적용은 새 설치 작업으로 진행합니다.
+
+**일반 재설치·upgrade에서 DB, PVC, hostPath나 라이선스 데이터를 삭제하지 않습니다.**
+데이터 초기화·DB 변경은 설치 재시도와 별개이며, 백업·복구 계획과 명시 승인이 필요합니다.
+관련 작업은 [App DB 이전과 사용자 백업](../operations/app-database-migration.md),
+[Helm 사용자 Values 백업](../operations/helm-user-values-backup.md)을 따릅니다.

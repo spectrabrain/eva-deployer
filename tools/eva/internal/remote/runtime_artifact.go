@@ -317,6 +317,17 @@ func validateRuntimeArtifactManifest(manifest RuntimeArtifactManifest, identity 
 	return nil
 }
 
+// ExportRuntimeArchive exports a validated managed Runtime without binding it
+// to a Remote registry. Python launcher links are safely materialized by the
+// same exporter used for Remote delivery.
+func ExportRuntimeArchive(root, archive string) error {
+	resolved, err := runtime.Resolve(root)
+	if err != nil {
+		return err
+	}
+	return writeRuntimeArchive(resolved.Root, archive)
+}
+
 func writeRuntimeArchive(root, archive string) (resultErr error) {
 	entries, err := runtimeEntries(root)
 	if err != nil {

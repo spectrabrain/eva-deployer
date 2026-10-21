@@ -575,13 +575,30 @@ func validateBundleLayout(root string, metadata Metadata) error {
 		airgapMarkerName:   {},
 	}
 	for _, artifact := range metadata.Artifacts {
-		if !strings.HasPrefix(artifact.File, "artifacts/") || strings.TrimPrefix(artifact.File, "artifacts/") == "" || strings.Contains(strings.TrimPrefix(artifact.File, "artifacts/"), "/") {
-			return fmt.Errorf("Airgap Bundle artifact %q must be directly below artifacts/", artifact.File)
+		// New bundles are flat so the installer can discover its sibling Tool
+		// archive. Keep accepting the original artifacts/<filename> layout.
+		name := strings.TrimPrefix(artifact.File, "artifacts/")
+		_, reserved := allowed[artifact.File]
+		if name == "" || name == "." || name == ".." || filepath.Base(name) != name ||
+			strings.Contains(name, "\\") || filepath.ToSlash(filepath.Clean(artifact.File)) != artifact.File ||
+			artifact.File == "artifacts" || reserved {
+			return fmt.Errorf("Airgap Bundle artifact %q must be a flat filename or directly below artifacts/", artifact.File)
 		}
 		allowed[artifact.File] = struct{}{}
 		checksum, ok := manifest[artifact.File]
 		if !ok || !strings.EqualFold(checksum, artifact.SHA256) {
 			return fmt.Errorf("Airgap Bundle checksum manifest does not match artifact %q", artifact.File)
+		}
+		// Resolve already checked these file digests. Verify all remaining
+		// manifest lines too, including release.yaml when supplied by new bundles.
+		delete(manifest, artifact.File)
+	}
+	for name, digest := range manifest {
+		if _, ok := allowed[name]; !ok {
+			return fmt.Errorf("Airgap Bundle checksum manifest has unexpected file %s", name)
+		}
+		if err := verifyChecksum(filepath.Join(root, name), digest); err != nil {
+			return fmt.Errorf("Airgap Bundle checksum manifest: %w", err)
 		}
 	}
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
@@ -603,6 +620,9 @@ func validateBundleLayout(root string, metadata Metadata) error {
 		}
 		if _, ok := allowed[filepath.ToSlash(relative)]; !ok {
 			return fmt.Errorf("Airgap Bundle has unexpected file %s", relative)
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("Airgap Bundle has non-regular file %s", relative)
 		}
 		return nil
 	})

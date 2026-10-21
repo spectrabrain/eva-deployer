@@ -37,7 +37,7 @@ sort -u "$IMAGE_DIR/infra-images-all.txt" -o "$IMAGE_DIR/infra-images-all.txt"
 while IFS= read -r image; do
   [[ -z "$image" ]] && continue
   echo "[pull] $image"
-  if $DOCKER_CMD pull "$image"; then
+  if $DOCKER_CMD pull --platform "${PULL_PLATFORM:-linux/amd64}" "$image"; then
     echo "$image" >> "$IMAGE_DIR/infra-images-pulled.txt"
   else
     echo "$image" >> "$IMAGE_DIR/infra-images-missing.txt"

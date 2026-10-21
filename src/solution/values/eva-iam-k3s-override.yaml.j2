@@ -17,7 +17,7 @@ config:
 
 keycloak:
 {% if airgap_mode | bool %}
-  # airgap: 모든 이미지를 Harbor 에서 받습니다. cloud 모드에서는 이 블록을 렌더하지 않고
+  # airgap: 모든 이미지를 Harbor 에서 받습니다. online 모드에서는 이 블록을 렌더하지 않고
   # 차트 기본값(ECR 주소)을 그대로 씁니다 — 여기 주소를 박아두면 차트 bump 때 낡습니다.
   image:
     repository: "{{ eva_iam_keycloak_image_repository }}"
@@ -97,8 +97,8 @@ redis:
     nodePort: {{ eva_iam_redis_nodeport }}
 
 imagePullSecrets:
-  enabled: {{ (repository_mode == 'cloud_repository') | lower }}
-  create: {{ (repository_mode == 'cloud_repository') | lower }}
+  enabled: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
+  create: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
   authType: "{{ eva_iam_image_pull_auth_type }}"
   hostPath: "{{ eva_iam_image_pull_host_path }}"
   secretName: "{{ eva_iam_image_pull_secret_name }}"

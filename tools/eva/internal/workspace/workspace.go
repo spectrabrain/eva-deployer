@@ -18,9 +18,24 @@ const DefaultRoot = "/etc/eva/sites"
 var siteIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 var ansibleRepositoryModes = map[string]string{
-	"cloud":  "cloud_repository",
+	"online": "online_repository",
 	"remote": "remote_repository",
 	"local":  "local_repository",
+}
+
+// NormalizeRepositoryMode keeps legacy inputs usable while new configuration
+// and plans describe connectivity, not the target's hosting environment.
+func NormalizeRepositoryMode(mode string) string {
+	switch mode = strings.ToLower(mode); mode {
+	case "cloud", "cloud_repository", "online_repository":
+		return "online"
+	case "remote_repository":
+		return "remote"
+	case "local_repository":
+		return "local"
+	default:
+		return mode
+	}
 }
 
 type Options struct {
@@ -81,7 +96,7 @@ func Resolve(options Options) (Resolved, error) {
 		return Resolved{}, err
 	}
 
-	mode := strings.ToLower(config.Repository.Mode)
+	mode := NormalizeRepositoryMode(config.Repository.Mode)
 	return Resolved{
 		SiteID:      config.Site.ID,
 		Root:        root,
@@ -215,6 +230,7 @@ func loadConfig(path string) (Config, error) {
 	if config.Repository.Project == "" {
 		config.Repository.Project = "eva"
 	}
+	config.Repository.Mode = NormalizeRepositoryMode(config.Repository.Mode)
 	return config, nil
 }
 
@@ -229,9 +245,9 @@ func validateConfig(config Config, requestedSiteID string) error {
 		return fmt.Errorf("--site %q does not match site.id %q", requestedSiteID, config.Site.ID)
 	}
 
-	mode := strings.ToLower(config.Repository.Mode)
+	mode := NormalizeRepositoryMode(config.Repository.Mode)
 	if _, ok := ansibleRepositoryModes[mode]; !ok {
-		return fmt.Errorf("repository.mode must be cloud, remote, or local; got %q", config.Repository.Mode)
+		return fmt.Errorf("repository.mode must be online, remote, or local; got %q", config.Repository.Mode)
 	}
 	if mode == "remote" || mode == "local" {
 		if err := validateRegistry(config.Repository.Registry); err != nil {

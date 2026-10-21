@@ -125,14 +125,14 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	}
 	prompt := configurePrompts{input: input, output: output, password: password}
 	fmt.Fprintln(output, "EVA 설치 설정 구성 — 설정 파일만 생성합니다. Ctrl+C 또는 입력 종료 시 저장하지 않습니다.")
-	choice, err := prompt.choice("설치환경 (이미지 공급 방식)\n  1) cloud — 인터넷/Cloud Repository\n  2) remote — Main Harbor에서 공급\n  3) local — Local/Airgap Harbor에서 공급", "1", "1", "2", "3")
+	choice, err := prompt.choice("설치환경 (저장소 접근 방식)\n  1) online — 외부 저장소 직접 접근 (온프레미스/클라우드 공통)\n  2) remote — Main Harbor에서 공급\n  3) local — Local/Airgap Harbor에서 공급", "1", "1", "2", "3")
 	if err != nil {
 		return err
 	}
-	mode := map[string]string{"1": "cloud", "2": "remote", "3": "local"}[choice]
+	mode := map[string]string{"1": "online", "2": "remote", "3": "local"}[choice]
 	bastion := false
-	if mode == "cloud" {
-		choice, err = prompt.choice("Cloud 실행 방식\n  1) 현재 서버에 설치 (local connection)\n  2) 현재 서버는 Bastion/controller, 별도 타겟에 SSH 설치", "1", "1", "2")
+	if mode == "online" {
+		choice, err = prompt.choice("Online 실행 방식\n  1) 현재 서버에 설치 (local connection)\n  2) 현재 서버는 Bastion/controller, 별도 타겟에 SSH 설치", "1", "1", "2")
 		if err != nil {
 			return err
 		}
@@ -142,7 +142,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	}
 	if bastion {
 		fmt.Fprintln(output, "타겟을 한 대씩 등록합니다. 현재 Bastion은 설치 대상이 아닙니다. SSH 비밀번호를 sudo에도 사용합니다.")
-		fmt.Fprintln(output, "Bastion→Target SSH 연결과 각 Target의 Cloud 접근이 필요합니다. 이 과정에서는 연결을 시험하지 않습니다.")
+		fmt.Fprintln(output, "Bastion→Target SSH 연결과 각 Target의 외부 저장소 직접 접근이 필요합니다. Bastion만 인터넷에 연결된 환경은 online이 아닙니다. 이 과정에서는 연결을 시험하지 않습니다.")
 	}
 	var targets []workspace.ConfigureTarget
 	names, hosts := make(map[string]bool), make(map[string]bool)

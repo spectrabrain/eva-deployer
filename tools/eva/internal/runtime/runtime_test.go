@@ -168,7 +168,7 @@ func TestBootstrapOnlinePublishesValidatedRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrapOnline() error = %v", err)
 	}
-	if installed.Root != destination || installed.Descriptor.Version != "cloud-test" {
+	if installed.Root != destination || installed.Descriptor.Version != "online-test" {
 		t.Fatalf("installed runtime = %#v", installed)
 	}
 	for _, name := range []string{"ansible-playbook", "helm", "kubectl", "kustomize", "oras"} {
@@ -218,10 +218,10 @@ func TestBootstrapOnlineInstallsPinnedAnsibleCollections(t *testing.T) {
 func TestCollectionInstallEnvironmentUsesOnlyStagingCollectionPath(t *testing.T) {
 	environment := collectionInstallEnvironment(
 		[]string{"KEEP=value", "ANSIBLE_COLLECTIONS_PATH=/operator/collections"},
-		"/opt/eva/.eva-runtime-cloud-123/collections",
+		"/opt/eva/.eva-runtime-online-123/collections",
 	)
 	if !containsEnvironment(environment, "KEEP=value") ||
-		!containsEnvironment(environment, "ANSIBLE_COLLECTIONS_PATH=/opt/eva/.eva-runtime-cloud-123/collections") ||
+		!containsEnvironment(environment, "ANSIBLE_COLLECTIONS_PATH=/opt/eva/.eva-runtime-online-123/collections") ||
 		containsEnvironment(environment, "ANSIBLE_COLLECTIONS_PATH=/operator/collections") {
 		t.Fatalf("collection install environment = %#v", environment)
 	}
@@ -280,7 +280,7 @@ func testOnlineBootstrapSpec(t *testing.T) (onlineBootstrapSpec, map[string][]by
 		artifacts = append(artifacts, artifact)
 	}
 	return onlineBootstrapSpec{
-		Version:             "cloud-test",
+		Version:             "online-test",
 		AnsibleRequirements: []string{"ansible==test"},
 		Artifacts:           artifacts,
 	}, payloads

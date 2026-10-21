@@ -12,7 +12,7 @@ import (
 )
 
 func TestConfigureSampleProfileMatrix(t *testing.T) {
-	for _, mode := range []string{"cloud", "remote", "local"} {
+	for _, mode := range []string{"online", "remote", "local"} {
 		for _, address := range []string{"shared", "separate", "ip"} {
 			for _, protocol := range []string{"http", "https"} {
 				for _, iam := range []string{"install", "external"} {
@@ -59,7 +59,7 @@ func TestConfigureSampleIndependentTargetPlaceholders(t *testing.T) {
 		{Name: "node-a", Solution: true, IAM: "install", Protocol: "https", Address: "shared"},
 		{Name: "node_a", Solution: true, IAM: "external", Protocol: "http", Address: "ip"},
 	}
-	contents, err := ConfigureSample("cloud", targets)
+	contents, err := ConfigureSample("online", targets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestConfigureSampleIndependentTargetPlaceholders(t *testing.T) {
 }
 
 func TestConfigureSampleOmitsRedundantTargetComponents(t *testing.T) {
-	contents, err := ConfigureSample("cloud", []ConfigureTarget{{
+	contents, err := ConfigureSample("online", []ConfigureTarget{{
 		Name:     "node-a",
 		Ansible:  map[string]any{"ansible_connection": "local"},
 		Solution: true,
@@ -101,7 +101,7 @@ func TestConfigureSampleOmitsRedundantTargetComponents(t *testing.T) {
 }
 
 func TestConfigureSampleKeepsTargetComponentsWhenNarrowerThanGlobal(t *testing.T) {
-	contents, err := ConfigureSample("cloud", []ConfigureTarget{
+	contents, err := ConfigureSample("online", []ConfigureTarget{
 		{Name: "node-a", Ansible: map[string]any{"ansible_connection": "local"}, Solution: true, IAM: "install", Protocol: "https", Address: "shared"},
 		{Name: "node-b", Ansible: map[string]any{"ansible_connection": "local"}, Solution: false, IAM: "install", Protocol: "https", Address: "shared"},
 	})

@@ -15,19 +15,19 @@ import (
 // for narrowly classifying APT dependency failures. Other failures are not repaired.
 type prerequisiteRunner func(string, ...string) (string, error)
 
-func prepareCloudRuntimeHost(destination string) error {
+func prepareOnlineRuntimeHost(destination string) error {
 	if destination != DefaultRoot {
 		return nil
 	}
-	return installCloudPrerequisites(runPrerequisiteCommand)
+	return installOnlinePrerequisites(runPrerequisiteCommand)
 }
 
-func installCloudPrerequisites(run prerequisiteRunner) error {
+func installOnlinePrerequisites(run prerequisiteRunner) error {
 	if run == nil {
-		return errors.New("Cloud Runtime prerequisite runner is not configured")
+		return errors.New("Online Runtime prerequisite runner is not configured")
 	}
 	if _, err := run("apt-get", "update"); err != nil {
-		return fmt.Errorf("update APT package index for Cloud Runtime bootstrap: %w", err)
+		return fmt.Errorf("update APT package index for Online Runtime bootstrap: %w", err)
 	}
 	install := []string{"install", "--yes", "--no-remove", "ca-certificates", "python3", "python3-venv"}
 	output, installErr := run("apt-get", install...)
@@ -35,16 +35,16 @@ func installCloudPrerequisites(run prerequisiteRunner) error {
 		return nil
 	}
 	if !isAPTDependencyFailure(output, installErr) {
-		return fmt.Errorf("install Cloud Runtime prerequisites: %w", installErr)
+		return fmt.Errorf("install Online Runtime prerequisites: %w", installErr)
 	}
 
-	fmt.Fprintln(os.Stdout, "[INFO] Cloud Runtime detected broken APT dependencies; checking a no-removal repair plan")
-	if err := repairCloudDependencies(run); err != nil {
-		return fmt.Errorf("install Cloud Runtime prerequisites: %w; automatic dependency recovery failed: %w", installErr, err)
+	fmt.Fprintln(os.Stdout, "[INFO] Online Runtime detected broken APT dependencies; checking a no-removal repair plan")
+	if err := repairOnlineDependencies(run); err != nil {
+		return fmt.Errorf("install Online Runtime prerequisites: %w; automatic dependency recovery failed: %w", installErr, err)
 	}
-	fmt.Fprintln(os.Stdout, "[INFO] APT dependency recovery succeeded; retrying Cloud Runtime prerequisites")
+	fmt.Fprintln(os.Stdout, "[INFO] APT dependency recovery succeeded; retrying Online Runtime prerequisites")
 	if _, err := run("apt-get", install...); err != nil {
-		return fmt.Errorf("retry Cloud Runtime prerequisites after dependency recovery: %w", err)
+		return fmt.Errorf("retry Online Runtime prerequisites after dependency recovery: %w", err)
 	}
 	return nil
 }
@@ -61,7 +61,7 @@ func isAPTDependencyFailure(output string, err error) bool {
 		(strings.Contains(text, "--fix-broken install") || strings.Contains(text, "apt-get -f install"))
 }
 
-func repairCloudDependencies(run prerequisiteRunner) error {
+func repairOnlineDependencies(run prerequisiteRunner) error {
 	// Explicit false values override permissive site-wide apt.conf settings.
 	// --yes alone is not a sufficient safeguard if Allow-Downgrades is configured.
 	policy := []string{

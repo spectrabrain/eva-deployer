@@ -143,7 +143,7 @@
   when:
     - not ansible_check_mode
     - airgap_mode | default(false) | bool
-    - repository_mode | default('cloud_repository') in ['local_repository', 'remote_repository']
+    - repository_mode | default('online_repository') in ['local_repository', 'remote_repository']
 
 - name: Restart k3s after registry configuration
   ansible.builtin.service:
@@ -152,7 +152,7 @@
   when:
     - not ansible_check_mode
     - airgap_mode | default(false) | bool
-    - repository_mode | default('cloud_repository') in ['local_repository', 'remote_repository']
+    - repository_mode | default('online_repository') in ['local_repository', 'remote_repository']
 
 - name: Find offline k3s container images archive
   ansible.builtin.stat:

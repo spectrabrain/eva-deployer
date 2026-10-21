@@ -1,7 +1,7 @@
 # EVA App·IAM 공개 포트와 Traefik
 
 App/IAM Ingress의 공개 포트는 k3s `kube-system/traefik`의 listener 설정과 함께 확인한다.
-Cloud/Remote/Local 공통이며, 아래에서는 설정 조회와 Deployer의 포트 정합화 절차를 설명한다.
+Online/Remote/Local 공통이며, 아래에서는 설정 조회와 Deployer의 포트 정합화 절차를 설명한다.
 
 ## `web`·`websecure` 설정 위치
 

@@ -59,11 +59,11 @@ func effectiveTargetComponents(input workspace.Installer, name string) map[strin
 }
 
 func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
-	for choice, mode := range map[string]string{"1": "cloud", "2": "remote", "3": "local"} {
+	for choice, mode := range map[string]string{"1": "online", "2": "remote", "3": "local"} {
 		for _, scope := range []string{"1", "2"} {
 			t.Run(mode+"/scope-"+scope, func(t *testing.T) {
 				answers := choice + "\n"
-				if mode == "cloud" {
+				if mode == "online" {
 					answers += "1\n"
 				}
 				answers += scope + "\n"
@@ -71,7 +71,7 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 					answers += "2\n1\n1\n1\n" // HTTPS/shared/co-install/Agent+Vision
 				}
 				input, messages, path := configureTest(t, answers)
-				if input.Repository.Mode != mode || (input.Credentials.AWS != nil) != (mode == "cloud") {
+				if input.Repository.Mode != mode || (input.Credentials.AWS != nil) != (mode == "online") {
 					t.Fatal("repository inputs do not follow the environment selection")
 				}
 				target := input.Targets["server-a"]
@@ -84,7 +84,7 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 				}
 				if scope == "2" {
 					want := "offline"
-					if mode == "cloud" {
+					if mode == "online" {
 						want = "online"
 					}
 					license := target.Values["app"]["app"].(map[string]any)["license"].(map[string]any)
@@ -109,15 +109,15 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 	}
 }
 
-func TestInstallConfigureCloudHTTP(t *testing.T) {
-	// Cloud/current server/Solution/HTTP/IP/IAM+App/no Agent or Vision.
+func TestInstallConfigureOnlineHTTP(t *testing.T) {
+	// Online/current server/Solution/HTTP/IP/IAM+App/no Agent or Vision.
 	input, messages, _ := configureTest(t, "1\n1\n2\n1\n3\n1\n4\n")
 	target := input.Targets["server-a"]
 	components := effectiveTargetComponents(input, "server-a")
-	if input.Repository.Mode != "cloud" || target.Ansible["ansible_connection"] != "local" ||
+	if input.Repository.Mode != "online" || target.Ansible["ansible_connection"] != "local" ||
 		!components["infra"] || !components["iam"] || !components["app"] ||
 		components["agent"] || components["vision"] {
-		t.Fatal("single-server Cloud HTTP component selection changed")
+		t.Fatal("single-server Online HTTP component selection changed")
 	}
 	for _, component := range []string{"iam", "app"} {
 		ingress := target.Values[component]["ingress"].(map[string]any)
@@ -140,7 +140,7 @@ func TestInstallConfigureCloudHTTP(t *testing.T) {
 
 func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 	answers := strings.Join([]string{
-		"1", "2", // Cloud + Bastion
+		"1", "2", // Online + Bastion
 		"infra-a", "192.0.2.10", "eva", "1", "1", // Infra-only, add another
 		"iam-app", "192.0.2.11", "eva", "2", // don't reuse Infra-only
 		"2", "2", "3", "1", "1", "1", // Solution/HTTPS/IP/co-install/Agent+Vision/add

@@ -1,15 +1,15 @@
 - name: Set EVA App install defaults (on-premise)
   ansible.builtin.set_fact:
-    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_mode: "{{ repository_mode | default('online_repository') }}"
     repository_project: "{{ repository_project | default('eva') }}"
     repository_registry: >-
       {{
         repository_registry
-        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | default(harbor_registry | default(((repository_mode | default('online_repository')) == 'local_repository') | ternary('localhost:32080', '')))
         | regex_replace('^https?://', '')
         | regex_replace('/+$', '')
       }}
-    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
     eva_app_namespace: "{{ eva_app_namespace | default('eva-app') }}"
     eva_app_name: "{{ eva_app_name | default('eva-app') }}"
     eva_app_deploy_version: "{{ eva_app_deploy_version | mandatory }}"
@@ -60,7 +60,7 @@
     eva_app_pipeline_detector_worker_num: "{{ eva_app_pipeline_detector_worker_num | default(16) }}"
     eva_app_pipeline_perceptor_worker_num: "{{ eva_app_pipeline_perceptor_worker_num | default(2) }}"
     # Repository 공급과 라이선스 연결은 별개입니다. 사전 결정한 라이선스가 다르면 Values에서 변경합니다.
-    eva_app_license_activation_mode: "{{ eva_app_license_activation_mode | default('online' if (repository_mode | default('cloud_repository')) == 'cloud_repository' else 'offline') }}"
+    eva_app_license_activation_mode: "{{ eva_app_license_activation_mode | default('online' if (repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository'] else 'offline') }}"
     eva_app_license_product_code: "{{ eva_app_license_product_code | default('eva-dev') }}"
     eva_app_license_api_key: "{{ eva_app_license_api_key | default('LICENSE_API_KEY') }}"
     eva_app_license_shared_key: "{{ eva_app_license_shared_key | default('LICENSE_SHARED_KEY') }}"
@@ -82,10 +82,10 @@
 - name: Validate repository mode for EVA App
   ansible.builtin.assert:
     that:
-      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
-      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+      - repository_mode in ['online_repository', 'cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode in ['online_repository', 'cloud_repository'] or repository_registry | length > 0
     fail_msg: >-
-      repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      repository_mode은 online_repository, remote_repository, local_repository 중 하나여야 합니다 (cloud_repository는 호환 입력).
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
 
 - name: Validate EVA App chart version supports values-driven images
@@ -114,7 +114,7 @@
     eva_app_image_repository: >-
       {{
         eva_app_image_repository | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary(
               ('211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-app'
                if (eva_app_chart_version is version('3.3.0', '>='))
@@ -126,7 +126,7 @@
     eva_app_mysql_image_repository: >-
       {{
         eva_app_mysql_image_repository | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary('mysql', repository_registry ~ '/' ~ repository_project ~ '/mysql')
         )
       }}
@@ -139,7 +139,7 @@
     eva_app_kubectl_image_repository: >-
       {{
         eva_app_kubectl_image_repository | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary('bitnami/kubectl', repository_registry ~ '/' ~ repository_project ~ '/kubectl')
         )
       }}
@@ -431,13 +431,32 @@
   ansible.builtin.set_fact:
     eva_app_generated_values: "{{ eva_app_generated_values | combine(eva_app_iam_values, recursive=true) }}"
 
+- name: Check Argo CD handoff receipt on control node
+  no_log: true
+  ansible.builtin.stat:
+    path: "{{ eva_app_argocd_handoff_path }}"
+  register: eva_app_argocd_handoff_status
+  delegate_to: localhost
+  become: true
+  when: not ansible_check_mode
+
+- name: Read Argo CD handoff receipt on control node
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ eva_app_argocd_handoff_path }}"
+  register: eva_app_argocd_handoff_raw
+  delegate_to: localhost
+  become: true
+  when:
+    - not ansible_check_mode
+    - eva_app_argocd_handoff_status.stat.exists | default(false)
+
 - name: Assess verified legacy EVA App internal Service preservation
   ansible.builtin.shell: |
     set -euo pipefail
 
     namespace="$EVA_APP_NAMESPACE"
     service_name="$EVA_APP_INTERNAL_SERVICE"
-    handoff_file="$EVA_APP_HANDOFF_FILE"
     site_id="$EVA_APP_SITE_ID"
 
     service_json="$(
@@ -457,14 +476,14 @@
     fi
 
     python3 - \
-      "$handoff_file" \
       "$site_id" \
       "$namespace" \
       "$service_name" \
       "$service_json" \
       "$EVA_APP_RELEASE" <<'PY_INTERNAL_SERVICE'
-    from pathlib import Path
+    import base64
     import json
+    import os
     import re
     import subprocess
     import sys
@@ -472,12 +491,11 @@
     import yaml
 
 
-    handoff_path = Path(sys.argv[1])
-    expected_site_id = sys.argv[2]
-    expected_namespace = sys.argv[3]
-    expected_service_name = sys.argv[4]
-    service = json.loads(sys.argv[5])
-    expected_release = sys.argv[6]
+    expected_site_id = sys.argv[1]
+    expected_namespace = sys.argv[2]
+    expected_service_name = sys.argv[3]
+    service = json.loads(sys.argv[4])
+    expected_release = sys.argv[5]
 
     metadata = service.get("metadata")
     spec = service.get("spec")
@@ -591,11 +609,15 @@
     # Unowned legacy resources always need a receipt. Helm-owned resources
     # need one only when residual Argo CD tracking still needs verification.
     if not helm_owned or tracking:
-        if not handoff_path.is_file():
+        encoded_handoff = os.environ.get("EVA_APP_ARGOCD_HANDOFF_B64", "")
+        if not encoded_handoff:
             raise SystemExit(
                 "[ERROR] active legacy EVA App internal Service requires an Argo CD handoff receipt"
             )
-        handoff = yaml.safe_load(handoff_path.read_text())
+        try:
+            handoff = yaml.safe_load(base64.b64decode(encoded_handoff, validate=True))
+        except (ValueError, yaml.YAMLError):
+            raise SystemExit("[ERROR] invalid Argo CD handoff receipt encoding")
         if (
             not isinstance(handoff, dict)
             or handoff.get("schema_version") != "v1"
@@ -708,7 +730,7 @@
     EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
     EVA_APP_RELEASE: "{{ eva_app_name }}"
     EVA_APP_INTERNAL_SERVICE: "{{ eva_app_name }}-internal"
-    EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
+    EVA_APP_ARGOCD_HANDOFF_B64: "{{ eva_app_argocd_handoff_raw.content | default('') }}"
     EVA_APP_SITE_ID: "{{ eva_site_id }}"
 
 - name: Build verified legacy EVA App internal Service values
@@ -1199,7 +1221,7 @@
   changed_when: "'patched' in eva_app_patch_pullsecret.stdout"
   when:
     - not ansible_check_mode
-    - repository_mode == 'cloud_repository'
+    - repository_mode in ['online_repository', 'cloud_repository']
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 

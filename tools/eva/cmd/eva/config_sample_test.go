@@ -82,7 +82,7 @@ func TestConfigSampleNoninteractiveAndExplicitOptions(t *testing.T) {
 	if err := runConfigSample([]string{"sample", "--address", "shared"}, strings.NewReader(""), &output, &messages, false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "cloud / shared / https") {
+	if !strings.Contains(output.String(), "online / shared / https") {
 		t.Fatal("non-terminal defaults ignored explicit address")
 	}
 	output.Reset()
@@ -98,11 +98,13 @@ func TestConfigSampleNoninteractiveAndExplicitOptions(t *testing.T) {
 
 func TestConfigSampleActivationMode(t *testing.T) {
 	for _, test := range []struct {
-		mode, want string
+		mode, wantMode, want string
 	}{
-		{"cloud", "online"},
-		{"remote", "offline"},
-		{"local", "offline"},
+		{"online", "online", "online"},
+		{"remote", "remote", "offline"},
+		{"local", "local", "offline"},
+		{"cloud", "online", "online"},
+		{"cloud_repository", "online", "online"},
 	} {
 		t.Run(test.mode, func(t *testing.T) {
 			args := []string{"sample", "--mode", test.mode, "--address", "shared", "--protocol", "http"}
@@ -113,6 +115,9 @@ func TestConfigSampleActivationMode(t *testing.T) {
 			var input workspace.Installer
 			if err := yaml.Unmarshal(output.Bytes(), &input); err != nil {
 				t.Fatal(err)
+			}
+			if input.Repository.Mode != test.wantMode || !strings.Contains(output.String(), test.wantMode+" / shared / http") {
+				t.Fatalf("sample repository mode/header must use %s, got %s", test.wantMode, input.Repository.Mode)
 			}
 			license := input.Targets["server-a"].Values["app"]["app"].(map[string]any)["license"].(map[string]any)
 			if license["activation_mode"] != test.want {
@@ -130,14 +135,14 @@ func TestExternalIAMNoninteractiveDefaults(t *testing.T) {
 	if err := runConfigSample([]string{"sample", "--iam", "external", "--non-interactive"}, strings.NewReader(""), &output, &messages, true); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "cloud / external-iam / https") || strings.Contains(messages.String(), "선택 [") || !strings.Contains(messages.String(), "[외부 IAM]") {
+	if !strings.Contains(output.String(), "online / external-iam / https") || strings.Contains(messages.String(), "선택 [") || !strings.Contains(messages.String(), "[외부 IAM]") {
 		t.Fatal("external IAM noninteractive defaults or guidance missing")
 	}
 }
 
 func TestConfigSampleOutputIsPrivateAndNeverOverwrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "eva-install.yaml")
-	args := []string{"sample", "--mode", "cloud", "--address", "shared", "--protocol", "https", "--output", path}
+	args := []string{"sample", "--mode", "online", "--address", "shared", "--protocol", "https", "--output", path}
 	var output, messages bytes.Buffer
 	if err := runConfigSample(args, strings.NewReader(""), &output, &messages, false); err != nil {
 		t.Fatal(err)

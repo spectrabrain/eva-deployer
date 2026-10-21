@@ -1,7 +1,7 @@
 image:
   repository: "{{ eva_app_image_repository }}"
   tag: "{{ eva_app_deploy_version }}"
-  pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
+  pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
 
 app:
   # IP 를 넣어도 됩니다 — 차트 3.1.8+ 는 IP 일 때 Ingress 규칙에서 host 를 생략합니다.
@@ -64,8 +64,8 @@ database:
     password: "{{ eva_app_db_password }}"
 
 imagePullSecrets:
-  enabled: {{ (repository_mode == 'cloud_repository') | lower }}
-  create: {{ (repository_mode == 'cloud_repository') | lower }}
+  enabled: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
+  create: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
   nameOverride: "ecr-registry"
   account: "{{ eva_app_ecr_account }}"
   region: "ap-northeast-2"

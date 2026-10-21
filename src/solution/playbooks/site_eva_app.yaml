@@ -32,7 +32,7 @@
 
     - name: Resolve repository mode
       ansible.builtin.set_fact:
-        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+        repository_mode: "{{ repository_mode | default('online_repository') }}"
       changed_when: false
 
   tasks:

@@ -962,7 +962,7 @@ class TraefikPortsTests(unittest.TestCase):
         caller = next(task for task in tasks if task.get("ansible.builtin.include_role", {}).get("name") == "eva_traefik_ports")
         result = next(task for task in tasks if "eva_" + component + "_traefik_args" in task.get("ansible.builtin.set_fact", {}))
         variables = {"eva_traefik_ports_manage": case != "opt-out", "eva_traefik_ports_backup_root": str(directory / "backup"),
-                     "eva_traefik_ports_timeout": 0, "eva_cli_chart_path": "override", "eva_cli_helm_set": [], "repository_mode": "cloud_repository",
+                     "eva_traefik_ports_timeout": 0, "eva_cli_chart_path": "override", "eva_cli_helm_set": [], "repository_mode": "online_repository",
                      f"eva_{component}_namespace": "eva-" + component, f"eva_{component}_name": "eva-" + component,
                      f"eva_{component}_workdir": str(directory), f"eva_{component}_chart_source": str(chart),
                      f"eva_{component}_chart_version": "1.0.0", f"eva_{component}_kubeconfig": str(directory / "absent-kubeconfig"),

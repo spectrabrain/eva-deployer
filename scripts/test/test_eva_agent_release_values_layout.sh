@@ -109,7 +109,7 @@ run_required_check 3.2.0 eva-agent-vllm/values-k3s.L40sx1.harbor.yaml >/dev/null
 grep -Fq '[missing] status=404' "$TMP_ROOT/required-3.2.0.log.out" || fail "missing source-split asset was not reported"
 
 # The Agent role must choose the same files: Harbor variants for Repository
-# targets, upstream-source variants for Cloud targets.
+# targets, upstream-source variants for online targets.
 if ! command -v "$ANSIBLE_PLAYBOOK" >/dev/null 2>&1 && [[ ! -x "$ANSIBLE_PLAYBOOK" ]]; then
   echo "ansible-playbook was not found: $ANSIBLE_PLAYBOOK" >&2
   exit 1
@@ -226,8 +226,10 @@ EOF
 # filename with an absolute path. Explicit Release overrides must survive.
 for case in \
   '3.1.0 local_repository true values-k3s.yaml values-k3s.L40sx1.yaml default' \
+  '3.1.0 online_repository false values-k3s.yaml values-k3s.L40sx1.yaml default' \
   '3.1.0 cloud_repository false values-k3s.yaml values-k3s.L40sx1.yaml default' \
   '3.2.0 remote_repository true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml default' \
+  '3.2.0 online_repository false values-k3s.ecr.yaml values-k3s.L40sx1.docker.yaml default' \
   '3.2.0 cloud_repository false values-k3s.ecr.yaml values-k3s.L40sx1.docker.yaml default' \
   '3.2.0 local_repository true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml default' \
   '3.2.1 remote_repository true values-k3s.harbor.yaml values-k3s.L40sx1.harbor.yaml default' \

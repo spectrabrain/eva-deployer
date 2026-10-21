@@ -1,12 +1,12 @@
 image:
   repository: "{{ eva_vision_image_repository }}"
   tag: "{{ eva_vision_deploy_version }}"
-  pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
+  pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
 
 runtimeClassName: "nvidia"
 
 imagePullSecrets:
-  enabled: {{ (repository_mode == 'cloud_repository') | lower }}
+  enabled: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
   create: false
   name: "ecr-registry"
 

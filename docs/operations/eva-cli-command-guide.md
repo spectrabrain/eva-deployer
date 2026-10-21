@@ -1,7 +1,7 @@
 # EVA Tool 명령어 가이드
 
 설치자가 사용하는 공개 `eva` 명령과 설치 결과 조회 방법을 정리한다.
-실제 설치 순서는 [Cloud](../installation/cloud-repository-runbook.md),
+실제 설치 순서는 [Online](../installation/online-repository-runbook.md),
 [Remote](../installation/remote-repository-runbook.md),
 [Local](../installation/local-repository-runbook.md) Runbook을 따른다.
 이 문서는 현재 소스에 구현된 명령을 기준으로 하며, 기존 설치 binary에는 새 명령이 없을 수 있다.
@@ -222,8 +222,8 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | --- | --- | --- |
 | `eva version` | Tool 버전·commit·build date | 조회 |
 | `eva help` | 공개 명령 목록 | 조회 |
-| `eva install configure [--output FILE]` | 환경·Cloud Bastion·타겟별 설치 옵션 질문 후 사용자 홈에 private YAML 생성 | 로컬 파일 생성 |
-| `eva config sample --mode cloud` | mode별 단일 설치 설정 샘플 출력 | 조회 |
+| `eva install configure [--output FILE]` | 환경·Online Bastion·타겟별 설치 옵션 질문 후 사용자 홈에 private YAML 생성 | 로컬 파일 생성 |
+| `eva config sample --mode online` | mode별 단일 설치 설정 샘플 출력 | 조회 |
 | `eva config sample --mode remote --output FILE` | 주소/프로토콜 선택 후 private 샘플 저장 | 로컬 파일 생성 |
 | `eva install --config FILE` | private YAML을 내부 Workspace로 변환해 설치 | 변경 |
 | `eva install [RELEASE_PATH] --site ID` | Workspace와 Release로 설치 | 변경 |
@@ -240,20 +240,20 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva backup show ... --latest` | 한 release의 최신 백업 메타데이터·경로; Values 원문 제외 | 조회 |
 | `eva backup values --path DIR` | SHA-256 확인 후 선택한 백업 Values 원문 출력 | 민감정보 조회 |
 
-일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Cloud/Remote/Local → Cloud 현재 서버/Bastion →
+일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Online/Remote/Local → Online 현재 서버/Bastion →
 타겟별 Infra-only/Solution·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
 Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입력하며 sudo도 같은 비밀번호를 쓴다.
 다음 타겟은 이전 설치 옵션을 재사용하거나 별도로 고른다. 서비스 주소/Secret은 복사하지 않는다.
 기본 결과는 사용자 홈의 `eva-install.yaml`(`0600`)이며, 필수 입력을 채우라는 안내만 하고 설치하지 않는다.
 기존 파일은 덮어쓰지 않으며 `--output FILE`로 다른 위치를 고른다. 타겟별 컴포넌트 선택은 Plan의
-Ansible `--limit`에 보존된다. Bastion은 설치 대상이 아니고 타겟의 Cloud 접근이 별도로 필요하다.
+Ansible `--limit`에 보존된다. Bastion은 설치 대상이 아니고 타겟의 upstream/인터넷 Repository 직접 접근이 별도로 필요하다.
 기존 `eva check`/`preflight gpu`는 실행 서버 기준이지 원격 타겟 일괄 검사 명령이 아니다.
 
 Bastion의 설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록한다.
 별도 SSH 접속 준비는 필요 없으며 이미 등록된 키가 변경되면 중단한다.
 
-설치 입력을 파일 하나로 관리하려면 `--config FILE`을 사용한다. 옵션/자동화용 Cloud/Remote/Local 샘플은
-`eva config sample --mode cloud|remote|local`로 얻으며 원본 설정은 `0600`으로 관리한다.
+설치 입력을 파일 하나로 관리하려면 `--config FILE`을 사용한다. 옵션/자동화용 Online/Remote/Local 샘플은
+`eva config sample --mode online|remote|local`로 얻으며 원본 설정은 `0600`으로 관리한다.
 터미널에서는 IAM 함께 설치/외부 IAM 연동을 먼저 선택하고 함께 설치인 경우 주소 구성도 고른다.
 `--iam external --protocol https`는 IAM 설치를 끄고 App에 외부 IAM·client·Redis 연결값을 입력하는 틀을 만든다.
 외부 모드에서 `--protocol`은 App에만 적용되고 IAM/Redis 연결은 독립적이다. `--address shared`는 사용하지 않는다.

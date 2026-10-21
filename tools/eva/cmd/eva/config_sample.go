@@ -20,10 +20,11 @@ func runConfig(args []string) error {
 
 func runConfigSample(args []string, input io.Reader, output, messages io.Writer, interactive bool) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(output, "Usage: eva config sample [--mode cloud|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE] [--non-interactive]")
+		fmt.Fprintln(output, "Usage: eva config sample [--mode online|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE] [--non-interactive]")
 		fmt.Fprintln(output, "Terminal input prompts for missing choices; menus go to stderr and YAML goes to stdout.")
-		fmt.Fprintln(output, "Non-interactive defaults: cloud / install / separate / https. External IAM skips address selection; --protocol controls App only.")
-		fmt.Fprintln(output, "License defaults: cloud=online, remote/local=offline. Set app.license.activation_mode in the generated YAML to match the prearranged license.")
+		fmt.Fprintln(output, "Non-interactive defaults: online / install / separate / https. External IAM skips address selection; --protocol controls App only.")
+		fmt.Fprintln(output, "Online means targets access upstream Internet repositories directly, on-premise or in a cloud. Legacy --mode cloud is accepted as online.")
+		fmt.Fprintln(output, "License defaults: online=online, remote/local=offline. License activation is separate from repository mode; set app.license.activation_mode to match the prearranged license.")
 		fmt.Fprintln(output, "--output creates a new 0600 file without overwriting.")
 		fmt.Fprintln(output, "HTTP/HTTPS profiles target v3.3 local App/IAM sources. Release catalog and HTTP execution integration are separate.")
 		return nil
@@ -33,7 +34,7 @@ func runConfigSample(args []string, input io.Reader, output, messages io.Writer,
 	}
 	flags := flag.NewFlagSet("config sample", flag.ContinueOnError)
 	flags.SetOutput(messages)
-	mode := flags.String("mode", "cloud", "repository mode: cloud, remote or local")
+	mode := flags.String("mode", "online", "repository mode: online, remote or local (legacy cloud is accepted)")
 	iam := flags.String("iam", "", "IAM connection: install (same-target handoff) or external (explicit App SSO)")
 	address := flags.String("address", "", "address pattern: shared or separate")
 	protocol := flags.String("protocol", "", "external protocol: http or https")
@@ -45,7 +46,7 @@ func runConfigSample(args []string, input io.Reader, output, messages io.Writer,
 	if flags.NArg() != 0 {
 		return errors.New("config sample accepts options only; see eva config help")
 	}
-	options := workspace.SampleOptions{Mode: *mode, Address: *address, Protocol: *protocol, IAM: *iam}
+	options := workspace.SampleOptions{Mode: workspace.NormalizeRepositoryMode(*mode), Address: *address, Protocol: *protocol, IAM: *iam}
 	// Preserve the existing fully specified invocation: address+protocol implies
 	// co-installation unless an IAM choice was explicitly requested.
 	if options.IAM == "" && options.Address != "" && options.Protocol != "" {

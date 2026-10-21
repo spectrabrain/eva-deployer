@@ -537,7 +537,7 @@ func TestShellEnvironmentPrependsRuntimeAndWorkspace(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(workspaceRoot, "site-values"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workspaceRoot, "site-values", "site.yaml"), []byte("site:\n  id: customer-a\nrepository:\n  mode: cloud\ncomponents:\n  app: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workspaceRoot, "site-values", "site.yaml"), []byte("site:\n  id: customer-a\nrepository:\n  mode: online\ncomponents:\n  app: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -641,7 +641,7 @@ func TestAPTPriorToInfraRequiresSeparateInteractiveApproval(t *testing.T) {
 		}}
 	}
 	err = aptPrerequisite(plan.Document{
-		RepositoryMode: "cloud_repository",
+		RepositoryMode: "online_repository",
 		Steps:          []plan.Step{{Component: "infra"}},
 	})
 	var displayed *displayedError
@@ -690,9 +690,10 @@ func TestOfflineRepositoryModeAcceptsWorkspaceAndAnsibleModes(t *testing.T) {
 			t.Fatalf("offlineRepositoryMode(%q) = false", repositoryMode)
 		}
 	}
-	if offlineRepositoryMode("cloud") ||
-		offlineRepositoryMode("cloud_repository") {
-		t.Fatal("cloud mode was classified as offline")
+	for _, repositoryMode := range []string{"online", "online_repository", "cloud", "cloud_repository"} {
+		if offlineRepositoryMode(repositoryMode) {
+			t.Fatalf("offlineRepositoryMode(%q) = true", repositoryMode)
+		}
 	}
 }
 
@@ -716,7 +717,7 @@ func TestMaterializedRemoteCacheOnlyUsesRemoteRepository(t *testing.T) {
 	if err != nil || cache == "" || calls != 1 {
 		t.Fatalf("remote materialization = %q, %v, calls=%d", cache, err, calls)
 	}
-	for _, mode := range []string{"cloud", "local"} {
+	for _, mode := range []string{"online", "local", "cloud", "cloud_repository"} {
 		workspaceResolved := remoteWorkspace
 		workspaceResolved.Config.Repository.Mode = mode
 		cache, err := materializedRemoteCache(resolved, workspaceResolved)
@@ -729,9 +730,9 @@ func TestMaterializedRemoteCacheOnlyUsesRemoteRepository(t *testing.T) {
 func TestEnsureInstallRuntimeReusesExistingRuntimeAcrossRepositoryModes(t *testing.T) {
 	root := writeShellRuntime(t)
 	// No offline payload is provided: a valid existing Runtime must be enough,
-	// including when a former Remote target changes to Cloud.
+	// including when a former Remote target changes to Online.
 	resolvedRelease := release.Resolved{Prepared: true, Metadata: release.Metadata{Version: "new-release"}}
-	for _, mode := range []string{"remote", "cloud", "local", "remote_repository", "cloud_repository", "local_repository"} {
+	for _, mode := range []string{"online", "remote", "local", "online_repository", "remote_repository", "local_repository", "cloud", "cloud_repository"} {
 		t.Run(mode, func(t *testing.T) {
 			if err := ensureInstallRuntime(root, resolvedRelease, mode); err != nil {
 				t.Fatalf("existing Runtime must be reusable for %s: %v", mode, err)

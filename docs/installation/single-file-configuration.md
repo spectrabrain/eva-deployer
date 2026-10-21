@@ -4,6 +4,11 @@
 형식으로 변환한다. Ansible playbook, Chart Values 병합, Release·Runtime 관리는 기존 계약을
 유지한다. 이 기능은 해당 변경이 포함된 Tool부터 사용할 수 있다.
 
+Repository mode의 표준 입력은 `online` / `remote` / `local`이며 Ansible 모드는 각각
+`online_repository` / `remote_repository` / `local_repository`이다. 기본값은 `online`이다.
+레거시 `cloud` / `cloud_repository`도 호환 입력으로 허용하며 `online` / `online_repository`로 정규화한다.
+모드 선택 기준은 [설치 Runbook](README.md#repository-mode-선택)을 따른다.
+
 ## 시작
 
 일반 설치자는 **sudo 없이** 다음 명령 하나로 시작한다.
@@ -19,8 +24,8 @@ symlink는 덮어쓰지 않으며, 다른 위치가 필요하면 `--output FILE`
 
 질문 순서는 다음과 같다. 번호를 선택하고 Enter를 누르며 `[번호]`가 기본값이다.
 
-1. **설치환경**: `cloud` / `remote` / `local`.
-2. **Cloud 실행 방식**: 현재 서버 설치 / 현재 서버를 Bastion(controller)으로 사용.
+1. **설치환경**: `online` / `remote` / `local`.
+2. **Online 실행 방식**: 현재 서버 설치 / 현재 서버를 Bastion(controller)으로 사용.
    Remote/Local은 기존 방식대로 해당 Target에서 구성한다.
 3. **Bastion일 때 타겟 한 대 등록**: 닉네임 → IP → SSH 계정 → 숨김 비밀번호.
    private key는 이 흐름에서 받지 않으며 SSH와 sudo에 같은 비밀번호를 쓴다.
@@ -41,17 +46,17 @@ IP 직접 접속은 SSH 대상 IP가 있으면 서비스 host와 함께 설치 I
 현재 서버 설치라면 `<TARGET_IP>`를 채운다. HTTPS IP 접속은 그 IP의 SAN이 있는 인증서가 필요하다.
 외부 IAM을 선택한 경우 주소/프로토콜 선택은 App에만 적용되고 IAM의 주소는 별도 입력이다.
 
-### Cloud Bastion의 의미
+### Online Bastion의 의미
 
 - 현재 서버에 Tool·Managed Runtime·검증된 Release를 준비하고 `eva install --config`를 실행한다.
   현재 서버는 inventory에 넣지 않으며 실제 Infra/Solution은 등록한 타겟에만 설치한다.
 - Bastion에서 각 타겟으로 **직접 SSH**한다. 별도 ProxyJump 게이트웨이나 SSH 터널을 구성하는 기능은 아니다.
-- Bastion의 인터넷 연결만으로 충분하지 않다. 각 타겟도 Cloud Repository/ECR/S3 및 필요한 외부 서비스에
+- Bastion의 인터넷 연결만으로 충분하지 않다. 각 타겟도 upstream/인터넷 Repository·ECR·S3 및 필요한 외부 서비스에
   접근할 수 있어야 한다. 타겟은 Ubuntu·GPU 등 기존 사전 조건을 충족해야 한다.
 - 대상 계정에 SSH password 인증과 같은 비밀번호를 사용하는 sudo를 허용해야 한다.
   설치/preflight가 설정된 계정·비밀번호로 연결하며 최초 SSH host key를 자동 등록한다.
   이미 등록된 키가 변경되면 연결을 중단한다.
-- 공통 Cloud AWS credential은 기존 배포 단계에서 각 해당 타겟에 사용된다.
+- 공통 Online AWS credential은 기존 배포 단계에서 각 해당 타겟에 사용된다.
   타겟별로 다른 AWS credential을 받는 기능은 아니며 Remote Main의 `remote target` 등록과도 별개이다.
 - 각 타겟은 독립 설치 대상이다. 여러 타겟을 입력한다고 하나의 multi-node k3s cluster를 만드는 것은 아니다.
 - 기존 `eva preflight gpu`와 `eva check`는 실행한 현재 서버 기준이다. Bastion에서 실행해
@@ -66,7 +71,7 @@ IP 직접 접속은 SSH 대상 IP가 있으면 서비스 host와 함께 설치 I
 승인된 위치를 선택한다. 기존 설정이 있으면 덮어쓰지 말고 다른 파일 이름을 사용한다.
 
 ```bash
-eva config sample --mode cloud --output "$HOME/eva-install.yaml"
+eva config sample --mode online --output "$HOME/eva-install.yaml"
 ```
 
 Remote/Local 설치는 `--mode remote`/`--mode local`을 사용한다. 샘플은 binary에 내장되어
@@ -92,7 +97,7 @@ IAM 구성
 주소 구성 질문은 IAM 함께 설치를 선택했을 때만 표시된다. 외부 IAM을 선택하면 주소 질문을
 생략하고 App의 HTTP/HTTPS를 선택한다. IAM baseUrl과 Redis 연결값은 App 프로토콜과 독립적이다.
 
-내부에는 Cloud/Remote/Local 기본 틀, 네 가지 함께 설치 Values 틀과 외부 IAM용 App HTTP/HTTPS 틀이 있다.
+내부에는 Online/Remote/Local 기본 틀, 네 가지 함께 설치 Values 틀과 외부 IAM용 App HTTP/HTTPS 틀이 있다.
 선택한 조합으로 합쳐 주석을 보존한 단일 YAML을 만든다. mode는 이미지 공급 방식이며
 서비스의 HTTP/HTTPS와는 별개이다. 기본값은 터미널에서 **IAM 함께 설치 + 동일 주소 + HTTPS**이다.
 도메인 분리 모드는 App과 IAM의 서로 다른 도메인을 사용한다. IP 직접 접속은 동일 주소 모드를
@@ -107,7 +112,7 @@ IAM 구성
 ```bash
 eva config sample --mode remote --address shared --protocol https --output "$HOME/eva-install.yaml"
 eva config sample --mode local --address separate --protocol https --output "$HOME/eva-install.yaml"
-eva config sample --mode cloud --iam external --protocol https --output "$HOME/eva-external-iam.yaml"
+eva config sample --mode online --iam external --protocol https --output "$HOME/eva-external-iam.yaml"
 ```
 
 `--iam install|external`로 IAM 구성을 명시한다. 외부 IAM에서는 `--address`를 생략한다
@@ -134,7 +139,7 @@ placeholder의 실제 문자열은 오류에 출력하지 않는다.
 
 ### App 라이선스
 
-`targets.<alias>.values.app.app.license.activation_mode`의 생성 기본값은 Cloud가 `online`,
+`targets.<alias>.values.app.app.license.activation_mode`의 생성 기본값은 Online이 `online`,
 Remote/Local이 `offline`이다. 라이선스는 설치 전에 결정하며 추가 질문이나 연결 검사를 하지 않는다.
 Repository mode는 이미지 공급 방식이므로 라이선스 활성화 방식을 강제하지 않는다.
 사전 발급된 라이선스가 온라인 방식이면 Remote에서도 `online`으로 변경할 수 있다.
@@ -157,7 +162,7 @@ Repository mode는 이미지 공급 방식이므로 라이선스 활성화 방�
 | `separate` | HTTP | `http://app.eva.com/` | `http://iam.eva.com/` | 없음 |
 | `separate` | HTTPS | `https://app.eva.com/` | `https://iam.eva.com/` | 서비스별 디렉터리 |
 
-위 네 틀은 IAM 함께 설치용이며 각각 Cloud/Remote/Local과 결합한다. HTTP는 암호화되지 않으므로 격리된 검증 환경용이며
+위 네 틀은 IAM 함께 설치용이며 각각 Online/Remote/Local과 결합한다. HTTP는 암호화되지 않으므로 격리된 검증 환경용이며
 운영 환경에는 HTTPS를 권장한다. 설정 계약은 다음과 같다.
 
 - App/IAM 모두 `ingress.tls.enabled`를 명시한다. `tls.create`는 인증서 Secret 생성 여부이며
@@ -239,7 +244,7 @@ sso:
 - 명시적 `baseUrl`과 `adminClientSecret`이 모두 있으면 App role은 같은 target의 이전 handoff보다
   이 설정을 우선한다. 새 샘플은 모든 외부 연결 placeholder를 채워야 입력 검증을 통과한다.
   검증 통과가 외부 서버 접속·Secret 권한·Redis 연결의 성공까지 보장하지는 않는다.
-- Cloud/Remote/Local 모두 지원하는 **샘플 구성**이다. Remote/Local에서는 외부 IAM/Redis까지의
+- Online/Remote/Local 모두 지원하는 **샘플 구성**이다. Remote/Local에서는 외부 IAM/Redis까지의
   내부망 도달 경로와 방화벽을 별도로 준비하고 AWS credential을 Target에 추가하지 않는다.
 
 **샘플 입력 검증과 실제 HTTP 설치 준비는 별개이다.** 필수 값을 채운 HTTP 샘플도
@@ -260,13 +265,13 @@ TLS SAN, GPU, network 및 credential의 실제 유효성은 기존 설치 precon
 
 ## 입력 schema
 
-Cloud 전체 예시는 `eva config sample --mode cloud`로 출력한다.
+Online 전체 예시는 `eva config sample --mode online`로 출력한다.
 
 | 항목 | 역할 |
 | --- | --- |
 | `schema_version` | 현재 `v1`만 지원. Release version과 별개 |
 | `site`, `repository`, `components` | 기존 Workspace의 site 설정과 동일 |
-| `credentials.aws` | Cloud용 공통 AWS credential. 생략하면 파일을 만들지 않음 |
+| `credentials.aws` | Online용 공통 AWS credential. 생략하면 파일을 만들지 않음 |
 | `targets.<alias>.ansible` | target별 Ansible host variables |
 | `targets.<alias>.components` | 선택 사항. 해당 target에 설치할 component 부분집합; 생략하면 전역 선택 상속 |
 | `targets.<alias>.values.iam` | target의 IAM Chart Values |
@@ -274,7 +279,7 @@ Cloud 전체 예시는 `eva config sample --mode cloud`로 출력한다.
 | `targets.<alias>.values.agent`, `.vision` | 필요한 경우만 지정하는 Chart override |
 
 AWS 항목은 `aws_access_key_id`, `aws_secret_access_key`, `region`이다. 앞의 두 항목은 함께
-지정하며 region 기본값은 `ap-northeast-2`이다. Cloud AWS CLI 구성 단계가 필요한 설치에서는
+지정하며 region 기본값은 `ap-northeast-2`이다. Online AWS CLI 구성 단계가 필요한 설치에서는
 이 credential을 제공한다. Remote/Local 설정의 `credentials.aws`는 거부한다.
 Main 서버의 credential 준비 절차는 이 Target 입력과 별개이다.
 
@@ -282,7 +287,7 @@ IAM 함께 설치 시 모든 Repository mode의 기본 틀에는
 `values.iam.keycloak.realmConfig.substitutions.EVA_IAM_ADMIN_EMAIL: "admin@eva.com"`을 포함한다.
 관리자 이메일은 사이트 정책에 맞게 변경한다.
 
-Cloud 기본 틀은 `imagePullSecrets.hostPath`를 넣지 않고 대상 사용자 기준의 기본 경로를 사용한다.
+Online 기본 틀은 `imagePullSecrets.hostPath`를 넣지 않고 대상 사용자 기준의 기본 경로를 사용한다.
 IAM role은 `eva_iam_node_home`(기본 `/home/{ansible_user}`) 아래 `.aws`를 사용하며,
 별도 사용자 설정이 없으면 `ansible_ssh_user`, 최종 `eva` 순으로 선택한다.
 AWS CLI 구성 role은 계정 DB의 **실제 홈** 아래 `.aws`에 credential을 기록하므로 root(`/root`)나
@@ -380,7 +385,7 @@ sudo eva workspace show --config "$HOME/eva-install.yaml"
 
 ```text
 /var/lib/eva/workspaces/<site-id>/<content-sha256>/
-├── credentials/aws_key.ini             # Cloud credential이 있는 경우만
+├── credentials/aws_key.ini             # Online credential이 있는 경우만
 ├── inventory/
 │   ├── inventory.ini
 │   └── host_vars/<alias>.yaml

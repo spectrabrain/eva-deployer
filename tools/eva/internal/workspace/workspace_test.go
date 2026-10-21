@@ -50,7 +50,7 @@ func TestResolveRejectsMismatchedSite(t *testing.T) {
 site:
   id: customer-a
 repository:
-  mode: cloud
+  mode: online
 components:
   app: true
 `)
@@ -85,12 +85,35 @@ func TestResolveRequiresEnabledComponent(t *testing.T) {
 site:
   id: customer-a
 repository:
-  mode: cloud
+  mode: online
 components:
   app: false
 `)
 	if _, err := Resolve(Options{Workspace: root}); err == nil {
 		t.Fatal("Resolve() accepted a workspace without enabled components")
+	}
+}
+
+func TestResolveOnlineAliasesWithoutRewritingWorkspace(t *testing.T) {
+	for _, mode := range []string{"online", "cloud", "ONLINE", "CLOUD", "online_repository", "cloud_repository"} {
+		t.Run(mode, func(t *testing.T) {
+			content := "site:\n  id: customer-a\nrepository:\n  mode: " + mode + "\ncomponents:\n  app: true\n"
+			root := writeWorkspace(t, content)
+			resolved, err := Resolve(Options{Workspace: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.Config.Repository.Mode != "online" || resolved.AnsibleMode != "online_repository" {
+				t.Fatal("online or legacy mode was not normalized")
+			}
+			if got := resolved.AnsibleExtraVars()[2]; got != "repository_mode=online_repository" {
+				t.Fatalf("Ansible mode = %q", got)
+			}
+			after, err := os.ReadFile(filepath.Join(root, "site-values", "site.yaml"))
+			if err != nil || string(after) != content {
+				t.Fatal("resolution rewrote an existing workspace snapshot")
+			}
+		})
 	}
 }
 

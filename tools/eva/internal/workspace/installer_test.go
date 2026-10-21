@@ -16,7 +16,7 @@ const installerFixture = `schema_version: v1
 site:
   id: customer-a
 repository:
-  mode: cloud
+  mode: online
 components:
   infra: true
   iam: true
@@ -65,7 +65,7 @@ func TestInstallerMaterializesExistingWorkspaceContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved.SiteID != "customer-a" || resolved.AnsibleMode != "cloud_repository" || resolved.Config.Repository.Project != "eva" {
+	if resolved.SiteID != "customer-a" || resolved.AnsibleMode != "online_repository" || resolved.Config.Repository.Project != "eva" {
 		t.Fatalf("unexpected workspace site/mode/project")
 	}
 	if !strings.HasPrefix(resolved.Root, filepath.Join(cache, "customer-a")+string(filepath.Separator)) {
@@ -289,7 +289,7 @@ func TestInstallerRejectsTamperedSnapshotAndSymlinkCache(t *testing.T) {
 
 func TestInstallerOfflineModesDoNotMaterializeAWSCredentials(t *testing.T) {
 	for _, mode := range []string{"remote", "local"} {
-		content := strings.Replace(installerFixture, "mode: cloud", "mode: "+mode+"\n  registry: harbor.example.com:32080", 1)
+		content := strings.Replace(installerFixture, "mode: online", "mode: "+mode+"\n  registry: harbor.example.com:32080", 1)
 		if _, err := LoadInstaller(writeInstaller(t, content), ""); err == nil {
 			t.Fatal("offline mode accepted AWS credentials")
 		}
@@ -303,6 +303,47 @@ func TestInstallerOfflineModesDoNotMaterializeAWSCredentials(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(resolved.Root, "credentials/aws_key.ini")); !os.IsNotExist(err) {
 			t.Fatal("offline workspace contains AWS credentials")
 		}
+	}
+}
+
+func TestInstallerOnlineAliasesUseCanonicalSnapshot(t *testing.T) {
+	path := writeInstaller(t, installerFixture)
+	cache := filepath.Join(t.TempDir(), "cache")
+	canonical, err := Resolve(Options{ConfigFile: path, CacheRoot: cache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"online", "cloud", "CLOUD", "online_repository", "cloud_repository"} {
+		t.Run(mode, func(t *testing.T) {
+			content := strings.Replace(installerFixture, "mode: online", "mode: "+mode, 1)
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			input, err := LoadInstaller(path, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if input.Repository.Mode != "online" || input.Credentials.AWS == nil {
+				t.Fatal("legacy mode did not retain online AWS input")
+			}
+			// Materialize also accepts callers constructing Installer directly.
+			input.Repository.Mode = mode
+			resolved, err := input.Materialize(cache)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.Root != canonical.Root || resolved.AnsibleMode != "online_repository" {
+				t.Fatal("equivalent modes produced different workspace snapshots")
+			}
+			site := readGeneratedMap(t, resolved.Root, "site-values/site.yaml")
+			if site["repository"].(map[string]any)["mode"] != "online" {
+				t.Fatal("new workspace did not serialize canonical online mode")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || string(after) != content {
+				t.Fatal("legacy installer source was rewritten")
+			}
+		})
 	}
 }
 

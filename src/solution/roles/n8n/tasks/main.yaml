@@ -1,16 +1,16 @@
 ---
 - name: Set n8n defaults
   ansible.builtin.set_fact:
-    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_mode: "{{ repository_mode | default('online_repository') }}"
     repository_project: "{{ repository_project | default('eva') }}"
     repository_registry: >-
       {{
         repository_registry
-        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | default(harbor_registry | default(((repository_mode | default('online_repository')) == 'local_repository') | ternary('localhost:32080', '')))
         | regex_replace('^https?://', '')
         | regex_replace('/+$', '')
       }}
-    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
     n8n_enabled: "{{ n8n_enabled | default(true) | bool }}"
     n8n_pinned_image: "{{ n8n_pinned_image | default(deploy_versions.n8n_image) }}"
     n8n_image_tag: "{{ n8n_image_tag | default((n8n_pinned_image | default(deploy_versions.n8n_image)) | regex_replace('^.*:', '')) }}"
@@ -55,10 +55,10 @@
 - name: Validate repository mode for n8n
   ansible.builtin.assert:
     that:
-      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
-      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+      - repository_mode in ['online_repository', 'cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode in ['online_repository', 'cloud_repository'] or repository_registry | length > 0
     fail_msg: >-
-      repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      repository_mode은 online_repository, remote_repository, local_repository 중 하나여야 합니다 (cloud_repository는 호환 입력).
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
 
 - name: Resolve n8n image repository
@@ -66,7 +66,7 @@
     n8n_deployment_image: >-
       {{
         n8n_image | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary(n8n_pinned_image, repository_registry ~ '/' ~ repository_project ~ '/n8n:' ~ n8n_image_tag)
         )
       }}

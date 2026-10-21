@@ -75,7 +75,7 @@ func usage() {
 	fmt.Println("EVA CLI")
 	fmt.Println("")
 	fmt.Println("Available commands:")
-	fmt.Println("  config sample [--mode cloud|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE]")
+	fmt.Println("  config sample [--mode online|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE]")
 	fmt.Println("  workspace <validate|show|ansible-vars|env> [--config FILE | --site ID | --workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
 	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
@@ -1217,7 +1217,7 @@ func runInstall(args []string) error {
 }
 
 // materializedRemoteCache provides the existing offline cache contract only
-// for Remote repository installs. Cloud and Local modes retain their current
+// for Remote repository installs. Online and Local modes retain their current
 // release and Airgap supply paths without touching Remote Target storage.
 func materializedRemoteCache(releaseResolved release.Resolved, workspaceResolved workspace.Resolved) (string, error) {
 	mode := strings.ToLower(workspaceResolved.Config.Repository.Mode)
@@ -2101,7 +2101,7 @@ func runtimeUsage() {
 	fmt.Println("       eva runtime bootstrap [--offline PATH] [--runtime-root PATH]")
 	fmt.Println("       eva runtime <validate|show> [--runtime-root PATH]")
 	fmt.Println("")
-	fmt.Printf("The managed Runtime defaults to %s. Without --offline, bootstrap downloads the pinned Cloud Runtime.\n", runtime.DefaultRoot)
+	fmt.Printf("The managed Runtime defaults to %s. Without --offline, bootstrap downloads the pinned Online Runtime.\n", runtime.DefaultRoot)
 }
 
 func runShell(args []string) error {

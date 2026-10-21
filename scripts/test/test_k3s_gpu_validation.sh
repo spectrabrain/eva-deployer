@@ -110,7 +110,7 @@ EOF
   connection: local
   vars:
     eva_cache_root: $root/cache
-    repository_mode: cloud_repository
+    repository_mode: online_repository
     k3s_gpu_validation_pod_manifest_path: $root/k3s-gpu-pod.yaml
   tasks:
     - ansible.builtin.include_tasks: $REPO_ROOT/src/infra/roles/k3s/tasks/nvidia-device-plugin.yaml

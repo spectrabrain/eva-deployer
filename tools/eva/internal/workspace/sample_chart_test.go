@@ -33,7 +33,7 @@ func TestInstallerSamplesAgainstLocalCharts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"cloud", "remote", "local"} {
+	for _, mode := range []string{"online", "remote", "local"} {
 		for _, address := range []string{"shared", "separate"} {
 			for _, protocol := range []string{"http", "https"} {
 				hostKinds := []string{"dns"}
@@ -87,7 +87,7 @@ func TestInstallerSampleIAMPublicPortAgainstChart(t *testing.T) {
 			}
 			for _, publicPort := range []string{"", port} {
 				t.Run(address+"/"+protocol+"/port="+publicPort, func(t *testing.T) {
-					contents, err := InstallerSampleFor(SampleOptions{Mode: "cloud", Address: address, Protocol: protocol})
+					contents, err := InstallerSampleFor(SampleOptions{Mode: "online", Address: address, Protocol: protocol})
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -112,7 +112,7 @@ func TestInstallerSampleIAMPublicPortAgainstChart(t *testing.T) {
 
 func assertExternalIAMSampleCharts(t *testing.T, helm, chart string) {
 	t.Helper()
-	for _, mode := range []string{"cloud", "remote", "local"} {
+	for _, mode := range []string{"online", "remote", "local"} {
 		for _, appProtocol := range []string{"http", "https"} {
 			for _, iamProtocol := range []string{"http", "https"} {
 				for _, redisScheme := range []string{"derived", "redis", "rediss"} {

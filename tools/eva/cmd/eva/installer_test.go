@@ -19,7 +19,7 @@ func installerTestInput(t *testing.T) string {
 	previous := defaultWorkspaceCacheRoot
 	defaultWorkspaceCacheRoot = filepath.Join(t.TempDir(), "workspaces")
 	t.Cleanup(func() { defaultWorkspaceCacheRoot = previous })
-	contents, err := workspace.InstallerSample("cloud")
+	contents, err := workspace.InstallerSample("online")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,16 +48,20 @@ func fillInstallerSample(contents []byte) []byte {
 
 func TestConfigSamplesAndValidationDoNotWriteWorkspace(t *testing.T) {
 	input := installerTestInput(t)
-	for _, mode := range []string{"cloud", "remote", "local"} {
+	for _, mode := range []string{"online", "remote", "local", "cloud", "cloud_repository"} {
+		wantMode := mode
+		if mode == "cloud" || mode == "cloud_repository" {
+			wantMode = "online"
+		}
 		output := captureRemoteTargetStdout(t, func() error { return run([]string{"config", "sample", "--mode", mode, "--non-interactive"}) })
 		if err := os.WriteFile(input, fillInstallerSample([]byte(output)), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		parsed, err := workspace.LoadInstaller(input, "customer-a")
-		if err != nil || parsed.Repository.Mode != mode {
+		if err != nil || parsed.Repository.Mode != wantMode {
 			t.Fatalf("sample for %s did not validate: %v", mode, err)
 		}
-		if mode != "cloud" && (strings.Contains(output, "aws_access_key_id") || strings.Contains(output, "imagePullSecrets")) {
+		if wantMode != "online" && (strings.Contains(output, "aws_access_key_id") || strings.Contains(output, "imagePullSecrets")) {
 			t.Fatal("offline sample contains AWS inputs")
 		}
 		output = captureRemoteTargetStdout(t, func() error { return run([]string{"workspace", "validate", "--config", input}) })
@@ -77,7 +81,7 @@ func TestConfigSamplesAndValidationDoNotWriteWorkspace(t *testing.T) {
 
 func TestExternalIAMConfigPlanExcludesIAMAndKeepsSecretsPrivate(t *testing.T) {
 	input := installerTestInput(t)
-	contents, err := workspace.InstallerSampleFor(workspace.SampleOptions{Mode: "cloud", Protocol: "https", IAM: "external"})
+	contents, err := workspace.InstallerSampleFor(workspace.SampleOptions{Mode: "online", Protocol: "https", IAM: "external"})
 	if err != nil {
 		t.Fatal(err)
 	}

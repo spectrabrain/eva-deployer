@@ -19,7 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const cloudRuntimeVersion = "1.0.1"
+const onlineRuntimeVersion = "1.0.1"
 
 type onlineArtifact struct {
 	Name        string
@@ -46,7 +46,7 @@ type onlineBootstrapDependencies struct {
 }
 
 var defaultOnlineBootstrapSpec = onlineBootstrapSpec{
-	Version: cloudRuntimeVersion,
+	Version: onlineRuntimeVersion,
 	AnsibleRequirements: []string{
 		"ansible==13.6.0",
 		"ansible-core==2.20.5",
@@ -85,14 +85,14 @@ var defaultOnlineBootstrapSpec = onlineBootstrapSpec{
 	},
 }
 
-// BootstrapOnline builds the managed Cloud Runtime from pinned upstream tools.
+// BootstrapOnline builds the managed Online Runtime from pinned upstream tools.
 // The payload is staged and validated before Install atomically publishes it.
 func BootstrapOnline(root string) (Resolved, error) {
 	return bootstrapOnline(root, defaultOnlineBootstrapSpec, onlineBootstrapDependencies{
 		download:    downloadFile,
 		run:         runCommand,
 		runWithEnv:  runCommandWithEnv,
-		prepareHost: prepareCloudRuntimeHost,
+		prepareHost: prepareOnlineRuntimeHost,
 		goos:        goruntime.GOOS,
 		goarch:      goruntime.GOARCH,
 	})
@@ -100,13 +100,13 @@ func BootstrapOnline(root string) (Resolved, error) {
 
 func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineBootstrapDependencies) (Resolved, error) {
 	if dependencies.goos != "linux" || dependencies.goarch != "amd64" {
-		return Resolved{}, fmt.Errorf("Cloud Runtime bootstrap supports linux/amd64 only, got %s/%s", dependencies.goos, dependencies.goarch)
+		return Resolved{}, fmt.Errorf("Online Runtime bootstrap supports linux/amd64 only, got %s/%s", dependencies.goos, dependencies.goarch)
 	}
 	if spec.Version == "" || len(spec.AnsibleRequirements) == 0 || len(spec.Artifacts) == 0 {
-		return Resolved{}, fmt.Errorf("Cloud Runtime bootstrap specification is incomplete")
+		return Resolved{}, fmt.Errorf("Online Runtime bootstrap specification is incomplete")
 	}
 	if dependencies.download == nil || dependencies.run == nil || dependencies.runWithEnv == nil || dependencies.prepareHost == nil {
-		return Resolved{}, fmt.Errorf("Cloud Runtime bootstrap dependencies are incomplete")
+		return Resolved{}, fmt.Errorf("Online Runtime bootstrap dependencies are incomplete")
 	}
 	if root == "" {
 		root = DefaultRoot
@@ -116,7 +116,7 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 		return Resolved{}, fmt.Errorf("resolve runtime destination: %w", err)
 	}
 	if destination == DefaultRoot && os.Geteuid() != 0 {
-		return Resolved{}, fmt.Errorf("Cloud Runtime bootstrap into %s requires root; run sudo eva runtime bootstrap", DefaultRoot)
+		return Resolved{}, fmt.Errorf("Online Runtime bootstrap into %s requires root; run sudo eva runtime bootstrap", DefaultRoot)
 	}
 	if err := dependencies.prepareHost(destination); err != nil {
 		return Resolved{}, err
@@ -125,13 +125,13 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return Resolved{}, fmt.Errorf("create runtime parent: %w", err)
 	}
-	staging, err := os.MkdirTemp(parent, ".eva-runtime-cloud-")
+	staging, err := os.MkdirTemp(parent, ".eva-runtime-online-")
 	if err != nil {
-		return Resolved{}, fmt.Errorf("create Cloud Runtime staging directory: %w", err)
+		return Resolved{}, fmt.Errorf("create Online Runtime staging directory: %w", err)
 	}
 	defer os.RemoveAll(staging)
 	if err := os.Chmod(staging, runtimeDirectoryMode); err != nil {
-		return Resolved{}, fmt.Errorf("set Cloud Runtime staging directory mode: %w", err)
+		return Resolved{}, fmt.Errorf("set Online Runtime staging directory mode: %w", err)
 	}
 
 	if err := dependencies.run("python3", "-m", "venv", filepath.Join(staging, "venv")); err != nil {
@@ -157,11 +157,11 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 	if err := os.RemoveAll(downloadDirectory); err != nil {
 		return Resolved{}, fmt.Errorf("remove Runtime download directory: %w", err)
 	}
-	if err := writeCloudDescriptor(staging, spec.Version); err != nil {
+	if err := writeOnlineDescriptor(staging, spec.Version); err != nil {
 		return Resolved{}, err
 	}
 	if _, err := Resolve(staging); err != nil {
-		return Resolved{}, fmt.Errorf("validate staged Cloud Runtime: %w", err)
+		return Resolved{}, fmt.Errorf("validate staged Online Runtime: %w", err)
 	}
 	return Install(staging, destination)
 }
@@ -192,10 +192,10 @@ func collectionInstallEnvironment(base []string, collectionRoot string) []string
 
 func installOnlineArtifact(root, downloadDirectory string, artifact onlineArtifact, download func(string, string) error) error {
 	if artifact.Name == "" || artifact.URL == "" || artifact.SHA256 == "" || artifact.TargetPath == "" {
-		return fmt.Errorf("Cloud Runtime artifact definition is incomplete")
+		return fmt.Errorf("Online Runtime artifact definition is incomplete")
 	}
 	if _, err := hex.DecodeString(artifact.SHA256); err != nil || len(artifact.SHA256) != sha256.Size*2 {
-		return fmt.Errorf("Cloud Runtime artifact %s has an invalid SHA-256", artifact.Name)
+		return fmt.Errorf("Online Runtime artifact %s has an invalid SHA-256", artifact.Name)
 	}
 	downloadPath := filepath.Join(downloadDirectory, artifact.Name)
 	if err := download(artifact.URL, downloadPath); err != nil {
@@ -206,7 +206,7 @@ func installOnlineArtifact(root, downloadDirectory string, artifact onlineArtifa
 	}
 	target := filepath.Join(root, filepath.FromSlash(artifact.TargetPath))
 	if !isWithin(root, target) {
-		return fmt.Errorf("Cloud Runtime artifact %s target escapes runtime root", artifact.Name)
+		return fmt.Errorf("Online Runtime artifact %s target escapes runtime root", artifact.Name)
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("create Runtime %s directory: %w", artifact.Name, err)
@@ -223,7 +223,7 @@ func installOnlineArtifact(root, downloadDirectory string, artifact onlineArtifa
 	return nil
 }
 
-func writeCloudDescriptor(root, version string) error {
+func writeOnlineDescriptor(root, version string) error {
 	contents, err := yaml.Marshal(Descriptor{
 		SchemaVersion: schemaVersion,
 		Version:       version,

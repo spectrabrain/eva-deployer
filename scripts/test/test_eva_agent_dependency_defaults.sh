@@ -52,8 +52,9 @@ cat >"$TMP_ROOT/playbook.yaml" <<EOF
           - eva_agent_qdrant_values_file == expected_values
           - eva_agent_qdrant_snapshot_source == expected_source
           - eva_agent_qdrant_snapshot_source is string
-          - airgap_mode == (repository_mode != 'cloud_repository')
-          - (eva_agent_sync_aws_credentials | int) == ((repository_mode == 'cloud_repository') | ternary(1, 0))
+          - repository_mode == expected_mode
+          - airgap_mode == (repository_mode not in ['online_repository', 'cloud_repository'])
+          - (eva_agent_sync_aws_credentials | int) == ((repository_mode in ['online_repository', 'cloud_repository']) | ternary(1, 0))
       tags:
         - eva_agent_dependency_defaults
 EOF
@@ -63,7 +64,12 @@ EOF
 # by preparation and older direct-Ansible examples.
 write_case() {
   local mode="$1" values="$2" source="$3" expected_values="$4" expected_source="$5"
+  local expected_mode="$mode"
+  if [[ "$mode" == default ]]; then
+    expected_mode=online_repository
+  fi
   cat >"$TMP_ROOT/case.yaml" <<EOF
+expected_mode: $expected_mode
 expected_values: $expected_values
 expected_source: $expected_source
 EOF
@@ -90,12 +96,15 @@ run_case() {
 
 for case in \
   'default default default values-k3s.s3.yaml local_pv' \
+  'online_repository default default values-k3s.s3.yaml local_pv' \
   'cloud_repository default default values-k3s.s3.yaml local_pv' \
   'remote_repository default default values-k3s.harbor.yaml harbor' \
   'local_repository default default values-k3s.harbor.yaml harbor' \
+  'online_repository values-k3s.harbor.yaml default values-k3s.harbor.yaml harbor' \
   'cloud_repository values-k3s.harbor.yaml default values-k3s.harbor.yaml harbor' \
   'remote_repository values-k3s.s3.yaml default values-k3s.s3.yaml local_pv' \
   'remote_repository default harbor values-k3s.harbor.yaml harbor' \
+  'online_repository default local_pv values-k3s.s3.yaml local_pv' \
   'cloud_repository default local_pv values-k3s.s3.yaml local_pv'; do
   read -r mode values source expected_values expected_source <<<"$case"
   write_case "$mode" "$values" "$source" "$expected_values" "$expected_source"
@@ -110,6 +119,7 @@ done
 # not relax the source contract or silently override an operator's input.
 for case in \
   'remote_repository default local_pv' \
+  'online_repository default harbor' \
   'cloud_repository default harbor' \
   'remote_repository default oci'; do
   read -r mode values source <<<"$case"
@@ -125,4 +135,4 @@ for case in \
   fi
 done
 
-echo 'EVA Agent dependency defaults contract tests passed (8 valid, 3 invalid cases).'
+echo 'EVA Agent dependency defaults contract tests passed (11 valid, 4 invalid cases).'

@@ -244,7 +244,7 @@ EOF
     # Listener/HelmChart behavior is tested by test_traefik_ports.py. This
     # existing Values fixture intentionally has no rendered Ingress/ConfigMap.
     eva_traefik_ports_manage: false
-    repository_mode: cloud_repository
+    repository_mode: online_repository
   tasks:
     - ansible.builtin.import_role:
         name: eva_app

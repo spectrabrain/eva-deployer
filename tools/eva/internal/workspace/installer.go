@@ -84,6 +84,7 @@ func LoadInstaller(path, requestedSiteID string) (Installer, error) {
 	if input.Repository.Project == "" {
 		input.Repository.Project = "eva"
 	}
+	input.Repository.Mode = NormalizeRepositoryMode(input.Repository.Mode)
 	if err := input.validate(requestedSiteID); err != nil {
 		return Installer{}, err
 	}
@@ -176,8 +177,8 @@ func (input Installer) validate(requestedSiteID string) error {
 		}
 	}
 	if aws := input.Credentials.AWS; aws != nil {
-		if !strings.EqualFold(input.Repository.Mode, "cloud") {
-			return errors.New("credentials.aws is only supported in cloud mode; do not distribute AWS credentials to Remote/Local targets")
+		if NormalizeRepositoryMode(input.Repository.Mode) != "online" {
+			return errors.New("credentials.aws is only supported in online mode; do not distribute AWS credentials to Remote/Local targets")
 		}
 		if aws.AccessKeyID == "" || aws.SecretAccessKey == "" {
 			return errors.New("credentials.aws requires aws_access_key_id and aws_secret_access_key")
@@ -238,6 +239,7 @@ func validateInstallerPlaceholders(input Installer) error {
 // Materialize publishes an immutable, content-addressed workspace. Plans and
 // retries refer to this persistent snapshot, never back to the user's config.
 func (input Installer) Materialize(cacheRoot string) (Resolved, error) {
+	input.Repository.Mode = NormalizeRepositoryMode(input.Repository.Mode)
 	if err := input.validate(""); err != nil {
 		return Resolved{}, err
 	}

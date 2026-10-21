@@ -1,7 +1,7 @@
 image:
   repository: "{{ eva_agent_image_repository }}"
   tag: "{{ eva_agent_image_tag }}"
-  pullPolicy: "{{ (repository_mode == 'cloud_repository') | ternary('Always', 'IfNotPresent') }}"
+  pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
 
 sharedPvcStorage:
   nfs:

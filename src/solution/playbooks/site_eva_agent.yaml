@@ -13,8 +13,8 @@
 
     - name: Resolve repository mode
       ansible.builtin.set_fact:
-        repository_mode: "{{ repository_mode | default('cloud_repository') }}"
-        airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+        repository_mode: "{{ repository_mode | default('online_repository') }}"
+        airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
       changed_when: false
 
     - name: Resolve Harbor endpoint metadata path
@@ -91,7 +91,7 @@
         eva_agent_airgap_cache_root_candidates:
           - "{{ eva_agent_cache_root | default(eva_cache_root) }}"
       when:
-        - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
+        - (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
         - eva_agent_cache_root is not defined
       changed_when: false
 
@@ -101,7 +101,7 @@
       loop: "{{ eva_agent_airgap_cache_root_candidates }}"
       register: eva_agent_airgap_cache_root_stats
       when:
-        - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
+        - (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
         - eva_agent_cache_root is not defined
 
     - name: Resolve detected airgap cache root
@@ -117,7 +117,7 @@
             ) | default(omit)
           }}
       when:
-        - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
+        - (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
         - eva_agent_cache_root is not defined
       changed_when: false
 
@@ -130,7 +130,7 @@
           {{ eva_agent_cache_root | default(eva_cache_root) }} 경로를 준비하거나
           -e eva_agent_cache_root=<cache 경로> 를 지정하세요.
       when:
-        - (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
+        - (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
 
   tasks:
     - name: STEP 1 - eva-agent

@@ -19,8 +19,8 @@ type SampleOptions struct {
 }
 
 func (options SampleOptions) Validate() error {
-	if _, ok := ansibleRepositoryModes[options.Mode]; !ok {
-		return errors.New("sample mode must be cloud, remote or local")
+	if _, ok := ansibleRepositoryModes[NormalizeRepositoryMode(options.Mode)]; !ok {
+		return errors.New("sample mode must be online, remote or local")
 	}
 	if options.IAM != "" && options.IAM != "install" && options.IAM != "external" {
 		return errors.New("sample IAM mode must be install or external")
@@ -46,11 +46,12 @@ func InstallerSample(mode string) ([]byte, error) {
 // InstallerSampleFor composes independently maintained repository and endpoint
 // templates. YAML nodes preserve the required-input comments in every mode.
 func InstallerSampleFor(options SampleOptions) ([]byte, error) {
+	options.Mode = NormalizeRepositoryMode(options.Mode)
 	if err := options.Validate(); err != nil {
 		return nil, err
 	}
 	basePath := "installer.yaml.sample"
-	if options.Mode != "cloud" {
+	if options.Mode != "online" {
 		basePath = "samples/" + options.Mode + ".yaml"
 	}
 	base, err := readSampleNode(basePath)
@@ -86,7 +87,7 @@ func InstallerSampleFor(options SampleOptions) ([]byte, error) {
 	if activation == nil {
 		return nil, errors.New("embedded installer sample is missing the license activation mode")
 	}
-	if options.Mode == "cloud" {
+	if options.Mode == "online" {
 		activation.Value = "online"
 	} else {
 		activation.Value = "offline"

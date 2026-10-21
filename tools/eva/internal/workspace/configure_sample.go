@@ -39,11 +39,12 @@ func ValidateConfigureTargetName(name string) error {
 // ConfigureSample composes target-specific scaffolds without serializing a typed
 // Installer, preserving the embedded examples and required-input comments.
 func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
+	mode = NormalizeRepositoryMode(mode)
 	if _, ok := ansibleRepositoryModes[mode]; !ok || len(targets) == 0 {
 		return nil, errors.New("configure requires a repository mode and at least one target")
 	}
 	basePath := "installer.yaml.sample"
-	if mode != "cloud" {
+	if mode != "online" {
 		basePath = "samples/" + mode + ".yaml"
 	}
 	document, err := readSampleNode(basePath)

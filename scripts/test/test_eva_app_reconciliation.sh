@@ -7,11 +7,15 @@ reconcile="$repo_root/src/solution/roles/eva_app/tasks/reconcile_app.yaml"
 verify="$repo_root/src/solution/roles/eva_app/tasks/verify_app_ownership.yaml"
 
 python3 - "$main" "$reconcile" "$verify" <<'PY'
+import base64
 import copy
+import getpass
 import json
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -67,9 +71,30 @@ for task_name in (
         )
 
 reconcile_path = Path(sys.argv[2])
-reconcile_shell = documents[reconcile_path][0].get("ansible.builtin.shell")
+reconcile_task = find_task(
+    documents[reconcile_path], "Assess EVA App Helm ownership reconciliation"
+)
+internal_task = find_task(
+    main_tasks, "Assess verified legacy EVA App internal Service preservation"
+)
+if reconcile_task is None or internal_task is None:
+    raise SystemExit("[ERROR] production EVA App assessment tasks are absent")
+reconcile_shell = reconcile_task.get("ansible.builtin.shell", "")
+internal_shell = internal_task.get("ansible.builtin.shell", "")
+for task in (internal_task, reconcile_task):
+    if (
+        task.get("environment", {}).get("EVA_APP_ARGOCD_HANDOFF_B64")
+        != "{{ eva_app_argocd_handoff_raw.content | default('') }}"
+        or "EVA_APP_HANDOFF_FILE" in task.get("environment", {})
+        or "EVA_APP_HANDOFF_FILE" in task.get("ansible.builtin.shell", "")
+        or "handoff_file" in task.get("ansible.builtin.shell", "")
+    ):
+        raise SystemExit(
+            "[ERROR] assessment must consume controller receipt content only: "
+            + task["name"]
+        )
 match = re.search(
-    r"python3 - \"\$handoff_file\" \"\$EVA_APP_SITE_ID\" <<'PY'\n(.*?)\nPY",
+    r"python3 - \"\$EVA_APP_SITE_ID\" <<'PY'\n(.*?)\nPY",
     reconcile_shell or "",
     re.DOTALL,
 )
@@ -90,23 +115,31 @@ valid_receipt = {
     "registration_commit": "a" * 40,
 }
 
-def validates(receipt):
-    with tempfile.TemporaryDirectory() as directory:
-        receipt_path = Path(directory) / "argocd-handoff.yaml"
-        receipt_path.write_text(yaml.safe_dump(receipt))
-        result = subprocess.run(
-            [sys.executable, "-", str(receipt_path), "site-a"],
-            input=validator,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    return result
+def encode_receipt(receipt):
+    if receipt is None:
+        return ""
+    content = yaml.safe_dump(receipt) if isinstance(receipt, dict) else receipt
+    return base64.b64encode(content.encode()).decode("ascii")
+
+def validates(receipt, *, encoded=None):
+    env = dict(os.environ, EVA_APP_ARGOCD_HANDOFF_B64=(
+        encode_receipt(receipt) if encoded is None else encoded
+    ))
+    env.pop("EVA_APP_HANDOFF_FILE", None)
+    return subprocess.run(
+        [sys.executable, "-", "site-a"],
+        input=validator,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 if validates(valid_receipt).stdout.strip() != "cluster-a-eva-app":
     raise SystemExit("[ERROR] valid Git-backed EVA App receipt was rejected")
 
 invalid_receipts = {
+    "site ID": {"site_id": "other"},
     "registration application": {"registration_application": "other"},
     "registration repository": {"registration_repository": ""},
     "registration branch": {"registration_branch": ""},
@@ -121,7 +154,17 @@ for name, changes in invalid_receipts.items():
     if validates(receipt).returncode == 0:
         raise SystemExit(f"[ERROR] invalid {name} receipt was accepted")
 
-if documents[reconcile_path][0]["environment"].get("EVA_APP_TLS_JOB_ENABLED") != "{{ eva_app_tls_job_enabled | bool | lower }}":
+for name, encoded in (
+    ("missing content", ""),
+    ("malformed base64", "not-base64!"),
+    ("non-strict base64", encode_receipt(valid_receipt) + "!"),
+    ("malformed YAML", encode_receipt("site_id: [")),
+    ("non-mapping YAML", encode_receipt("[]")),
+):
+    if validates(None, encoded=encoded).returncode == 0:
+        raise SystemExit(f"[ERROR] validator accepted {name}")
+
+if reconcile_task["environment"].get("EVA_APP_TLS_JOB_ENABLED") != "{{ eva_app_tls_job_enabled | bool | lower }}":
     raise SystemExit("[ERROR] actual TLS Job gating fact is not passed to reconciliation")
 
 # Execute the production assessment shell against local, read-only CLI mocks.
@@ -147,6 +190,16 @@ def resource(kind, name, api):
     }
 
 deployment = resource("Deployment", "eva-app", "apps/v1")
+internal_service = resource("Service", "eva-app-internal", "v1")
+internal_service["spec"] = {
+    "type": "ClusterIP",
+    "selector": {
+        "app.kubernetes.io/instance": "eva-app",
+        "app.kubernetes.io/name": "eva-app",
+        "component": "eva-app",
+    },
+    "ports": [{"name": "http", "protocol": "TCP", "port": 32010, "targetPort": 32010}],
+}
 tls_helpers = [
     resource("Job", "eva-app-tls-job", "batch/v1"),
     resource("Role", "eva-app-tls-job-role", "rbac.authorization.k8s.io/v1"),
@@ -179,7 +232,17 @@ if tool == "helm":
 elif args[:2] == ["create", "--dry-run=client"]:
     print(Path(args[args.index("-f") + 1]).read_text())
 elif args[0] == "get":
-    if "," in args[1]:
+    if args[1:3] == ["service", "eva-app-internal"]:
+        if "-n" not in args or args[args.index("-n") + 1] != "eva-app":
+            raise SystemExit("unexpected Service namespace")
+        matches = [item for item in fixture["live"]
+                   if item["kind"] == "Service"
+                   and item["metadata"]["name"] == args[2]
+                   and item["metadata"]["namespace"] == "eva-app"]
+        if len(matches) != 1:
+            sys.exit(1)
+        print(json.dumps(matches[0]))
+    elif "," in args[1]:
         print(json.dumps({"items": fixture["live"] + fixture["scan_extra"]}))
     elif args[1] == "secret" and "-l" in args:
         print(json.dumps({"items": [{"metadata": {"labels": {
@@ -193,48 +256,79 @@ else:
     raise SystemExit("forbidden kubectl mutation or unexpected command")
 '''
 
+def install_mock_cli(root):
+    root.mkdir(parents=True, exist_ok=True)
+    for tool in ("helm", "kubectl"):
+        executable = root / tool
+        executable.write_text("#!" + sys.executable + "\n" + mock_cli)
+        executable.chmod(0o755)
+
+def assert_read_only(log, name):
+    commands = log.read_text().splitlines() if log.exists() else []
+    if not commands:
+        raise SystemExit(f"[ERROR] {name}: assessment did not exercise CLI mocks")
+    for command in commands:
+        tool, *args = shlex.split(command)
+        allowed = (
+            tool == "helm"
+            and (args[:2] in (["status", "eva-app"], ["get", "manifest"], ["template", "eva-app"]))
+        ) or (
+            tool == "kubectl"
+            and (args[:1] == ["get"] or (
+                args[:2] == ["create", "--dry-run=client"]
+                and [arg for arg in args if arg.startswith("--dry-run")] == ["--dry-run=client"]
+            ))
+        )
+        if not allowed:
+            raise SystemExit(f"[ERROR] {name}: forbidden assessment command: {command}")
+    return commands
+
 def assess(name, *, status="deployed", old=None, live=None, rendered=None,
-           enabled="false", receipt=valid_receipt, scan_extra=None, mode="cloud_repository",
-           error=None):
+           enabled="false", receipt=valid_receipt, scan_extra=None, mode="online_repository",
+           error=None, assessment="reconcile", encoded=None, target_receipt=None):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        for tool in ("helm", "kubectl"):
-            executable = root / tool
-            executable.write_text("#!" + sys.executable + "\n" + mock_cli)
-            executable.chmod(0o755)
+        install_mock_cli(root)
+        default_resources = [internal_service] if assessment == "internal" else stored
         fixture = root / "fixture.json"
         fixture.write_text(json.dumps({
             "status": status,
-            "stored": stored if old is None else old,
-            "live": stored if live is None else live,
+            "stored": default_resources if old is None else old,
+            "live": default_resources if live is None else live,
             "rendered": [deployment] if rendered is None else rendered,
             "scan_extra": scan_extra or [],
         }))
-        receipt_path = root / "handoff.yaml"
-        if receipt is not None:
-            receipt_path.write_text(yaml.safe_dump(receipt))
         env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
                    ASSESSMENT_FIXTURE=str(fixture), ASSESSMENT_LOG=str(root / "commands.log"),
                    EVA_APP_NAMESPACE="eva-app", EVA_APP_RELEASE="eva-app",
+                   EVA_APP_INTERNAL_SERVICE="eva-app-internal",
                    EVA_APP_CHART_SOURCE="eva-app/eva-app", EVA_APP_CHART_VERSION="3.3.0-beta.3",
                    EVA_APP_VALUES_FILE=str(root / "values.yaml"),
                    EVA_APP_EFFECTIVE_VALUES_FILE=str(root / "effective.yaml"),
-                   EVA_APP_HANDOFF_FILE=str(receipt_path), EVA_APP_USE_CHART_VERSION="1",
+                   EVA_APP_ARGOCD_HANDOFF_B64=(encode_receipt(receipt) if encoded is None else encoded),
+                   EVA_APP_USE_CHART_VERSION="1",
                    EVA_APP_REPOSITORY_MODE=mode, EVA_APP_HELM_SET_JSON="[]", EVA_APP_SITE_ID="site-a")
+        env.pop("EVA_APP_HANDOFF_FILE", None)
+        # Only explicit fallback-attack cases create a target-local receipt.
+        # Ordinary assessments have no receipt file anywhere in the fixture.
+        if target_receipt is not None:
+            target_path = root / "target-handoff.yaml"
+            target_path.write_text(yaml.safe_dump(target_receipt))
+            env["EVA_APP_HANDOFF_FILE"] = str(target_path)
         env.pop("EVA_APP_TLS_JOB_ENABLED", None)
         if enabled is not None:
             env["EVA_APP_TLS_JOB_ENABLED"] = enabled
-        result = subprocess.run(["bash", "-c", reconcile_shell], env=env, text=True,
+        shell = internal_shell if assessment == "internal" else reconcile_shell
+        expected = "preserve_internal_service=true" if assessment == "internal" else "take_ownership=true"
+        result = subprocess.run(["bash", "-c", shell], env=env, text=True,
                                 capture_output=True, check=False)
         output = result.stdout + result.stderr
         if error is None:
-            if result.returncode != 0 or "take_ownership=true" not in result.stdout:
+            if result.returncode != 0 or expected not in result.stdout:
                 raise SystemExit(f"[ERROR] {name}: expected verified reconciliation\n{output}")
         elif result.returncode == 0 or error not in output:
             raise SystemExit(f"[ERROR] {name}: expected rejection containing {error!r}\n{output}")
-        commands = (root / "commands.log").read_text()
-        if re.search(r"kubectl (delete|patch|apply)|helm upgrade", commands):
-            raise SystemExit(f"[ERROR] {name}: assessment mutated cluster state")
+        assert_read_only(root / "commands.log", name)
     print(f"[OK] App assessment: {name}")
 
 assess("deployed TLS generation disabled")
@@ -286,6 +380,271 @@ ecr = resource("Job", "eva-app-ecr-job-once", "batch/v1")
 assess("repository ECR cleanup contract preserved", old=[*stored, ecr], live=[*stored, ecr], mode="remote_repository")
 assess("repository ECR-only cleanup preserved", old=[*stored, ecr], live=[ecr], mode="remote_repository")
 assess("local repository ECR cleanup contract preserved", old=[*stored, ecr], live=[*stored, ecr], mode="local_repository")
+
+legacy_service = copy.deepcopy(internal_service)
+for key in ("meta.helm.sh/release-name", "meta.helm.sh/release-namespace"):
+    legacy_service["metadata"]["annotations"].pop(key)
+legacy_service["metadata"]["labels"] = {}
+assess("unowned legacy internal Service uses controller receipt", assessment="internal",
+    status=None, old=[], live=[legacy_service])
+assess("unowned legacy internal Service requires controller receipt", assessment="internal",
+    status=None, old=[], live=[legacy_service], receipt=None,
+    error="requires an Argo CD handoff receipt")
+current_service = copy.deepcopy(internal_service)
+current_service["metadata"]["annotations"].pop("argocd.argoproj.io/tracking-id")
+assess("current Helm internal Service without Argo tracking needs no receipt", assessment="internal",
+    old=[current_service], live=[current_service], receipt=None)
+
+for assessment, missing_error, site_error in (
+    ("reconcile", "require a verified Argo CD handoff receipt", "Git-backed EVA App identity contract"),
+    ("internal", "requires an Argo CD handoff receipt", "invalid Argo CD handoff receipt"),
+):
+    assess(assessment + " controller content without receipt file", assessment=assessment)
+    assess(assessment + " missing receipt", assessment=assessment, receipt=None, error=missing_error)
+    assess(assessment + " wrong site", assessment=assessment,
+           receipt={**valid_receipt, "site_id": "other"}, error=site_error)
+    for name, encoded in (
+        ("malformed base64", "not-base64!"),
+        ("non-strict base64", encode_receipt(valid_receipt) + "!"),
+        ("malformed YAML", encode_receipt("site_id: [")),
+        ("non-mapping YAML", encode_receipt("[]")),
+    ):
+        # Error wording may differ between decode/YAML failures. Both actual
+        # shells must fail closed, not report a successful assessment.
+        assess(assessment + " " + name, assessment=assessment, encoded=encoded, error="")
+    tracked = copy.deepcopy([internal_service] if assessment == "internal" else stored)
+    tracked[0]["metadata"]["annotations"]["argocd.argoproj.io/tracking-id"] = (
+        "other:/Service:eva-app/eva-app-internal"
+    )
+    assess(assessment + " wrong tracking", assessment=assessment, live=tracked,
+           error="tracking identity mismatch")
+    assess(assessment + " invalid commit", assessment=assessment,
+           receipt={**valid_receipt, "registration_commit": "A" * 40},
+           error="registration commit" if assessment == "internal" else "Git-backed EVA App identity contract")
+    assess(assessment + " hostile target file cannot override controller content",
+           assessment=assessment, target_receipt={**valid_receipt, "site_id": "other"})
+    assess(assessment + " target file cannot replace missing controller receipt",
+           assessment=assessment, receipt=None, target_receipt=valid_receipt, error=missing_error)
+
+# Exercise the real delegation/register/environment boundary, not a hand-built
+# shell environment. Local target aliases deliberately share a filesystem: once
+# the controller snapshot is removed, even that shared path cannot mask a target
+# file read. Distinct sites/clusters also expose cross-host register leakage.
+receipt_task_names = (
+    "Check Argo CD handoff receipt on control node",
+    "Read Argo CD handoff receipt on control node",
+)
+receipt_tasks = [find_task(main_tasks, name) for name in receipt_task_names]
+for task, name, module, argument, register in zip(
+    receipt_tasks,
+    receipt_task_names,
+    ("ansible.builtin.stat", "ansible.builtin.slurp"),
+    ("path", "src"),
+    ("eva_app_argocd_handoff_status", "eva_app_argocd_handoff_raw"),
+):
+    if task is None:
+        raise SystemExit("[ERROR] missing production controller receipt task: " + name)
+    conditions = task.get("when", [])
+    conditions = [conditions] if isinstance(conditions, str) else conditions
+    if (
+        task.get(module, {}).get(argument) != "{{ eva_app_argocd_handoff_path }}"
+        or task.get("delegate_to") != "localhost"
+        or task.get("become") is not True
+        or task.get("no_log") is not True
+        or task.get("register") != register
+        or not any("not" in str(condition) and "ansible_check_mode" in str(condition)
+                   for condition in conditions)
+        or (module == "ansible.builtin.slurp" and not any(
+            "eva_app_argocd_handoff_status.stat.exists" in str(condition)
+            for condition in conditions
+        ))
+    ):
+        raise SystemExit("[ERROR] unsafe production controller receipt task: " + name)
+main_names = [task.get("name") for task in main_tasks if isinstance(task, dict)]
+if not (
+    main_names.index(receipt_task_names[0])
+    < main_names.index(receipt_task_names[1])
+    < main_names.index(internal_task["name"])
+):
+    raise SystemExit("[ERROR] controller receipt must be read before internal Service assessment")
+
+ansible_playbook = shutil.which("ansible-playbook")
+if ansible_playbook is None:
+    raise SystemExit("[ERROR] ansible-playbook is required for controller receipt boundary tests")
+
+with tempfile.TemporaryDirectory(prefix="eva-app-receipt-boundary-") as directory:
+    root = Path(directory)
+    install_mock_cli(root / "bin")
+    hosts = {}
+    aliases = ("receipt-target-a", "receipt-target-b")
+    for suffix, alias in zip(("a", "b"), aliases):
+        host_root = root / alias
+        controller = root / "controller" / alias / "argocd-handoff.yaml"
+        controller.parent.mkdir(parents=True)
+        host_root.mkdir()
+        target = host_root / "target-handoff.yaml"
+        receipt = {
+            **valid_receipt,
+            "site_id": "site-" + suffix,
+            "cluster_name": "cluster-" + suffix,
+            "applications": ["cluster-" + suffix + "-eva-app", "cluster-" + suffix + "-eva-agent"],
+            "registration_manifest": "registration/clusters/cluster-" + suffix + ".yaml",
+            "registration_commit": suffix * 40,
+        }
+        controller.write_text(yaml.safe_dump(receipt))
+        controller.chmod(0o600)
+        target.write_text(yaml.safe_dump({**receipt, "site_id": "hostile-target"}))
+        resources = copy.deepcopy([deployment, *tls_helpers, internal_service])
+        for item in resources:
+            annotations = item["metadata"]["annotations"]
+            annotations["argocd.argoproj.io/tracking-id"] = annotations[
+                "argocd.argoproj.io/tracking-id"
+            ].replace("cluster-a-eva-app:", "cluster-" + suffix + "-eva-app:", 1)
+        fixture = host_root / "fixture.json"
+        fixture.write_text(json.dumps({
+            "status": "deployed",
+            "stored": resources,
+            "live": resources,
+            "rendered": [resources[0], resources[-1]],
+            "scan_extra": [],
+        }))
+        hosts[alias] = {
+            "ansible_connection": "local",
+            "ansible_python_interpreter": sys.executable,
+            "ansible_remote_tmp": str(host_root / "ansible-tmp"),
+            "eva_site_id": receipt["site_id"],
+            "eva_app_argocd_handoff_path": str(controller),
+            "eva_app_workdir": str(host_root),
+            "eva_app_effective_values_dest": str(host_root / "effective.yaml"),
+            "fixture_expected_receipt": encode_receipt(receipt),
+            "fixture_json": str(fixture),
+            "fixture_log": str(host_root / "commands.log"),
+            "fixture_target_receipt": str(target),
+        }
+    inventory = root / "inventory.yaml"
+    inventory.write_text(yaml.safe_dump({"all": {"children": {
+        "receipt_targets": {"hosts": hosts},
+        "receipt_controller": {"hosts": {"localhost": {
+            "ansible_connection": "local", "ansible_python_interpreter": sys.executable,
+        }}},
+    }}}))
+
+    # Preserve all production task settings (especially delegate_to, become,
+    # no_log, register, when and environment). Only expected rejection copies
+    # change failed_when so the play can assert their exit status and message.
+    internal_rejected = copy.deepcopy(internal_task)
+    reconcile_rejected = copy.deepcopy(reconcile_task)
+    internal_rejected["failed_when"] = False
+    reconcile_rejected["failed_when"] = False
+    fixture_tasks = [
+        *copy.deepcopy(receipt_tasks),
+        {"name": "Assert delegated results belong to each target alias",
+         "no_log": True,
+         "ansible.builtin.assert": {"that": [
+             "eva_app_argocd_handoff_status.stat.exists | bool",
+             "eva_app_argocd_handoff_raw.content == fixture_expected_receipt",
+             "hostvars[inventory_hostname].eva_app_argocd_handoff_raw.content == fixture_expected_receipt",
+             "hostvars['localhost'].eva_app_argocd_handoff_raw is not defined",
+             "hostvars['receipt-target-a'].eva_app_argocd_handoff_raw.content != hostvars['receipt-target-b'].eva_app_argocd_handoff_raw.content",
+         ]}},
+        {"name": "Remove controller receipt after actual delegated slurp",
+         "ansible.builtin.file": {"path": "{{ eva_app_argocd_handoff_path }}", "state": "absent"},
+         "delegate_to": "localhost", "become": False},
+        {"name": "Probe deleted receipt path from target",
+         "ansible.builtin.stat": {"path": "{{ eva_app_argocd_handoff_path }}"},
+         "register": "fixture_target_probe"},
+        {"name": "Assert target cannot read the snapshotted receipt file",
+         "no_log": True,
+         "ansible.builtin.assert": {"that": [
+             "not fixture_target_probe.stat.exists",
+             "hostvars[inventory_hostname].eva_app_argocd_handoff_raw.content == fixture_expected_receipt",
+         ]}},
+        copy.deepcopy(internal_task),
+        copy.deepcopy(reconcile_task),
+        {"name": "Assert both actual target shells accept controller snapshot",
+         "ansible.builtin.assert": {"that": [
+             "eva_app_internal_service_preservation.rc == 0",
+             "'preserve_internal_service=true' in eva_app_internal_service_preservation.stdout_lines",
+             "not eva_app_internal_service_preservation.changed",
+             "eva_app_legacy_reconciliation.rc == 0",
+             "'take_ownership=true' in eva_app_legacy_reconciliation.stdout_lines",
+             "not eva_app_legacy_reconciliation.changed",
+         ]}},
+        {"name": "Make target-local fallback look valid before missing-controller assessment",
+         "no_log": True,
+         "ansible.builtin.copy": {
+             "content": "{{ fixture_expected_receipt | b64decode }}",
+             "dest": "{{ fixture_target_receipt }}", "mode": "0600",
+         }},
+        *copy.deepcopy(receipt_tasks),
+        {"name": "Assert missing controller receipt clears earlier target snapshot",
+         "ansible.builtin.assert": {"that": [
+             "not eva_app_argocd_handoff_status.stat.exists",
+             "eva_app_argocd_handoff_raw is skipped",
+             "eva_app_argocd_handoff_raw.content is not defined",
+         ]}},
+        internal_rejected,
+        reconcile_rejected,
+        {"name": "Assert target-local file cannot bypass missing controller receipt",
+         "ansible.builtin.assert": {"that": [
+             "eva_app_internal_service_preservation.rc != 0",
+             "'requires an Argo CD handoff receipt' in (eva_app_internal_service_preservation.stdout + eva_app_internal_service_preservation.stderr)",
+             "eva_app_legacy_reconciliation.rc != 0",
+             "'require a verified Argo CD handoff receipt' in (eva_app_legacy_reconciliation.stdout + eva_app_legacy_reconciliation.stderr)",
+         ]}},
+        {"name": "Report verified controller snapshot boundary",
+         "ansible.builtin.debug": {"msg": "controller snapshot boundary verified for {{ inventory_hostname }}"}},
+    ]
+    playbook = root / "playbook.yaml"
+    playbook.write_text(yaml.safe_dump([{
+        "name": "Exercise production controller receipt transfer and target assessments",
+        "hosts": "receipt_targets", "gather_facts": False, "become": False,
+        "strategy": "linear",
+        "vars": {
+            # Keep real production become:true tasks runnable without requiring
+            # sudo/root in a local fixture: controller files belong to this user.
+            "ansible_become_user": getpass.getuser(),
+            "eva_app_namespace": "eva-app", "eva_app_name": "eva-app",
+            "eva_app_kubeconfig": str(root / "unused-kubeconfig"),
+            "eva_app_chart_source": "eva-app/eva-app", "eva_app_chart_version": "3.3.0-beta.3",
+            "eva_app_tls_job_enabled": False, "repository_mode": "online_repository",
+            "eva_cli_helm_set": [], "eva_cli_chart_path": "",
+            "eva_app_traefik_args": "", "eva_app_traefik_env": {},
+        },
+        "environment": {
+            "PATH": str(root / "bin") + os.pathsep + str(Path(sys.executable).parent)
+                    + os.pathsep + os.environ["PATH"],
+            "ASSESSMENT_FIXTURE": "{{ fixture_json }}", "ASSESSMENT_LOG": "{{ fixture_log }}",
+            # Deliberately injected legacy input must be ignored, never read.
+            "EVA_APP_HANDOFF_FILE": "{{ fixture_target_receipt }}",
+        },
+        "tasks": fixture_tasks,
+    }], sort_keys=False))
+    config = root / "ansible.cfg"
+    config.write_text("[defaults]\nretry_files_enabled = False\nstdout_callback = default\n")
+    env = dict(os.environ, ANSIBLE_CONFIG=str(config), ANSIBLE_NOCOLOR="1",
+               ANSIBLE_STDOUT_CALLBACK="default", ANSIBLE_BECOME_ALLOW_SAME_USER="False")
+    env.pop("EVA_APP_HANDOFF_FILE", None)
+    env.pop("EVA_APP_ARGOCD_HANDOFF_B64", None)
+    result = subprocess.run(
+        [ansible_playbook, "-i", str(inventory), str(playbook)],
+        env=env, text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0 or result.stdout.count("controller snapshot boundary verified for ") != len(aliases):
+        raise SystemExit(
+            "[ERROR] actual Ansible controller receipt boundary fixture failed\n"
+            + result.stdout + result.stderr
+        )
+    for alias in aliases:
+        commands = assert_read_only(Path(hosts[alias]["fixture_log"]), alias)
+        if not (
+            any(command.startswith("kubectl get service eva-app-internal -n eva-app") for command in commands)
+            and any(command.startswith("helm template eva-app") for command in commands)
+        ):
+            raise SystemExit("[ERROR] both production shells were not exercised for " + alias)
+        if Path(hosts[alias]["eva_app_argocd_handoff_path"]).exists():
+            raise SystemExit("[ERROR] controller receipt survived boundary fixture for " + alias)
+    print("[OK] actual delegated stat/slurp: two isolated aliases, deleted controller receipts, no target fallback, read-only CLIs")
 PY
 
 for required in \

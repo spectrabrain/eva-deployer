@@ -16,16 +16,16 @@
 
 - name: Set EVA Agent dependency defaults
   ansible.builtin.set_fact:
-    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_mode: "{{ repository_mode | default('online_repository') }}"
     repository_project: "{{ repository_project | default('eva') }}"
     repository_registry: >-
       {{
         repository_registry
-        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | default(harbor_registry | default(((repository_mode | default('online_repository')) == 'local_repository') | ternary('localhost:32080', '')))
         | regex_replace('^https?://', '')
         | regex_replace('/+$', '')
       }}
-    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}"
+    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
     eva_agent_namespace: "{{ eva_agent_namespace | default('eva-agent') }}"
     eva_agent_deploy_version: "{{ eva_agent_deploy_version | mandatory }}"
     eva_agent_workdir: "{{ eva_agent_workdir | default('/opt/eva-agent/' ~ eva_agent_deploy_version) }}"
@@ -33,13 +33,13 @@
     eva_agent_vllm_deploy_values_dir: "{{ eva_agent_vllm_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/vllm') }}"
     eva_agent_kubeconfig: "{{ eva_agent_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
     eva_agent_aws_profile: "{{ eva_agent_aws_profile | default('default') }}"
-    eva_agent_sync_aws_credentials: "{{ eva_agent_sync_aws_credentials | default((not ((airgap_mode | default(false) | bool) or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']))) | ternary(1, 0)) }}"
+    eva_agent_sync_aws_credentials: "{{ eva_agent_sync_aws_credentials | default((not ((airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']))) | ternary(1, 0)) }}"
     eva_agent_qdrant_chart_version: "{{ eva_agent_qdrant_chart_version | default(qdrant_chart_version) | mandatory }}"
     eva_agent_qdrant_values_file: >-
       {{
         eva_agent_qdrant_values_file
         | default(
-            ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
+            ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
             | ternary('values-k3s.harbor.yaml', 'values-k3s.s3.yaml')
           )
       }}
@@ -52,7 +52,7 @@
               (
                 eva_agent_qdrant_values_file
                 | default(
-                    ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository'])
+                    ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
                     | ternary('values-k3s.harbor.yaml', 'values-k3s.s3.yaml')
                   )
               ) == 'values-k3s.harbor.yaml'
@@ -113,7 +113,7 @@
 
 # EVA Agent 3.2.0 split its Release values by image source; the same rule is
 # defined for preparation in scripts/lib/load_versions.sh. Repository targets
-# deploy the Harbor variant, Cloud targets the upstream-source variant.
+# deploy the Harbor variant, online targets the upstream-source variant.
 - name: Resolve EVA Agent Release values layout
   ansible.builtin.set_fact:
     eva_agent_values_layout: >-
@@ -158,10 +158,10 @@
 - name: Validate repository mode for EVA Agent dependencies
   ansible.builtin.assert:
     that:
-      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
-      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+      - repository_mode in ['online_repository', 'cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode in ['online_repository', 'cloud_repository'] or repository_registry | length > 0
     fail_msg: >-
-      repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      repository_mode은 online_repository, remote_repository, local_repository 중 하나여야 합니다 (cloud_repository는 호환 입력).
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
   tags:
     - eva_agent_dependency_defaults
@@ -174,7 +174,7 @@
         (eva_agent_qdrant_values_file == 'values-k3s.s3.yaml' and eva_agent_qdrant_snapshot_source == 'local_pv')
         or (eva_agent_qdrant_values_file == 'values-k3s.harbor.yaml' and eva_agent_qdrant_snapshot_source == 'harbor')
     fail_msg: >-
-      Cloud Qdrant uses values-k3s.s3.yaml with local_pv bootstrap snapshots.
+      Online Qdrant uses values-k3s.s3.yaml with local_pv bootstrap snapshots.
       Harbor snapshots require values-k3s.harbor.yaml with snapshot source harbor.
       Resolved values: repository_mode={{ repository_mode }},
       eva_agent_qdrant_values_file={{ eva_agent_qdrant_values_file }},
@@ -198,7 +198,7 @@
     eva_agent_qdrant_image_repository: >-
       {{
         eva_agent_qdrant_image_repository | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary('docker.io/qdrant/qdrant', repository_registry ~ '/' ~ repository_project ~ '/qdrant')
         )
       }}
@@ -206,7 +206,7 @@
     eva_agent_qdrant_chart_test_image_repository: >-
       {{
         eva_agent_qdrant_chart_test_image_repository | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary('registry.suse.com/bci/bci-base', repository_registry ~ '/' ~ repository_project ~ '/bci-base')
         )
       }}
@@ -214,7 +214,7 @@
     eva_agent_vllm_image_repository: >-
       {{
         eva_agent_vllm_image_repository | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary('vllm/vllm-openai', repository_registry ~ '/' ~ repository_project ~ '/vllm-openai')
         )
       }}
@@ -222,7 +222,7 @@
     eva_agent_vllm_router_image_repository: >-
       {{
         eva_agent_vllm_router_image_repository | default(
-          (repository_mode == 'cloud_repository')
+          (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary('lmcache/lmstack-router', repository_registry ~ '/' ~ repository_project ~ '/lmstack-router')
         )
       }}

@@ -174,7 +174,7 @@ print("[PASS] shared/separate HTTP samples explicitly disable ingress and Redis 
 cases = []
 
 
-def add_case(name, mode="cloud_repository", protocol="https", host_kind="dns", **options):
+def add_case(name, mode="online_repository", protocol="https", host_kind="dns", **options):
     layout = "shared" if host_kind == "ip" else "separate"
     substitutions = {"<PUBLIC_HOST>": "192.0.2.10", "<APP_HOST>": "app.example.test",
                      "<IAM_HOST>": "iam.example.test", "<TLS_CERT_DIRECTORY>": "/fixture/certs",
@@ -197,6 +197,8 @@ def add_case(name, mode="cloud_repository", protocol="https", host_kind="dns", *
         "eva_app_chart_version": catalog["eva_app_chart_version"],
         "eva_app_deploy_version": catalog["eva_app_deploy_version"],
         "eva_iam_admin_api_client_secret": "fixture-runtime-secret",
+        # No live Helm release: resolve the client identity from local chart defaults.
+        "eva_iam_resolved_values_result": {"stdout": yaml.safe_dump(defaults["iam"])},
         # These replace only file-discovery I/O, not value/default resolution.
         "eva_iam_values_file_stat": {"stat": {"exists": True}},
         "eva_app_values_file_status": {"stat": {"exists": True}},
@@ -235,7 +237,7 @@ def add_case(name, mode="cloud_repository", protocol="https", host_kind="dns", *
                   "values": values, "variables": variables, "options": options})
 
 
-for mode in ("cloud_repository", "remote_repository", "local_repository"):
+for mode in ("online_repository", "cloud_repository", "remote_repository", "local_repository"):
     for protocol in ("http", "https"):
         for host_kind in ("dns", "ip"):
             add_case(f"{mode}-{protocol}-{host_kind}", mode, protocol, host_kind)
@@ -266,7 +268,8 @@ fixture_tasks += tasks("iam", "Resolve eva-iam values file", "Select this host's
                        "Resolve the eva-iam chart reference to install from", "Resolve effective eva-iam NodePorts",
                        "Resolve eva-iam generated config for eva-app", "Validate repository mode for EVA IAM",
                        "Validate eva-iam chart version supports publicPort / publicUrl",
-                       "Render eva-iam k3s override values on control node")
+                       "Render eva-iam k3s override values on control node",
+                       "Resolve deployed EVA IAM App client identity")
 fixture_tasks += [caller_probe("iam"), render("Render real IAM handoff body", tmp / "handoff.j2", "{{ eva_iam_app_handoff_path }}")]
 fixture_tasks += tasks("app", "Set EVA App install defaults (on-premise)", "Validate repository mode for EVA App",
                        "Validate EVA App chart version supports values-driven images",
@@ -408,17 +411,17 @@ for case in cases:
         for component in ("app", "iam"):
             assert snapshot[f"{component}_chart_repo"] == bases[component, versions[component]]
             assert snapshot[f"{component}_kubeconfig"] == str(directory / "home/.kube/config")
-        cloud = case["mode"] == "cloud_repository"
+        online = case["mode"] in {"online_repository", "cloud_repository"}
         registry = "harbor.example.test:8443" if case["mode"] == "remote_repository" else "localhost:32080"
         app_repository = ("211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-app"
-                          if cloud else registry + "/eva/eva-app")
+                          if online else registry + "/eva/eva-app")
         assert snapshot["app_repository"] == app_repository
         account = options.get("account", "211722900905")
         assert snapshot["app_account"] == account and app_role["imagePullSecrets"]["account"] == account
         for component in ("app", "iam"):
-            expected_source = f"eva-{component}/eva-{component}" if cloud else str(directory / "cache" / f"eva-{component}" / f"eva-{component}-{versions[component]}.tgz")
+            expected_source = f"eva-{component}/eva-{component}" if online else str(directory / "cache" / f"eva-{component}" / f"eva-{component}-{versions[component]}.tgz")
             assert snapshot[f"{component}_chart_source"] == expected_source
-        assert snapshot["iam_version_arg"] == (f"--version {versions['iam']}" if cloud else "")
+        assert snapshot["iam_version_arg"] == (f"--version {versions['iam']}" if online else "")
         resources = {}
         for component in ("app", "iam"):
             arguments = ["template", f"eva-{component}", archives[component], "--namespace", f"eva-{component}"]
@@ -435,30 +438,33 @@ for case in cases:
             protocol_contract(component, resources[component], site[component], tls, ingress_enabled, create)
         app_resources, iam_resources = resources["app"], resources["iam"]
         assert named_image(app_resources, "eva-app") == app_repository + ":" + versions["app"]
-        assert named_image(app_resources, "eva-app-mysql") == ("mysql" if cloud else registry + "/eva/mysql") + ":8.0.42-bookworm"
-        assert app_effective["imagePullSecrets"]["enabled"] == cloud
-        assert app_effective["imagePullSecrets"]["create"] == cloud
+        assert named_image(app_resources, "eva-app-mysql") == ("mysql" if online else registry + "/eva/mysql") + ":8.0.42-bookworm"
+        assert app_effective["imagePullSecrets"]["enabled"] == online
+        assert app_effective["imagePullSecrets"]["create"] == online
+        assert iam_role["imagePullSecrets"]["enabled"] == online
+        assert iam_role["imagePullSecrets"]["create"] == online
+        assert app_role["image"]["pullPolicy"] == ("Always" if online else "IfNotPresent")
         app_manifest = (directory / "app-manifest.yaml").read_text()
-        if cloud:
+        if online:
             assert f"{account}.dkr.ecr.ap-northeast-2.amazonaws.com" in app_manifest, "ECR job must use selected account"
         else:
             assert not any(r["kind"] == "CronJob" for r in app_resources + iam_resources)
             for component_resources in resources.values():
                 assert all(c["image"].startswith(registry + "/eva/") for c in pod_containers(component_resources))
-        # Cloud IAM must inherit every source/tag, including appVersion fallback,
+        # Online IAM must inherit every source/tag, including appVersion fallback,
         # rather than pinning a stale product repository or image tag in the role.
         iam_images = {c["image"] for c in pod_containers(iam_resources)}
         for image_name, path in image_paths.items():
             original = nested(defaults["iam"], path)
             override = nested(iam_role, path)
             assert "tag" not in override, (image_name, "role must preserve chart tag")
-            if cloud:
-                assert "repository" not in override, (image_name, "Cloud role must preserve chart source")
+            if online:
+                assert "repository" not in override, (image_name, "Online role must preserve chart source")
             else:
                 assert override["repository"] == registry + "/eva/" + image_name
             if image_name == "kubectl" and not (tls and ingress_enabled and create):
                 continue
-            expected_repo = original["repository"] if cloud else registry + "/eva/" + image_name
+            expected_repo = original["repository"] if online else registry + "/eva/" + image_name
             assert expected_repo + ":" + str(original.get("tag") or versions["iam"]) in iam_images, image_name
         iam_config = one(iam_resources, "ConfigMap", "eva-iam")["data"]
         app_config = one(app_resources, "ConfigMap", "eva-app-env")["data"]

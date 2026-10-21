@@ -10,12 +10,12 @@ EVA는 고객마다 Network와 Security 환경이 다르므로, 하나의 설치
 
 설치자는 Repository mode에 맞는 단일 Runbook을 사용합니다.
 
-- [Cloud Repository 설치 가이드](docs/installation/cloud-repository-runbook.md)
+- [Online Repository 설치 가이드](docs/installation/online-repository-runbook.md)
 - [Remote Repository 설치 가이드](docs/installation/remote-repository-runbook.md)
 - [Local Repository 설치 가이드](docs/installation/local-repository-runbook.md)
 
 설치 입력은 원하는 위치의 private YAML 파일 하나로 작성할 수 있습니다.
-sudo 없이 `eva install configure`로 환경·Cloud Bastion·타겟별 옵션을 고르면 사용자 홈에
+sudo 없이 `eva install configure`로 환경·Online Bastion·타겟별 옵션을 고르면 사용자 홈에
 설정 틀을 만듭니다. 남은 필수 값을 채우고 `sudo eva install --config <파일> --yes`로
 실행하면 내부 Workspace는 자동 생성됩니다. 옵션/자동화용 `eva config sample`도 유지합니다. mode와 입력 규칙은
 [단일 설치 설정](docs/installation/single-file-configuration.md)을 참고합니다.
@@ -30,13 +30,18 @@ Ansible 실행 예시는 source 개발·이관 참고용이며 Remote 운영 절
 
 ### Repository 기반 배포 모드
 
-설치 시 이미지 출처는 `repository_mode`로 결정하며, 기본값은 `cloud_repository`입니다.
+사용자 모드는 `online` / `remote` / `local`입니다. Ansible의 `repository_mode`는 각각
+`online_repository` / `remote_repository` / `local_repository`이며 기본값은 `online_repository`입니다.
 
 | Repository 모드 | 적용 환경 | 설치 Image 공급 경로 |
 | --- | --- | --- |
-| `cloud_repository` | 대상 서버가 인터넷과 외부 Repository에 접근 가능 | AWS ECR, Docker Hub, S3 등 외부 Repository |
+| `online_repository` | 대상 서버가 upstream/인터넷 Registry·Repository에 직접 접근 가능 | AWS ECR, Docker Hub, S3 등 외부 Repository |
 | `remote_repository` | 대상 서버는 인터넷에 접근할 수 없지만 Main 서버에 접근 가능 | Main 서버의 Harbor |
 | `local_repository` | 외부 인터넷과 외부 Network가 모두 차단된 완전 폐쇄망 | 저장매체로 반입한 고객 내부 Harbor |
+
+`online`은 온프레미스/클라우드 제공자와 무관한 네트워크 기준입니다. Bastion만 인터넷에 연결되고
+설치 대상이 오프라인이면 `online`이 아닙니다. Main Harbor와 설치 자산을 사용하는 환경은 `remote`,
+저장매체로 반입한 Bundle과 Local Harbor를 사용하는 완전 폐쇄망은 `local`을 선택합니다.
 
 `remote_repository`는 대상 EVA 서버와 통신할 수 있고 외부 인터넷에 접근 가능한 Main 서버의 Harbor를 여러 EVA 서버가 함께 사용할 수 있어, 다수 사업장에 같은 Release를 배포할 때 사용합니다. `local_repository`는 완전 폐쇄망에서 Local Harbor에 사전 반입한 이미지를 등록한 뒤 설치하는 모드입니다.
 
@@ -94,7 +99,7 @@ sudo eva verify
 Installer는 Tool과 Release를 함께 검증한 뒤 해당 Release를 Current Release로 등록합니다. Tool,
 command link, Current Release 등록이 모두 성공해야 설치가 완료됩니다. 이후 `--release`를 생략한
 `sudo eva verify`, `sudo eva install` 및 Remote preparation 명령은 이 Current Release를 사용합니다.
-세부 설치 절차는 [Cloud Runbook](docs/installation/cloud-repository-runbook.md) 또는
+세부 설치 절차는 [Online Runbook](docs/installation/online-repository-runbook.md) 또는
 [Remote Runbook](docs/installation/remote-repository-runbook.md)을 따릅니다.
 
 Installer는 계정이나 group membership을 변경하지 않습니다. Tool, Runtime, Release는 바로 조회할 수 있고, Workspace의 Secret과 Operation 상태·로그를 다루는 명령은 `sudo eva ...`로 실행합니다. 따라서 `sudo` 권한이 있는 `eva` 또는 DevOps 계정은 재로그인 없이 바로 사용할 수 있습니다.
@@ -116,7 +121,7 @@ download 또는 Ansible 명령을 정상 절차로 실행하지 않습니다.
 
 | 모드 | 사용 환경 | 준비/Ansible 실행 위치 | 대상 서버의 이미지 출처 | 파일 이동 |
 | --- | --- | --- | --- | --- |
-| `cloud_repository` | 대상 서버가 인터넷과 AWS에 직접 접근 가능 | 대상 서버 또는 별도 control node | 외부 Registry, ECR, S3 | 불필요 |
+| `online_repository` | 대상 서버가 인터넷과 AWS에 직접 접근 가능 | 대상 서버 또는 별도 control node | 외부 Registry, ECR, S3 | 불필요 |
 | `remote_repository` | 대상 서버는 인터넷이 없지만 Main Harbor에는 연결 가능 | 인터넷 가능 Main 서버 | Main Harbor | 불필요 (Main 서버가 Ansible로 전달) |
 | `local_repository` | 대상 서버가 완전 Airgap | 인터넷 가능 준비 서버 → Airgap 서버 | Airgap 서버의 Local Harbor | USB 등 저장 매체 필요 |
 
@@ -195,7 +200,7 @@ sudo dpkg --audit
 
 위 다섯 패키지의 version이 서로 다르면, Ansible 재실행 전에 OS 패키지 상태부터 맞춰야 합니다.
 
-### 1-4. Cloud/Remote/Local 준비 서버: AWS 인증
+### 1-4. Online/Remote/Local 준비 서버: AWS 인증
 
 현재 저장소에는 AWS 인증 입력이 두 흐름으로 나뉘어 있습니다. 이 둘은 목적이 다르며, 서로를 자동으로 대체하지 않습니다.
 
@@ -204,7 +209,7 @@ sudo dpkg --audit
 현재 구현 기준으로 `awscli` role은 아래처럼 동작합니다.
 
 - 호출 playbook: `src/solution/playbooks/site_eva_config.yaml`
-- 실행 조건: `repository_mode=cloud_repository` 이고 `airgap_mode=false` 인 경우만 실행
+- 실행 조건: `repository_mode=online_repository` 이고 `airgap_mode=false` 인 경우만 실행
 - 읽는 위치: control node의 `<selected-workspace>/credentials/aws_key.ini`
 - 명시적 override: `-e aws_key_file=/absolute/path/aws_key.ini`
 - 읽는 주체: Ansible control node의 `lookup('ansible.builtin.file', ...)`
@@ -266,7 +271,7 @@ Migration note:
 
 #### D. Repository mode별 AWS credential 사용 위치
 
-`cloud_repository`
+`online_repository`
 
 - 대상 서버가 AWS ECR, S3 등에 직접 접근해야 할 수 있습니다.
 - 현재 구현에서는 `site_eva_config.yaml` 실행 시 control node의 `<selected-workspace>/credentials/aws_key.ini`를 기본값으로 읽어 target user의 `~/.aws`를 구성합니다.
@@ -294,13 +299,13 @@ Migration note:
 - 현재 Ansible `awscli` role은 credential block에 `no_log: true`를 사용합니다.
 - 형식 참고용 sample은 `workspace/credentials/aws_key.ini.sample`만 사용하고, sample에는 실제 Secret을 넣지 않습니다.
 
-### 1-5. cloud_repository: 대상 서버가 외부 Registry를 직접 사용
+### 1-5. online_repository: 대상 서버가 외부 Registry를 직접 사용
 
 대상 서버가 인터넷/ECR/Docker Hub/S3에 직접 접근 가능한 모드입니다. 별도 Harbor 준비가 필요 없습니다.
 
 1. 대상 서버(또는 대상 서버에 접속 가능한 control node)에 Python/Ansible을 준비합니다.
 2. 대상 서버가 AWS ECR, Docker Hub/외부 Registry, S3에 연결되는지 확인합니다.
-3. 이후 설치 단계에서 `-e repository_mode=cloud_repository`를 사용합니다.
+3. 이후 설치 단계에서 `-e repository_mode=online_repository`를 사용합니다.
 
 #### 대상 서버 또는 control node: Ansible 준비
 
@@ -760,7 +765,7 @@ kubectl logs -n eva-agent statefulset/eva-agent-qdrant -c qdrant-snapshot-sync
 
 ## 2. Inventory
 
-cloud_repository 모드 설치:
+online_repository 모드 설치:
 
 inventory.ini
 ```ini
@@ -768,7 +773,7 @@ inventory.ini
 localhost ansible_connection=local ansible_become_password=<sudo 비밀번호>
 
 [all:vars]
-repository_mode=cloud_repository
+repository_mode=online_repository
 ```
 
 aws_key.ini
@@ -868,7 +873,7 @@ ls -l ./out/work/config/<site>/<target-ip>/precondition.yaml
 
 인프라는 k3s, kubectl, helm, NFS CSI, NVIDIA runtime/device-plugin 등을 구성합니다.
 
-### [cloud_repository]
+### [online_repository]
 
 대상 서버가 인터넷/ECR/Docker Hub에 접근 가능한 경우입니다.
 
@@ -877,12 +882,12 @@ mkdir -p out/work/logs/$EVA_SITE_ID/infra
 
 ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml --check \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-check.log
 
 ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/infra/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_infra.yaml \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/infra/ansible-run.log
 ```
 
@@ -958,14 +963,14 @@ MIG에서 `display_mode_selector`가 필요하면 인터넷 가능 환경에서 
 AWS_PROFILE=default AWS_REGION=ap-northeast-2 ./scripts/download/download_display_mode_selector.sh
 ```
 
-### [cloud_repository]
+### [online_repository]
 
 ```bash
 mkdir -p out/work/logs/$EVA_SITE_ID/gpu-mig
 
 ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/infra/playbooks/site_gpu_mig.yaml \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/gpu-mig/ansible-run.log
 ```
 
@@ -1006,14 +1011,14 @@ nvidia-smi
 
 `src/solution/playbooks/site_eva_config.yaml`은 EVA 배포에 필요한 설정 파일을 생성합니다. 생성된 값은 `out/work/config/<site>/<target>/eva.yaml`에 저장됩니다.
 
-### [cloud_repository]
+### [online_repository]
 
 ```bash
 mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
 ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_config.yaml \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-config.log
 ```
 
@@ -1081,14 +1086,14 @@ cp workspace/site-values/iam.yaml.sample workspace/site-values/iam.yaml
 
 App과 같은 host를 사용할 때는 IAM ingress path를 `/iam`처럼 App의 path와 겹치지 않게 지정합니다. EVA App이 IAM Redis를 사용하도록 구성하는 경우에는 Redis external/TLS/NodePort도 함께 켜야 합니다.
 
-### [cloud_repository]
+### [online_repository]
 
 ```bash
 mkdir -p out/work/logs/$EVA_SITE_ID/iam
 
 ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/iam/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva_iam.yaml \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -e eva_iam_host=iam.customer.example \
   -e eva_iam_ingress_path=/iam \
   -e eva_iam_redis_external_enabled=true \
@@ -1188,7 +1193,7 @@ site-a-localhost:
 ```
 
 `product_code`는 발급된 라이선스에 따라 `eva-dev` 또는 `eva-prod`를 사용하며 해당 제품의 API/shared key와 일치시킵니다.
-`activation_mode`의 기본값은 Cloud `online`, Remote/Local `offline`입니다. 제품 코드로 활성화 방식을 고정하지 않습니다.
+`activation_mode`의 기본값은 Online `online`, Remote/Local `offline`입니다. Repository mode와는 별개이며 제품 코드로 활성화 방식을 고정하지 않습니다.
 라이선스는 사전에 결정하므로 별도 연결 질문 없이 기본값을 제공하며, 온라인 라이선스이면 Values에서 `online`으로 변경합니다.
 `online`은 App에서 라이선스 서버로 연결할 수 있어야 합니다.
 
@@ -1208,7 +1213,7 @@ out/work/rendered/<site>/<target>/
 
 `vllm/values-override-from-config.yaml`은 `out/work/config/<site>/<target>/eva.yaml`에 vLLM override 값이 있을 때만 생성됩니다.
 
-### [cloud_repository]
+### [online_repository]
 
 ## 1. IP 기반 TLSStore 자동 구성
 
@@ -1235,7 +1240,7 @@ eva_iam_app_redirect_uris: eva-app에서 사용할 https url + /*
 
 ```bash
 ansible-playbook -i 'localhost,' -c local site_eva_iam.yaml -K \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -e eva_iam_host=10.158.2.185 \
   -e eva_iam_node_user=eva \
   -e eva_iam_ingress_path=/iam \
@@ -1251,7 +1256,7 @@ ansible-playbook -i 'localhost,' -c local site_eva_iam.yaml -K \
 
 ```bash
 ansible-playbook -i 'localhost,' -c local site_eva_app.yaml -K \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -e repository_registry=localhost:32080 \
   -e eva_app_backend_host=10.158.2.185 \
   -e eva_app_backend_secure=true
@@ -1311,7 +1316,7 @@ mkdir -p out/work/logs/$EVA_SITE_ID/eva
 
 ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/eva/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_eva.yaml \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/eva/ansible-run-eva.log
 ```
 kustomize 패키지 설치 시 에러 발생하는 경우, 수동 설치 후 명령어 실행 sudo ln -s /snap/bin/kustomize /usr/local/bin/kustomize 다음 재설치
@@ -1374,14 +1379,14 @@ kubectl get svc -A
 
 n8n은 EVA 설치와 분리해서 별도 playbook으로 실행합니다.
 
-### [cloud_repository]
+### [online_repository]
 
 ```bash
 mkdir -p out/work/logs/$EVA_SITE_ID/n8n
 
 ANSIBLE_LOG_PATH=out/work/logs/$EVA_SITE_ID/n8n/ansible-internal.log \
 .venv/bin/ansible-playbook -i workspace/inventory/inventory.ini src/solution/playbooks/site_n8n.yaml \
-  -e repository_mode=cloud_repository \
+  -e repository_mode=online_repository \
   -vvv 2>&1 | tee out/work/logs/$EVA_SITE_ID/n8n/ansible-run.log
 ```
 

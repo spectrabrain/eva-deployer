@@ -10,7 +10,7 @@
     gpu_mig_mig_selector_local_base_dir: "{{ gpu_mig_mig_selector_local_base_dir | default(eva_cache_root ~ '/display_mode_selector/mode_selector_1.72.0') }}"
     gpu_mig_k8s_device_plugin_image: >-
       {{ gpu_mig_k8s_device_plugin_image | default(
-        ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+        ((repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository'])
         | ternary(
             'nvcr.io/nvidia/k8s-device-plugin:v0.18.0',
             (repository_registry | default('localhost:32080')) ~ '/' ~
@@ -19,7 +19,7 @@
       ) }}
     gpu_mig_cuda_validation_image: >-
       {{ gpu_mig_cuda_validation_image | default(
-        ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+        ((repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository'])
         | ternary(
             'nvcr.io/nvidia/cuda:12.5.0-base-ubuntu22.04',
             (repository_registry | default('localhost:32080')) ~ '/' ~

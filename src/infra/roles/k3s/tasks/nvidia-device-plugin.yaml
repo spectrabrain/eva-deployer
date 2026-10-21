@@ -10,12 +10,12 @@
 
 - name: Resolve infra image repositories
   ansible.builtin.set_fact:
-    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_mode: "{{ repository_mode | default('online_repository') }}"
     repository_project: "{{ repository_project | default('eva') }}"
     repository_registry: >-
       {{
         repository_registry
-        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | default(harbor_registry | default(((repository_mode | default('online_repository')) == 'local_repository') | ternary('localhost:32080', '')))
         | regex_replace('^https?://', '')
         | regex_replace('/+$', '')
       }}
@@ -26,14 +26,14 @@
     nvidia_device_plugin_image: >-
       {{
         nvidia_device_plugin_image | default(
-          ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+          ((repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository'])
           | ternary('nvcr.io/nvidia/k8s-device-plugin:v0.18.0', repository_registry ~ '/' ~ repository_project ~ '/k8s-device-plugin:v0.18.0')
         )
       }}
     nvidia_cuda_sample_image: >-
       {{
         nvidia_cuda_sample_image | default(
-          ((repository_mode | default('cloud_repository')) == 'cloud_repository')
+          ((repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository'])
           | ternary('nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0', repository_registry ~ '/' ~ repository_project ~ '/cuda-sample:vectoradd-cuda12.5.0')
         )
       }}
@@ -42,10 +42,10 @@
 - name: Validate infra repository mode
   ansible.builtin.assert:
     that:
-      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
-      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+      - repository_mode in ['online_repository', 'cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode in ['online_repository', 'cloud_repository'] or repository_registry | length > 0
     fail_msg: >-
-      repository_mode은 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      repository_mode은 online_repository, remote_repository, local_repository 중 하나여야 합니다 (cloud_repository는 호환 입력).
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
 
 - name: Set NVIDIA device plugin manifest paths

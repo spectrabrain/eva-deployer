@@ -1,7 +1,7 @@
 # App DB 보존·라이선스 identity 정합화와 이전 사용자 백업
 
 **Deployer의 App 설치 단계**에서 적용된다. Helm 직접 설치에는 적용되지 않는다.
-Cloud/Remote/Local 모두 같은 절차이며 인터넷 연결은 필요 없다.
+Online/Remote/Local 모두 같은 절차이며 인터넷 연결은 필요 없다.
 DB 복사, 라이선스 identity 정합화, 제품의 Alembic schema upgrade는 서로 다른 단계다.
 **정상적인 `eva_v3_0`이 이미 있으면 삭제하거나 이전 DB로 덮어쓰지 않고 그대로 사용한다.**
 

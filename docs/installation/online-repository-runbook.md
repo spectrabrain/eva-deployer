@@ -1,7 +1,9 @@
-# EVA Cloud 설치 가이드
+# EVA Online 설치 가이드
 
 이 가이드는 지원되는 NVIDIA GPU가 장착된 Ubuntu 24.04 `linux/amd64` 서버에
 EVA를 설치하는 절차입니다. 현재 서버에 설치하거나 별도 Bastion에서 여러 타겟에 각각 설치할 수 있습니다.
+`online`은 설치 대상이 upstream/인터넷 Registry·Repository에 직접 접근하는 모드이며,
+온프레미스/클라우드 제공자와 무관합니다. Ansible 모드는 `online_repository`입니다.
 일반 전체 설치는 Infra, Config, IAM, Agent, Vision, App을
 하나의 `eva install` 작업으로 설치합니다. Docker, k3s, NVIDIA runtime, 호스트 영속
 데이터를 변경하므로 먼저 작업 가능 시간과 백업 정책을 확인합니다.
@@ -13,7 +15,7 @@ EVA를 설치하는 절차입니다. 현재 서버에 설치하거나 별도 Bas
 | OS 및 플랫폼 | Ubuntu 24.04, `linux/amd64` |
 | 가속기 | 지원되는 NVIDIA GPU, 설치된 NVIDIA driver, `nvidia-smi` |
 | 컨테이너 플랫폼 | Docker, k3s, NVIDIA Container Toolkit/CDI, NVIDIA Device Plugin |
-| 네트워크 | Cloud Repository, GitHub, Docker Hub, AWS/ECR/S3 및 필요한 HTTPS endpoint |
+| 네트워크 | upstream/인터넷 Repository, GitHub, Docker Hub, AWS/ECR/S3 및 필요한 HTTPS endpoint |
 | 사이트 입력 | 대상 호스트의 AWS credential 및 TLS certificate/key |
 | 권한 | `sudo eva ...`를 실행할 수 있는 사용자 |
 
@@ -50,8 +52,9 @@ EVA Release가 바뀌었다는 이유로 bootstrap을 반복하지 않습니다.
 시작하기 전에 Managed Runtime을 검증합니다.
 
 Bastion 설치는 여기까지를 **현재 Bastion/controller**에서 수행합니다. 각 타겟에도
-Cloud Repository/ECR/S3 접근이 필요하며 Bastion만 인터넷에 연결된 폐쇄망 구성은 Cloud가 아닙니다.
-그 환경에는 Remote Repository Runbook을 사용합니다.
+upstream/인터넷 Repository·ECR·S3 접근이 필요하며 Bastion만 인터넷에 연결된 폐쇄망 구성은 Online이 아닙니다.
+Main Harbor와 설치 자산을 사용하는 환경은 [Remote Repository Runbook](remote-repository-runbook.md),
+저장매체로 반입한 Bundle과 Local Harbor를 사용하는 완전 폐쇄망은 [Local Repository Runbook](local-repository-runbook.md)을 사용합니다.
 
 ## 4. GPU 사전 조건 확인
 
@@ -77,7 +80,7 @@ resource type이 여러 개면 임의로 선택하지 않고 설치를 중단합
 eva install configure
 ```
 
-1. 설치환경에서 **cloud**를 선택합니다.
+1. 설치환경에서 **online**을 선택합니다.
 2. **현재 서버 설치** 또는 **Bastion/controller**를 선택합니다.
 3. Bastion이면 닉네임·IP·SSH 계정·숨김 비밀번호로 타겟 한 대를 등록합니다.
   sudo도 같은 비밀번호를 사용하며 private key는 이 wizard에서 받지 않습니다.
@@ -90,7 +93,7 @@ eva install configure
 타겟마다 선택은 독립적이며 Infra-only 타겟에는 Solution Values를 넣지 않습니다.
 타겟별 `components`에 따라 실제 Ansible 단계의 대상도 제한합니다. 같은 설치 옵션을 재사용해도
 연결 비밀번호와 서비스 주소·Secret은 복사하지 않습니다. 여러 타겟은 하나의 cluster를 만드는 기능이 아닙니다.
-기존 단일 서버용 `eva config sample --mode cloud`와 비대화형 옵션도 유지합니다.
+기존 단일 서버용 `eva config sample --mode online`과 비대화형 옵션도 유지합니다.
 
 현재 소스의 버전은 **App `3.3.0-beta.3` / IAM `3.3.0-beta.1`**입니다. 두 Chart는
 SpectraBrain 게시 저장소에서 가져오며 App ECR 이미지·인증 계정도 새 공급원으로 맞춥니다.
@@ -98,7 +101,7 @@ SpectraBrain 게시 저장소에서 가져오며 App ECR 이미지·인증 계�
 이미 설치된 Tool은 소스 수정만으로 갱신되지 않습니다. Release의 버전 catalog도 확인합니다.
 두 명령 모두 `--output FILE`로 위치를 바꿀 수 있고 새 파일만 `0600`으로 만들며 덮어쓰지 않습니다.
 
-**첫 단일 서버 Cloud 실설치 테스트**는 `cloud → 현재 서버 → Infra + Solution`으로 시작하고,
+**첫 단일 서버 Online 실설치 테스트**는 `online → 현재 서버 → Infra + Solution`으로 시작하고,
 원하는 HTTP/HTTPS와 주소·IAM·Agent/Vision 구성을 선택합니다. 실제 설치 E2E는 아직 별도 검증 대상입니다.
 
 - **HTTP:** 격리된 테스트에만 사용합니다. 생성된 App/IAM `ingress.tls.enabled/create: false`,
@@ -124,7 +127,7 @@ schema_version: v1
 site:
   id: customer-a
 repository:
-  mode: cloud
+  mode: online
   project: eva
 components:
   infra: true
@@ -190,7 +193,7 @@ targets:
               password: eva-redis-pass # IAM Redis와 동일하게 맞추고 변경
               url: "" # 선택 override; 비우면 App이 SSO 변수로 조합
           license:
-            activation_mode: online # Cloud 기본값. 사전 결정한 라이선스 방식에 맞게 변경합니다.
+            activation_mode: online # Online 기본값. 사전 결정한 라이선스 방식에 맞게 변경합니다.
             product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
             api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key. ex) demo-license-api-key (예시 전용)
             shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key. ex) demo-license-shared-key (예시 전용)
@@ -369,4 +372,4 @@ sudo eva retry --yes
 
 CPU-only 서버는 제한된 테스트를 위한 예외 환경입니다. 단일 설정의 `components`에서 `agent`와 `vision`을
 `false`로 설정하면 Infra와 Config가 NVIDIA runtime/CDI 작업을 건너뜁니다. 이 가이드의 기본
-Cloud 운영 환경은 아닙니다.
+Online 운영 환경은 아닙니다.

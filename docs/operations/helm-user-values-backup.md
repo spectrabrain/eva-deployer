@@ -18,7 +18,7 @@ App DB 이전·로컬 사용자 CSV 보존은 [App DB 마이그레이션](app-da
 
 선택한 설치 role에서 해당 release의 reconciliation, scale-down, Helm upgrade보다 먼저 실행한다.
 App/IAM/Vision의 사용자 지정 release 이름, 각 role의 namespace 및 kubeconfig를 따른다.
-Cloud/Remote/Local 공통 동작이며, Helm이 아닌 manifest로 설치하는 n8n은 대상이 아니다.
+Online/Remote/Local 공통 동작이며, Helm이 아닌 manifest로 설치하는 n8n은 대상이 아니다.
 
 Helm release가 실제로 없으면 백업 파일 없이 건너뛴다. failed/pending 상태 release도 현재 저장된
 revision의 Values를 보존한다. API/RBAC/인증 오류, Helm 조회 실패, 파일 쓰기 오류는 신규 설치로

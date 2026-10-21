@@ -12,10 +12,10 @@ grep -Fq "values-k3s.harbor.yaml' and eva_agent_qdrant_snapshot_source == 'harbo
 grep -Fq 'eva_agent_qdrant_post_renderer_arg' "$ROLE"
 grep -Fq '{{ eva_agent_qdrant_post_renderer_arg }}' "$ROLE"
 
-cloud_values="$(curl -fsSL "$BASE/eva-agent-qdrant/values-k3s.s3.yaml")"
+online_values="$(curl -fsSL "$BASE/eva-agent-qdrant/values-k3s.s3.yaml")"
 plugin="$(curl -fsSL "$BASE/plugins/eva-agent-qdrant/plugin.yaml")"
-printf '%s\n' "$cloud_values" | grep -Fq 'S3_BUCKET'
-printf '%s\n' "$cloud_values" | grep -Fq 'qdrant-snapshot-sync'
+printf '%s\n' "$online_values" | grep -Fq 'S3_BUCKET'
+printf '%s\n' "$online_values" | grep -Fq 'qdrant-snapshot-sync'
 printf '%s\n' "$plugin" | grep -Fq 'eva-agent-qdrant-postrenderer'
 
-echo 'EVA Qdrant Cloud values contract tests passed.'
+echo 'EVA Qdrant Online values contract tests passed.'

@@ -9,7 +9,6 @@
     chart_version="$EVA_APP_CHART_VERSION"
     values_file="$EVA_APP_VALUES_FILE"
     effective_values_file="$EVA_APP_EFFECTIVE_VALUES_FILE"
-    handoff_file="$EVA_APP_HANDOFF_FILE"
     use_chart_version="$EVA_APP_USE_CHART_VERSION"
     repository_mode="$EVA_APP_REPOSITORY_MODE"
     tls_job_enabled="${EVA_APP_TLS_JOB_ENABLED:-true}"
@@ -262,14 +261,15 @@
       exit 0
     fi
 
-    if [[ ! -f "$handoff_file" ]]; then
+    if [[ -z "${EVA_APP_ARGOCD_HANDOFF_B64:-}" ]]; then
       echo '[ERROR] EVA App legacy resources require a verified Argo CD handoff receipt'
       exit 1
     fi
 
     legacy_application="$(
-      python3 - "$handoff_file" "$EVA_APP_SITE_ID" <<'PY'
-    from pathlib import Path
+      python3 - "$EVA_APP_SITE_ID" <<'PY'
+    import base64
+    import os
     import posixpath
     import re
     import sys
@@ -302,11 +302,14 @@
             )
         )
 
-    data = yaml.safe_load(Path(sys.argv[1]).read_text())
+    try:
+        data = yaml.safe_load(base64.b64decode(os.environ['EVA_APP_ARGOCD_HANDOFF_B64'], validate=True))
+    except (ValueError, yaml.YAMLError):
+        raise SystemExit(1)
     if (
         not isinstance(data, dict)
         or data.get('schema_version') != 'v1'
-        or data.get('site_id') != sys.argv[2]
+        or data.get('site_id') != sys.argv[1]
         or not data.get('completed_at')
     ):
         raise SystemExit(1)
@@ -559,7 +562,7 @@
     EVA_APP_TRAEFIK_POST_RENDERER: "{{ eva_traefik_ports_result.renderer | default('') if (eva_app_traefik_args | default('') | length > 0) else '' }}"
     EVA_APP_TRAEFIK_ROUTER: "{{ eva_app_workdir }}/traefik-router.json"
     EVA_APP_HELM_PLUGINS: "{{ (eva_app_traefik_env | default({})).HELM_PLUGINS | default('') }}"
-    EVA_APP_HANDOFF_FILE: "{{ eva_app_argocd_handoff_path }}"
+    EVA_APP_ARGOCD_HANDOFF_B64: "{{ eva_app_argocd_handoff_raw.content | default('') }}"
     EVA_APP_SITE_ID: "{{ eva_site_id }}"
     EVA_APP_REPOSITORY_MODE: "{{ repository_mode }}"
     EVA_APP_TLS_JOB_ENABLED: "{{ eva_app_tls_job_enabled | bool | lower }}"

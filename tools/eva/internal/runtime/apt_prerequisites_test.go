@@ -57,7 +57,7 @@ func prerequisiteRepairCommands() [][]string {
 func runPrerequisiteSteps(t *testing.T, steps []prerequisiteStep) error {
 	t.Helper()
 	run, verify := prerequisiteScript(t, steps)
-	err := installCloudPrerequisites(run)
+	err := installOnlinePrerequisites(run)
 	verify()
 	return err
 }
@@ -95,14 +95,14 @@ func aptRecoveryFixture(t *testing.T) string {
 	return string(contents)
 }
 
-func TestInstallCloudPrerequisitesHealthy(t *testing.T) {
+func TestInstallOnlinePrerequisitesHealthy(t *testing.T) {
 	commands := prerequisiteRepairCommands()
 	if err := runPrerequisiteSteps(t, []prerequisiteStep{{command: commands[0]}, {command: commands[1]}}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestInstallCloudPrerequisitesAutomaticallyRepairsNineUpgrades(t *testing.T) {
+func TestInstallOnlinePrerequisitesAutomaticallyRepairsNineUpgrades(t *testing.T) {
 	commands := prerequisiteRepairCommands()
 	steps := make([]prerequisiteStep, len(commands))
 	for index, command := range commands {
@@ -115,7 +115,7 @@ func TestInstallCloudPrerequisitesAutomaticallyRepairsNineUpgrades(t *testing.T)
 	}
 }
 
-func TestInstallCloudPrerequisitesDoesNotRepairUnrelatedFailures(t *testing.T) {
+func TestInstallOnlinePrerequisitesDoesNotRepairUnrelatedFailures(t *testing.T) {
 	commands := prerequisiteRepairCommands()
 	for _, test := range []struct {
 		name, output string
@@ -145,7 +145,7 @@ func TestInstallCloudPrerequisitesDoesNotRepairUnrelatedFailures(t *testing.T) {
 	}
 }
 
-func TestInstallCloudPrerequisitesStopsAtFailedRecoveryStage(t *testing.T) {
+func TestInstallOnlinePrerequisitesStopsAtFailedRecoveryStage(t *testing.T) {
 	commands := prerequisiteRepairCommands()
 	for stage := 2; stage < len(commands); stage++ {
 		t.Run(fmt.Sprint(stage), func(t *testing.T) {
@@ -169,7 +169,7 @@ func TestInstallCloudPrerequisitesStopsAtFailedRecoveryStage(t *testing.T) {
 	}
 }
 
-func TestInstallCloudPrerequisitesDoesNotLoopWhenRetryFails(t *testing.T) {
+func TestInstallOnlinePrerequisitesDoesNotLoopWhenRetryFails(t *testing.T) {
 	commands := prerequisiteRepairCommands()
 	steps := make([]prerequisiteStep, len(commands))
 	for index, command := range commands {
@@ -178,12 +178,12 @@ func TestInstallCloudPrerequisitesDoesNotLoopWhenRetryFails(t *testing.T) {
 	steps[1].output, steps[1].err = brokenAPTDependencies, prerequisiteExitError(100)
 	steps[2].output = aptRecoveryFixture(t)
 	steps[7].output, steps[7].err = brokenAPTDependencies, prerequisiteExitError(100)
-	if err := runPrerequisiteSteps(t, steps); err == nil || !strings.Contains(err.Error(), "retry Cloud Runtime prerequisites") {
+	if err := runPrerequisiteSteps(t, steps); err == nil || !strings.Contains(err.Error(), "retry Online Runtime prerequisites") {
 		t.Fatalf("retry must stop rather than start another repair: %v", err)
 	}
 }
 
-func TestInstallCloudPrerequisitesRejectsIncompleteDpkgAudit(t *testing.T) {
+func TestInstallOnlinePrerequisitesRejectsIncompleteDpkgAudit(t *testing.T) {
 	commands := prerequisiteRepairCommands()
 	steps := make([]prerequisiteStep, 7)
 	for index := range steps {
@@ -197,7 +197,7 @@ func TestInstallCloudPrerequisitesRejectsIncompleteDpkgAudit(t *testing.T) {
 	}
 }
 
-func TestInstallCloudPrerequisitesRejectsUnsafeRepairPlans(t *testing.T) {
+func TestInstallOnlinePrerequisitesRejectsUnsafeRepairPlans(t *testing.T) {
 	fixture := aptRecoveryFixture(t)
 	for name, plan := range map[string]string{
 		"no summary":     "Inst libc6-dev [old] (new Ubuntu)\n",
@@ -239,8 +239,8 @@ func TestPrerequisiteRunnerCapturesDiagnosticsWithStableEnvironment(t *testing.T
 	}
 }
 
-func TestInstallCloudPrerequisitesRejectsMissingRunner(t *testing.T) {
-	if err := installCloudPrerequisites(nil); err == nil {
+func TestInstallOnlinePrerequisitesRejectsMissingRunner(t *testing.T) {
+	if err := installOnlinePrerequisites(nil); err == nil {
 		t.Fatal("missing runner accepted")
 	}
 }
@@ -262,7 +262,7 @@ func TestBootstrapOnlineContinuesAfterAutomaticDependencyRecovery(t *testing.T) 
 		if root != destination {
 			t.Fatalf("host preparation destination = %q, want %q", root, destination)
 		}
-		if err := installCloudPrerequisites(runner); err != nil {
+		if err := installOnlinePrerequisites(runner); err != nil {
 			return err
 		}
 		prepared = true
@@ -280,7 +280,7 @@ func TestBootstrapOnlineContinuesAfterAutomaticDependencyRecovery(t *testing.T) 
 		t.Fatal(err)
 	}
 	verify()
-	if !prepared || installed.Descriptor.Version != "cloud-test" {
+	if !prepared || installed.Descriptor.Version != "online-test" {
 		t.Fatal("recovered bootstrap did not publish the validated Runtime")
 	}
 }
@@ -296,7 +296,7 @@ func TestBootstrapOnlinePreservesRuntimeWhenDependencyRecoveryFails(t *testing.T
 	destination := createRuntime(t)
 	spec, payloads := testOnlineBootstrapSpec(t)
 	dependencies := testOnlineBootstrapDependencies(t, payloads)
-	dependencies.prepareHost = func(string) error { return installCloudPrerequisites(runner) }
+	dependencies.prepareHost = func(string) error { return installOnlinePrerequisites(runner) }
 	dependencies.run = func(name string, args ...string) error {
 		t.Fatalf("failed recovery started Runtime construction: %s %v", name, args)
 		return nil
@@ -324,8 +324,8 @@ func TestBootstrapOnlineRequiresHostPreparationDependency(t *testing.T) {
 	}
 }
 
-func TestPrepareCloudRuntimeHostSkipsCustomDestination(t *testing.T) {
-	if err := prepareCloudRuntimeHost(filepath.Join(t.TempDir(), "runtime")); err != nil {
+func TestPrepareOnlineRuntimeHostSkipsCustomDestination(t *testing.T) {
+	if err := prepareOnlineRuntimeHost(filepath.Join(t.TempDir(), "runtime")); err != nil {
 		t.Fatal(err)
 	}
 }

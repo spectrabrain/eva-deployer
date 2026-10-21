@@ -31,7 +31,7 @@ HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 고릅니다
 `host:port`로 바꾸고, `targets.server-a.ansible`에 local/SSH 접속·sudo 정보를,
 `targets.server-a.values.iam`과 `values.app`에 승인된 TLS·IAM·license 값을 작성합니다.
 인증서/key는 target의 `ingress.tls.hostPath`에 따로 준비합니다. Agent/Vision override가
-필요할 때만 `values.agent`/`values.vision`을 추가합니다. Cloud용 `credentials.aws`는
+필요할 때만 `values.agent`/`values.vision`을 추가합니다. Online용 `credentials.aws`는
 Local 입력에서 거부되며 AWS credential을 대상에 복사하지 않습니다.
 
 ```bash
@@ -176,7 +176,7 @@ docker info --format '{{.DriverStatus}}'
 **판단 기준은 하나입니다 — 이 머신에서 `docker save` 로 tar 를 만들어 옮기는가?**
 
 - 그렇다 → 아래처럼 끕니다
-- 아니다 (cloud 설치 대상, 이미지 빌드 전용 머신 등) → 기본값 그대로 두세요
+- 아니다 (online 설치 대상, 이미지 빌드 전용 머신 등) → 기본값 그대로 두세요
 
 ```bash
 sudo cat /etc/docker/daemon.json 2>/dev/null   # 기존 insecure-registries 등 보존
@@ -648,7 +648,7 @@ print('OK')"
   `localhost` 는 `-i 'localhost,'` 로 돌릴 때의 이름입니다
 - `sso.realm` / `clientId` 는 차트 기본값이 `eva-sso` / `eva-app-kr-2` 라 반드시 덮어써야 합니다
   (role 의 `-e` 노브가 없어 이 파일에서만 지정 가능)
-- 현재 Tool/Release에서 `activation_mode` 기본값은 Cloud `online`, Remote/Local `offline`입니다.
+- 현재 Tool/Release에서 `activation_mode` 기본값은 Online `online`, Remote/Local `offline`입니다.
   이전 Release나 기존 Values에 `online`이 남아 있으면 폐쇄망 설치 전에 `offline`으로 변경합니다.
   `product_code`는 발급된 라이선스의 `eva-dev`/`eva-prod`와 일치시킵니다.
 

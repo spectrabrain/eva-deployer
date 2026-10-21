@@ -96,20 +96,20 @@
 - name: Set EVA IAM (SSO) install defaults
   no_log: true
   ansible.builtin.set_fact:
-    repository_mode: "{{ repository_mode | default('cloud_repository') }}"
+    repository_mode: "{{ repository_mode | default('online_repository') }}"
     repository_project: "{{ repository_project | default('eva') }}"
     # Harbor host:port, scheme/trailing slash stripped — same normalisation eva_app does.
     repository_registry: >-
       {{
         repository_registry
-        | default(harbor_registry | default(((repository_mode | default('cloud_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | default(harbor_registry | default(((repository_mode | default('online_repository')) == 'local_repository') | ternary('localhost:32080', '')))
         | regex_replace('^https?://', '')
         | regex_replace('/+$', '')
       }}
     # remote/local_repository always implies airgap; -e airgap_mode=true forces it on.
     airgap_mode: >-
       {{ (airgap_mode | default(false) | bool)
-         or ((repository_mode | default('cloud_repository')) in ['remote_repository', 'local_repository']) }}
+         or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}
     eva_iam_namespace: "{{ eva_iam_namespace | default('eva-iam') }}"
     eva_iam_name: "{{ eva_iam_name | default('eva-iam') }}"
     # Opt-in guard: release identities ("<namespace>/<name>") this automation must never overwrite.
@@ -323,10 +323,10 @@
 - name: Validate repository mode for EVA IAM
   ansible.builtin.assert:
     that:
-      - repository_mode in ['cloud_repository', 'remote_repository', 'local_repository']
-      - repository_mode == 'cloud_repository' or repository_registry | length > 0
+      - repository_mode in ['online_repository', 'cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode in ['online_repository', 'cloud_repository'] or repository_registry | length > 0
     fail_msg: >-
-      repository_mode 는 cloud_repository, remote_repository, local_repository 중 하나여야 합니다.
+      repository_mode 는 online_repository, remote_repository, local_repository 중 하나여야 합니다 (cloud_repository는 호환 입력).
       remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry 가
       필요합니다 (k3s 노드에서 접근 가능한 Harbor host:port).
 

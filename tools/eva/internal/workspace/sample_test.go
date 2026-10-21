@@ -55,7 +55,11 @@ func fillSample(contents []byte) []byte {
 }
 
 func TestAllInstallerSampleCombinations(t *testing.T) {
-	for _, mode := range []string{"cloud", "remote", "local"} {
+	for _, mode := range []string{"online", "remote", "local", "cloud", "cloud_repository"} {
+		wantMode := mode
+		if mode == "cloud" || mode == "cloud_repository" {
+			wantMode = "online"
+		}
 		for _, address := range []string{"shared", "separate"} {
 			for _, protocol := range []string{"https", "http"} {
 				t.Run(mode+"/"+address+"/"+protocol, func(t *testing.T) {
@@ -71,10 +75,10 @@ func TestAllInstallerSampleCombinations(t *testing.T) {
 					if err := yaml.Unmarshal(fillSample(contents), &input); err != nil {
 						t.Fatal(err)
 					}
-					if input.Repository.Mode != mode || (input.Credentials.AWS != nil) != (mode == "cloud") {
+					if input.Repository.Mode != wantMode || (input.Credentials.AWS != nil) != (wantMode == "online") {
 						t.Fatal("sample repository/credential mismatch")
 					}
-					if mode != "cloud" && (strings.Contains(string(contents), "imagePullSecrets") || strings.Contains(string(contents), "aws_access_key_id")) {
+					if wantMode != "online" && (strings.Contains(string(contents), "imagePullSecrets") || strings.Contains(string(contents), "aws_access_key_id")) {
 						t.Fatal("offline sample contains AWS settings")
 					}
 					values := input.Targets["server-a"].Values
@@ -151,6 +155,9 @@ func TestAllInstallerSampleCombinations(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					if resolved.Config.Repository.Mode != wantMode || resolved.AnsibleMode != wantMode+"_repository" {
+						t.Fatal("sample did not resolve to canonical workspace/Ansible repository modes")
+					}
 					if _, err := os.Stat(filepath.Join(resolved.Root, "site-values/app.yaml")); err != nil {
 						t.Fatal(err)
 					}
@@ -161,7 +168,7 @@ func TestAllInstallerSampleCombinations(t *testing.T) {
 }
 
 func TestExternalIAMInstallerSamples(t *testing.T) {
-	for _, mode := range []string{"cloud", "remote", "local"} {
+	for _, mode := range []string{"online", "remote", "local"} {
 		for _, protocol := range []string{"http", "https"} {
 			t.Run(mode+"/"+protocol, func(t *testing.T) {
 				contents, err := InstallerSampleFor(SampleOptions{Mode: mode, Protocol: protocol, IAM: "external"})
@@ -221,7 +228,7 @@ func TestExternalIAMInstallerSamples(t *testing.T) {
 func assertSampleLicense(t *testing.T, contents []byte, app map[string]any, mode string) {
 	t.Helper()
 	want := "offline"
-	if mode == "cloud" {
+	if mode == "online" || mode == "cloud" || mode == "cloud_repository" {
 		want = "online"
 	}
 	if nestedSampleValue(app, "app", "license", "activation_mode") != want {
@@ -236,7 +243,7 @@ func assertSampleLicense(t *testing.T, contents []byte, app map[string]any, mode
 }
 
 func TestInstallerSampleLicenseOverrides(t *testing.T) {
-	for _, mode := range []string{"cloud", "remote", "local"} {
+	for _, mode := range []string{"online", "remote", "local"} {
 		for _, activation := range []string{"online", "offline"} {
 			for _, iam := range []string{"install", "external"} {
 				t.Run(mode+"/"+activation+"/"+iam, func(t *testing.T) {
@@ -292,16 +299,16 @@ func TestExternalIAMSampleRejectsUnfilledConnectionInputs(t *testing.T) {
 	}
 }
 
-func TestCloudInstallerSampleUsesAutomaticCredentialPath(t *testing.T) {
-	contents, err := InstallerSample("cloud")
+func TestOnlineInstallerSampleUsesAutomaticCredentialPath(t *testing.T) {
+	contents, err := InstallerSample("online")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(contents), "imagePullSecrets") {
-		t.Fatal("cloud sample must not require a credential path override")
+		t.Fatal("online sample must not require a credential path override")
 	}
 	if _, err := LoadInstaller(writeInstaller(t, string(fillSample(contents))), ""); err != nil {
-		t.Fatalf("cloud sample must allow automatic credential path: %v", err)
+		t.Fatalf("online sample must allow automatic credential path: %v", err)
 	}
 }
 
@@ -329,7 +336,7 @@ func TestEmbeddedSampleFormattingAndPlaceholderExamples(t *testing.T) {
 }
 
 func TestInstallerSampleRejectsUnfilledRequiredInputsWithoutLeakingSecrets(t *testing.T) {
-	contents, err := InstallerSample("cloud")
+	contents, err := InstallerSample("online")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,11 +356,11 @@ func TestInstallerSampleRejectsUnfilledRequiredInputsWithoutLeakingSecrets(t *te
 
 func TestInstallerSampleRejectsInvalidChoices(t *testing.T) {
 	for _, options := range []SampleOptions{
-		{Mode: "../cloud", Address: "shared", Protocol: "https"},
-		{Mode: "cloud", Address: "../shared", Protocol: "https"},
-		{Mode: "cloud", Address: "shared", Protocol: "ftp"},
-		{Mode: "cloud", Address: "separate", Protocol: "https", IAM: "invalid"},
-		{Mode: "cloud", Address: "shared", Protocol: "https", IAM: "external"},
+		{Mode: "../online", Address: "shared", Protocol: "https"},
+		{Mode: "online", Address: "../shared", Protocol: "https"},
+		{Mode: "online", Address: "shared", Protocol: "ftp"},
+		{Mode: "online", Address: "separate", Protocol: "https", IAM: "invalid"},
+		{Mode: "online", Address: "shared", Protocol: "https", IAM: "external"},
 	} {
 		if _, err := InstallerSampleFor(options); err == nil {
 			t.Fatal("invalid sample choice accepted")

@@ -11,7 +11,7 @@ app:
     backendPublicPort: 80  # App HTTP 외부 포트. 외부 IAM의 App client redirect URI에도 반영합니다.
     browserTitleName: EVA
     license:
-      activation_mode: offline  # Cloud 기본 online, Remote/Local 기본 offline. 사전 결정한 라이선스에 맞게 변경하며 online은 라이선스 서버 연결이 필요합니다.
+      activation_mode: offline  # Online 기본 online, Remote/Local 기본 offline. repository.mode와 별개로 사전 결정한 라이선스에 맞게 변경하며 online은 라이선스 서버 연결이 필요합니다.
       product_code: "<LICENSE_PRODUCT_CODE>"  # 필수: 발급된 license와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
       api_key: "<LICENSE_API_KEY>"  # 필수: 발급된 license API key. ex) demo-license-api-key (예시 전용)
       shared_key: "<LICENSE_SHARED_KEY>"  # 필수: 발급된 license shared key. ex) demo-license-shared-key (예시 전용)

@@ -49,7 +49,8 @@ IP 직접 접속은 SSH 대상 IP가 있으면 서비스 host와 함께 설치 I
 - Bastion의 인터넷 연결만으로 충분하지 않다. 각 타겟도 Cloud Repository/ECR/S3 및 필요한 외부 서비스에
   접근할 수 있어야 한다. 타겟은 Ubuntu·GPU 등 기존 사전 조건을 충족해야 한다.
 - 대상 계정에 SSH password 인증과 같은 비밀번호를 사용하는 sudo를 허용해야 한다.
-  SSH host key는 사전에 신뢰 여부를 확인한다. host key 검증을 끄지 않는다.
+  설치/preflight가 설정된 계정·비밀번호로 연결하며 최초 SSH host key를 자동 등록한다.
+  이미 등록된 키가 변경되면 연결을 중단한다.
 - 공통 Cloud AWS credential은 기존 배포 단계에서 각 해당 타겟에 사용된다.
   타겟별로 다른 AWS credential을 받는 기능은 아니며 Remote Main의 `remote target` 등록과도 별개이다.
 - 각 타겟은 독립 설치 대상이다. 여러 타겟을 입력한다고 하나의 multi-node k3s cluster를 만드는 것은 아니다.

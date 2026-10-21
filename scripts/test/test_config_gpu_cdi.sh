@@ -64,6 +64,7 @@ EOF
     config_gpu_cdi_runtime_config_path: $root/nvidia-container-runtime-config.toml
     eva_site_config_root: $root/config/site
     ansible_facts:
+      default_ipv4: "{{ fixture_default_ipv4 | default({}) }}"
       env:
         HOME: /tmp
       mounts:
@@ -104,7 +105,7 @@ for scenario in cpu-only cpu-detected-ip cpu-explicit-host; do
   expected_host=127.0.0.1
   host_args=()
   if [[ "$scenario" != cpu-only ]]; then
-    host_args+=(-e '{"ansible_default_ipv4":{"address":"192.0.2.10"}}')
+    host_args+=(-e '{"fixture_default_ipv4":{"address":"192.0.2.10"}}')
     expected_host=192.0.2.10
   fi
   if [[ "$scenario" == cpu-explicit-host ]]; then

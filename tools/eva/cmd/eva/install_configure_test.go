@@ -101,6 +101,9 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 				if strings.Contains(messages, "라이선스 서버 인터넷 연결") {
 					t.Fatal("license activation must not add a connectivity question")
 				}
+				if strings.Contains(messages, "sudo ssh") {
+					t.Fatal("local connections must not request SSH host key registration")
+				}
 			})
 		}
 	}
@@ -158,6 +161,16 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 		vars := input.Targets[name].Ansible
 		if vars["ansible_connection"] != "ssh" || vars["ansible_password"] != secrets[index] || vars["ansible_become_password"] != secrets[index] || vars["ansible_ssh_private_key_file"] != nil {
 			t.Fatal("Bastion connection password contract changed")
+		}
+	}
+	for _, required := range []string{"설정된 SSH 계정·비밀번호", "최초 host key를 자동 등록", "이미 등록된 키가 변경되면 중단"} {
+		if !strings.Contains(messages, required) {
+			t.Fatalf("Bastion automatic SSH connection guidance is missing %q", required)
+		}
+	}
+	for _, unwanted := range []string{"sudo ssh", "StrictHostKeyChecking=ask", "StrictHostKeyChecking=no", "ANSIBLE_HOST_KEY_CHECKING=False", "ssh-keyscan"} {
+		if strings.Contains(messages, unwanted) {
+			t.Fatalf("Bastion must not require manual SSH preparation or disable key checking: %s", unwanted)
 		}
 	}
 	contents, err := os.ReadFile(path)

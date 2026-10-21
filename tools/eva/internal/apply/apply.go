@@ -76,7 +76,9 @@ func RunPrecondition(options Options, document plan.Document) (string, error) {
 	}
 	command := exec.Command(ansiblePath, args...)
 	command.Dir = releaseRoot
-	command.Env = commandEnvironment(document, releaseRoot, "", resolvedRuntime)
+	// Explicit preflight has no operation log. Ansible resolves an empty
+	// ANSIBLE_LOG_PATH to the working directory; disable its file logger instead.
+	command.Env = commandEnvironment(document, releaseRoot, os.DevNull, resolvedRuntime)
 	command.Stdout = options.Stdout
 	command.Stderr = options.Stderr
 	if err := command.Run(); err != nil {

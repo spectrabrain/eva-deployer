@@ -43,6 +43,9 @@ func TestExecuteRunsPlanAndRecordsResult(t *testing.T) {
 	if !strings.Contains(output.String(), "EVA_RUNTIME_ROOT="+runtimeRoot) {
 		t.Fatalf("managed Runtime root = %q", output.String())
 	}
+	if !strings.Contains(output.String(), "ANSIBLE_LOG_PATH="+filepath.Join(completed.LogDirectory, "ansible-internal.log")+"\n") {
+		t.Fatalf("operation must retain its private Ansible log: %q", output.String())
+	}
 	for _, directory := range []string{
 		filepath.Join(runtimeRoot, "bin"),
 		filepath.Join(runtimeRoot, "venv", "bin"),
@@ -130,6 +133,9 @@ func TestExecuteRejectsTargetPatterns(t *testing.T) {
 }
 
 func TestRunPreconditionRunsOnlyPreconditionWithoutOperationState(t *testing.T) {
+	// Explicit preflight must not inherit an uncontrolled log destination.
+	inheritedLog := filepath.Join(t.TempDir(), "inherited.log")
+	t.Setenv("ANSIBLE_LOG_PATH", inheritedLog)
 	workspace := createWorkspace(t)
 	releaseRoot := createReleaseSource(t, "")
 	runtimeRoot := createRuntime(t)
@@ -145,6 +151,9 @@ func TestRunPreconditionRunsOnlyPreconditionWithoutOperationState(t *testing.T) 
 	}
 	if root != releaseRoot || !strings.Contains(output.String(), expectedPlaybooks["precondition"]) || strings.Contains(output.String(), expectedPlaybooks["app"]) {
 		t.Fatalf("RunPrecondition() root=%q output=%q", root, output.String())
+	}
+	if !strings.Contains(output.String(), "ANSIBLE_LOG_PATH="+os.DevNull+"\n") || strings.Contains(output.String(), inheritedLog) {
+		t.Fatalf("preflight must disable file logging with a nonempty path: %q", output.String())
 	}
 }
 
@@ -303,7 +312,7 @@ func createRuntime(t *testing.T) string {
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		contents := "#!/bin/sh\nprintf 'EVA_REPO_ROOT=%s\\n' \"$EVA_REPO_ROOT\"\nprintf 'EVA_RUNTIME_ROOT=%s\\n' \"$EVA_RUNTIME_ROOT\"\nprintf 'ANSIBLE_COLLECTIONS_PATH=%s\\n' \"$ANSIBLE_COLLECTIONS_PATH\"\nprintf 'PATH=%s\\n' \"$PATH\"\nprintf 'ARGS=%s\\n' \"$*\"\n"
+		contents := "#!/bin/sh\nprintf 'EVA_REPO_ROOT=%s\\n' \"$EVA_REPO_ROOT\"\nprintf 'EVA_RUNTIME_ROOT=%s\\n' \"$EVA_RUNTIME_ROOT\"\nprintf 'ANSIBLE_COLLECTIONS_PATH=%s\\n' \"$ANSIBLE_COLLECTIONS_PATH\"\nprintf 'ANSIBLE_LOG_PATH=%s\\n' \"$ANSIBLE_LOG_PATH\"\nprintf 'PATH=%s\\n' \"$PATH\"\nprintf 'ARGS=%s\\n' \"$*\"\n"
 		if name == "ansible-playbook" {
 			contents += "if [ -f \"$EVA_REPO_ROOT/fail\" ]; then exit 7; fi\n"
 		}

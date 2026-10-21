@@ -249,6 +249,9 @@ Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입�
 Ansible `--limit`에 보존된다. Bastion은 설치 대상이 아니고 타겟의 Cloud 접근이 별도로 필요하다.
 기존 `eva check`/`preflight gpu`는 실행 서버 기준이지 원격 타겟 일괄 검사 명령이 아니다.
 
+Bastion의 설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록한다.
+별도 SSH 접속 준비는 필요 없으며 이미 등록된 키가 변경되면 중단한다.
+
 설치 입력을 파일 하나로 관리하려면 `--config FILE`을 사용한다. 옵션/자동화용 Cloud/Remote/Local 샘플은
 `eva config sample --mode cloud|remote|local`로 얻으며 원본 설정은 `0600`으로 관리한다.
 터미널에서는 IAM 함께 설치/외부 IAM 연동을 먼저 선택하고 함께 설치인 경우 주소 구성도 고른다.

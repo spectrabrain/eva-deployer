@@ -225,8 +225,8 @@ EOF
     ansible_facts:
       env:
         HOME: /tmp
-    ansible_default_ipv4:
-      address: 127.0.0.1
+      default_ipv4:
+        address: 127.0.0.1
     eva_site_config_root: $root/config/site
     eva_site_state_root: $root/state/site
     eva_site_deploy_root: $root/rendered-root

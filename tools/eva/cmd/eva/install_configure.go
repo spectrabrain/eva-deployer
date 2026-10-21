@@ -205,9 +205,12 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 		}
 	}
 	fmt.Fprintf(output, "입력 확인: sudo eva workspace validate --config %s\n", shellQuoteConfigurePath(*path))
+	if bastion {
+		fmt.Fprintln(output, "설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록합니다. 이미 등록된 키가 변경되면 중단합니다.")
+	}
 	fmt.Fprintf(output, "검토 후 설치: sudo eva install --config %s\n", shellQuoteConfigurePath(*path))
 	if bastion {
-		fmt.Fprintln(output, "Bastion의 eva check/preflight gpu는 현재 서버 기준입니다. 타겟 상태는 타겟별로 확인하고 SSH host key를 사전에 검증하세요.")
+		fmt.Fprintln(output, "Bastion의 eva check/preflight gpu는 현재 서버 기준입니다. 타겟 상태는 타겟별로 확인하세요.")
 	}
 	return nil
 }

@@ -203,7 +203,6 @@ def add_case(name, mode="cloud_repository", protocol="https", host_kind="dns", *
         "eva_app_iam_handoff_status": {"stat": {"exists": True}},
         "fixture_facts": {"env": {"HOME": str(directory / "home")},
                           "default_ipv4": {"address": "192.0.2.10"}},
-        "ansible_default_ipv4": {"address": "192.0.2.10"},
         "ansible_python_interpreter": sys.executable,
     }
     if mode == "remote_repository":

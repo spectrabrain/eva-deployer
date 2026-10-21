@@ -47,8 +47,10 @@ class IAMValuesTests(unittest.TestCase):
             "localhost ansible_connection=local ansible_become=false\n"
         )
         self.variables = {
-            "ansible_facts": {"env": {"HOME": str(self.root)}},
-            "ansible_default_ipv4": {"address": "192.0.2.10"},
+            "ansible_facts": {
+                "env": {"HOME": str(self.root)},
+                "default_ipv4": {"address": "192.0.2.10"},
+            },
             "eva_site_id": "fixture",
             "eva_site_values_root": str(self.root / "site-values"),
             "eva_site_deploy_root": str(self.root / "deploy"),
@@ -257,16 +259,38 @@ esac
         self.assertEqual(list(self.rendered.iterdir()), [path])
         self.assertFalse((self.root / "helm.log").exists())
 
-    def test_config_summary_host_uses_public_address_not_inventory_alias(self):
-        tasks = yaml.safe_load((ROLES / "config/tasks/eva.yaml").read_text())
-        builder = next(task for task in tasks if task.get("name") == "Build eva.yaml content")
-        self.run_play([builder, {"ansible.builtin.assert": {"that": [
-            "config_eva_backend_host == '192.0.2.10'",
-        ]}}], {"config_effective_gpu_count": 0, "eva_site_config_root": str(self.root)})
-        self.run_play([builder, {"ansible.builtin.assert": {"that": [
-            "config_eva_backend_host == 'public.example.test'",
-        ]}}], {"config_effective_gpu_count": 0, "eva_site_config_root": str(self.root),
-               "eva_app_backend_host": "public.example.test"})
+    def test_public_host_defaults_without_fact_injection(self):
+        cases = [
+            ("missing-ipv4", {}, {}, "127.0.0.1"),
+            ("missing-address", {"default_ipv4": {}}, {}, "127.0.0.1"),
+            ("detected-ipv4", {"default_ipv4": {"address": "192.0.2.10"}}, {}, "192.0.2.10"),
+            ("explicit-host", {"default_ipv4": {"address": "192.0.2.10"}},
+             {"eva_app_backend_host": "public.example.test"}, "public.example.test"),
+            ("explicit-host-without-ipv4", {},
+             {"eva_app_backend_host": "public.example.test"}, "public.example.test"),
+        ]
+        for role, source, name, host_fact in (
+            ("config", "config/tasks/eva.yaml", "Build eva.yaml content", "config_eva_backend_host"),
+            ("app", "eva_app/tasks/main.yaml", "Set EVA App install defaults (on-premise)",
+             "eva_app_backend_host"),
+        ):
+            tasks = yaml.safe_load((ROLES / source).read_text())
+            builder = next(task for task in tasks if task.get("name") == name)
+            for scenario, facts, overrides, expected in cases:
+                with self.subTest(role=role, scenario=scenario):
+                    variables = {
+                        "ansible_facts": {"env": {"HOME": str(self.root)}, **facts},
+                        "config_effective_gpu_count": 0,
+                        "eva_site_config_root": str(self.root),
+                        "eva_app_chart_version": "3.3.0-beta.3",
+                        "eva_app_deploy_version": "3.3.0-beta.3",
+                        **overrides,
+                    }
+                    output = self.run_play([
+                        builder,
+                        {"ansible.builtin.assert": {"that": [f"{host_fact} == '{expected}'"]}},
+                    ], variables, env={"ANSIBLE_INJECT_FACT_VARS": "False"})
+                    self.assertNotIn("INJECT_FACTS_AS_VARS", output)
 
 
 if __name__ == "__main__":

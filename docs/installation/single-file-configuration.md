@@ -7,7 +7,7 @@
 Repository mode의 표준 입력은 `online` / `remote` / `local`이며 Ansible 모드는 각각
 `online_repository` / `remote_repository` / `local_repository`이다. 기본값은 `online`이다.
 레거시 `cloud` / `cloud_repository`도 호환 입력으로 허용하며 `online` / `online_repository`로 정규화한다.
-모드 선택 기준은 [설치 Runbook](README.md#repository-mode-선택)을 따른다.
+모드 선택 기준은 [EVA Deployer README](../../README.md#repository-mode-선택)를 따른다.
 
 ## 시작
 

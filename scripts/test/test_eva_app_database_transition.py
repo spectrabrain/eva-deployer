@@ -29,6 +29,11 @@ READER = importlib.util.module_from_spec(READER_SPEC)
 READER_SPEC.loader.exec_module(READER)
 
 
+FEWSHOT_TRIGGER = ["trg_after_delete_fewshot", "DELETE", "fewshot", "AFTER", "ROW",
+                   "INSERT INTO deleted_frame (frame_path, created_at)\n"
+                   "        VALUES (OLD.frame_path, NOW())"]
+
+
 def deployment(name, component, containers, volumes):
     return {"kind": "Deployment", "metadata": {"name": name, "uid": name + "-uid"},
             "spec": {"replicas": 0, "template": {"metadata": {"labels": {"component": component}},
@@ -116,7 +121,14 @@ class FakeTransition(MODULE.Transition):
         if "information_schema.COLUMNS" in statement:
             db = statement.split("TABLE_SCHEMA='")[1].split("'")[0]
             return "\n".join(self.databases[db]["columns"])
+        if statement.startswith("SELECT HEX(TRIGGER_NAME)"):
+            db = statement.split("TRIGGER_SCHEMA='")[1].split("'")[0]
+            return "\n".join("\t".join(value.encode().hex().upper() for value in trigger)
+                             for trigger in self.databases[db].get("triggers", []))
         if "information_schema.TABLES" in statement:
+            if "information_schema.TRIGGERS" in statement:
+                db = statement.split("TABLE_SCHEMA='")[1].split("'")[0]
+                return str(int(self.special_objects) + len(self.databases[db].get("triggers", [])))
             return self.special_objects
         if "information_schema.PROCESSLIST" in statement:
             return "0"
@@ -424,6 +436,82 @@ class DatabaseTransitionTests(unittest.TestCase):
         self.t.special_objects = "1"
         with self.assertRaisesRegex(MODULE.UnsafeTransition, "stored objects"):
             self.t.run()
+
+    def fewshot_trigger(self, live="eva"):
+        self.t = fixture(self.root, live=live)
+        data = self.t.databases["eva"]
+        data["tables"].update(fewshot="2", deleted_frame="0")
+        data["triggers"] = [copy.deepcopy(FEWSHOT_TRIGGER)]
+        return data
+
+    def test_missing_target_copies_legacy_fewshot_trigger_without_changing_source(self):
+        original = copy.deepcopy(self.fewshot_trigger(live="eva_v3_0"))
+        result = self.t.run()
+        self.assertTrue(result["copied"])
+        self.assertEqual((result["source"], result["destination"]), ("eva", "eva_v3_0"))
+        self.assertEqual(self.t.databases["eva"], original)
+        self.assertEqual(self.t.databases["eva_v3_0"], original)
+        self.assertTrue((Path(result["backup_directory"]) / "copy-complete.json").is_file())
+
+    def test_fewshot_trigger_allows_only_harmless_sql_formatting(self):
+        data = self.fewshot_trigger()
+        data["triggers"][0][-1] = (" insert into `deleted_frame` (`frame_path`, `created_at`)\n"
+                                   " values (old . `frame_path`, now ( )) ; ")
+        self.assertTrue(self.t.run()["copied"])
+
+    def test_unknown_or_modified_triggers_still_block_before_copy(self):
+        variants = [
+            (0, "other_trigger"), (1, "INSERT"), (2, "config"), (3, "BEFORE"), (4, "STATEMENT"),
+            (5, "INSERT INTO eva.deleted_frame (frame_path, created_at) VALUES (OLD.frame_path, NOW())"),
+            (5, "INSERT INTO `eva`.`deleted_frame` (frame_path, created_at) VALUES (OLD.frame_path, NOW())"),
+            (5, "INSERT INTO eva_v3_0.deleted_frame (frame_path, created_at) VALUES (OLD.frame_path, NOW())"),
+            (5, "INSERT INTO Deleted_Frame (frame_path, created_at) VALUES (OLD.frame_path, NOW())"),
+            (5, "INSERT INTO deleted_frame (frame_path, created_at) VALUES (NEW.frame_path, NOW())"),
+            (5, FEWSHOT_TRIGGER[-1] + "; DELETE FROM config"),
+            (5, FEWSHOT_TRIGGER[-1] + " /* modified */"),
+        ]
+        for field, value in variants:
+            with self.subTest(field=field, value=value):
+                data = self.fewshot_trigger()
+                data["triggers"][0][field] = value
+                before = copy.deepcopy(self.t.databases)
+                with self.assertRaisesRegex(MODULE.UnsafeTransition, "trigger"):
+                    self.t.run()
+                self.assertEqual(self.t.databases, before)
+                self.assertFalse(list(self.root.glob("*/source.json")))
+
+    def test_known_trigger_does_not_allow_an_additional_trigger_or_missing_table(self):
+        for missing_table in (False, True):
+            with self.subTest(missing_table=missing_table):
+                data = self.fewshot_trigger()
+                if missing_table:
+                    del data["tables"]["deleted_frame"]
+                else:
+                    other = copy.deepcopy(FEWSHOT_TRIGGER)
+                    other[0] = "other_trigger"
+                    data["triggers"].append(other)
+                before = copy.deepcopy(self.t.databases)
+                with self.assertRaisesRegex(MODULE.UnsafeTransition, "trigger"):
+                    self.t.run()
+                self.assertEqual(self.t.databases, before)
+
+    def test_malformed_trigger_metadata_fails_closed_without_disclosing_body(self):
+        encoded = [value.encode().hex().upper() for value in FEWSHOT_TRIGGER]
+        invalid = ["private-trigger-body", "\t".join(encoded[:-1]),
+                   "\t".join(encoded[:-1] + ["FF"]), "\t".join(encoded[:-1] + ["0"])]
+        for raw in invalid:
+            with self.subTest(raw=raw):
+                self.fewshot_trigger()
+                original_sql = self.t.sql
+
+                def malformed(statement):
+                    return raw if statement.startswith("SELECT HEX(TRIGGER_NAME)") else original_sql(statement)
+
+                with patch.object(self.t, "sql", side_effect=malformed):
+                    with self.assertRaisesRegex(MODULE.UnsafeTransition, "unsupported trigger") as failure:
+                        self.t.run()
+                self.assertNotIn("private-trigger-body", str(failure.exception))
+                self.assertNotIn("eva_v3_0", self.t.databases)
 
     def test_active_app_or_foreign_mysql_owner_refused(self):
         self.t.pods.append({"metadata": {"labels": {"component": "eva-app"}}})

@@ -118,12 +118,29 @@ Chart Values 아래에 넣는 옵션이 아니다.
   부분 대상 DB를 확인해야 하므로 실패한 복사를 자동 재개/덮어쓰기하지 않는다.
 - 외부 DB, root가 아닌 기존 App DB 사용자, DB endpoint/credential/저장소 변경: 지원 범위 밖이므로
   사전 수동 migration/사용자 CSV 백업과 검토가 필요하다. 보호 절차를 끄고 진행하는 옵션은 없다.
-- 비-InnoDB 테이블, view/routine/event/trigger, cross-DB FK: schema-qualified 참조를 잘못 복사하지
-  않도록 자동 이름 이전을 거부한다. 단순 DB dump 명령의 성공만으로 안전하다고 판단하지 않는다.
+- 비-InnoDB 테이블, view/routine/event, cross-DB FK와 미지원 trigger: schema-qualified 참조를
+   잘못 복사하지 않도록 자동 이름 이전을 거부한다. 단순 DB dump 명령의 성공만으로 안전하다고
+   판단하지 않는다. 아래의 검증된 제품 trigger만 예외로 보존 복사한다.
 - 준비되지 않은 MySQL, 남아 있는 App Pod, 모호한 MySQL controller: 재시작으로 우회하지 않는다.
 
 schema migration 이후 Helm rollback만으로 DB/user 테이블이 복구되지 않는다. CSV는 사용자
 수동 재등록에 쓰고, DB 전체 복구가 필요하면 검증한 SQL 백업과 제품의 복구 절차를 따른다.
+
+### 기존 fewshot 삭제 trigger의 보존
+
+`trg_after_delete_fewshot`이 `fewshot`의 `AFTER DELETE FOR EACH ROW` trigger이고,
+본문이 같은 DB의 `deleted_frame(frame_path, created_at)`에 `OLD.frame_path`, `NOW()`만
+INSERT하는 경우 자동 복사를 지원한다. `fewshot`과 `deleted_frame`은 모두 원본에 존재하는
+InnoDB 테이블이어야 한다. 이름만으로 허용하지 않고 대상·시점·이벤트·본문을 함께 검사한다.
+
+허용하는 차이는 SQL keyword 대소문자, 공백과 identifier의 backtick뿐이다. DB 이름을
+명시한 참조, 다른 이름/본문/이벤트, 추가 trigger·statement·comment는 수동 검토 대상으로
+중단한다. 일반 로그에 trigger 본문이나 실제 행 데이터를 출력하지 않는다.
+
+trigger를 제거하거나 원본을 고치지 않고 SQL dump에 명시적으로 포함해 대상 DB에 복원한다.
+복원 후 canonical dump 비교에도 trigger 정의가 포함된다. 원본 DB와 trigger는 보존한다.
+대상 DB가 삭제된 상태에서 이 trigger 때문에 준비가 실패했더라도 원본 trigger를 삭제하거나
+App을 다시 설치해 우회하지 않는다. 수정된 Release를 사용해 새 설치 작업을 시작한다.
 
 ## 기존 `eva`와 `eva_v3_0`의 ID가 다른 경우
 

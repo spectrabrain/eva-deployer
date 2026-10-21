@@ -16,7 +16,7 @@ import time
 import unittest
 import uuid
 
-from test_eva_app_database_transition import MODULE, fixture
+from test_eva_app_database_transition import FEWSHOT_TRIGGER, MODULE, fixture
 
 
 @unittest.skipUnless(os.environ.get("EVA_TEST_MYSQL_IMAGE"), "set EVA_TEST_MYSQL_IMAGE to a locally cached MySQL 8 image")
@@ -89,6 +89,79 @@ class RealMySQLTests(unittest.TestCase):
         self.assertFalse(result["copied"])
         self.assertEqual(len(result["legacy_user_csv"]), 1)
         self.assertTrue((Path(result["backup_directory"]) / "eva.sql").exists())
+
+    def create_fewshot_tables(self):
+        self.t.sql("""CREATE TABLE eva.fewshot (seq INT PRIMARY KEY,frame_path VARCHAR(256)) ENGINE=InnoDB;
+        CREATE TABLE eva.deleted_frame (seq INT AUTO_INCREMENT PRIMARY KEY,frame_path VARCHAR(256),created_at DATETIME) ENGINE=InnoDB;
+        INSERT INTO eva.fewshot VALUES (1,'fixture-frame'),(2,'keep-frame');""")
+
+    def test_missing_target_preserves_fewshot_trigger_and_routes_deletes_to_target_only(self):
+        self.create_fewshot_tables()
+        self.t.sql("CREATE TRIGGER eva.trg_after_delete_fewshot AFTER DELETE ON eva.fewshot FOR EACH ROW "
+                   + FEWSHOT_TRIGGER[-1] + ";")
+        # Existing App already points at the canonical DB that was deleted.
+        secret = self.t.objects[("secret", "app-secret")]
+        secret["data"]["MYSQL_NAME"] = self.t.resources[2]["data"]["MYSQL_NAME"]
+        original = self.t.snapshot("eva")
+        result = self.t.run()
+        self.assertTrue(result["copied"])
+        self.assertEqual((result["source"], result["destination"]), ("eva", "eva_v3_0"))
+        self.assertEqual(self.t.snapshot("eva"), original)
+        self.assertEqual(self.t.snapshot("eva_v3_0"), original)
+        self.assertEqual(self.t.sql("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='eva_v3_0';"), "1")
+        self.t.sql("DELETE FROM eva_v3_0.fewshot WHERE seq=1;")
+        self.assertEqual(self.t.sql("SELECT frame_path FROM eva_v3_0.deleted_frame;"), "fixture-frame")
+        self.assertEqual(self.t.sql("SELECT COUNT(*) FROM eva.deleted_frame;"), "0")
+        self.assertEqual(self.t.snapshot("eva"), original)
+        # Reinstall keeps the destination and its trigger instead of copying again.
+        self.assertFalse(self.t.run()["copied"])
+
+    def test_unknown_and_schema_qualified_fewshot_triggers_remain_blocked(self):
+        self.create_fewshot_tables()
+        variants = [
+            ("other_trigger", FEWSHOT_TRIGGER[-1]),
+            ("trg_after_delete_fewshot", "INSERT INTO eva.deleted_frame (frame_path,created_at) VALUES (OLD.frame_path,NOW())"),
+            ("trg_after_delete_fewshot", "INSERT INTO deleted_frame (frame_path,created_at) VALUES ('not-the-old-frame',NOW())"),
+        ]
+        for name, body in variants:
+            with self.subTest(name=name, body=body):
+                self.t.sql("CREATE TRIGGER eva." + name + " AFTER DELETE ON eva.fewshot FOR EACH ROW " + body + ";")
+                try:
+                    before = self.t.snapshot("eva")
+                    with self.assertRaisesRegex(MODULE.UnsafeTransition, "trigger"):
+                        self.t.run()
+                    self.assertEqual(self.t.snapshot("eva"), before)
+                    self.assertEqual(self.t.tables("eva_v3_0"), [])
+                    self.assertFalse(list(self.t.backup_root.glob("*/source.json")))
+                finally:
+                    self.t.sql("DROP TRIGGER eva." + name + ";")
+
+    def test_known_trigger_does_not_bypass_other_unsafe_schema_checks(self):
+        self.create_fewshot_tables()
+        self.t.sql("CREATE TRIGGER eva.trg_after_delete_fewshot AFTER DELETE ON eva.fewshot FOR EACH ROW "
+                   + FEWSHOT_TRIGGER[-1] + ";")
+        # Everything here exists ONLY in this test's own ephemeral container.
+        self.t.sql("CREATE DATABASE isolated_reference; CREATE TABLE isolated_reference.parent (id INT PRIMARY KEY) ENGINE=InnoDB;")
+        variants = [
+            ("CREATE TABLE eva.unsafe_table (id INT) ENGINE=MyISAM;", "DROP TABLE eva.unsafe_table;"),
+            ("CREATE VIEW eva.unsafe_view AS SELECT seq FROM eva.fewshot;", "DROP VIEW eva.unsafe_view;"),
+            ("CREATE PROCEDURE eva.unsafe_proc() SELECT 1;", "DROP PROCEDURE eva.unsafe_proc;"),
+            ("CREATE EVENT eva.unsafe_event ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY DO SELECT 1;", "DROP EVENT eva.unsafe_event;"),
+            ("CREATE TABLE eva.unsafe_fk (id INT, FOREIGN KEY (id) REFERENCES isolated_reference.parent(id)) ENGINE=InnoDB;",
+             "DROP TABLE eva.unsafe_fk;"),
+        ]
+        for create, remove in variants:
+            with self.subTest(create=create):
+                self.t.sql(create)
+                try:
+                    before = self.t.snapshot("eva")
+                    with self.assertRaisesRegex(MODULE.UnsafeTransition, "stored objects"):
+                        self.t.run()
+                    self.assertEqual(self.t.snapshot("eva"), before)
+                    self.assertEqual(self.t.tables("eva_v3_0"), [])
+                    self.assertFalse(list(self.t.backup_root.glob("*/source.json")))
+                finally:
+                    self.t.sql(remove)
 
     def test_populated_destination_is_unchanged(self):
         self.t.sql("CREATE DATABASE eva_v3_0; CREATE TABLE eva_v3_0.unrelated (id INT); INSERT INTO eva_v3_0.unrelated VALUES (42);")

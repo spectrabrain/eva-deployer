@@ -357,7 +357,7 @@ class Transition:
             self.mysql(["mysqldump", "--user=root", "--default-character-set=utf8mb4",
                         "--single-transaction", "--quick", "--hex-blob", "--no-tablespaces",
                         "--set-gtid-purged=OFF", "--skip-comments", "--skip-dump-date",
-                        "--order-by-primary", "--skip-add-locks", db], stdout=stream)
+                        "--order-by-primary", "--skip-add-locks", "--triggers", db], stdout=stream)
             stream.flush()
             os.fsync(stream.fileno())
         require(path.stat().st_size > 0, "Empty DB dump; migration stopped.")
@@ -370,6 +370,39 @@ class Transition:
         revisions = self.sql("SELECT version_num FROM " + identifier(db) + ".alembic_version ORDER BY version_num;")
         return {"tables": counts, "eva_id": self.eva_id(db), "alembic": revisions}
 
+    def validate_copy_triggers(self, source, source_tables):
+        # HEX keeps multiline bodies and mysql batch separators unambiguous.
+        # Never print definitions: an unknown trigger may contain private literals.
+        raw = self.sql("SELECT HEX(TRIGGER_NAME),HEX(EVENT_MANIPULATION),HEX(EVENT_OBJECT_TABLE),"
+                       "HEX(ACTION_TIMING),HEX(ACTION_ORIENTATION),HEX(ACTION_STATEMENT) "
+                       "FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='" + source
+                       + "' ORDER BY TRIGGER_NAME;")
+        if not raw:
+            return
+        message = ("Source DB " + source + " has an unsupported trigger; only the verified local fewshot "
+                   "delete trigger can be copied automatically. Manual migration required.")
+        rows = raw.splitlines()
+        require(len(rows) == 1 and {"fewshot", "deleted_frame"}.issubset(source_tables), message)
+        cells = rows[0].split("\t")
+        require(len(cells) == 6 and all(re.fullmatch(r"(?:[0-9A-Fa-f]{2})+", cell) for cell in cells), message)
+        try:
+            name, event, table, timing, orientation, body = [bytes.fromhex(cell).decode("utf-8") for cell in cells]
+        except UnicodeDecodeError as exc:
+            raise UnsafeTransition(message) from exc
+        require((name, event, table, timing, orientation)
+                == ("trg_after_delete_fewshot", "DELETE", "fewshot", "AFTER", "ROW"), message)
+        # An intentionally narrow grammar, not a SQL rewriter: allow only this
+        # product trigger's schema-local INSERT with OLD.frame_path and NOW().
+        # Identifiers stay case-sensitive; quoted identifiers/keyword case and
+        # whitespace are harmless. Qualified DB names, comments, BEGIN blocks,
+        # literals, extra statements and every other trigger remain unsupported.
+        frame = r"(?:frame_path|`frame_path`)"
+        body_pattern = (r"\s*(?i:INSERT\s+INTO)\s+(?:deleted_frame|`deleted_frame`)\s*\(\s*"
+                        + frame + r"\s*,\s*(?:created_at|`created_at`)\s*\)\s*"
+                        + r"(?i:VALUES)\s*\(\s*(?i:OLD)\s*\.\s*" + frame
+                        + r"\s*,\s*(?i:NOW)\s*\(\s*\)\s*\)\s*;?\s*")
+        require(re.fullmatch(body_pattern, body) is not None, message)
+
     def copy_database(self, source, target):
         source_tables = self.tables(source)
         require("config" in source_tables and "alembic_version" in source_tables,
@@ -381,12 +414,12 @@ class Transition:
         objects = self.sql(
             "SELECT (SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='" + source
             + "' AND (TABLE_TYPE!='BASE TABLE' OR ENGINE!='InnoDB'))"
-            + "+(SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='" + source + "')"
             + "+(SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA='" + source + "')"
             + "+(SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA='" + source + "')"
             + "+(SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='" + source
             + "' AND REFERENCED_TABLE_SCHEMA IS NOT NULL AND REFERENCED_TABLE_SCHEMA!='" + source + "');")
-        require(objects == "0", "Source has non-InnoDB tables, stored objects or cross-DB references; manual migration required.")
+        require(objects == "0", "Source DB " + source + " has non-InnoDB tables, stored objects or cross-DB references; manual migration required.")
+        self.validate_copy_triggers(source, source_tables)
         before = self.snapshot(source)
         directory = self.backup_directory()
         dump = directory / (source + ".sql")

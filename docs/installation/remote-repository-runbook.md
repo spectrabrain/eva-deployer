@@ -1,0 +1,420 @@
+# EVA Remote Repository 설치 가이드
+
+이 가이드는 인터넷에 연결된 Main 서버에서 EVA 설치 자산을 준비하고, 외부 인터넷이
+차단된 Target에 Main Harbor와 게시된 Remote delivery만으로 EVA를 설치하는 절차입니다.
+Main bootstrap과 Target 설치는 Docker, k3s, NVIDIA runtime 및 호스트 영속 데이터를
+변경할 수 있으므로 먼저 작업 가능 시간과 백업 정책을 확인합니다.
+
+## 1. 대상 환경과 작업 위치
+
+| 작업 위치 | 필수 운영 기준 |
+| --- | --- |
+| [Main] OS/platform | Ubuntu 24.04, `linux/amd64` |
+| [Main] 네트워크 | AWS, ECR, Docker Hub, GitHub, package source 접근 |
+| [Main] 저장 공간 | image, model, package 및 Harbor 데이터를 위한 충분한 공간 |
+| [Main] Harbor | Target node와 Pod가 접근 가능한 `host:port` endpoint |
+| [Target] OS/platform | Ubuntu 24.04, `linux/amd64` |
+| [Target] GPU | 지원 NVIDIA GPU, driver 및 `nvidia-smi` |
+| [Target] 네트워크 | Main Harbor 및 Main SSH 경로만 사용; 외부 인터넷은 사용하지 않음 |
+| 권한 | Main과 Target에서 `sudo eva ...`를 실행할 수 있는 사용자 |
+
+Main은 EVA Managed Runtime, Docker/Compose, Harbor와 private `eva` project(`public: false`)를 준비합니다.
+Target에는 Main의 Runtime, package/model payload 및 Harbor image를 사용해 EVA를
+설치합니다. Target에서 AWS, S3, ECR, Docker Hub 또는 Hugging Face로 fallback하지
+않습니다.
+
+## 2. [Main] EVA Tool 설치 및 Base Release 검증
+
+설치를 시작할 파일은 `eva-base-release-<version>.zip`입니다. 압축을 푼 Release root에는
+최소 다음 파일이 있어야 합니다.
+
+```text
+eva-tool_<version>_linux_amd64.tar.gz
+eva-tool-installer.sh
+eva-infra_<version>.tar.gz
+eva-solution_<version>.tar.gz
+release.yaml
+checksums.sha256
+```
+
+Remote Base Release에는 `eva-offline`이 필수가 아닙니다. Remote Runtime artifact와
+Target payload는 이후 Main preparation 결과로 생성됩니다.
+
+```bash
+unzip -q eva-base-release-*.zip -d eva-base-release
+cd eva-base-release
+sudo bash ./eva-tool-installer.sh
+sudo eva verify
+```
+
+installer는 Tool archive와 Base Release checksum을 검증하고, 실행한 Release를
+Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에서도 이 Base Release의
+무결성을 확인합니다. 다른 Release를 확인할 때만 `sudo eva verify --release <path-or-version>`를
+명시합니다. 아래 Main preparation/verify/publish도 인자 없이 같은 Current Release를
+사용합니다. 다른 Release가 필요한 경우에만 해당 Remote 명령에 `RELEASE_PATH`를 명시합니다.
+
+## 3. [Main] AWS와 Harbor 입력 확인
+
+정상 작업에 사용할 Main Harbor endpoint를 확인합니다.
+
+```text
+10.159.57.172:32080
+```
+
+Main Harbor endpoint에는 URL scheme을 넣지 않으며 `localhost` 또는 loopback 주소를
+사용하지 않습니다. Target node와 Pod 모두 이 endpoint에 연결할 수 있어야 합니다.
+기본 project는 `eva`입니다.
+
+Managed Harbor 인증은 승인된 Secret 관리 절차로 준비합니다. `EVA_HARBOR_ADMIN_PASSWORD`가
+비어 있지 않으면 그 값을 우선합니다. 비밀번호 CLI option은 없고, receipt와 로그에 비밀번호를
+기록하지 않습니다. 공개 기본 비밀번호로 운영하지 않습니다.
+Main 게시는 기존 bootstrap의 Harbor 인증을 재사용하며 별도 게시 credential 준비 단계는 없습니다.
+credential을 Release·payload에 넣지 않습니다.
+
+Remote preparation에는 Main 서버에서 사용할 AWS credential이 필요합니다.
+`sudo eva remote prepare`는 EVA managed credential을 확인하며, credential이 없고
+대화형 terminal에서 실행 중이면 AWS Access Key ID, AWS Secret Access Key 및 AWS Region을
+입력받습니다. Region의 기본값은 `ap-northeast-2`입니다.
+
+검증된 credential은 `/var/lib/eva/credentials/aws_key.ini`에 권한 `0600`으로 안전하게
+저장됩니다. 다음 형식만 사용하며, credential을 명령행이나 Release에 넣지 않습니다.
+
+```ini
+aws_access_key_id = <AWS_ACCESS_KEY_ID>
+aws_secret_access_key = <AWS_SECRET_ACCESS_KEY>
+region = ap-northeast-2
+```
+
+credential은 preparation evidence, Target payload, Remote publish 결과에 포함되지 않으며
+Target 서버에 AWS credential을 준비하지 않습니다.
+
+## 4. [Main] Preparation Plane bootstrap
+
+Main의 preparation plane을 준비하거나 기존 상태를 검증합니다.
+
+```bash
+sudo eva remote bootstrap \
+  --registry 10.159.57.172:32080 \
+  --yes
+```
+
+이 명령은 Managed Runtime, Docker Engine/Compose, Harbor 및 private `eva` project(`public: false`)를 준비하거나
+검증하고, 같은 `sudo` 실행 identity의 Docker registry credential까지 확인한 뒤 Harbor
+receipt를 기록합니다. 별도의 `docker login`은 정상 절차에 필요하지 않습니다. credential
+오류가 발생하면 수동 login 대신 `sudo eva remote bootstrap --yes`를 다시 실행합니다.
+Target의 k3s, GPU, NFS 또는 EVA component를
+Main에 설치하지 않습니다. 이미 승인된 외부 Harbor를 쓸 때만 advanced
+`--external-harbor` option을 사용합니다.
+
+## 5. [Main] Remote 자산 준비
+
+검증한 Base Release를 준비합니다. registry/project는 bootstrap receipt에서 자동으로
+해석됩니다.
+
+```bash
+sudo eva remote prepare
+```
+
+성공하면 Remote Runtime과 Target의 패키지·Chart·helper·Agent 모델 자산이 준비되고,
+제품·Infra 이미지와 Qdrant snapshot은 Main Harbor에 게시됩니다.
+
+### Vision 모델 공급
+
+Vision weights는 컨테이너 이미지와 별도로 공급하며 Target payload에 포함하지 않습니다.
+Main의 `eva remote prepare`가 S3에서 모델을 다운로드·검증해 Main Harbor에 게시합니다.
+Main에는 모델 S3의 list/read와 Vision 이미지 ECR pull 권한이 필요합니다.
+**모델 게시가 기존 배포에 영향을 줄 수 있으므로 변경 승인을 확인합니다.**
+Target의 Pod는 Main Harbor에서 모델을 받아 영구 캐시에 저장하고 서비스를 준비합니다.
+Target은 S3에 접근하지 않으며 AWS credential이나 별도 weights 파일 전송이 필요하지 않습니다.
+인증은 기존 EVA Infra의 Harbor 설정을 재사용하며 수동 Secret 생성이나 추가 설치 명령은 필요하지 않습니다.
+첫 실행은 오래 걸릴 수 있으므로 다운로드·압축 해제와 영구 캐시를 위한 디스크 공간을 확보합니다.
+**재시도·upgrade 시 모델 PVC를 삭제하지 않습니다.**
+기본 모델을 사용하며, 승인된 custom 모델이 필요할 때만 준비와 설치의 모델 선택·설정을 일치시킵니다.
+
+Target에 Release를 전달하기 전에 준비 결과를 검증합니다.
+
+```bash
+sudo eva remote verify
+```
+
+이 검증은 준비 파일과 게시 결과를 확인합니다. 실제 Target의 다운로드와 서비스 정상 동작은
+설치 후 별도로 확인합니다. 검증 실패 시 자산이나 보고서를 임의 수정하지 말고 같은 Release로 다시 준비합니다.
+
+## 6. [Main] Managed Target 등록·검증 및 Release 게시
+
+Main의 Managed Target Registry는 publish 인증에만 사용하며 Target의 EVA installation
+workspace와 별개입니다. Target password를 command line에 기록하지 않습니다. 등록 시 Main의
+root 전용 credential store에 저장하고, 등록한 SSH host key가 바뀌면 자동 수락하지 않습니다.
+
+먼저 Target을 한 번 등록합니다. 대화형 입력에서 SSH 및 sudo password를 echo 없이 받으며,
+SSH·sudo 인증도 저장 전에 검증합니다.
+
+```bash
+sudo eva remote target add site-dev-196
+```
+
+이미 등록된 이름으로 다시 `add`하면 입력을 받기 전에 거부되며 기존 설정과 credential은
+그대로 유지됩니다. 등록된 Target과 주소는 다음 명령으로 확인합니다. credential은 출력하지
+않으며, credential 등이 손상된 Target은 `STATUS`에 `invalid`와 원인이 표시됩니다.
+
+```bash
+sudo eva remote target list
+```
+
+```text
+NAME          HOST           PORT  USER  AUTH      STATUS
+site-dev-196  10.159.56.196  22    eva   password  ok
+```
+
+잘못 등록한 Target은 이름으로 삭제한 뒤 다시 `add`합니다. 삭제 전 host 정보를 보여주고
+확인을 받으며, 비대화형 실행에서는 `--yes`가 필요합니다. 해당 Target의 설정과 credential만
+삭제하며 다른 Target이나 Release·cache는 건드리지 않습니다.
+
+```bash
+sudo eva remote target remove site-dev-196
+```
+
+게시 전에는 Target 연결과 권한, `linux/amd64`, storage 및 inbox parent를 다시 확인합니다.
+이 preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.
+
+```bash
+sudo eva remote target verify site-dev-196
+```
+
+검증한 Base Release와 생성된 delivery artifact를 등록한 Target으로 게시합니다.
+
+```bash
+sudo eva remote publish \
+  --target site-dev-196
+```
+
+Base Release, Remote Runtime 및 Target payload는 하나의 Target staging area로 전달되고,
+Target에서 checksum과 identity를 재검증한 뒤 atomic publish됩니다. Workspace,
+inventory와 AWS credential은 전송하지 않습니다. 동일 identity의 재게시는 허용하지만,
+같은 version에 다른 identity를 덮어쓰지는 않습니다.
+
+bootstrap receipt와 같은 registry를 명시적으로 확인하려면 모든 Remote 명령에
+`--registry 10.159.57.172:32080`를 붙일 수 있습니다. 다른 registry는 조용히
+override되지 않습니다. 변경이 필요한 경우 새 endpoint가 정상인지 확인한 후 다음처럼
+receipt를 교체합니다. 기존 Harbor data, preparation 결과와 Target Release는 삭제하지
+않습니다.
+
+```bash
+sudo eva remote bootstrap \
+  --registry 10.159.57.173:32080 \
+  --replace-registry \
+  --yes
+```
+
+## 7. [Target] EVA Tool 설치 및 게시된 Release 확인
+
+Target에는 Tool이 없으므로 최초 한 번만 게시된 installer의 절대 경로를 실행합니다.
+
+```bash
+release_version=<version>
+release_root="/var/lib/eva/inbox/releases/$release_version"
+
+sudo bash "$release_root/eva-tool-installer.sh"
+sudo eva verify
+```
+
+installer는 checksum과 Tool version을 검증한 뒤 이 게시 Release를 Current Release로
+등록합니다. `sudo eva verify`는 Base Release 무결성을 확인합니다. Remote Runtime, payload
+및 delivery marker의 전체 검증은 다음 `eva install`의 선행 검증에서 수행됩니다. 게시된
+파일을 수정하거나 일반 사용자가 inbox Release directory로 이동할 필요가 없습니다. 검증에
+실패하면 Main에서 다시 준비·게시합니다.
+
+## 8. [Target] 단일 설치 설정 준비
+
+Target의 원하는 위치에 설치 설정 YAML 하나만 둡니다. Tool에 내장된 Remote 샘플을 꺼내고
+site, Main Harbor, 접속·TLS·license·IAM 값을 수정합니다. 기존 파일은 덮어쓰지 않습니다.
+
+```bash
+eva install configure
+```
+
+sudo 없이 Target에서 실행하고 설치환경 **remote**를 고릅니다. 현재 Target의 Infra-only/Solution,
+HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 선택합니다. 결과는 사용자 홈의
+`eva-install.yaml`입니다. 기존 옵션/자동화용 `eva config sample --mode remote`도 유지합니다.
+이 기존 명령에서 IAM만 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
+App의 외부 SSO·Redis 연결값을 입력합니다. Target에서 IAM/Redis로의 내부망 접근이 필요합니다.
+검증한 Release에 포함된 Tool·자산을 함께 사용합니다.
+HTTP는 격리 테스트용이며, 운영 환경에서는 HTTPS를 사용합니다.
+기존 `config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
+명시합니다. `--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
+제거하기 전에는 검증에 실패합니다.
+
+다음은 다른 도메인 + HTTPS 예시입니다. 동일 주소 틀은 IAM `/iam`, App `/`를 사용합니다.
+
+```yaml
+schema_version: v1
+site:
+  id: customer-a
+repository:
+  mode: remote
+  registry: harbor.example.com:32080
+  project: eva
+components:
+  infra: true
+  iam: true
+  agent: true
+  vision: true
+  app: true
+  n8n: false
+targets:
+  server-a:
+    ansible:
+      ansible_connection: local
+      ansible_user: eva
+      ansible_become: true
+      ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호
+    values:
+      iam:
+        config:
+          host: iam.example.com
+        keycloak:
+          realmConfig:
+            substitutions:
+              EVA_IAM_ADMIN_EMAIL: "admin@eva.com"
+          realmPatch:
+            realmAdmin:
+              password: "<REALM_ADMIN_PASSWORD>" # 필수: realm 관리자 비밀번호
+            evaApp:
+              redirectUris:
+                - "https://app.example.com/*"
+        ingress:
+          tls:
+            enabled: true
+            create: true
+            hostPath: /etc/eva/certs
+        redis:
+          tls:
+            enabled: true # HTTPS 구성에 맞춰 IAM Redis TLS도 사용합니다.
+          external:
+            enabled: true
+      app:
+        ingress:
+          path: /
+          tls:
+            enabled: true
+            create: true
+            hostPath: /etc/eva/certs
+        app:
+          backendHost: app.example.com
+          backendSecure: true
+          backendSecurePort: 443
+          license:
+            activation_mode: offline # Remote 기본값. 사전 결정한 라이선스가 온라인이면 online으로 변경합니다.
+            product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
+            api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key
+            shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key
+```
+
+TLS certificate/key는 target의 `hostPath`에 별도로 준비합니다. `targets`는 inventory alias별
+mapping이며 `ansible_host`를 지정하면 Deployer가 해당 주소를 기존 Values target key로
+자동 변환합니다. SSH private key의 상대 경로는 설정 파일 기준입니다.
+필요한 Agent/Vision Chart override만 `values.agent`/`values.vision`에 추가하고,
+GPU/MIG/profile과 repository-derived image 설정은 고정하지 않습니다.
+
+Remote의 라이선스 활성화 기본값은 `offline`이며 별도 연결 질문은 하지 않습니다.
+사전 발급된 온라인 라이선스를 사용하면 `activation_mode: online`으로 변경하고 App에서
+라이선스 서버로 연결할 수 있도록 준비합니다. 이미지 공급 방식과 라이선스 방식은 독립적입니다.
+
+Remote/Local 설정의 `credentials.aws`는 거부됩니다. AWS/S3/ECR credential은 Main에만
+관리하며 Target 입력과 Release에 넣지 않습니다. 원본 설정과 내부 생성 Workspace는
+Secret이며 커밋하지 않습니다. Deployer가 내부 Workspace를
+`/var/lib/eva/workspaces/<site-id>/<content-sha256>/`에 생성하므로 폴더와 여러 파일을
+직접 만들 필요가 없습니다. 디렉터리 `0700`, 파일 `0600`이며 기존 `--workspace`도 지원합니다.
+
+## 9. [Target] GPU 사전 조건 확인
+
+설치 전에 NVIDIA driver와 감지된 GPU/MIG 상태를 확인합니다.
+
+```bash
+sudo eva preflight gpu
+```
+
+MIG를 사용할 site는 설치 전에 의도한 MIG 구성을 적용합니다. `infra`가 Docker, CDI,
+k3s와 NVIDIA Device Plugin을 구성하며 이후 Config가 사용 가능한 GPU 또는 MIG resource를
+선택합니다.
+
+## 10. [Target] Argo CD 관리 연결 확인
+
+기존 Argo CD가 같은 site의 EVA resource를 관리했을 수 있으면 설치 전에 handoff를
+확인합니다.
+
+```bash
+sudo eva preflight argocd \
+  --config /home/eva/eva-install.yaml
+```
+
+발견된 관리 연결을 해제할지 묻는 경우 현재 상태와 승인 내용을 확인합니다. 거절하거나
+검증에 실패하면 설치를 시작하지 않습니다.
+
+이 명령은 `eva install`과 같이 Current Release(7단계에서 등록한 게시 Release)를 사용하므로
+실행 위치와 무관합니다. Target에 Managed Runtime이 아직 없으면 게시된 Remote Runtime
+artifact로 먼저 설치합니다.
+
+## 11. [Target] EVA 설치
+
+단일 설정과 게시된 Release를 검증한 뒤 설치를 실행합니다. 설정 검증은 Workspace를 생성하지
+않으며 설치 시 검증된 snapshot을 생성·재사용합니다.
+
+```bash
+sudo eva workspace validate \
+  --config /home/eva/eva-install.yaml
+
+sudo eva install \
+  --config /home/eva/eva-install.yaml \
+  --yes
+```
+
+다른 Release를 사용해야 할 때만 `--release`로 명시적으로 override합니다. 이 override는
+Current Release를 변경하지 않습니다.
+
+```bash
+sudo eva verify --release /var/lib/eva/inbox/releases/<another-version>
+sudo eva install --release /var/lib/eva/inbox/releases/<another-version> \
+  --config /home/eva/eva-install.yaml \
+  --yes
+```
+
+Target에 유효한 Managed Runtime이 없으면 설치는 게시된 Remote Runtime artifact로만
+bootstrap합니다. online Runtime 또는 original `eva-offline` fallback은 사용하지 않습니다.
+Target payload는 managed cache로 materialize되고 image·Qdrant snapshot·Vision 모델은 Main Harbor를
+사용합니다.
+
+## 12. 설치 결과 확인
+
+설치 상태와 작업 결과를 확인합니다.
+
+```bash
+sudo eva check --verbose
+sudo eva status
+```
+
+선택한 Agent 또는 Vision component가 있으면 GPU/MIG allocatable resource, NVIDIA Device
+Plugin readiness 및 workload의 할당 상태도 확인합니다. workload image가 Main Harbor prefix를
+사용하는지, Target에 AWS credential이나 public source 설정이 남지 않았는지도 확인합니다.
+Vision은 모델 다운로드·준비 완료와 모델 PVC 재사용, 실제 분석 요청도 확인합니다.
+
+## 13. 재실행 및 문제 해결
+
+입력 수정 후에는 동일 Release와 단일 설정으로 `install`을 다시 실행합니다. 설정이 바뀌면
+새 Workspace snapshot을 사용합니다. 입력 변경이 없는 실패는 `retry`로 재시도합니다.
+`retry`는 원래 snapshot을 사용하며 원본 YAML을 다시 읽지 않습니다.
+
+```bash
+sudo eva install \
+  --config /home/eva/eva-install.yaml \
+  --yes
+
+sudo eva retry --yes
+```
+
+동일 Runtime/payload identity와 기존 영속 데이터는 재사용합니다. Release checksum,
+delivery marker 또는 Runtime/payload 검증 오류는 Target에서 임의로 고치지 말고 Main의
+준비·검증·게시 절차를 다시 수행합니다.
+
+Vision 모델 준비 실패는 Main의 모델 게시 결과와 Target의 Harbor 접근·기존 EVA Infra 인증 설정을
+확인합니다. Target에서 S3 fallback을 켜거나 실패를 우회해 workload를 중단하지 않습니다.

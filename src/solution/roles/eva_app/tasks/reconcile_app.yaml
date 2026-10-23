@@ -1,0 +1,570 @@
+---
+- name: Assess EVA App Helm ownership reconciliation
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="$EVA_APP_NAMESPACE"
+    release="$EVA_APP_RELEASE"
+    chart_source="$EVA_APP_CHART_SOURCE"
+    chart_version="$EVA_APP_CHART_VERSION"
+    values_file="$EVA_APP_VALUES_FILE"
+    effective_values_file="$EVA_APP_EFFECTIVE_VALUES_FILE"
+    use_chart_version="$EVA_APP_USE_CHART_VERSION"
+    repository_mode="$EVA_APP_REPOSITORY_MODE"
+    tls_job_enabled="${EVA_APP_TLS_JOB_ENABLED:-true}"
+    failed_release_recovery=false
+    deployed_release_reconciliation=false
+
+    rendered_file="$(mktemp)"
+    rendered_json_file="$(mktemp)"
+    candidates_file="$(mktemp)"
+    rendered_resources_file="$(mktemp)"
+    failed_manifest_file="$(mktemp)"
+    failed_manifest_json_file="$(mktemp)"
+    failed_manifest_resources_file="$(mktemp)"
+    obsolete_ecr_file="$(mktemp)"
+    obsolete_tls_resources_file="$(mktemp)"
+    cleanup() {
+      rm -f \
+        "$rendered_file" \
+        "$rendered_json_file" \
+        "$candidates_file" \
+        "$rendered_resources_file" \
+        "$failed_manifest_file" \
+        "$failed_manifest_json_file" \
+        "$failed_manifest_resources_file" \
+        "$obsolete_ecr_file" \
+        "$obsolete_tls_resources_file"
+    }
+    trap cleanup EXIT
+
+    is_obsolete_ecr_resource() {
+      [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]] || return 1
+      case "$1/$2" in
+        "CronJob/$release-ecr-cronjob"|"Job/$release-ecr-job-once"|\
+        "Role/$release-ecr-cronjob-role"|"RoleBinding/$release-ecr-cronjob-rolebinding"|\
+        "ServiceAccount/$release-ecr-cronjob-sa") return 0 ;;
+      esac
+      return 1
+    }
+
+    obsolete_tls_api_version() {
+      [[ "$tls_job_enabled" == false ]] || return 1
+      case "$1/$2" in
+        "Job/$release-tls-job") printf 'batch/v1' ;;
+        "Role/$release-tls-job-role"|"RoleBinding/$release-tls-job-rolebinding")
+          printf 'rbac.authorization.k8s.io/v1' ;;
+        "ServiceAccount/$release-tls-job-sa") printf 'v1' ;;
+        *) return 1 ;;
+      esac
+    }
+
+    # Snapshot only the known ECR refresh resources. No Secret/PVC or general
+    # application resources are cleanup candidates. Validate ownership below.
+    if [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]]; then
+      for resource in \
+        "CronJob/$release-ecr-cronjob" \
+        "Job/$release-ecr-job-once" \
+        "Role/$release-ecr-cronjob-role" \
+        "RoleBinding/$release-ecr-cronjob-rolebinding" \
+        "ServiceAccount/$release-ecr-cronjob-sa"
+      do
+        resource_json="$(kubectl get "$resource" -n "$namespace" --ignore-not-found=true -o json)"
+        [[ -n "$resource_json" ]] || continue
+        jq -c '.' <<< "$resource_json" >> "$obsolete_ecr_file"
+      done
+    fi
+
+    if helm status "$release" -n "$namespace" >/dev/null 2>&1; then
+      release_status_json="$(helm status "$release" -n "$namespace" -o json)"
+      release_status="$(jq -r '.info.status // empty' <<< "$release_status_json")"
+      if [[ "$release_status" == 'deployed' || "$release_status" == 'failed' ]]; then
+        release_name="$(jq -r '.name // empty' <<< "$release_status_json")"
+        release_namespace="$(jq -r '.namespace // empty' <<< "$release_status_json")"
+        release_revision="$(jq -r '.version // empty' <<< "$release_status_json")"
+        if [[ "$release_name" != "$release" || "$release_namespace" != "$namespace" || ! "$release_revision" =~ ^[1-9][0-9]*$ ]]; then
+          echo "[ERROR] invalid $release_status EVA App Helm release identity: release=$release status_name=$release_name status_namespace=$release_namespace revision=$release_revision"
+          exit 1
+        fi
+      else
+        echo "[ERROR] unsafe EVA App Helm release status: release=$release status=$release_status"
+        exit 1
+      fi
+
+      if [[ "$release_status" == 'deployed' ]]; then
+        [[ ! -s "$obsolete_ecr_file" ]] || deployed_release_reconciliation=true
+        # Helm annotations do not transfer SSA field ownership. A deployed
+        # release may still have fields owned by argocd-controller after handoff.
+        helm get manifest "$release" -n "$namespace" > "$failed_manifest_file"
+        kubectl create --dry-run=client --namespace "$namespace" -f "$failed_manifest_file" -o json |
+          jq -s '[.[] | if .kind == "List" then .items[] else . end] ' > "$failed_manifest_json_file"
+        jq -r '.[] | select((.kind // "") != "" and (.metadata.name // "") != "") | [.kind, .metadata.name] | @tsv' "$failed_manifest_json_file" |
+          LC_ALL=C sort -u > "$failed_manifest_resources_file"
+        while IFS=$'\t' read -r kind name
+        do
+          [[ -n "$kind" && -n "$name" ]] || continue
+          resource_json="$(kubectl get "$kind/$name" -n "$namespace" --ignore-not-found=true --show-managed-fields=true -o json)"
+          [[ -n "$resource_json" ]] || continue
+          if jq -e '
+            ((.metadata.annotations."argocd.argoproj.io/tracking-id" // "") != "")
+            or any(.metadata.managedFields[]?; .manager == "argocd-controller")
+          ' <<< "$resource_json" >/dev/null; then
+            deployed_release_reconciliation=true
+          fi
+        done < "$failed_manifest_resources_file"
+        if [[ "$deployed_release_reconciliation" != true ]]; then
+          echo 'take_ownership=false'
+          echo 'force_conflicts=false'
+          echo 'failed_release_recovery=false'
+          echo '[INFO] deployed EVA App Helm release has no residual Argo CD ownership'
+          exit 0
+        fi
+        echo '[INFO] deployed EVA App Helm release requires verified residual Argo CD SSA reconciliation'
+      else
+        failed_secret_count="$(
+          kubectl get secret -n "$namespace" \
+            -l "owner=helm,name=$release,status=failed" -o json |
+            jq --arg release "$release" \
+              '[.items[]? | select(.metadata.labels.owner == "helm" and .metadata.labels.name == $release and .metadata.labels.status == "failed")] | length'
+        )"
+        if [[ "$failed_secret_count" != '1' ]]; then
+          echo "[ERROR] failed EVA App Helm release Secret is missing or ambiguous: release=$release count=$failed_secret_count"
+          exit 1
+        fi
+        failed_release_recovery=true
+        echo '[INFO] failed EVA App Helm release will be recovered by verified Helm upgrade'
+      fi
+    fi
+
+    helm_template=(helm template "$release" "$chart_source" --namespace "$namespace" --values "$values_file" --values "$effective_values_file")
+    while IFS= read -r helm_set
+    do
+      [[ -n "$helm_set" ]] || continue
+      helm_template+=(--set "$helm_set")
+    done < <(python3 -c 'import json, sys; [print(item) for item in json.loads(sys.argv[1])]' "$EVA_APP_HELM_SET_JSON")
+    if [[ "$use_chart_version" == '1' ]]; then
+      helm_template+=(--version "$chart_version")
+    fi
+    if [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]]; then
+      helm_template+=(--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false)
+    fi
+    if [[ -n "${EVA_APP_TRAEFIK_POST_RENDERER:-}" ]]; then
+      if [[ -n "${EVA_APP_HELM_PLUGINS:-}" ]]; then
+        export HELM_PLUGINS="$EVA_APP_HELM_PLUGINS"
+      fi
+      helm_template+=(--post-renderer "$EVA_APP_TRAEFIK_POST_RENDERER" --post-renderer-args "$EVA_APP_TRAEFIK_ROUTER")
+    fi
+    "${helm_template[@]}" > "$rendered_file"
+
+    kubectl create --dry-run=client --namespace "$namespace" -f "$rendered_file" -o json |
+      jq -s '[.[] | if .kind == "List" then .items[] else . end] ' > "$rendered_json_file"
+
+    jq -r '.[] | select((.kind // "") != "" and (.metadata.name // "") != "") | [.kind, .metadata.name] | @tsv' "$rendered_json_file" |
+      LC_ALL=C sort -u > "$rendered_resources_file"
+
+    if [[ "$failed_release_recovery" == true || "$deployed_release_reconciliation" == true ]]; then
+      if [[ "$failed_release_recovery" == true ]]; then
+        helm get manifest "$release" -n "$namespace" > "$failed_manifest_file"
+        kubectl create --dry-run=client --namespace "$namespace" -f "$failed_manifest_file" -o json |
+          jq -s '[.[] | if .kind == "List" then .items[] else . end] ' > "$failed_manifest_json_file"
+        jq -r '.[] | select((.kind // "") != "" and (.metadata.name // "") != "") | [.kind, .metadata.name] | @tsv' "$failed_manifest_json_file" |
+          LC_ALL=C sort -u > "$failed_manifest_resources_file"
+      fi
+      while IFS=$'\t' read -r kind name
+      do
+        [[ -n "$kind" && -n "$name" ]] || continue
+        if ! grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file"; then
+          if is_obsolete_ecr_resource "$kind" "$name"; then
+            continue
+          fi
+          if expected_api="$(obsolete_tls_api_version "$kind" "$name")"; then
+            # Only TLS generation helpers may disappear when generation is
+            # disabled. Live helpers still undergo the full ownership checks.
+            if ! jq -e --arg kind "$kind" --arg name "$name" --arg api "$expected_api" --arg namespace "$namespace" '
+              [.[] | select(.kind == $kind and .metadata.name == $name)]
+              | all(.[]; .apiVersion == $api and ((.metadata.namespace // $namespace) == $namespace))
+            ' "$failed_manifest_json_file" >/dev/null; then
+              echo "[ERROR] unsafe stored EVA App TLS helper identity: $kind/$name"
+              exit 1
+            fi
+            continue
+          fi
+          if [[ "$failed_release_recovery" == true ]]; then
+            echo "[ERROR] failed EVA App release manifest is incompatible with current rendered chart: $kind/$name"
+          else
+            echo "[ERROR] deployed EVA App release manifest is incompatible with current rendered chart: $kind/$name"
+          fi
+          exit 1
+        fi
+      done < "$failed_manifest_resources_file"
+    fi
+
+    while IFS=$'\t' read -r kind name
+    do
+      [[ -n "$kind" && -n "$name" ]] || continue
+      case "$kind" in
+        PersistentVolume|PersistentVolumeClaim|StorageClass)
+          resource_json="$(kubectl get "$kind/$name" -n "$namespace" --ignore-not-found=true -o json)"
+          if [[ -n "$resource_json" ]]; then
+            echo "[ERROR] persistent resource cannot be adopted: $kind/$name"
+            exit 1
+          fi
+          continue
+          ;;
+      esac
+      resource_json="$(kubectl get "$kind/$name" -n "$namespace" --ignore-not-found=true --show-managed-fields=true -o json)"
+      if [[ -n "$resource_json" ]]; then
+        printf '%s' "$resource_json" | base64 | tr -d '\n' >> "$candidates_file"
+        printf '\n' >> "$candidates_file"
+      fi
+    done < "$rendered_resources_file"
+
+    # TLS Job/RBAC helpers omitted by HTTP or create:false are not adoption
+    # targets, but cannot bypass receipt, tracking, Helm or controller checks.
+    # Helm handles old manifest entries during upgrade; do not delete Secrets,
+    # TLSStore or helpers here (the Job may already have expired via its TTL).
+    rendered_candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
+    for resource in \
+      "Job/$release-tls-job" \
+      "Role/$release-tls-job-role" \
+      "RoleBinding/$release-tls-job-rolebinding" \
+      "ServiceAccount/$release-tls-job-sa"
+    do
+      kind="${resource%%/*}"
+      name="${resource#*/}"
+      expected_api="$(obsolete_tls_api_version "$kind" "$name")" || continue
+      grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file" && continue
+      resource_json="$(kubectl get "$resource" -n "$namespace" --ignore-not-found=true --show-managed-fields=true -o json)"
+      [[ -n "$resource_json" ]] || continue
+      if ! jq -e --arg kind "$kind" --arg name "$name" --arg api "$expected_api" \
+        '.kind == $kind and .metadata.name == $name and .apiVersion == $api' <<< "$resource_json" >/dev/null; then
+        echo "[ERROR] unsafe live EVA App TLS helper identity: $resource"
+        exit 1
+      fi
+      printf '%s' "$resource_json" | base64 | tr -d '\n' >> "$candidates_file"
+      printf '\n' >> "$candidates_file"
+      printf '%s\t%s\n' "$kind" "$name" >> "$obsolete_tls_resources_file"
+    done
+
+    candidate_count="$(wc -l < "$candidates_file" | tr -d ' ')"
+    if [[ "$rendered_candidate_count" == '0' && ! -s "$obsolete_ecr_file" ]]; then
+      if [[ "$failed_release_recovery" == true || "$deployed_release_reconciliation" == true ]]; then
+        echo '[ERROR] EVA App release reconciliation has no live rendered resource candidates'
+        exit 1
+      fi
+    fi
+    if [[ "$candidate_count" == '0' && ! -s "$obsolete_ecr_file" ]]; then
+      echo 'take_ownership=false'
+      echo 'force_conflicts=false'
+      echo 'failed_release_recovery=false'
+      echo '[INFO] clean EVA App installation state'
+      exit 0
+    fi
+
+    if [[ -z "${EVA_APP_ARGOCD_HANDOFF_B64:-}" ]]; then
+      echo '[ERROR] EVA App legacy resources require a verified Argo CD handoff receipt'
+      exit 1
+    fi
+
+    legacy_application="$(
+      python3 - "$EVA_APP_SITE_ID" <<'PY'
+    import base64
+    import os
+    import posixpath
+    import re
+    import sys
+    import yaml
+
+    def is_nonempty_string(value):
+        return isinstance(value, str) and bool(value)
+
+    def is_safe_relative_path(value):
+        return (
+            is_nonempty_string(value)
+            and not value.startswith('/')
+            and '\\' not in value
+            and '\x00' not in value
+            and posixpath.normpath(value) == value
+            and value != '..'
+            and not value.startswith('../')
+        )
+
+    def is_legacy_application(value):
+        return (
+            is_nonempty_string(value)
+            and re.fullmatch(r'[A-Za-z0-9.-]+', value) is not None
+            and any(
+                value.endswith(suffix) and len(value) > len(suffix)
+                for suffix in (
+                    '-eva-iam', '-eva-app', '-eva-vision', '-eva-agent',
+                    '-eva-agent-init', '-eva-agent-qdrant', '-eva-agent-vllm',
+                )
+            )
+        )
+
+    try:
+        data = yaml.safe_load(base64.b64decode(os.environ['EVA_APP_ARGOCD_HANDOFF_B64'], validate=True))
+    except (ValueError, yaml.YAMLError):
+        raise SystemExit(1)
+    if (
+        not isinstance(data, dict)
+        or data.get('schema_version') != 'v1'
+        or data.get('site_id') != sys.argv[1]
+        or not data.get('completed_at')
+    ):
+        raise SystemExit(1)
+
+    cluster_name = data.get('cluster_name')
+    registration_application = data.get('registration_application')
+    registration_repository = data.get('registration_repository')
+    registration_branch = data.get('registration_branch')
+    registration_manifest = data.get('registration_manifest')
+    registration_commit = data.get('registration_commit')
+    if (
+        not is_nonempty_string(cluster_name)
+        or registration_application != 'registration'
+        or not is_nonempty_string(registration_repository)
+        or not is_nonempty_string(registration_branch)
+        or not is_nonempty_string(registration_manifest)
+        or not isinstance(registration_commit, str)
+        or re.fullmatch(r'[0-9a-f]{40,64}', registration_commit) is None
+    ):
+        raise SystemExit(1)
+
+    manifest_suffix = '/clusters/' + cluster_name + '.yaml'
+    if registration_manifest == 'clusters/' + cluster_name + '.yaml':
+        source_path = '.'
+    elif registration_manifest.endswith(manifest_suffix):
+        source_path = registration_manifest[:-len(manifest_suffix)]
+    else:
+        raise SystemExit(1)
+    if source_path != '.' and not is_safe_relative_path(source_path):
+        raise SystemExit(1)
+
+    applications = data.get('applications')
+    if (
+        not isinstance(applications, list)
+        or not applications
+        or not all(is_legacy_application(application) for application in applications)
+        or len(set(applications)) != len(applications)
+    ):
+        raise SystemExit(1)
+    expected_application = cluster_name + '-eva-app'
+    matches = [application for application in applications if application.endswith('-eva-app')]
+    if matches != [expected_application]:
+        raise SystemExit(1)
+    print(expected_application)
+    PY
+    )" || {
+      echo '[ERROR] Argo CD handoff receipt does not satisfy the Git-backed EVA App identity contract'
+      exit 1
+    }
+
+    while IFS= read -r encoded
+    do
+      resource_json="$(printf '%s' "$encoded" | base64 -d)"
+      kind="$(jq -r '.kind // empty' <<< "$resource_json")"
+      name="$(jq -r '.metadata.name // empty' <<< "$resource_json")"
+      resource_namespace="$(jq -r '.metadata.namespace // empty' <<< "$resource_json")"
+      api_version="$(jq -r '.apiVersion // empty' <<< "$resource_json")"
+      tracking="$(jq -r '.metadata.annotations."argocd.argoproj.io/tracking-id" // empty' <<< "$resource_json")"
+      managed_by="$(jq -r '.metadata.labels."app.kubernetes.io/managed-by" // empty' <<< "$resource_json")"
+      helm_name="$(jq -r '.metadata.annotations."meta.helm.sh/release-name" // empty' <<< "$resource_json")"
+      helm_namespace="$(jq -r '.metadata.annotations."meta.helm.sh/release-namespace" // empty' <<< "$resource_json")"
+      controller_count="$(jq '[.metadata.ownerReferences[]? | select(.controller == true)] | length' <<< "$resource_json")"
+
+      if [[ -z "$kind" || -z "$name" || "$resource_namespace" != "$namespace" ]]; then
+        echo "[ERROR] unsafe EVA App legacy resource identity: $kind/$name"
+        exit 1
+      fi
+      group="${api_version%%/*}"
+      if [[ "$api_version" == 'v1' ]]; then
+        tracking_group='/'
+      else
+        tracking_group="$group/"
+      fi
+      expected_tracking="$legacy_application:$tracking_group$kind:$namespace/$name"
+      if [[ "$deployed_release_reconciliation" == true ]] && ! grep -Fxq "$kind"$'\t'"$name" "$failed_manifest_resources_file"; then
+        echo "[ERROR] deployed EVA App resource is absent from stored Helm manifest: $kind/$name"
+        exit 1
+      fi
+      if [[ -z "$helm_name" && -z "$helm_namespace" ]]; then
+        if [[ "$deployed_release_reconciliation" == true ]]; then
+          echo "[ERROR] deployed EVA App resource lacks current Helm ownership: $kind/$name"
+          exit 1
+        fi
+        if [[ -n "$managed_by" && "$managed_by" != 'Helm' ]]; then
+          echo "[ERROR] unsupported managed-by ownership: $kind/$name=$managed_by"
+          exit 1
+        fi
+        if [[ "$controller_count" != '0' ]]; then
+          echo "[ERROR] unexpected controller ownership: $kind/$name"
+          exit 1
+        fi
+        if [[ "$tracking" != "$expected_tracking" ]]; then
+          echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
+          exit 1
+        fi
+      elif [[ -n "$helm_name" && -n "$helm_namespace" ]]; then
+        if [[ ( "$failed_release_recovery" != true && "$deployed_release_reconciliation" != true ) || "$helm_name" != "$release" || "$helm_namespace" != "$namespace" || "$managed_by" != 'Helm' ]]; then
+          echo "[ERROR] foreign Helm ownership: $kind/$name"
+          exit 1
+        fi
+        if [[ "$controller_count" != '0' ]]; then
+          echo "[ERROR] unexpected controller ownership: $kind/$name"
+          exit 1
+        fi
+        if [[ -n "$tracking" && "$tracking" != "$expected_tracking" ]]; then
+          echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
+          exit 1
+        fi
+        echo "[INFO] exact current release Helm ownership accepted: $kind/$name"
+      else
+        echo "[ERROR] partial Helm ownership: $kind/$name"
+        exit 1
+      fi
+    done < "$candidates_file"
+
+    obsolete_ecr_json="$(
+      python3 - "$obsolete_ecr_file" "$namespace" "$release" "$legacy_application" "$rendered_resources_file" <<'PY_ECR'
+    import json
+    from pathlib import Path
+    import sys
+
+    source, namespace, release, application, rendered = sys.argv[1:]
+    allowed = {
+      ('CronJob', release + '-ecr-cronjob'): ('batch/v1', 'cronjobs'),
+      ('Job', release + '-ecr-job-once'): ('batch/v1', 'jobs'),
+      ('Role', release + '-ecr-cronjob-role'): ('rbac.authorization.k8s.io/v1', 'roles'),
+      ('RoleBinding', release + '-ecr-cronjob-rolebinding'): ('rbac.authorization.k8s.io/v1', 'rolebindings'),
+      ('ServiceAccount', release + '-ecr-cronjob-sa'): ('v1', 'serviceaccounts'),
+    }
+    inventory = set(Path(rendered).read_text().splitlines())
+    cleanup = []
+    for line in Path(source).read_text().splitlines():
+      resource = json.loads(line)
+      kind = resource.get('kind')
+      metadata = resource.get('metadata') or {}
+      name = metadata.get('name')
+      identity = (kind, name)
+      if identity not in allowed or metadata.get('namespace') != namespace:
+        raise SystemExit('[ERROR] unsafe obsolete ECR resource identity')
+      if kind + '\t' + name in inventory:
+        raise SystemExit('[ERROR] ECR refresh resource is still rendered in repository mode: ' + kind + '/' + name)
+      api_version, plural = allowed[identity]
+      if resource.get('apiVersion') != api_version:
+        raise SystemExit('[ERROR] unexpected obsolete ECR apiVersion: ' + kind + '/' + name)
+      annotations = metadata.get('annotations') or {}
+      labels = metadata.get('labels') or {}
+      helm_name = annotations.get('meta.helm.sh/release-name', '')
+      helm_namespace = annotations.get('meta.helm.sh/release-namespace', '')
+      tracking = annotations.get('argocd.argoproj.io/tracking-id', '')
+      group = api_version.split('/')[0] if '/' in api_version else ''
+      expected = f'{application}:{group}/{kind}:{namespace}/{name}'
+      if helm_name or helm_namespace:
+        if (helm_name, helm_namespace, labels.get('app.kubernetes.io/managed-by')) != (release, namespace, 'Helm'):
+          raise SystemExit('[ERROR] foreign or partial obsolete ECR Helm ownership: ' + kind + '/' + name)
+        if tracking and tracking != expected:
+          raise SystemExit('[ERROR] obsolete ECR tracking identity mismatch: ' + kind + '/' + name)
+      elif tracking != expected or labels.get('app.kubernetes.io/managed-by', '') not in ('', 'Helm'):
+        raise SystemExit('[ERROR] unverified obsolete ECR ownership: ' + kind + '/' + name)
+      if any(owner.get('controller') is True for owner in metadata.get('ownerReferences') or []):
+        raise SystemExit('[ERROR] unexpected obsolete ECR controller ownership: ' + kind + '/' + name)
+      uid = metadata.get('uid')
+      version = metadata.get('resourceVersion')
+      if not isinstance(uid, str) or not uid or not isinstance(version, str) or not version:
+        raise SystemExit('[ERROR] missing obsolete ECR deletion preconditions: ' + kind + '/' + name)
+      prefix = '/api/v1' if api_version == 'v1' else '/apis/' + api_version
+      cleanup.append({'kind': kind, 'name': name, 'uid': uid, 'resourceVersion': version,
+              'api_path': f'{prefix}/namespaces/{namespace}/{plural}/{name}'})
+    print(json.dumps(cleanup))
+    PY_ECR
+    )"
+
+    # A previously Argo CD-managed App object omitted by the current chart is
+    # an ambiguous partial migration. Discover it explicitly rather than
+    # adopting only the rendered subset.
+    legacy_resource_types=(
+      deployments.apps
+      statefulsets.apps
+      daemonsets.apps
+      cronjobs.batch
+      jobs.batch
+      services
+      configmaps
+      secrets
+      serviceaccounts
+      roles.rbac.authorization.k8s.io
+      rolebindings.rbac.authorization.k8s.io
+      ingresses.networking.k8s.io
+    )
+    legacy_resource_query="$(
+      IFS=,
+      printf '%s' "${legacy_resource_types[*]}"
+    )"
+
+    kubectl get "$legacy_resource_query" -n "$namespace" -o json |
+      jq -r --arg application "$legacy_application" '
+        .items[]?
+        | select(
+            (.metadata.annotations."argocd.argoproj.io/tracking-id" // "")
+            | startswith($application + ":")
+          )
+        | [.kind, .metadata.name]
+        | @tsv
+      ' |
+      LC_ALL=C sort -u |
+      while IFS=$'\t' read -r kind name
+      do
+        [[ -n "$kind" && -n "$name" ]] || continue
+        if ! grep -Fxq \
+          "$kind"$'\t'"$name" \
+          "$rendered_resources_file"
+        then
+          if is_obsolete_ecr_resource "$kind" "$name"; then
+            if jq -e --arg kind "$kind" --arg name "$name" \
+              'any(.[]; .kind == $kind and .name == $name)' <<< "$obsolete_ecr_json" >/dev/null; then
+              continue
+            fi
+            echo "[ERROR] obsolete ECR resource changed during assessment: $kind/$name"
+            exit 1
+          fi
+          if obsolete_tls_api_version "$kind" "$name" >/dev/null; then
+            if grep -Fxq "$kind"$'\t'"$name" "$obsolete_tls_resources_file"; then
+              continue
+            fi
+            echo "[ERROR] obsolete TLS helper changed during assessment: $kind/$name"
+            exit 1
+          fi
+          echo \
+            "[ERROR] legacy EVA App resource is absent from rendered chart: $kind/$name"
+          exit 1
+        fi
+      done
+
+    echo 'take_ownership=true'
+    echo 'force_conflicts=true'
+    echo "obsolete_ecr_resources=$obsolete_ecr_json"
+    echo "failed_release_recovery=$failed_release_recovery"
+    echo "[OK] verified EVA App resources for Helm adoption application=$legacy_application count=$candidate_count failed_release_recovery=$failed_release_recovery deployed_release_reconciliation=$deployed_release_reconciliation"
+  args:
+    executable: /bin/bash
+  register: eva_app_legacy_reconciliation
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_RELEASE: "{{ eva_app_name }}"
+    EVA_APP_CHART_SOURCE: "{{ eva_app_chart_source }}"
+    EVA_APP_CHART_VERSION: "{{ eva_app_chart_version }}"
+    EVA_APP_VALUES_FILE: "{{ eva_app_workdir }}/values.yaml"
+    EVA_APP_EFFECTIVE_VALUES_FILE: "{{ eva_app_effective_values_dest }}"
+    EVA_APP_TRAEFIK_POST_RENDERER: "{{ eva_traefik_ports_result.renderer | default('') if (eva_app_traefik_args | default('') | length > 0) else '' }}"
+    EVA_APP_TRAEFIK_ROUTER: "{{ eva_app_workdir }}/traefik-router.json"
+    EVA_APP_HELM_PLUGINS: "{{ (eva_app_traefik_env | default({})).HELM_PLUGINS | default('') }}"
+    EVA_APP_ARGOCD_HANDOFF_B64: "{{ eva_app_argocd_handoff_raw.content | default('') }}"
+    EVA_APP_SITE_ID: "{{ eva_site_id }}"
+    EVA_APP_REPOSITORY_MODE: "{{ repository_mode }}"
+    EVA_APP_TLS_JOB_ENABLED: "{{ eva_app_tls_job_enabled | bool | lower }}"
+    EVA_APP_HELM_SET_JSON: "{{ eva_cli_helm_set | default([]) | to_json }}"
+    EVA_APP_USE_CHART_VERSION: "{{ (eva_cli_chart_path | default('') | length == 0) | ternary('1', '0') }}"

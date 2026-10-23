@@ -1,0 +1,23 @@
+# Run before reconciliation, scale-down or Helm upgrade. Backups are target-side,
+# independent of disposable workdirs and never automatically reused as input.
+- name: Back up existing Helm user Values before changing the release
+  ansible.builtin.script:
+    cmd: backup_user_values.py
+      --namespace {{ eva_helm_backup_namespace | quote }}
+      --release {{ eva_helm_backup_release | quote }}
+      --component {{ eva_helm_backup_component | quote }}
+      --root {{ eva_helm_values_backup_root | default('/var/lib/eva/backups/helm-values') | quote }}
+      --site {{ eva_site_id | default('default') | quote }}
+    executable: "{{ ansible_facts.python.executable | default('/usr/bin/python3') }}"
+  register: eva_helm_values_backup_result
+  changed_when: >-
+    eva_helm_values_backup_result.rc == 0
+    and (eva_helm_values_backup_result.stdout | from_json).status == 'saved'
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_helm_backup_kubeconfig }}"
+
+- name: Show Helm user Values backup location without its contents
+  ansible.builtin.debug:
+    msg: "{{ eva_helm_values_backup_result.stdout | from_json }}"
+  when: not ansible_check_mode

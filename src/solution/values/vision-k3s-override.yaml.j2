@@ -1,0 +1,91 @@
+image:
+  repository: "{{ eva_vision_image_repository }}"
+  tag: "{{ eva_vision_image_tag | default(eva_vision_deploy_version) }}"
+  pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
+
+runtimeClassName: "nvidia"
+
+imagePullSecrets:
+  enabled: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
+  create: false
+{% if eva_vision_chart_version is version('3.3.0', '>=') %}
+  ExistingSecret: "ecr-registry"
+  account: "211722900905"
+  region: "ap-northeast-2"
+{% else %}
+  name: "ecr-registry"
+{% endif %}
+
+{% if eva_vision_chart_version is version('3.3.0', '>=') %}
+modelSource:
+  type: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('s3', 'harbor') }}"
+
+s3:
+  modelUri: "s3://spectrabrain-eva-vision/model_dir"
+  region: "ap-northeast-2"
+  existingSecret: "eva-vision-s3"
+
+harbor:
+  registry: {{ repository_registry | to_json }}
+  project: {{ repository_project | to_json }}
+  insecure: {{ repository_insecure | default(harbor_insecure | default(false)) | bool | lower }}
+  plainHttp: {{ repository_plain_http | default(harbor_plain_http | default(true)) | bool | lower }}
+  # Missing private Secret is created automatically from target k3s registry auth.
+  # Existing valid Secrets are reused unchanged.
+  # Explicitly public projects may override existingSecret to "" for anonymous pulls.
+  existingSecret: "eva-vision-harbor"
+
+modelCache:
+  enabled: true
+  existingClaim: ""
+  storageClass: {{ eva_vision_storage_class | to_json }}
+  size: {{ eva_vision_pvc_size | to_json }}
+  accessModes:
+    - ReadWriteOnce
+
+appConfig:
+  embedding:
+    modelRoot: "/app/model_dir"
+{% endif %}
+
+replicaCount: 1
+
+strategy:
+  type: Recreate
+
+resources:
+  limits:
+    memory: "24Gi"
+    cpu: "4"
+  requests:
+    memory: "24Gi"
+    cpu: "2"
+
+gpu:
+  count: {{ eva_vision_gpu_count }}
+  cudaVisibleDevices: ""
+  mig:
+    resourceName: "{{ eva_vision_gpu_resource_name }}"
+  mps:
+    enabled: true
+    pipeDirectory: "/tmp/nvidia-mps"
+    logDirectory: "/tmp/nvidia-mps-log"
+
+probes:
+  liveness:
+    initialDelaySeconds: 3000
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+persistence:
+  enabled: false
+  storageClass: "{{ eva_vision_storage_class }}"
+  size: "{{ eva_vision_pvc_size }}"
+
+affinity: {}

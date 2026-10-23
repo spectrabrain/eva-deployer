@@ -1,0 +1,21 @@
+- name: Detect NVIDIA GPU presence
+  ansible.builtin.import_tasks: detect.yaml
+
+- name: Install GPU driver
+  ansible.builtin.import_tasks: driver.yaml
+  when:
+    - gpu_has_nvidia | default(false) | bool
+    - not (gpu_skip_driver_update | default(false) | bool)
+
+- name: Skip GPU driver update by request
+  ansible.builtin.debug:
+    msg: "Skipping GPU driver update because gpu_skip_driver_update=true."
+  when:
+    - gpu_has_nvidia | default(false) | bool
+    - gpu_skip_driver_update | default(false) | bool
+
+- name: Install NVIDIA container toolkit
+  ansible.builtin.import_tasks: container-toolkit.yaml
+
+- name: Install CUDA toolkit
+  ansible.builtin.import_tasks: cuda.yaml

@@ -1,0 +1,29 @@
+- name: Copy EVA App database transition helper
+  ansible.builtin.copy:
+    src: database_transition.py
+    dest: "{{ eva_app_workdir }}/database_transition.py"
+    mode: "0700"
+
+- name: Copy read-only EVA App license identity reader
+  ansible.builtin.copy:
+    src: read_license_identity.py
+    dest: "{{ eva_app_workdir }}/read_license_identity.py"
+    mode: "0700"
+
+- name: Render exact EVA App target manifest for DB preparation
+  no_log: true
+  ansible.builtin.shell: >-
+    umask 077;
+    helm template {{ eva_app_name | quote }} {{ eva_app_chart_source | quote }}
+    -n {{ eva_app_namespace | quote }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version | quote }}{% endif %}
+    -f {{ (eva_app_workdir ~ '/values.yaml') | quote }}
+    -f {{ eva_app_effective_values_dest | quote }}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    {% if repository_mode in ['remote_repository', 'local_repository'] %}--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false{% endif %}
+    {{ eva_app_traefik_args | default('') }}
+    > {{ (eva_app_workdir ~ '/db-target-manifest.yaml') | quote }}
+  args:
+    executable: /bin/bash
+  changed_when: false
+  environment: "{{ {'KUBECONFIG': eva_app_kubeconfig} | combine(eva_app_traefik_env | default({})) }}"

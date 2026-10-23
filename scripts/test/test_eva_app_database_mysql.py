@@ -10,11 +10,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import tempfile
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 from test_eva_app_database_transition import FEWSHOT_TRIGGER, MODULE, fixture
 
@@ -82,6 +84,121 @@ class RealMySQLTests(unittest.TestCase):
         again.objects, again.pods = self.t.objects, self.t.pods
         again.test_container = self.container
         self.assertFalse(again.run()["copied"])
+
+    def mysql_session(self, database="eva"):
+        # Only this test's isolated container; keep a real client connected like
+        # DBeaver. No host ports, installed Python DB driver or live credentials.
+        args = ["docker", "exec", "-i", self.container, "sh", "-c",
+                'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec "$@"', "sh",
+                "mysql", "--user=root", "--batch", "--raw", "--skip-column-names", "--unbuffered"]
+        if database:
+            args.append(database)
+        client = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        def close():
+            try:
+                client.communicate(input=b"ROLLBACK; UNLOCK TABLES;\n", timeout=10)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                client.communicate()
+
+        self.addCleanup(close)
+        return client
+
+    def client_sql(self, client, statement):
+        marker = ("complete_" + uuid.uuid4().hex).encode()
+        client.stdin.write(statement.encode() + b"\nSELECT '" + marker + b"';\n")
+        client.stdin.flush()
+        data = b""
+        deadline = time.monotonic() + 15
+        while not data.endswith(marker + b"\n"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([client.stdout], [], [], remaining)[0]:
+                self.fail("Isolated persistent MySQL client timed out")
+            chunk = os.read(client.stdout.fileno(), 65536)
+            if not chunk:
+                self.fail("Isolated persistent MySQL client exited unexpectedly")
+            data += chunk
+        return data[:-len(marker) - 1].decode().rstrip("\n")
+
+    def test_idle_database_viewer_allows_copy_and_stays_connected(self):
+        client = self.mysql_session()
+        connection = self.client_sql(client, "SELECT CONNECTION_ID();")
+        self.client_sql(client, "SELECT COUNT(*) FROM eva.config;")
+        self.assertEqual(self.t.sql("SELECT COMMAND FROM information_schema.PROCESSLIST WHERE ID=" + connection + ";"), "Sleep")
+        self.assertEqual(self.t.sql("SELECT COUNT(*) FROM information_schema.INNODB_TRX WHERE trx_mysql_thread_id=" + connection + ";"), "0")
+        self.assertTrue(self.t.run()["copied"])
+        self.assertEqual(self.client_sql(client, "SELECT CONNECTION_ID();"), connection)
+        self.assertEqual(self.t.eva_id("eva"), self.t.eva_id("eva_v3_0"))
+
+    def test_sleeping_viewer_transaction_still_blocks_copy(self):
+        client = self.mysql_session()
+        connection = self.client_sql(client, "SELECT CONNECTION_ID();")
+        self.client_sql(client, "START TRANSACTION; SELECT COUNT(*) FROM eva.config;")
+        self.assertEqual(self.t.sql("SELECT COMMAND FROM information_schema.PROCESSLIST WHERE ID=" + connection + ";"), "Sleep")
+        with self.assertRaisesRegex(MODULE.UnsafeTransition, "transactions/locks"):
+            self.t.run()
+        self.assertEqual(self.t.tables("eva_v3_0"), [])
+        self.client_sql(client, "ROLLBACK;")
+        self.assertTrue(self.t.run()["copied"])
+        self.assertEqual(self.client_sql(client, "SELECT CONNECTION_ID();"), connection)
+
+    def test_sleeping_viewer_table_lock_still_blocks_copy(self):
+        client = self.mysql_session()
+        self.client_sql(client, "LOCK TABLES eva.config READ;")
+        with self.assertRaisesRegex(MODULE.UnsafeTransition, "transactions/locks"):
+            self.t.run()
+        self.assertEqual(self.t.tables("eva_v3_0"), [])
+        self.client_sql(client, "UNLOCK TABLES;")
+        self.assertTrue(self.t.run()["copied"])
+
+    def test_idle_target_viewer_allows_identity_alignment(self):
+        self.conflicting_databases()
+        client = self.mysql_session("eva_v3_0")
+        connection = self.client_sql(client, "SELECT CONNECTION_ID();")
+        cache = b"encrypted-private-fixture"
+        self.t.license_evidence = {"status": "present", "product": "test-product",
+                                   "eva_id_hex": b"preserved-test-id".hex().upper(),
+                                   "cache_sha256": hashlib.sha256(cache).hexdigest(),
+                                   "encrypted_cache_base64": base64.b64encode(cache).decode()}
+        self.assertEqual(self.t.run()["license_identity"], "corrected")
+        self.assertEqual(self.client_sql(client, "SELECT CONNECTION_ID();"), connection)
+
+    def test_schema_qualified_open_transaction_is_not_hidden_by_default_database(self):
+        for database in ("", "mysql"):
+            with self.subTest(database=database):
+                client = self.mysql_session(database)
+                self.client_sql(client, "START TRANSACTION; SELECT COUNT(*) FROM eva.config;")
+                with self.assertRaisesRegex(MODULE.UnsafeTransition, "transactions/locks"):
+                    self.t.require_quiescent_databases("eva", "eva_v3_0")
+                self.client_sql(client, "ROLLBACK;")
+                self.t.require_quiescent_databases("eva", "eva_v3_0")
+
+    def test_active_query_is_blocked_and_short_refresh_can_finish(self):
+        # A controllable waiting SELECT instead of a timing-sensitive SLEEP.
+        holder = self.mysql_session()
+        viewer = self.mysql_session()
+        name = "viewer_refresh_" + uuid.uuid4().hex
+        self.assertEqual(self.client_sql(holder, "SELECT GET_LOCK('" + name + "',0);"), "1")
+        connection = self.client_sql(viewer, "SELECT CONNECTION_ID();")
+        viewer.stdin.write(("SELECT GET_LOCK('" + name + "',30);\n").encode())
+        viewer.stdin.flush()
+        for _ in range(30):
+            if self.t.sql("SELECT COMMAND FROM information_schema.PROCESSLIST WHERE ID=" + connection + ";") == "Query":
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("Isolated viewer query did not start")
+        try:
+            with patch.object(MODULE.time, "sleep"):
+                with self.assertRaisesRegex(MODULE.UnsafeTransition, "active=1"):
+                    self.t.require_quiescent_databases("eva")
+            # Finish the metadata-like query during the guard's bounded retry.
+            with patch.object(MODULE.time, "sleep", side_effect=lambda _: self.client_sql(holder, "SELECT RELEASE_LOCK('" + name + "');")):
+                self.t.require_quiescent_databases("eva")
+        finally:
+            self.client_sql(holder, "SELECT RELEASE_LOCK('" + name + "');")
+        self.client_sql(viewer, "SELECT RELEASE_LOCK('" + name + "');")
 
     def test_no_name_change_still_archives_pre32_users(self):
         self.t.resources[2]["data"]["MYSQL_NAME"] = self.t.objects[("secret", "app-secret")]["data"]["MYSQL_NAME"]

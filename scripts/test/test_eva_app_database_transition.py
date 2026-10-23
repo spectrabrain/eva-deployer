@@ -131,7 +131,7 @@ class FakeTransition(MODULE.Transition):
                 return str(int(self.special_objects) + len(self.databases[db].get("triggers", [])))
             return self.special_objects
         if "information_schema.PROCESSLIST" in statement:
-            return "0"
+            return "1\t1\t0\t0\t0"
         if "information_schema.SCHEMATA" in statement:
             return "utf8mb4\tutf8mb4_0900_ai_ci"
         if statement.startswith("CREATE DATABASE"):
@@ -556,14 +556,71 @@ class DatabaseTransitionTests(unittest.TestCase):
         original_sql = self.t.sql
 
         def busy(statement):
-            return "1" if "information_schema.PROCESSLIST" in statement else original_sql(statement)
+            return "1\t1\t1\t0\t0" if "information_schema.PROCESSLIST" in statement else original_sql(statement)
 
-        with patch.object(self.t, "sql", side_effect=busy):
+        with patch.object(self.t, "sql", side_effect=busy), patch.object(MODULE.time, "sleep"):
             with self.assertRaisesRegex(MODULE.UnsafeTransition, "Other DB sessions"):
                 self.t.run()
         with patch.object(MODULE.fcntl, "flock", side_effect=BlockingIOError):
             with self.assertRaisesRegex(MODULE.UnsafeTransition, "Another App DB"):
                 self.t.run()
+
+    def test_idle_viewers_pass_without_waiting_or_reading_query_text(self):
+        with patch.object(self.t, "sql", return_value="1\t1\t0\t0\t0") as sql, patch.object(MODULE.time, "sleep") as sleep:
+            self.t.require_quiescent_databases("eva", "eva_v3_0")
+        sleep.assert_not_called()
+        statement = sql.call_args.args[0]
+        self.assertIn("p.COMMAND NOT IN ('Sleep','Daemon')", statement)
+        self.assertIn("information_schema.INNODB_TRX", statement)
+        self.assertIn("performance_schema.metadata_locks", statement)
+        self.assertIn("m.OBJECT_SCHEMA IN ('eva','eva_v3_0')", statement)
+        self.assertIn("p.DB IS NULL", statement)
+        self.assertNotIn(".INFO", statement)
+        self.assertNotIn("SQL_TEXT", statement)
+
+    def test_short_viewer_refresh_is_retried_then_allowed(self):
+        with patch.object(self.t, "sql", side_effect=["1\t1\t1\t0\t0", "1\t1\t0\t0\t0"]), patch.object(MODULE.time, "sleep") as sleep:
+            self.t.require_quiescent_databases("eva")
+        sleep.assert_called_once_with(1)
+
+    def test_busy_transactions_and_locks_fail_after_bounded_wait(self):
+        for result, detail in (("1\t1\t1\t0\t0", "active=1"),
+                               ("1\t1\t0\t1\t0", "transactions=1"),
+                               ("1\t1\t0\t0\t1", "locks=1")):
+            with self.subTest(result=result):
+                with patch.object(self.t, "sql", return_value=result) as sql, patch.object(MODULE.time, "sleep") as sleep:
+                    with self.assertRaisesRegex(MODULE.UnsafeTransition, detail):
+                        self.t.require_quiescent_databases("eva")
+                self.assertEqual(sql.call_count, 6)
+                self.assertEqual(sleep.call_count, 5)
+
+    def test_unknown_session_safety_never_discloses_raw_metadata(self):
+        for result in ("private-session-query", "0\t1\t0\t0\t0", "1\t0\t0\t0\t0", "1\t1\t-1\t0\t0", "1\t1\t0\t0"):
+            with self.subTest(result=result), patch.object(self.t, "sql", return_value=result):
+                with self.assertRaisesRegex(MODULE.UnsafeTransition, "Cannot verify DB session safety") as failure:
+                    self.t.require_quiescent_databases("eva")
+                self.assertNotIn("private-session-query", str(failure.exception))
+
+    def test_new_transaction_during_dump_stops_before_destination_creation(self):
+        original_sql = self.t.sql
+        original_dump = self.t.dump
+        dumped = False
+
+        def dump(db, path):
+            nonlocal dumped
+            original_dump(db, path)
+            dumped = True
+
+        def sql(statement):
+            if dumped and "information_schema.PROCESSLIST" in statement:
+                return "1\t1\t0\t1\t0"
+            return original_sql(statement)
+
+        with patch.object(self.t, "dump", side_effect=dump), patch.object(self.t, "sql", side_effect=sql), patch.object(MODULE.time, "sleep"):
+            with self.assertRaisesRegex(MODULE.UnsafeTransition, "transactions=1"):
+                self.t.run()
+        self.assertNotIn("eva_v3_0", self.t.databases)
+        self.assertFalse(any(isinstance(call, str) and call.startswith("CREATE DATABASE") for call in self.t.calls))
 
     def test_unknown_user_schema_stops_upgrade(self):
         self.t.databases["eva"]["columns"] = ["seq", "unknown_id"]

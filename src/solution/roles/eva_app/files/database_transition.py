@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -186,8 +187,7 @@ class Transition:
         old = self.eva_id(target)
         if old == identity:
             return "matched"
-        require(self.sql("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID!=CONNECTION_ID() AND DB='"
-                         + target + "';") == "0", "Other DB sessions appeared; identity correction stopped.")
+        self.require_quiescent_databases(target)
         require(self.sql("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA='"
                          + target + "' AND EVENT_OBJECT_TABLE='config';") == "0",
                 "Config triggers prevent an identity-only correction.")
@@ -213,6 +213,7 @@ class Transition:
             "database_dump_sha256": sha256(dump), "scope": "config.eva_id-only", "snapshot": before})
         # The only DML in this feature; CAS avoids overwriting a concurrently
         # changed identity. No generated ID, INSERT, DROP, other rows or source writes.
+        self.require_quiescent_databases(target)
         count = self.sql("START TRANSACTION; UPDATE " + identifier(target)
                          + ".config SET value=CONVERT(0x" + identity + " USING utf8mb4) "
                          + "WHERE `key`='eva_id' AND HEX(value)='" + old + "'; SELECT ROW_COUNT(); COMMIT;")
@@ -312,6 +313,50 @@ class Transition:
         return self.mysql(["mysql", "--user=root", "--default-character-set=utf8mb4",
                            "--batch", "--raw", "--skip-column-names"],
                           input=statement.encode("utf-8"), stdout=subprocess.PIPE).stdout.decode("utf-8").rstrip("\n")
+
+    def require_quiescent_databases(self, *databases):
+        for db in databases:
+            identifier(db)
+        names = ",".join("'" + db + "'" for db in sorted(set(databases)))
+        # A sleeping JDBC/DBeaver connection alone is not a writer. A sleeping
+        # transaction or LOCK TABLES session is still unsafe. Inspect metadata,
+        # never SQL text, and never KILL a viewer's connection. Locks also catch
+        # schema-qualified access from a connection using a different default DB.
+        scope = "(p.DB IN (" + names + ") OR p.DB IS NULL)"
+        statement = (
+            "SELECT @@performance_schema,"
+            "(SELECT COUNT(*) FROM performance_schema.setup_instruments "
+            "WHERE NAME='wait/lock/metadata/sql/mdl' AND ENABLED='YES'),"
+            "(SELECT COUNT(*) FROM information_schema.PROCESSLIST p "
+            # MySQL's idle event_scheduler is a schema-less Daemon, not a client
+            # query. Executing event workers still have Query/transaction/locks.
+            "WHERE p.ID!=CONNECTION_ID() AND " + scope + " AND p.COMMAND NOT IN ('Sleep','Daemon')),"
+            "(SELECT COUNT(*) FROM information_schema.INNODB_TRX t "
+            "JOIN information_schema.PROCESSLIST p ON p.ID=t.trx_mysql_thread_id "
+            "WHERE p.ID!=CONNECTION_ID() AND " + scope + "),"
+            "(SELECT COUNT(*) FROM performance_schema.metadata_locks m "
+            "JOIN performance_schema.threads th ON th.THREAD_ID=m.OWNER_THREAD_ID "
+            "WHERE th.PROCESSLIST_ID!=CONNECTION_ID() AND m.OBJECT_SCHEMA IN (" + names + "));"
+        )
+        # Brief metadata refreshes in a DB viewer must not fail an installation.
+        # This is a bounded wait, not permission to edit data during maintenance.
+        for attempt in range(6):
+            cells = self.sql(statement).split("\t")
+            require(len(cells) == 5 and all(re.fullmatch(r"[0-9]+", cell) for cell in cells),
+                    "Cannot verify DB session safety; session metadata response is invalid.")
+            enabled, instrumented, active, transactions, locks = map(int, cells)
+            require(enabled == instrumented == 1,
+                    "Cannot verify DB session safety; MySQL performance_schema and metadata lock instrumentation must be enabled.")
+            if active == transactions == locks == 0:
+                return
+            if attempt < 5:
+                time.sleep(1)
+        raise UnsafeTransition(
+            "Other DB sessions are busy or hold transactions/locks "
+            "(active=" + str(active) + ", transactions=" + str(transactions) + ", locks=" + str(locks) + "); "
+            "finish queries and commit/rollback or release locks before retry. "
+            "Idle transaction-free DB viewer connections are allowed."
+        )
 
     def tables(self, db):
         identifier(db)
@@ -420,6 +465,7 @@ class Transition:
             + "' AND REFERENCED_TABLE_SCHEMA IS NOT NULL AND REFERENCED_TABLE_SCHEMA!='" + source + "');")
         require(objects == "0", "Source DB " + source + " has non-InnoDB tables, stored objects or cross-DB references; manual migration required.")
         self.validate_copy_triggers(source, source_tables)
+        self.require_quiescent_databases(source, target)
         before = self.snapshot(source)
         directory = self.backup_directory()
         dump = directory / (source + ".sql")
@@ -429,6 +475,7 @@ class Transition:
         charset = self.sql("SELECT DEFAULT_CHARACTER_SET_NAME,DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"
                            + source + "';").split("\t")
         require(len(charset) == 2, "Cannot determine source DB charset/collation.")
+        self.require_quiescent_databases(source, target)
         self.sql("CREATE DATABASE IF NOT EXISTS " + identifier(target) + " CHARACTER SET "
                  + identifier(charset[0]) + " COLLATE " + identifier(charset[1]) + ";")
         # A failed restore is NOT cleaned up automatically. Retain dump and partial
@@ -525,9 +572,7 @@ class Transition:
                 source = "eva"
         require(bool(self.tables(source)), "Selected existing DB is missing/empty; refusing a silent fresh identity.")
         self.eva_id(source)
-        sessions = self.sql("SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID!=CONNECTION_ID() AND DB IN ('"
-                    + source + "','" + target + "');")
-        require(sessions == "0", "Other DB sessions are active; stop all writers before backup/copy.")
+        self.require_quiescent_databases(source, target)
         self.backup_root = private_dir(self.backup_root)
         with (self.backup_root / ".lock").open("a") as lock:
             try:

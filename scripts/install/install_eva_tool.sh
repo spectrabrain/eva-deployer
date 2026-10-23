@@ -150,9 +150,12 @@ remote_backend_paths=(
   scripts/download/download_offline_assets.sh
   scripts/download/download_python_venv_debs.sh
   scripts/download/download_qdrant_snapshots.sh
+  scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
+  scripts/lib/vision_models.py
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/publish/push_vision_models_to_harbor.sh
   scripts/remote/publish_release_to_target.sh
   scripts/install/install_docker.sh
   scripts/install/setup_harbor.sh
@@ -172,9 +175,11 @@ remote_backend_shell_paths=(
   scripts/download/download_offline_assets.sh
   scripts/download/download_python_venv_debs.sh
   scripts/download/download_qdrant_snapshots.sh
+  scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/publish/push_vision_models_to_harbor.sh
   scripts/remote/publish_release_to_target.sh
   scripts/install/install_docker.sh
   scripts/install/setup_harbor.sh

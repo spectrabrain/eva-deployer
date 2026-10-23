@@ -12,6 +12,8 @@ from pathlib import Path
 import sys
 
 import yaml
+from jinja2 import Environment
+from ansible.plugins.test.core import version_compare
 
 
 repo_root = Path(sys.argv[1])
@@ -31,18 +33,21 @@ reconcile_path = (
 expected_command = [
     "/bin/bash",
     "-lc",
-    "mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled 2>/dev/null || true; exec uv run ./run.sh serve --log-profile prod --foreground",
+    "if [ -f /app/scripts/warmup.py ]; then mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled || exit 1; fi; "
+    'exec /app/scripts/docker-entrypoint.sh "$@"',
+    "eva-vision-entrypoint",
 ]
 
 
-def render_postrenderer(skip_startup_warmup: bool) -> str:
-    source = template_path.read_text()
-    source = source.replace(
-        "{{ eva_vision_progress_deadline_seconds | int }}", "3600"
-    )
-    source = source.replace(
-        "{{ eva_vision_skip_startup_warmup | bool | ternary('True', 'False') }}",
-        str(skip_startup_warmup),
+def render_postrenderer(skip_startup_warmup: bool, version="3.3.0") -> str:
+    environment = Environment()
+    environment.filters["bool"] = bool
+    environment.filters["ternary"] = lambda value, yes, no: yes if value else no
+    environment.tests["version"] = version_compare
+    source = environment.from_string(template_path.read_text()).render(
+        eva_vision_progress_deadline_seconds=3600,
+        eva_vision_skip_startup_warmup=skip_startup_warmup,
+        eva_vision_chart_version=version,
     )
     if "{{" in source or "}}" in source:
         raise SystemExit("[ERROR] post-renderer template rendering is incomplete")
@@ -137,6 +142,15 @@ if target["spec"].get("progressDeadlineSeconds") != 3600:
     raise SystemExit("[ERROR] post-renderer did not set progressDeadlineSeconds")
 if container.get("command") != expected_command:
     raise SystemExit("[ERROR] post-renderer did not set the startup command")
+if container.get("args") != ["--log-profile", "prod", "--foreground"]:
+    raise SystemExit("[ERROR] image CMD arguments were lost")
+
+custom_args = deployment()
+custom_args["spec"]["template"]["spec"]["containers"][0]["args"] = ["--foreground"]
+rendered_args = assert_success(enabled, manifest(custom_args))
+assert rendered_args[0]["spec"]["template"]["spec"]["containers"][0]["args"] == ["--foreground"]
+legacy = assert_success(render_postrenderer(True, "3.2.0"), manifest(deployment()))
+assert 'exec uv run ./run.sh serve "$@"' in legacy[0]["spec"]["template"]["spec"]["containers"][0]["command"][2]
 
 rendered = assert_success(enabled, manifest(deployment(expected_command, 3600)))
 if rendered[0]["spec"]["template"]["spec"]["containers"][0]["command"] != expected_command:

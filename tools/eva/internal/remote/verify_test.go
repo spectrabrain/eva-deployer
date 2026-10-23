@@ -23,6 +23,9 @@ func TestVerifyValidatesCompletedPreparationWithoutMutation(t *testing.T) {
 	if result.ManifestPath != filepath.Join(root, manifestFileName) || result.LiveRegistryVerified {
 		t.Fatalf("Verify() result = %#v", result)
 	}
+	if !sameStrings(result.Categories, []string{"release", "runtime-packages", "product-images", "infra-images", "models", "qdrant-snapshots", "vision-models"}) {
+		t.Fatalf("verification categories = %v", result.Categories)
+	}
 	after := preparationFingerprint(t, root)
 	if before != after {
 		t.Fatalf("Verify() mutated preparation tree\nbefore=%s\nafter=%s", before, after)
@@ -43,6 +46,18 @@ func TestVerifyRejectsIncompleteOrMismatchedPreparation(t *testing.T) {
 			if err := os.Remove(filepath.Join(root, "cache/images/images-pulled.txt")); err != nil {
 				t.Fatal(err)
 			}
+		}},
+		{"missing Vision report", func(t *testing.T, root string, _ release.Resolved, _ PreparationIdentity) {
+			mustRemove(t, filepath.Join(root, "reports/vision-artifacts.txt"))
+		}},
+		{"wrong Vision report", func(t *testing.T, root string, _ release.Resolved, _ PreparationIdentity) {
+			mustWrite(t, filepath.Join(root, "reports/vision-artifacts.txt"), "wrong\n")
+		}},
+		{"corrupt Vision model", func(t *testing.T, root string, _ release.Resolved, _ PreparationIdentity) {
+			mustWrite(t, filepath.Join(root, "cache/vision-models/model_dir/Owl-v2/weights/model.bin"), "corrupt\n")
+		}},
+		{"missing Vision validation evidence", func(t *testing.T, root string, _ release.Resolved, _ PreparationIdentity) {
+			mustRemove(t, filepath.Join(root, "reports/cache-vision-models.yaml"))
 		}},
 		{"missing image remains", func(t *testing.T, root string, _ release.Resolved, _ PreparationIdentity) {
 			if err := os.WriteFile(filepath.Join(root, "cache/images/images-missing.txt"), []byte("example/missing:1\n"), 0o640); err != nil {
@@ -69,7 +84,7 @@ func TestVerifyRejectsIncompleteOrMismatchedPreparation(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			root, resolved, identity := writeCompletedPreparation(t)
 			testCase.mutate(t, root, resolved, identity)
-			_, err := (VerifyService{PreparationRoot: filepath.Dir(root)}).Verify(VerifyOptions{Release: resolved, Registry: identity.RepositoryRegistry})
+			_, err := (VerifyService{PreparationRoot: filepath.Dir(root), CacheRoot: filepath.Join(root, "cache")}).Verify(VerifyOptions{Release: resolved, Registry: identity.RepositoryRegistry})
 			if err == nil {
 				t.Fatal("Verify() succeeded")
 			}
@@ -115,6 +130,9 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 	write("cache/qdrant-snapshots/snapshot.bin", "snapshot\n")
 	write("cache/qdrant-snapshots/manifest.txt", "snapshot_specs:\ndir|snapshot.bin|collection\nfiles:\n"+filepath.Join(root, "cache/qdrant-snapshots/snapshot.bin")+"\n")
 	write("reports/qdrant-artifacts.txt", "harbor.example.internal:32080/eva/qdrant-snapshots:tag|snapshot.bin|collection\n")
+	writeVisionFixture(t, filepath.Join(root, "cache"), nil)
+	writeVisionArtifactFixture(t, filepath.Join(root, "cache"), root, identity.RepositoryRegistry, identity.RepositoryProject)
+	write("reports/cache-vision-models.yaml", "schema_version: v1\nstatus: validated\n")
 	if err := writeYAMLReport(root, "reports/release-validation.yaml", map[string]string{"release_version": identity.ReleaseVersion, "release_yaml_sha256": identity.ReleaseYAMLSHA256, "checksums_sha256": identity.ChecksumsSHA256, "platform": resolved.Metadata.Platform.OS + "/" + resolved.Metadata.Platform.Arch, "offline_artifact": offlineArtifactName(resolved), "offline_artifact_sha256": offlineArtifactSHA256(resolved)}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +147,7 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeYAMLReport(root, "reports/preparation-summary.yaml", map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "runtime-artifact", "target-payload"}, "runtime_artifact": "prepared", "runtime_version": runtimeArtifact.Manifest.Runtime.Version, "runtime_archive_sha256": runtimeArtifact.Manifest.Runtime.ArchiveSHA256, "runtime_manifest": filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml"))}); err != nil {
+	if err := writeYAMLReport(root, "reports/preparation-summary.yaml", map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "vision-models", "runtime-artifact", "target-payload"}, "runtime_artifact": "prepared", "runtime_version": runtimeArtifact.Manifest.Runtime.Version, "runtime_archive_sha256": runtimeArtifact.Manifest.Runtime.ArchiveSHA256, "runtime_manifest": filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml"))}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeYAMLReport(root, "reports/verification.yaml", map[string]string{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "status": "validated"}); err != nil {
@@ -164,6 +182,8 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 
 func stepEvidence(name string) string {
 	values := map[string]string{"validate-release": "reports/release-validation.yaml", "main-preflight": "reports/main-preflight.yaml", "build-runtime-artifact": "runtime/placeholder", "prepare-offline-assets": "cache/manifest.txt", "download-product-images": "cache/images/images-all.txt", "download-infra-images": "cache/images/infra-images-all.txt", "download-models": "cache/models/manifest.txt", "download-qdrant-snapshots": "cache/qdrant-snapshots/manifest.txt", "publish-product-images": "reports/repository-mapping-product.txt", "publish-infra-images": "reports/repository-mapping-infra.txt", "publish-qdrant-snapshots": "reports/qdrant-artifacts.txt", "write-manifest": "reports/preparation-summary.yaml", "verify": "reports/verification.yaml"}
+	values["download-vision-models"] = "reports/cache-vision-models.yaml"
+	values["publish-vision-models"] = "reports/vision-artifacts.txt"
 	return values[name]
 }
 

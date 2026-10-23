@@ -5,13 +5,14 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 installer="$repo_root/scripts/install/install_eva_tool.sh"
 
+installer_available=true
 if [[ "$EUID" -eq 0 ]]; then
   sudo_cmd=()
 elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
   sudo_cmd=(sudo)
 else
-  echo "[skip] EVA Tool archive installer contract requires root or passwordless sudo" >&2
-  exit 0
+  sudo_cmd=()
+  installer_available=false
 fi
 
 for command in go install ln mktemp stat tar; do
@@ -32,9 +33,12 @@ remote_backend_paths=(
   scripts/download/download_offline_assets.sh
   scripts/download/download_python_venv_debs.sh
   scripts/download/download_qdrant_snapshots.sh
+  scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
+  scripts/lib/vision_models.py
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/publish/push_vision_models_to_harbor.sh
   scripts/remote/publish_release_to_target.sh
   scripts/install/install_docker.sh
   scripts/install/setup_harbor.sh
@@ -54,9 +58,11 @@ remote_backend_shell_paths=(
   scripts/download/download_offline_assets.sh
   scripts/download/download_python_venv_debs.sh
   scripts/download/download_qdrant_snapshots.sh
+  scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
+  scripts/publish/push_vision_models_to_harbor.sh
   scripts/remote/publish_release_to_target.sh
   scripts/install/install_docker.sh
   scripts/install/setup_harbor.sh
@@ -89,6 +95,20 @@ archive="$release_root/eva-tool_0.1.0-migration_linux_amd64.tar.gz"
   cd "$fixture_root"
   tar -czf "$archive" bin libexec
 )
+# These packaging/dependency checks do not need privileged installation.
+# Prepared Releases have no scripts: the Tool's versioned helper root must
+# contain both wrappers and their relative Python dependency.
+mapfile -t fixture_entries < <(tar -tzf "$archive")
+for path in "${remote_backend_paths[@]}"; do
+  printf '%s\n' "${fixture_entries[@]}" | grep -Fxq "libexec/remote-root/$path"
+done
+"$fixture_root/libexec/remote-root/scripts/download/download_vision_models.sh" --help >/dev/null
+"$fixture_root/libexec/remote-root/scripts/publish/push_vision_models_to_harbor.sh" --help >/dev/null
+echo "[OK] EVA Tool archive contains runnable Vision backends and Python dependency"
+if [[ "$installer_available" != true ]]; then
+  echo "[skip] privileged EVA Tool installation contract requires root or passwordless sudo" >&2
+  exit 0
+fi
 install -m 0755 "$installer" "$release_root/eva-tool-installer.sh"
 printf 'infra fixture\n' > "$release_root/eva-infra_0.1.0-migration.tar.gz"
 printf 'solution fixture\n' > "$release_root/eva-solution_0.1.0-migration.tar.gz"
@@ -136,6 +156,9 @@ assert_mode "$install_root/opt/eva/tool/libexec/remote-root" 755
 assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/remote/publish_release_to_target.sh" 755
 assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/install/install_docker.sh" 755
 assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/install/setup_harbor.sh" 755
+assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/download/download_vision_models.sh" 755
+assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/publish/push_vision_models_to_harbor.sh" 755
+assert_mode "$install_root/opt/eva/tool/libexec/remote-root/scripts/lib/vision_models.py" 644
 assert_mode "$install_root/opt/eva/tool/libexec/remote-root/src/infra/version.yaml" 644
 assert_mode "$install_root/var/lib/eva/releases" 750
 assert_mode "$install_root/var/lib/eva/releases/current.yaml" 640
@@ -162,10 +185,12 @@ for directory in \
 done
 "$install_root/bin/eva" remote --help >/dev/null
 "$install_root/opt/eva/tool/libexec/remote-root/scripts/remote/publish_release_to_target.sh" --help >/dev/null
+"$install_root/opt/eva/tool/libexec/remote-root/scripts/download/download_vision_models.sh" --help >/dev/null
+"$install_root/opt/eva/tool/libexec/remote-root/scripts/publish/push_vision_models_to_harbor.sh" --help >/dev/null
 VERSIONS_QUIET=1 bash -c '
   source "$1"
   load_deploy_versions
-  [[ -n "$EVA_AGENT_RELEASE" && -n "$K3S_DEFAULT_VERSION" ]]
+  [[ -n "$EVA_AGENT_RELEASE" && -n "$K3S_DEFAULT_VERSION" && "$EVA_VISION_IMAGE_TAG" == 3.3.0rc2 ]]
 ' bash "$install_root/opt/eva/tool/libexec/remote-root/scripts/lib/load_versions.sh"
 
 # A failure after receipt publication must restore the prior Tool, command

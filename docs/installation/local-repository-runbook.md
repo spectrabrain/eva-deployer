@@ -57,11 +57,11 @@ sudo eva airgap prepare --release "$original_release" \
   포함 여부와 관계없이 모든 하드웨어의 Display Mode·GPU·MIG 준비 완료를 보장하지 않습니다.
 
 명령은 선택한 원본 Release의 Infra/Solution version catalog를 기준으로 **Infra·App·IAM·Agent·Vision의
-패키지·Chart·helper, n8n 이미지, 선택한 vLLM 이미지, 모델, Harbor용 Qdrant snapshot,
+패키지·Chart·helper, n8n 이미지, 선택한 vLLM 이미지, Agent 모델, Vision 모델 캐시, Harbor용 Qdrant snapshot,
 Harbor offline installer, NVIDIA driver 의존성 repo**를 준비합니다. 유효한 Managed Runtime은
 재사용하고 없으면 온라인으로 bootstrap합니다. 손상된 기존 Runtime은 먼저 복구해야 합니다.
 
-**Harbor 배포·이미지/snapshot 게시, GPU driver 설치·Display Mode/MIG 전환, Docker daemon 설정
+**Harbor 배포·이미지/Qdrant snapshot 게시, GPU driver 설치·Display Mode/MIG 전환, Docker daemon 설정
 변경은 수행하지 않습니다.** 출력 옆의 격리된 임시 작업 디렉터리는 성공·실패 시 정리하며
 resume을 지원하지 않습니다. 중단 후에는 원인을 해결하고 처음부터 다시 실행합니다.
 강제 종료·서버 장애 시에는 private 임시 디렉터리가 남을 수 있으므로 담당자가 실행 중인 작업이
@@ -112,10 +112,10 @@ Local은 Repository 공급 방식이며, 서비스의 HTTP/HTTPS나 IAM 함께 �
 | 담당 | 설치 전 완료할 작업 |
 | --- | --- |
 | 자산 준비 담당자 | 대상 OS·플랫폼·GPU와 설치할 component에 맞는 Release, Runtime, 패키지, Chart, 이미지, 모델 및 snapshot 준비·검증·반입 |
-| 내부 Repository 담당자 | Harbor 설치, 이미지 적재, 필요한 Qdrant snapshot OCI artifact 게시, endpoint·인증·접근 권한 인계 |
+| 내부 Repository 담당자 | private Harbor 설치, 이미지 적재, 필요한 Qdrant snapshot OCI artifact 게시, endpoint·기존 Harbor 인증 설정 인계 |
 | 설치 담당자 | 대상 서버 사전 확인, 설정·인증서·라이선스 준비, CLI 설치 실행과 결과 검증 |
 
-**현재 `eva install`은 Local Harbor 생성, 제품 이미지 load/push, snapshot artifact 게시,
+**현재 `eva install`은 Local Harbor 생성, 제품 이미지 load/push, Qdrant snapshot artifact 게시,
 전체 오프라인 캐시 배치를 대신하지 않습니다.** 이 준비가 끝나지 않았다면 설치를 시작하지 않습니다.
 Docker가 필요한 Harbor·이미지 적재 작업과 EVA Managed Runtime 준비는 별개입니다.
 
@@ -146,6 +146,19 @@ Base Release만 받은 상태나 Bundle 검증만 통과한 상태를 폐쇄망 
   `local_pv` 방식과 혼합하지 않습니다.
 - Local 설정에는 `credentials.aws`를 넣지 않습니다. 대상 서버에 AWS credential을 복사해
   외부 Registry나 S3에서 빠진 자산을 받는 방식으로 진행하지 않습니다.
+
+### Vision 모델 공급
+
+Vision weights는 컨테이너 이미지와 별도로 공급합니다. 인터넷 준비 서버의 `eva airgap prepare`가
+S3에서 모델을 다운로드·검증해 Bundle에 자동 포함합니다. 준비 서버에는 모델 S3의 list/read와
+Vision 이미지 ECR pull 권한이 필요하며, 대상 Harbor의 모델 게시 권한도 확인합니다.
+Local 설치는 반입한 모델을 설정된 내부 Harbor에 자동 게시하고, Pod가 이를 영구 캐시에 받아
+서비스를 준비합니다. 인증은 기존 EVA Infra의 Harbor 설정을 재사용하며 수동 Secret 생성이나
+추가 설치 명령은 필요하지 않습니다.
+**설치 시 모델 `latest` 갱신은 기존 배포에도 영향을 줄 수 있으므로 변경 승인을 확인합니다.**
+첫 실행은 오래 걸릴 수 있으므로 다운로드·압축 해제와 영구 캐시를 위한 디스크 공간을 확보합니다.
+**재시도·upgrade 시 모델 PVC를 삭제하지 않습니다.**
+기본 모델을 사용하며, 승인된 custom 모델이 필요할 때만 준비와 설치의 모델 선택·설정을 일치시킵니다.
 
 ## 4. 대상 서버 반입·Tool 설치·캐시 배치
 
@@ -238,6 +251,7 @@ offline_archive="$release_root/eva-offline_<version>_linux_amd64.tar.gz"
 snapshot OCI artifact 게시**를 완료합니다. 이 작업은 `eva airgap prepare`나 `eva install`의
 일부가 아닙니다. Harbor 설치·재구성은 서비스 중단이나 저장소 경로 변경을 일으킬 수 있으므로
 기존 Harbor의 설정·데이터 보존 계획과 변경 승인을 먼저 확인합니다.
+설정 helper가 새로 만드는 project는 **`public: false`**입니다.
 
 검증한 Tool에 포함된 helper root는 기본 설치 시 `/opt/eva/tool/libexec/remote-root`입니다.
 custom Tool root에서는 설치된 binary의 실제 경로로 찾습니다. 실행 소스에 `scripts/`가 있을
@@ -284,7 +298,7 @@ helper 종료만 믿지 말고 필요한 태그·Docker Hub mirror 경로와 sna
 - node와 Pod용 Harbor endpoint·인증·mirror 구성 및 필요한 방화벽 허용
 
 `eva verify` 성공은 Release artifact 무결성 확인입니다. OS 의존성, 전체 cache 완전성,
-Harbor 실제 pull, 서비스 접속이나 설치 E2E 성공을 보장하지 않습니다.
+Harbor 실제 pull이나 서비스 정상 동작은 별도로 확인합니다.
 
 ## 5. 단일 설치 설정 작성
 
@@ -317,8 +331,8 @@ Values는 생성된 `values.<component>` 아래에 그대로 작성하며 `local
 Harbor 인증이나 snapshot 방식은 준비 담당자가 인계한 값에 맞춥니다. 다음 항목은 필요할 때
 `targets.server-a.ansible`에 지정하는 **배포 옵션**이며 Chart Values가 아닙니다.
 
-- `harbor_admin_user`, `harbor_admin_password`: 실제 Harbor 인증 정보를 이 private YAML에 입력합니다.
-  별도 `docker login`만으로 k3s와 snapshot pull 인증이 구성되지는 않습니다.
+- `harbor_admin_user`, `harbor_admin_password`: 기존 Harbor 설정과 같은 인증으로 EVA Infra의
+  node registry 인증을 구성합니다. 별도 `docker login`만으로 k3s·snapshot 인증이 구성되지는 않습니다.
 - `k3s_dockerhub_mirror_enabled: true`: 원본 Docker Hub 경로의 이미지도 Harbor에서 공급할 때 사용;
   준비한 mirror 경로에 이미지가 있어야 합니다.
 - Harbor snapshot 사용 시 `eva_agent_qdrant_snapshot_source: harbor`와
@@ -402,6 +416,7 @@ sudo eva inspect logs --tail 200
 - 설정한 App 주소로 접속하고 새 브라우저 세션에서 로그인·로그아웃 확인
 - IAM/Redis 연결과 발급된 라이선스의 활성 상태 확인
 - 선택한 Agent/Vision의 GPU 할당과 실제 카메라·분석 요청 확인
+- Vision 모델 다운로드·준비 완료와 모델 PVC 재사용 확인
 - Qdrant snapshot 사용 시 대상 collection·복원 데이터 확인
 - 데이터 저장·조회, 영구 저장소와 재기동 후 보존 확인
 
@@ -415,6 +430,7 @@ sudo eva inspect logs --tail 200
 | --- | --- |
 | cache·Chart·모델 누락 또는 OS 패키지 불일치 | 준비 담당자가 같은 Release 기준의 자산·배치를 보완; 인터넷 fallback이나 버전 혼합 금지 |
 | image pull 실패 | Harbor endpoint·인증·적재 태그·mirror 경로와 node/Pod 접근 확인 |
+| Vision 모델 준비 실패 | 캐시 무결성·모델 선택, Harbor 접근·게시 권한·기존 EVA Infra 인증 설정 확인; 실패를 우회해 workload를 중단하지 않음 |
 | Qdrant artifact 조회 실패 | 일반 이미지와 별도로 snapshot 게시 여부·profile·tag·인증 확인 |
 | IAM Secret 조회 실패 | IAM 단계 로그와 기동·관리자 인증·realm/client 구성 확인; 빈 handoff 수동 작성 금지 |
 | 인증서·로그인·Redis 오류 | 실제 공개 URL·SAN·redirect URI·Redis endpoint/TLS·방화벽 정합성 확인 |

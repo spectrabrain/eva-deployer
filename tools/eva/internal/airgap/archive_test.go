@@ -15,7 +15,31 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"eva-deployer/tools/eva/internal/remote"
 )
+
+func archiveTestVisionCache(t *testing.T, cache string) {
+	t.Helper()
+	var models []map[string]any
+	for _, name := range []string{"Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"} {
+		var files []map[string]any
+		for _, file := range []struct{ path, body string }{
+			{"manifest.txt", "model data, not a relocatable cache manifest: " + cache + "/unchanged\n"},
+			{"weights/model.bin", "tiny Vision model " + name + "\n"},
+		} {
+			body := []byte(file.body)
+			archiveTestWriteFile(t, filepath.Join(cache, "vision-models/model_dir", name, file.path), body)
+			files = append(files, map[string]any{"path": file.path, "size": len(body), "sha256": archiveTestDigest(body)})
+		}
+		models = append(models, map[string]any{"name": name, "files": files})
+	}
+	data, err := json.MarshalIndent(map[string]any{"schema_version": "v1", "source": "s3://spectrabrain-eva-vision/model_dir", "models": models}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveTestWriteFile(t, filepath.Join(cache, "vision-models/manifest.json"), append(data, '\n'))
+}
 
 type archiveTestEntry struct {
 	header tar.Header
@@ -552,6 +576,7 @@ func TestBuildOfflineArchivePublicRuntimeCAAndAdditionalCaches(t *testing.T) {
 	for _, name := range []string{"qdrant-snapshots/snapshot.bin", "harbor/harbor-offline-installer.tgz"} {
 		archiveTestWriteFile(t, filepath.Join(root, name), []byte("asset"))
 	}
+	archiveTestVisionCache(t, root)
 	runtime := archiveTestWriteTar(t, []archiveTestEntry{
 		archiveTestRegular("runtime/runtime.yaml", []byte("descriptor")),
 		archiveTestRegular("runtime/venv/lib/python3.12/site-packages/certifi/cacert.pem", []byte("public CA")),
@@ -567,6 +592,17 @@ func TestBuildOfflineArchivePublicRuntimeCAAndAdditionalCaches(t *testing.T) {
 	if _, ok := entries["out/cache/qdrant-snapshots/snapshot.bin"]; !ok {
 		t.Fatal("snapshot missing")
 	}
+	for name, entry := range entries {
+		if strings.HasPrefix(name, "out/cache/vision-models/") && entry.header.Typeflag == tar.TypeReg {
+			original, err := os.ReadFile(filepath.Join(root, strings.TrimPrefix(name, "out/cache/")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(original, entry.body) {
+				t.Fatalf("checksummed Vision bytes were rewritten: %s", name)
+			}
+		}
+	}
 	// Exercise the exact documented target-side selective extraction. It
 	// must not require an out/cache directory header or extract Runtime files.
 	tarBinary, err := exec.LookPath("tar")
@@ -581,8 +617,52 @@ func TestBuildOfflineArchivePublicRuntimeCAAndAdditionalCaches(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, "out/cache/qdrant-snapshots/snapshot.bin")); err != nil {
 		t.Fatal(err)
 	}
+	if err := remote.ValidateVisionModels(filepath.Join(target, "out/cache")); err != nil {
+		t.Fatalf("restored Vision cache failed exact validation: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(target, "runtime")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("cache extraction materialized Runtime too")
+	}
+}
+
+func TestBuildOfflineArchiveExcludesVisionBackendLock(t *testing.T) {
+	cache := t.TempDir()
+	archiveTestVisionCache(t, cache)
+	lock := filepath.Join(cache, ".vision-models.lock")
+	archiveTestWriteFile(t, lock, nil)
+	output := filepath.Join(t.TempDir(), "offline.tar.gz")
+	if err := buildOfflineArchive(archiveTestRuntime(t), cache, output); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := archiveTestReadOffline(t, output)["out/cache/.vision-models.lock"]; ok {
+		t.Fatal("backend process lock was archived")
+	}
+	archiveTestWriteFile(t, lock, []byte("not lock state"))
+	if err := buildOfflineArchive(archiveTestRuntime(t), cache, filepath.Join(t.TempDir(), "bad.tar.gz")); err == nil {
+		t.Fatal("nonempty file was hidden as a backend lock")
+	}
+}
+
+func TestBuildOfflineArchiveRejectsInvalidVisionCaches(t *testing.T) {
+	for _, tc := range []struct{ name, path, body string }{
+		{"corrupt", "vision-models/model_dir/Owl-v2/weights/model.bin", "corrupt"},
+		{"extra safe file", "vision-models/model_dir/Owl-v2/extra.bin", "extra"},
+		{"credentials", "vision-models/model_dir/Owl-v2/credentials.json", "private"},
+		{"empty", "vision-models/model_dir/Owl-v2/weights/model.bin", ""},
+		{"bad manifest", "vision-models/manifest.json", "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache := t.TempDir()
+			archiveTestVisionCache(t, cache)
+			archiveTestWriteFile(t, filepath.Join(cache, tc.path), []byte(tc.body))
+			output := filepath.Join(t.TempDir(), "offline.tar.gz")
+			if err := buildOfflineArchive(archiveTestRuntime(t), cache, output); err == nil {
+				t.Fatal("invalid Vision cache archived")
+			}
+			if _, err := os.Lstat(output); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("failed archive exposed output")
+			}
+		})
 	}
 }
 

@@ -176,6 +176,7 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 		"scripts/download/download_n8n_images.sh",
 		"scripts/download/download_eva_models.sh",
 		"scripts/download/download_qdrant_snapshots.sh",
+		"scripts/download/download_vision_models.sh",
 	}
 	for _, step := range steps {
 		backend, err := service.ResolveBackend(step)
@@ -258,6 +259,10 @@ func preparationEnvironment(work, cache, infra, solution string, rt managedrunti
 		"EVA_SITE_ID": "airgap-preparation", "HARBOR_ASSET_DIR": filepath.Join(cache, "harbor"), "HARBOR_INSTALL_ROOT": filepath.Join(work, "harbor"),
 		"COMPONENTS": "all", "PULL_PLATFORM": "linux/amd64", "STRICT_MISSING": "true", "DRIVER_REPO_MODE": "full", "NVIDIA_DRIVER_PACKAGE": options.DriverPackage,
 		"EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor", "EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "EVA_AGENT_VLLM_VALUES_FILE": vllm,
+	}
+	// The Python backend and Go validator must use the same exact selection.
+	if value, set := os.LookupEnv("EVA_VISION_MODELS"); set {
+		env["EVA_VISION_MODELS"] = value
 	}
 	// Proxy and public CA settings are transport configuration, not version or
 	// component overrides. User AWS/Docker/Python configuration is not inherited.
@@ -350,7 +355,7 @@ func vllmValuesFile(catalog, profile string) (string, error) {
 }
 
 func validateAssets(cache string) error {
-	for _, validate := range []func(string) error{remote.ValidateOfflineAssets, remote.ValidateModels, remote.ValidateQdrantSnapshots} {
+	for _, validate := range []func(string) error{remote.ValidateOfflineAssets, remote.ValidateModels, remote.ValidateQdrantSnapshots, remote.ValidateVisionModels} {
 		if err := validate(cache); err != nil {
 			return err
 		}

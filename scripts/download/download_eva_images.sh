@@ -14,6 +14,8 @@ load_deploy_versions
 EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in src/solution/version.yaml)}"
 EVA_APP_CHART_VERSION="${EVA_APP_CHART_VERSION:?missing EVA_APP_CHART_VERSION (set in src/solution/version.yaml)}"
 EVA_VISION_CHART_VERSION="${EVA_VISION_CHART_VERSION:?missing EVA_VISION_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_VISION_IMAGE_TAG="${EVA_VISION_IMAGE_TAG:?missing EVA_VISION_IMAGE_TAG (set in src/solution/version.yaml)}"
+EVA_VISION_IMAGE_REPOSITORY="${EVA_VISION_IMAGE_REPOSITORY:-$(eva_vision_source image "$EVA_VISION_CHART_VERSION")}"
 EVA_AGENT_CHART_VERSION="${EVA_AGENT_CHART_VERSION:?missing EVA_AGENT_CHART_VERSION (set in src/solution/version.yaml)}"
 EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_VLLM_CHART_VERSION (set in src/solution/version.yaml)}"
 EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in src/solution/version.yaml)}"
@@ -118,7 +120,10 @@ rm -f "$RENDER_DIR"/*.yaml
 want eva-app          && helm template eva-app "$APP_CHART" \
   --set image.tag="$EVA_APP_DEPLOY_VERSION" \
   --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-app.yaml"
-want eva-vision       && helm template eva-vision "$VISION_CHART" > "$RENDER_DIR/eva-vision.yaml"
+want eva-vision       && helm template eva-vision "$VISION_CHART" \
+  --set-string image.repository="$EVA_VISION_IMAGE_REPOSITORY" \
+  --set-string image.tag="$EVA_VISION_IMAGE_TAG" \
+  --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-vision.yaml"
 want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
 want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \
   -f "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}" \

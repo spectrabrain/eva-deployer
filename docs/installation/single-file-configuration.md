@@ -1,8 +1,7 @@
 # 단일 설치 설정
 
-설치자는 원하는 위치의 YAML 파일 하나만 관리한다. Deployer는 이를 검증하고 기존 Workspace
-형식으로 변환한다. Ansible playbook, Chart Values 병합, Release·Runtime 관리는 기존 계약을
-유지한다. 이 기능은 해당 변경이 포함된 Tool부터 사용할 수 있다.
+설치자는 원하는 위치의 YAML 파일 하나만 관리한다. Deployer는 이를 검증하고 설치에 필요한
+Workspace와 component별 설정을 생성한다.
 
 Repository mode의 표준 입력은 `online` / `remote` / `local`이며 Ansible 모드는 각각
 `online_repository` / `remote_repository` / `local_repository`이다. 기본값은 `online`이다.
@@ -88,7 +87,7 @@ IAM 구성
   2) EVA APP과 EVA IAM 다른 도메인 (각각 /)
 선택 [1]:
 
-외부 접속 환경 (v3.3 대상)
+외부 접속 환경
   1) HTTP (인증서 불필요, 격리된 검증 환경용)
   2) HTTPS (인증서 필요, 권장)
 선택 [2]:
@@ -149,11 +148,7 @@ Repository mode는 이미지 공급 방식이므로 라이선스 활성화 방�
 그 제품에 발급된 `api_key`와 `shared_key`를 함께 사용한다. 제품 코드만으로
 `online`/`offline`을 결정하지 않으며 두 설정 모두 사전 결정한 라이선스와 일치시킨다.
 
-### v3.3 대상 주소·프로토콜 샘플
-
-샘플은 **게시 App `3.3.0-beta.3` / IAM `3.3.0-beta.1`의 Values·template 계약**을 기준으로 한다.
-현재 소스의 Release catalog도 이 버전을 사용한다. 이미 설치된 Tool이나 Current Release는 자동
-갱신되지 않으므로 변경이 포함된 새 Tool과 Release를 함께 사용한다. 실제 설치 E2E는 별도 검증 대상이다.
+### 주소·프로토콜 샘플
 
 | 주소 구성 | 프로토콜 | App 예시 | IAM 예시 | 인증서 입력 |
 | --- | --- | --- | --- | --- |
@@ -163,7 +158,7 @@ Repository mode는 이미지 공급 방식이므로 라이선스 활성화 방�
 | `separate` | HTTPS | `https://app.eva.com/` | `https://iam.eva.com/` | 서비스별 디렉터리 |
 
 위 네 틀은 IAM 함께 설치용이며 각각 Online/Remote/Local과 결합한다. HTTP는 암호화되지 않으므로 격리된 검증 환경용이며
-운영 환경에는 HTTPS를 권장한다. 설정 계약은 다음과 같다.
+운영 환경에는 HTTPS를 권장한다. 설정 기준은 다음과 같다.
 
 - App/IAM 모두 `ingress.tls.enabled`를 명시한다. `tls.create`는 인증서 Secret 생성 여부이며
   **`create: false`만으로 HTTP로 바뀌지 않는다.** HTTP에서는 둘 다 `false`이다.
@@ -176,7 +171,6 @@ Repository mode는 이미지 공급 방식이므로 라이선스 활성화 방�
 - IAM `config.publicUrl`, `keycloak.config.realmSslRequired`처럼
   Chart가 기본값·자동 계산으로 처리하는 항목은 샘플에서 생략한다. 외부 URL과 issuer는
   TLS 설정·host·path에서, realm SSL 모드는 HTTP에서 `none`, HTTPS에서 `external`로 결정된다.
-  게시 Chart는 HTTP에서 hostname HTTPS 강제를 끄고 realm patch로 기존 HSTS도 정리한다.
 - IAM client `redirectUris`는 IAM이 아니라 **App의 외부 주소**를 가리킨다. 비표준 포트이면
   IAM과 App 각각의 실제 외부 포트를 반영한다. IAM은 `config.publicPort`를 채우고,
   App은 해당 외부 포트와 redirect URI를 함께 맞춘다. `shared`에서는 포트도 같다.
@@ -247,13 +241,7 @@ sso:
 - Online/Remote/Local 모두 지원하는 **샘플 구성**이다. Remote/Local에서는 외부 IAM/Redis까지의
   내부망 도달 경로와 방화벽을 별도로 준비하고 AWS credential을 Target에 추가하지 않는다.
 
-**샘플 입력 검증과 실제 HTTP 설치 준비는 별개이다.** 필수 값을 채운 HTTP 샘플도
-`workspace validate`와 내부 Workspace 변환을 통과한다. 이것이 기존 배포 Chart의 HTTP 지원이나
-실제 설치 성공을 보장하지는 않는다. HTTP 실설치 전에는 v3.3 Chart/Release 전환과 Deployer의
-TLS SAN precondition·IP TLSStore 처리에 대한 프로토콜 연동 및 E2E 검증이 추가로 필요하다.
-이번 작업에서는 해당 실행 경로를 변경하거나 인증서 검증을 우회하지 않는다.
-
-아래는 사용 중인 Release와 일치하는 **HTTPS 설정**을 검증·설치하는 예시이다.
+필수 입력을 채운 뒤 설정을 검증하고 설치한다.
 
 ```bash
 sudo eva workspace validate --config "$HOME/eva-install.yaml"

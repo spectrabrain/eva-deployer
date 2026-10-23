@@ -18,7 +18,7 @@ Main bootstrap과 Target 설치는 Docker, k3s, NVIDIA runtime 및 호스트 영
 | [Target] 네트워크 | Main Harbor 및 Main SSH 경로만 사용; 외부 인터넷은 사용하지 않음 |
 | 권한 | Main과 Target에서 `sudo eva ...`를 실행할 수 있는 사용자 |
 
-Main은 EVA Managed Runtime, Docker/Compose, Harbor와 `eva` project를 준비합니다.
+Main은 EVA Managed Runtime, Docker/Compose, Harbor와 private `eva` project(`public: false`)를 준비합니다.
 Target에는 Main의 Runtime, package/model payload 및 Harbor image를 사용해 EVA를
 설치합니다. Target에서 AWS, S3, ECR, Docker Hub 또는 Hugging Face로 fallback하지
 않습니다.
@@ -65,9 +65,11 @@ Main Harbor endpoint에는 URL scheme을 넣지 않으며 `localhost` 또는 loo
 사용하지 않습니다. Target node와 Pod 모두 이 endpoint에 연결할 수 있어야 합니다.
 기본 project는 `eva`입니다.
 
-Managed Harbor의 초기 계정은 `admin`이며 초기 비밀번호 기본값은 `EVA123@`입니다.
-`EVA_HARBOR_ADMIN_PASSWORD`가 비어 있지 않으면 그 값을 우선합니다. 비밀번호 CLI
-option은 없고, receipt와 로그에 비밀번호를 기록하지 않습니다.
+Managed Harbor 인증은 승인된 Secret 관리 절차로 준비합니다. `EVA_HARBOR_ADMIN_PASSWORD`가
+비어 있지 않으면 그 값을 우선합니다. 비밀번호 CLI option은 없고, receipt와 로그에 비밀번호를
+기록하지 않습니다. 공개 기본 비밀번호로 운영하지 않습니다.
+Main 게시는 기존 bootstrap의 Harbor 인증을 재사용하며 별도 게시 credential 준비 단계는 없습니다.
+credential을 Release·payload에 넣지 않습니다.
 
 Remote preparation에는 Main 서버에서 사용할 AWS credential이 필요합니다.
 `sudo eva remote prepare`는 EVA managed credential을 확인하며, credential이 없고
@@ -96,7 +98,7 @@ sudo eva remote bootstrap \
   --yes
 ```
 
-이 명령은 Managed Runtime, Docker Engine/Compose, Harbor 및 `eva` project를 준비하거나
+이 명령은 Managed Runtime, Docker Engine/Compose, Harbor 및 private `eva` project(`public: false`)를 준비하거나
 검증하고, 같은 `sudo` 실행 identity의 Docker registry credential까지 확인한 뒤 Harbor
 receipt를 기록합니다. 별도의 `docker login`은 정상 절차에 필요하지 않습니다. credential
 오류가 발생하면 수동 login 대신 `sudo eva remote bootstrap --yes`를 다시 실행합니다.
@@ -113,10 +115,30 @@ Main에 설치하지 않습니다. 이미 승인된 외부 Harbor를 쓸 때만 
 sudo eva remote prepare
 ```
 
-성공하면 Remote Runtime artifact, Target package/host/chart/helper/model payload, Main
-Harbor의 product/infra image 및 Qdrant snapshot OCI artifact와 preparation evidence가
-생성됩니다. Container image와 Qdrant snapshot 파일은 Target payload에 중복 저장하지
-않고 Main Harbor에서 공급합니다.
+성공하면 Remote Runtime과 Target의 패키지·Chart·helper·Agent 모델 자산이 준비되고,
+제품·Infra 이미지와 Qdrant snapshot은 Main Harbor에 게시됩니다.
+
+### Vision 모델 공급
+
+Vision weights는 컨테이너 이미지와 별도로 공급하며 Target payload에 포함하지 않습니다.
+Main의 `eva remote prepare`가 S3에서 모델을 다운로드·검증해 Main Harbor에 게시합니다.
+Main에는 모델 S3의 list/read와 Vision 이미지 ECR pull 권한이 필요합니다.
+**모델 게시가 기존 배포에 영향을 줄 수 있으므로 변경 승인을 확인합니다.**
+Target의 Pod는 Main Harbor에서 모델을 받아 영구 캐시에 저장하고 서비스를 준비합니다.
+Target은 S3에 접근하지 않으며 AWS credential이나 별도 weights 파일 전송이 필요하지 않습니다.
+인증은 기존 EVA Infra의 Harbor 설정을 재사용하며 수동 Secret 생성이나 추가 설치 명령은 필요하지 않습니다.
+첫 실행은 오래 걸릴 수 있으므로 다운로드·압축 해제와 영구 캐시를 위한 디스크 공간을 확보합니다.
+**재시도·upgrade 시 모델 PVC를 삭제하지 않습니다.**
+기본 모델을 사용하며, 승인된 custom 모델이 필요할 때만 준비와 설치의 모델 선택·설정을 일치시킵니다.
+
+Target에 Release를 전달하기 전에 준비 결과를 검증합니다.
+
+```bash
+sudo eva remote verify
+```
+
+이 검증은 준비 파일과 게시 결과를 확인합니다. 실제 Target의 다운로드와 서비스 정상 동작은
+설치 후 별도로 확인합니다. 검증 실패 시 자산이나 보고서를 임의 수정하지 말고 같은 Release로 다시 준비합니다.
 
 ## 6. [Main] Managed Target 등록·검증 및 Release 게시
 
@@ -216,9 +238,9 @@ HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 선택합니
 `eva-install.yaml`입니다. 기존 옵션/자동화용 `eva config sample --mode remote`도 유지합니다.
 이 기존 명령에서 IAM만 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
 App의 외부 SSO·Redis 연결값을 입력합니다. Target에서 IAM/Redis로의 내부망 접근이 필요합니다.
-샘플은 게시 App `3.3.0-beta.3` / IAM `3.3.0-beta.1` 기준입니다. 이 변경을 포함한 Tool·Release·배포
-자산을 사용합니다. HTTP는 격리 테스트용으로 인증서 검사·TLS 생성을 생략하고 HTTPS 검증은 유지합니다.
-실제 설치 E2E는 별도 검증 대상입니다. 기존 `config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
+검증한 Release에 포함된 Tool·자산을 함께 사용합니다.
+HTTP는 격리 테스트용이며, 운영 환경에서는 HTTPS를 사용합니다.
+기존 `config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
 명시합니다. `--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
 제거하기 전에는 검증에 실패합니다.
 
@@ -245,7 +267,7 @@ targets:
       ansible_connection: local
       ansible_user: eva
       ansible_become: true
-      ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호. ex) demo-sudo-only (예시 전용)
+      ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호
     values:
       iam:
         config:
@@ -256,7 +278,7 @@ targets:
               EVA_IAM_ADMIN_EMAIL: "admin@eva.com"
           realmPatch:
             realmAdmin:
-              password: "<REALM_ADMIN_PASSWORD>" # 필수: realm 관리자 비밀번호. ex) Demo-Realm-Only!42 (예시 전용)
+              password: "<REALM_ADMIN_PASSWORD>" # 필수: realm 관리자 비밀번호
             evaApp:
               redirectUris:
                 - "https://app.example.com/*"
@@ -284,8 +306,8 @@ targets:
           license:
             activation_mode: offline # Remote 기본값. 사전 결정한 라이선스가 온라인이면 online으로 변경합니다.
             product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
-            api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key. ex) demo-license-api-key (예시 전용)
-            shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key. ex) demo-license-shared-key (예시 전용)
+            api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key
+            shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key
 ```
 
 TLS certificate/key는 target의 `hostPath`에 별도로 준비합니다. `targets`는 inventory alias별
@@ -359,7 +381,7 @@ sudo eva install --release /var/lib/eva/inbox/releases/<another-version> \
 
 Target에 유효한 Managed Runtime이 없으면 설치는 게시된 Remote Runtime artifact로만
 bootstrap합니다. online Runtime 또는 original `eva-offline` fallback은 사용하지 않습니다.
-Target payload는 managed cache로 materialize되고 image와 Qdrant snapshot은 Main Harbor를
+Target payload는 managed cache로 materialize되고 image·Qdrant snapshot·Vision 모델은 Main Harbor를
 사용합니다.
 
 ## 12. 설치 결과 확인
@@ -374,6 +396,7 @@ sudo eva status
 선택한 Agent 또는 Vision component가 있으면 GPU/MIG allocatable resource, NVIDIA Device
 Plugin readiness 및 workload의 할당 상태도 확인합니다. workload image가 Main Harbor prefix를
 사용하는지, Target에 AWS credential이나 public source 설정이 남지 않았는지도 확인합니다.
+Vision은 모델 다운로드·준비 완료와 모델 PVC 재사용, 실제 분석 요청도 확인합니다.
 
 ## 13. 재실행 및 문제 해결
 
@@ -392,3 +415,6 @@ sudo eva retry --yes
 동일 Runtime/payload identity와 기존 영속 데이터는 재사용합니다. Release checksum,
 delivery marker 또는 Runtime/payload 검증 오류는 Target에서 임의로 고치지 말고 Main의
 준비·검증·게시 절차를 다시 수행합니다.
+
+Vision 모델 준비 실패는 Main의 모델 게시 결과와 Target의 Harbor 접근·기존 EVA Infra 인증 설정을
+확인합니다. Target에서 S3 fallback을 켜거나 실패를 우회해 workload를 중단하지 않습니다.

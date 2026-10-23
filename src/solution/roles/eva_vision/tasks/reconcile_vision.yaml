@@ -96,6 +96,13 @@
           and
           (.metadata.name // "") != ""
         )
+      # New chart-managed storage and registry credentials are not legacy
+      # adoption candidates. Keep the exact four-resource deletion boundary.
+      | select((
+          (.kind == "PersistentVolumeClaim" and
+           (.metadata.name == "eva-vision-models" or .metadata.name == "eva-vision-logs"))
+          or (.kind == "Secret" and .metadata.name == "eva-vision-regcred")
+        ) | not)
       | [
           .kind,
           .metadata.name
@@ -387,6 +394,6 @@
     EVA_VISION_NAMESPACE: "{{ eva_vision_namespace }}"
     EVA_VISION_RELEASE: "{{ eva_vision_name }}"
     EVA_VISION_CHART_VERSION: "{{ eva_vision_chart_version }}"
-    EVA_VISION_VALUES_FILE: "{{ eva_vision_workdir }}/effective-input-values.yaml"
+    EVA_VISION_VALUES_FILE: "{{ eva_vision_runtime_values_file | default(eva_vision_workdir ~ '/effective-input-values.yaml') }}"
     EVA_VISION_CHART_SOURCE: "{{ eva_vision_chart_source }}"
     EVA_VISION_USE_CHART_VERSION: "{{ (eva_cli_chart_path | default('') | length == 0) | ternary('1', '0') }}"

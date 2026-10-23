@@ -23,9 +23,11 @@ var remoteBackendPaths = map[string]string{
 	"download-infra-images":     "scripts/download/download_infra_images.sh",
 	"download-models":           "scripts/download/download_eva_models.sh",
 	"download-qdrant-snapshots": "scripts/download/download_qdrant_snapshots.sh",
+	"download-vision-models":    "scripts/download/download_vision_models.sh",
 	"publish-product-images":    "scripts/publish/push_images_to_repository.sh",
 	"publish-infra-images":      "scripts/publish/push_images_to_repository.sh",
 	"publish-qdrant-snapshots":  "scripts/publish/push_qdrant_snapshots_to_harbor.sh",
+	"publish-vision-models":     "scripts/publish/push_vision_models_to_harbor.sh",
 }
 
 type ProcessOptions struct {
@@ -229,7 +231,12 @@ func (service PrepareService) steps(
 			return nil
 		}}
 	}
+	visionModels, err := visionModelSelection()
+	if err != nil {
+		return nil, err
+	}
 	base := map[string]string{"EVA_CACHE_ROOT": cacheRoot, "COMPONENTS": "all", "EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor", "EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "PULL_PLATFORM": "linux/amd64", "REPOSITORY_REGISTRY": identity.RepositoryRegistry, "REPOSITORY_PROJECT": identity.RepositoryProject}
+	base["EVA_VISION_MODELS"] = strings.Join(visionModels, ",")
 	env := func(values map[string]string) map[string]string {
 		copy := map[string]string{}
 		for k, v := range base {
@@ -297,6 +304,7 @@ func (service PrepareService) steps(
 		}),
 		command("download-models", awsEnv(nil), []string{"reports/cache-models.yaml"}, func() error { return ValidateModels(cacheRoot) }),
 		command("download-qdrant-snapshots", awsEnv(nil), []string{"reports/cache-qdrant-snapshots.yaml"}, func() error { return ValidateQdrantSnapshots(cacheRoot) }),
+		command("download-vision-models", awsEnv(nil), []string{"reports/cache-vision-models.yaml"}, func() error { return ValidateVisionModels(cacheRoot) }),
 		command("publish-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(cacheRoot, "images/images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-product.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-product.txt"}, func() error {
 			return ValidateRepositoryMapping(cacheRoot, root, "images/images-pulled.txt", "reports/repository-mapping-product.txt", identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
@@ -309,6 +317,12 @@ func (service PrepareService) steps(
 			"LOCAL_HARBOR_YML":         harborConfigPath,
 		}), []string{"reports/qdrant-artifacts.txt"}, func() error {
 			return ValidateQdrantArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject)
+		}),
+		command("publish-vision-models", env(map[string]string{
+			"HARBOR_ARTIFACT_MANIFEST": filepath.Join(root, "reports/vision-artifacts.txt"),
+			"LOCAL_HARBOR_YML":         harborConfigPath,
+		}), []string{"reports/vision-artifacts.txt"}, func() error {
+			return ValidateVisionArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
 		{Name: "write-manifest", Run: func(context.Context) (StepResult, error) {
 			fmt.Fprintf(
@@ -336,7 +350,7 @@ func (service PrepareService) steps(
 			if err != nil {
 				return StepResult{}, err
 			}
-			summary := map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "runtime-artifact", "target-payload"}, "runtime_artifact": "prepared", "runtime_version": runtimeArtifact.Manifest.Runtime.Version, "runtime_archive_sha256": runtimeArtifact.Manifest.Runtime.ArchiveSHA256, "runtime_manifest": filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml"))}
+			summary := map[string]any{"release_version": identity.ReleaseVersion, "repository": identity.RepositoryRegistry + "/" + identity.RepositoryProject, "assets": []string{"offline", "product-images", "infra-images", "models", "qdrant-snapshots", "vision-models", "runtime-artifact", "target-payload"}, "runtime_artifact": "prepared", "runtime_version": runtimeArtifact.Manifest.Runtime.Version, "runtime_archive_sha256": runtimeArtifact.Manifest.Runtime.ArchiveSHA256, "runtime_manifest": filepath.ToSlash(filepath.Join(runtimeArtifactDirectory, payloadIdentityKey(identity), "manifest.yaml"))}
 			if err := writeYAMLReport(root, "reports/preparation-summary.yaml", summary); err != nil {
 				return StepResult{}, err
 			}

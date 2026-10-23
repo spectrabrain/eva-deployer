@@ -72,7 +72,7 @@ func (service VerifyService) Verify(options VerifyOptions) (VerifyResult, error)
 		Registry:       identity.RepositoryRegistry,
 		Project:        identity.RepositoryProject,
 		ManifestPath:   manifestPath,
-		Categories:     []string{"release", "runtime-packages", "product-images", "infra-images", "models", "qdrant-snapshots"},
+		Categories:     []string{"release", "runtime-packages", "product-images", "infra-images", "models", "qdrant-snapshots", "vision-models"},
 		// This phase verifies local preparation evidence only. It does not claim a
 		// live Harbor query, and it intentionally has no credential side effects.
 		LiveRegistryVerified: false,

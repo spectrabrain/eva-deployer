@@ -1,0 +1,253 @@
+# Ask Helm to resolve --set (including escaped keys, arrays, booleans and nulls)
+# rather than approximating its merge semantics in Ansible.
+- name: Ensure EVA Vision runtime Values probe directory exists
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}/values-probe/templates"
+    state: directory
+    mode: "0700"
+
+- name: Write EVA Vision runtime Values probe chart
+  ansible.builtin.copy:
+    content: "apiVersion: v2\nname: eva-vision-values\nversion: 1.0.0\n"
+    dest: "{{ eva_vision_workdir }}/values-probe/Chart.yaml"
+    mode: "0600"
+
+- name: Write EVA Vision runtime Values probe template
+  ansible.builtin.template:
+    src: runtime-values.yaml.j2
+    dest: "{{ eva_vision_workdir }}/values-probe/templates/values.yaml"
+    mode: "0600"
+
+- name: Resolve EVA Vision runtime Values with Helm
+  no_log: true
+  ansible.builtin.command: >-
+    helm template eva-vision-values {{ (eva_vision_workdir ~ '/values-probe') | quote }}
+    -f {{ (eva_vision_workdir ~ '/effective-input-values.yaml') | quote }}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+  register: eva_vision_runtime_values_raw
+  changed_when: false
+
+- name: Read effective EVA Vision runtime Values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_runtime_values: "{{ eva_vision_runtime_values_raw.stdout | from_yaml }}"
+    eva_vision_runtime_values_file: "{{ eva_vision_workdir }}/runtime-values.yaml"
+
+- name: Save private resolved EVA Vision runtime Values
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_vision_runtime_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_vision_runtime_values_file }}"
+    mode: "0600"
+
+- name: Validate EVA Vision model source and airgap boundary
+  ansible.builtin.assert:
+    that:
+      - eva_vision_runtime_values.modelSource.type in ['s3', 'harbor', 'none']
+      - repository_mode in ['online_repository', 'cloud_repository'] or eva_vision_runtime_values.modelSource.type != 's3'
+    fail_msg: "Vision models must use Harbor (or pre-provisioned none) on Remote/Local targets; S3 requires Online mode."
+
+- name: Validate selected EVA Vision Harbor endpoint
+  ansible.builtin.assert:
+    that:
+      - eva_vision_runtime_values.harbor.registry | default(none) is string
+      - eva_vision_runtime_values.harbor.registry | default('', true) | length > 0
+      - eva_vision_runtime_values.harbor.project | default(none) is string
+      - eva_vision_runtime_values.harbor.project | default('', true) | length > 0
+    fail_msg: "Vision Harbor models require harbor.registry and harbor.project in the effective Values."
+  when: eva_vision_runtime_values.modelSource.type == 'harbor'
+
+- name: Resolve effective EVA Vision model Secret contract
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_model_secret_name: >-
+      {{ (eva_vision_runtime_values.s3.existingSecret | default('', true))
+         if eva_vision_runtime_values.modelSource.type == 's3'
+         else ((eva_vision_runtime_values.harbor.existingSecret | default('', true))
+               if eva_vision_runtime_values.modelSource.type == 'harbor' else '') }}
+    eva_vision_model_secret_keys: >-
+      {{ ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']
+         if eva_vision_runtime_values.modelSource.type == 's3'
+         else ['HARBOR_USERNAME', 'HARBOR_PASSWORD'] }}
+
+- name: Prepare selected EVA Vision model Secret safely
+  no_log: true
+  when: eva_vision_model_secret_name | length > 0
+  block:
+    - name: Check effective EVA Vision model Secret
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - secret
+          - "{{ eva_vision_model_secret_name }}"
+          - -n
+          - "{{ eva_vision_namespace }}"
+          - --ignore-not-found=true
+          - -o
+          - json
+      environment:
+        KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+      register: eva_vision_model_secret
+      changed_when: false
+
+    - name: Validate existing EVA Vision model Secret data
+      ansible.builtin.assert:
+        that:
+          - eva_vision_model_secret.stdout | from_json is mapping
+          - (eva_vision_model_secret.stdout | from_json).get('data') is mapping
+        fail_msg: "The selected Vision model Secret must contain credential data."
+      when: eva_vision_model_secret.stdout | length > 0
+
+    - name: Validate existing EVA Vision model Secret keys
+      ansible.builtin.assert:
+        that:
+          - (eva_vision_model_secret.stdout | from_json).data[item] | default('') | length > 0
+          - eva_vision_runtime_values.modelSource.type != 'harbor' or (eva_vision_model_secret.stdout | from_json).data.get(item) is string
+          - eva_vision_runtime_values.modelSource.type != 'harbor' or (eva_vision_model_secret.stdout | from_json).data[item] | b64decode | trim | length > 0
+        fail_msg: "The selected Vision model Secret must contain both nonempty credential keys."
+      loop: "{{ eva_vision_model_secret_keys }}"
+      when: eva_vision_model_secret.stdout | length > 0
+
+    - name: Create missing EVA Vision Harbor model Secret from target infra credentials
+      ansible.builtin.include_tasks: harbor_model_secret.yaml
+      when:
+        - eva_vision_runtime_values.modelSource.type == 'harbor'
+        - eva_vision_model_secret.stdout | length == 0
+
+    - name: Create missing Online EVA Vision S3 Secret safely
+      when:
+        - eva_vision_runtime_values.modelSource.type == 's3'
+        - eva_vision_model_secret.stdout | length == 0
+      block:
+        - name: Read Online AWS credentials from the existing workspace credential file
+          ansible.builtin.set_fact:
+            eva_vision_aws_key_raw: "{{ lookup('ansible.builtin.file', aws_key_file | default(eva_workspace_credentials_root ~ '/aws_key.ini', true)) }}"
+
+        - name: Extract Online Vision S3 credentials
+          ansible.builtin.set_fact:
+            eva_vision_s3_access_key: "{{ (eva_vision_aws_key_raw | regex_findall('(?m)^\\s*aws_access_key_id\\s*=\\s*(.+)\\s*$') | first | default('')) | trim }}"
+            eva_vision_s3_secret_key: "{{ (eva_vision_aws_key_raw | regex_findall('(?m)^\\s*aws_secret_access_key\\s*=\\s*(.+)\\s*$') | first | default('')) | trim }}"
+
+        - name: Validate Online Vision S3 credential pair
+          ansible.builtin.assert:
+            that:
+              - eva_vision_s3_access_key | length > 0
+              - eva_vision_s3_secret_key | length > 0
+            fail_msg: "Provision the selected S3 Secret or provide aws_access_key_id and aws_secret_access_key in the Online workspace AWS credential file."
+
+        - name: Create EVA Vision namespace for S3 credentials
+          ansible.builtin.shell: >-
+            set -o pipefail;
+            kubectl create namespace {{ eva_vision_namespace | quote }} --dry-run=client -o yaml | kubectl apply -f -
+          args:
+            executable: /bin/bash
+          register: eva_vision_model_namespace
+          changed_when: "'created' in eva_vision_model_namespace.stdout"
+          environment:
+            KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
+        # Create, never apply/replace: an operator-owned Secret must not be overwritten.
+        # stdin avoids exposing credentials in process arguments or files.
+        - name: Create Online EVA Vision S3 Secret without overwriting existing credentials
+          ansible.builtin.command:
+            argv: [kubectl, create, -f, '-']
+            stdin: >-
+              {{ {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+                  'metadata': {'name': eva_vision_model_secret_name, 'namespace': eva_vision_namespace},
+                  'stringData': {'AWS_ACCESS_KEY_ID': eva_vision_s3_access_key,
+                                 'AWS_SECRET_ACCESS_KEY': eva_vision_s3_secret_key}} | to_json }}
+          environment:
+            KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+          changed_when: true
+      always:
+        - name: Clear transient Vision AWS credential facts
+          ansible.builtin.set_fact:
+            eva_vision_aws_key_raw: ''
+            eva_vision_s3_access_key: ''
+            eva_vision_s3_secret_key: ''
+  always:
+    - name: Clear transient Vision model Secret response
+      ansible.builtin.set_fact:
+        eva_vision_model_secret: {}
+
+# Remote Harbor is already seeded; never require weights or publisher tools there.
+- name: Publish Local EVA Vision models to selected Harbor
+  when:
+    - repository_mode == 'local_repository'
+    - eva_vision_runtime_values.modelSource.type == 'harbor'
+  vars:
+    # Packaged Releases contain no scripts. This is a CONTROLLER source path,
+    # supplied by the CLI's backend resolver; checkout use retains its fallback.
+    eva_vision_publisher_source_root: "{{ lookup('ansible.builtin.env', 'EVA_REMOTE_LIBEXEC_ROOT') | default(eva_repo_root, true) }}"
+    eva_vision_publisher_root: "{{ eva_vision_workdir }}/model-publisher"
+    # Like Qdrant, prefer the original sudo user, but resolve the actual passwd
+    # home instead of assuming /home/<user> or trusting become root's HOME.
+    eva_vision_publisher_user: >-
+      {{ ansible_facts.get('env', {}).get('SUDO_USER', '')
+         if ansible_facts.get('env', {}).get('SUDO_USER', '') not in ['', 'root']
+         else ansible_user | default(ansible_ssh_user | default(
+           ansible_facts.get('user_id') | default(ansible_facts.get('env', {}).get('USER', 'root'), true), true), true) }}
+    eva_vision_publisher_harbor_override: "{{ local_harbor_yml | default(lookup('ansible.builtin.env', 'LOCAL_HARBOR_YML'), true) }}"
+    eva_vision_publisher_interpreter: "{{ ansible_python_interpreter | default('auto', true) }}"
+    eva_vision_publisher_environment:
+      PYTHON: >-
+        {{ eva_vision_publisher_interpreter
+           if eva_vision_publisher_interpreter not in ['auto', 'auto_silent', 'auto_legacy', 'auto_legacy_silent']
+           else ansible_facts.get('python', {}).get('executable') | default(
+             ansible_facts.get('discovered_interpreter_python') | default('python3', true), true) }}
+      EVA_CACHE_ROOT: "{{ eva_cache_root }}"
+      ORAS_CMD: "{{ eva_cache_root }}/tools/oras"
+      REPOSITORY_REGISTRY: "{{ eva_vision_runtime_values.harbor.registry }}"
+      REPOSITORY_PROJECT: "{{ eva_vision_runtime_values.harbor.project }}"
+      REPOSITORY_PLAIN_HTTP: "{{ eva_vision_runtime_values.harbor.plainHttp | bool | lower }}"
+      REPOSITORY_INSECURE: "{{ eva_vision_runtime_values.harbor.insecure | bool | lower }}"
+      REPOSITORY_USERNAME: >-
+        {{ repository_username | default(harbor_username | default(
+           lookup('ansible.builtin.env', 'REPOSITORY_USERNAME') | default(
+           lookup('ansible.builtin.env', 'HARBOR_USERNAME') | default('admin', true), true)), true) }}
+      REPOSITORY_PASSWORD: >-
+        {{ repository_password | default(harbor_admin_password | default(
+           lookup('ansible.builtin.env', 'REPOSITORY_PASSWORD') | default(
+           lookup('ansible.builtin.env', 'HARBOR_PASSWORD'), true)), true) }}
+      LOCAL_HARBOR_YML: >-
+        {{ eva_vision_publisher_harbor_override or
+           (eva_vision_publisher_passwd.ansible_facts.getent_passwd[eva_vision_publisher_user][4]
+            ~ '/.local/share/eva-harbor/harbor/harbor.yml') }}
+  block:
+    - name: Look up original target user home for Local Vision Harbor credentials
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ eva_vision_publisher_user }}"
+      register: eva_vision_publisher_passwd
+      when: eva_vision_publisher_harbor_override | length == 0
+
+    - name: Ensure target Vision model publisher directories exist
+      ansible.builtin.file:
+        path: "{{ eva_vision_publisher_root }}/scripts/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [publish, lib]
+
+    - name: Copy Vision model publisher from controller helper root
+      ansible.builtin.copy:
+        src: "{{ eva_vision_publisher_source_root }}/scripts/{{ item.path }}"
+        dest: "{{ eva_vision_publisher_root }}/scripts/{{ item.path }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: publish/push_vision_models_to_harbor.sh, mode: '0755'}
+        - {path: lib/vision_models.py, mode: '0644'}
+
+    - name: Run copied Vision model publisher on target
+      no_log: true
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - "{{ eva_vision_publisher_root }}/scripts/publish/push_vision_models_to_harbor.sh"
+      # Preserve unset versus explicitly empty selection, matching the Go
+      # validator and Python helper; never interpolate selection into a shell.
+      environment: >-
+        {{ eva_vision_publisher_environment | combine(
+             {'EVA_VISION_MODELS': lookup('ansible.builtin.env', 'EVA_VISION_MODELS')}
+             if lookup('ansible.builtin.env', 'EVA_VISION_MODELS', default=undef()) is defined else {}) }}
+      changed_when: true

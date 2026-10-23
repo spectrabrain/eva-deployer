@@ -94,6 +94,8 @@ import re
 import sys
 
 import yaml
+from jinja2 import Environment
+from ansible.plugins.test.core import version_compare
 
 
 template_path = Path(sys.argv[1])
@@ -117,10 +119,14 @@ for input_name, literal in (
     ("true", "True"),
     ("false", "False"),
 ):
-    rendered_content = template_content.replace(
-        expression,
-        literal,
-        1,
+    environment = Environment()
+    environment.filters["bool"] = bool
+    environment.filters["ternary"] = lambda value, yes, no: yes if value else no
+    environment.tests["version"] = version_compare
+    rendered_content = environment.from_string(template_content).render(
+      eva_vision_chart_version="3.3.0",
+      eva_vision_progress_deadline_seconds=3600,
+      eva_vision_skip_startup_warmup=(literal == "True"),
     )
 
     expected_line = (

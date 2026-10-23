@@ -28,6 +28,7 @@ var serviceTestSteps = []string{
 	"scripts/download/download_n8n_images.sh",
 	"scripts/download/download_eva_models.sh",
 	"scripts/download/download_qdrant_snapshots.sh",
+	"scripts/download/download_vision_models.sh",
 }
 
 const serviceTestBackendRoot = "/trusted-airgap-test-backends"
@@ -273,6 +274,8 @@ func (f *serviceTestFixture) writeStepAssets(step string, options remote.Process
 	case "scripts/download/download_qdrant_snapshots.sh":
 		write("qdrant-snapshots/snapshot.bin", "snapshot\n")
 		write("qdrant-snapshots/manifest.txt", "source: harbor\nsnapshot_specs:\ndir|snapshot.bin|collection\nfiles:\n"+filepath.Join(cache, "qdrant-snapshots/snapshot.bin")+"\n")
+	case "scripts/download/download_vision_models.sh":
+		archiveTestVisionCache(f.t, cache)
 	default:
 		f.t.Fatalf("no fake asset generator for %q", step)
 	}
@@ -381,6 +384,7 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 		"runtime/runtime.yaml", "runtime/bin/ansible-playbook", "runtime/bin/helm", "runtime/bin/kubectl", "runtime/bin/kustomize", "runtime/bin/oras",
 		"out/cache/manifest.txt", "out/cache/python-debs/python3-venv.deb", "out/cache/harbor/harbor-offline-installer-v2.12.2.tgz",
 		"out/cache/models/agent/hf/model.bin", "out/cache/models/vllm/hf/model.bin", "out/cache/qdrant-snapshots/snapshot.bin",
+		"out/cache/vision-models/manifest.json", "out/cache/vision-models/model_dir/Owl-v2/weights/model.bin",
 		"out/cache/images/eva-images.tar", "out/cache/images/airgap-images.txt", "out/cache/airgap-preparation.yaml",
 	} {
 		if len(entries[name].body) == 0 {
@@ -633,6 +637,7 @@ func TestServicePrepareRejectsIncompleteAssets(t *testing.T) {
 		"nvidia/nvidia-driver-repo.manifest.txt", "eva-iam/iam.tgz", "eva-agent/eva-agent-init-3.2.0.tgz",
 		"eva-agent/eva-agent-vllm-3.2.0.tgz", "qdrant/qdrant.tgz", "k3s/k3s-airgap-images-amd64.tar.zst",
 		"models/agent/hf/model.bin", "models/vllm/hf/model.bin", "models/manifest.txt", "qdrant-snapshots/snapshot.bin", "qdrant-snapshots/manifest.txt",
+		"vision-models/manifest.json", "vision-models/model_dir/Owl-v2/weights/model.bin",
 		"images/images-all.txt", "images/infra-images-pulled.txt",
 	} {
 		t.Run(relative, func(t *testing.T) {
@@ -660,6 +665,9 @@ func TestServicePrepareRejectsIncompleteAssets(t *testing.T) {
 		{"different infra image lists", "images/infra-images-pulled.txt", "example.test/eva:latest\n"},
 		{"model manifest outside cache", "models/manifest.txt", "files:\n/does-not-exist/model.bin\n"},
 		{"invalid snapshot specs", "qdrant-snapshots/manifest.txt", "snapshot_specs:\ninvalid\nfiles:\n"},
+		{"corrupt Vision model", "vision-models/model_dir/Owl-v2/weights/model.bin", "wrong weights\n"},
+		{"extra Vision file", "vision-models/model_dir/Owl-v2/extra.bin", "extra\n"},
+		{"invalid Vision manifest", "vision-models/manifest.json", "{}\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newServiceTestFixture(t)

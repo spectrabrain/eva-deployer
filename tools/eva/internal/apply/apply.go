@@ -13,6 +13,7 @@ import (
 	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
+	"eva-deployer/tools/eva/internal/remote"
 	"eva-deployer/tools/eva/internal/runtime"
 	"eva-deployer/tools/eva/internal/workspace"
 )
@@ -343,6 +344,13 @@ func commandEnvironment(
 		values[name] = value
 	}
 	values["EVA_REPO_ROOT"] = releaseRoot
+	// Sources in a prepared Release intentionally contain no scripts. Supply
+	// the installed Tool's versioned helper root to roles that copy backends
+	// to a target (Local Vision publishing), rather than guessing a checkout.
+	delete(values, "EVA_REMOTE_LIBEXEC_ROOT")
+	if backend, err := remote.ResolveBackend("scripts/publish/push_vision_models_to_harbor.sh"); err == nil {
+		values["EVA_REMOTE_LIBEXEC_ROOT"] = filepath.Dir(filepath.Dir(filepath.Dir(backend)))
+	}
 	values["EVA_RUNTIME_ROOT"] = resolvedRuntime.Root
 	values["ANSIBLE_LOG_PATH"] = internalLogPath
 	values["ANSIBLE_COLLECTIONS_PATH"] = prependPath(

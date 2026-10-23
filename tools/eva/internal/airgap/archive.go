@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"eva-deployer/tools/eva/internal/remote"
 )
 
 const archiveJSONLimit = 16 << 20
@@ -37,6 +39,15 @@ func buildOfflineArchive(runtimeArchive, cacheRoot, destination string) (resultE
 	}
 	if !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
 		return errors.New("cache root must be a non-symlink directory")
+	}
+	// Older/offline-only caches may lack Vision weights. If present, never
+	// archive a tree that would fail validation after target-side restoration.
+	if _, err := os.Lstat(filepath.Join(root, "vision-models")); err == nil {
+		if err := remote.ValidateVisionModels(cacheRoot); err != nil {
+			return fmt.Errorf("validate Vision cache before archive: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	output, err := filepath.Abs(destination)
 	if err != nil {
@@ -82,6 +93,15 @@ func buildOfflineArchive(runtimeArchive, cacheRoot, destination string) (resultE
 		if err := checkArchiveSource(info); err != nil {
 			return fmt.Errorf("cache entry %q: %w", name, err)
 		}
+		// The model backend intentionally leaves its flock inode in the cache
+		// parent. It is empty process coordination state, not an offline asset.
+		// Never archive it, and never treat nonempty data as a lock to hide it.
+		if name == ".vision-models.lock" {
+			if !info.Mode().IsRegular() || info.Size() != 0 {
+				return errors.New("Vision cache lock must be an empty regular file")
+			}
+			return nil
+		}
 		// Helm rendering includes Kubernetes Secrets; none of this subtree is
 		// an offline asset. In particular, do not inspect/copy its secret data.
 		if name == "images/rendered" {
@@ -115,7 +135,7 @@ func offlineCacheDirectory(name string) bool {
 	switch name {
 	case "aws", "apt", "docker", "nvidia", "cuda", "helm", "k3s", "k8s", "nfs",
 		"eva-app", "eva-vision", "eva-agent", "eva-iam", "qdrant", "tools", "images",
-		"display_mode_selector", "models", "python-debs", "wheels", "qdrant-snapshots", "harbor":
+		"display_mode_selector", "models", "python-debs", "wheels", "qdrant-snapshots", "vision-models", "harbor":
 		return true
 	}
 	return false
@@ -282,7 +302,7 @@ func writeOfflineCacheEntry(tw *tar.Writer, full, name, root, originalRoot strin
 		return err
 	}
 	defer file.Close()
-	if filepath.Base(full) == "manifest.txt" {
+	if filepath.Base(full) == "manifest.txt" && !strings.HasPrefix(name, "out/cache/vision-models/") {
 		// Count a streaming rewrite before emitting the tar header; even a
 		// large model manifest never needs to reside in memory as a whole.
 		prefix := root

@@ -49,8 +49,8 @@ type PayloadSource struct {
 }
 
 // BuildTargetPayload creates a deterministic, verified archive from the
-// managed preparation cache. Image and Qdrant snapshot payloads deliberately
-// remain outside this archive because Main Harbor supplies them.
+// managed preparation cache. Image, Qdrant snapshot and Vision model payloads
+// deliberately remain outside this archive because Main Harbor supplies them.
 func BuildTargetPayload(
 	preparationRoot string,
 	cacheRoot string,

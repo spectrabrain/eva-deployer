@@ -31,6 +31,11 @@
     eva_vision_rollout_timeout: "{{ eva_vision_rollout_timeout | default('1800s') }}"
     eva_vision_progress_deadline_seconds: "{{ eva_vision_progress_deadline_seconds | default(3600) }}"
     eva_vision_skip_startup_warmup: "{{ eva_vision_skip_startup_warmup | default(true) }}"
+    eva_vision_chart_repo_url: >-
+      {{ eva_vision_chart_repo_url | default(
+           (eva_vision_chart_version is version('3.3.0', '>='))
+           | ternary('https://raw.githubusercontent.com/spectrabrain/eva-vision-chart/chartmuseum/',
+                     'https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/')) }}
 
 - name: Load target-specific EVA Vision Workspace values
   ansible.builtin.import_tasks: workspace_values.yaml
@@ -51,7 +56,9 @@
         eva_vision_image_repository | default(
           (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary(
-              '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-vision',
+              (eva_vision_chart_version is version('3.3.0', '>='))
+              | ternary('211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-vision',
+                  '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-vision'),
               repository_registry ~ '/' ~ repository_project ~ '/eva-vision'
             )
         )
@@ -116,7 +123,8 @@
     success_msg: "NVIDIA Device Plugin daemonset detected."
 
 - name: Add Helm repository for EVA Vision
-  ansible.builtin.command: helm repo add eva-vision https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/
+  ansible.builtin.command: >-
+    helm repo add eva-vision {{ eva_vision_chart_repo_url | quote }} --force-update
   register: helm_repo_eva_vision
   changed_when: "'already exists' not in (helm_repo_eva_vision.stdout + helm_repo_eva_vision.stderr)"
   failed_when:
@@ -158,7 +166,9 @@
 
 - name: Export default values.yaml from EVA Vision chart
   ansible.builtin.shell: >-
-    helm show values {{ eva_vision_chart_source }} > {{ eva_vision_workdir }}/values.yaml
+    helm show values {{ eva_vision_chart_source | quote }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version | quote }}{% endif %}
+    > {{ (eva_vision_workdir ~ '/values.yaml') | quote }}
   args:
     executable: /bin/bash
   changed_when: false
@@ -266,6 +276,12 @@
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
+
+- name: Prepare EVA Vision external model runtime
+  ansible.builtin.include_tasks: model_runtime.yaml
+  when:
+    - not ansible_check_mode
+    - eva_vision_chart_version is version('3.3.0', '>=')
 
 - name: Check existing EVA Vision deployment
   ansible.builtin.command: kubectl get deployment {{ eva_vision_name }} -n {{ eva_vision_namespace }}
@@ -375,7 +391,7 @@
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
     -f {{ eva_vision_workdir }}/effective-input-values.yaml
     --post-renderer eva-vision-postrenderer
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
     > /dev/null
   args:
     executable: /bin/bash
@@ -398,7 +414,7 @@
     --create-namespace
     -f {{ eva_vision_workdir }}/effective-input-values.yaml
     --post-renderer eva-vision-postrenderer
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
   register: eva_vision_deploy_online
   changed_when: >-
     'has been upgraded' in eva_vision_deploy_online.stdout
@@ -417,7 +433,7 @@
     --create-namespace
     -f {{ eva_vision_workdir }}/effective-input-values.yaml
     --post-renderer eva-vision-postrenderer
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
   register: eva_vision_deploy_offline
   changed_when: >-
     'has been upgraded' in eva_vision_deploy_offline.stdout

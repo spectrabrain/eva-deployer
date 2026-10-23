@@ -95,14 +95,7 @@ eva install configure
 연결 비밀번호와 서비스 주소·Secret은 복사하지 않습니다. 여러 타겟은 하나의 cluster를 만드는 기능이 아닙니다.
 기존 단일 서버용 `eva config sample --mode online`과 비대화형 옵션도 유지합니다.
 
-현재 소스의 버전은 **App `3.3.0-beta.3` / IAM `3.3.0-beta.1`**입니다. 두 Chart는
-SpectraBrain 게시 저장소에서 가져오며 App ECR 이미지·인증 계정도 새 공급원으로 맞춥니다.
-이 변경이 포함된 **새 EVA Tool과 Release**를 사용해야 합니다. 기존에 등록된 Current Release나
-이미 설치된 Tool은 소스 수정만으로 갱신되지 않습니다. Release의 버전 catalog도 확인합니다.
 두 명령 모두 `--output FILE`로 위치를 바꿀 수 있고 새 파일만 `0600`으로 만들며 덮어쓰지 않습니다.
-
-**첫 단일 서버 Online 실설치 테스트**는 `online → 현재 서버 → Infra + Solution`으로 시작하고,
-원하는 HTTP/HTTPS와 주소·IAM·Agent/Vision 구성을 선택합니다. 실제 설치 E2E는 아직 별도 검증 대상입니다.
 
 - **HTTP:** 격리된 테스트에만 사용합니다. 생성된 App/IAM `ingress.tls.enabled/create: false`,
   App `backendSecure: false`를 유지합니다. host 인증서 SAN 검사·TLS Secret Job·Traefik 기본
@@ -113,8 +106,8 @@ SpectraBrain 게시 저장소에서 가져오며 App ECR 이미지·인증 계�
 - 표준 외부 포트는 HTTP `80`, HTTPS `443`입니다. 기존 Traefik 포트를 자동 변경하지 않습니다.
   비표준 포트라면 실제 Service/외부 LB 노출과 App의 외부 포트·IAM `config.publicPort`·
   App client `redirectUris`를 함께 맞춥니다.
-- AWS credential에는 새 제품 Registry(`211722900905.dkr.ecr.ap-northeast-2.amazonaws.com`)의
-  App·IAM pull 권한이 필요합니다. Agent/Vision 버전과 기존 공급원은 이번 변경에서 유지합니다.
+- AWS credential에는 제품 이미지의 ECR pull 권한과 모델용 S3 list/read 권한이 필요합니다.
+  다른 AWS 계정의 자산을 사용하는 경우 해당 계정에서도 접근을 허용해야 합니다.
 - 브라우저뿐 아니라 **App Pod에서도 IAM 외부 주소를 해석·접속**할 수 있어야 합니다.
   주소·license·AWS·sudo 입력을 채운 뒤 아래 입력 검증, 6절 인증서 준비, 필요한 경우 7절 preflight,
   8절 설치 순서로 진행합니다.
@@ -138,8 +131,8 @@ components:
   n8n: false
 credentials:
   aws:
-    aws_access_key_id: "<AWS_ACCESS_KEY_ID>" # 필수: 실제 발급값. ex) AKIAEXAMPLEONLY000000 (예시 전용)
-    aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>" # 필수: 실제 발급값, 커밋 금지. ex) demo-aws-secret-only (예시 전용)
+    aws_access_key_id: "<AWS_ACCESS_KEY_ID>" # 필수: 실제 발급값
+    aws_secret_access_key: "<AWS_SECRET_ACCESS_KEY>" # 필수: 실제 발급값, 커밋 금지
     region: ap-northeast-2
 targets:
   server-a:
@@ -147,7 +140,7 @@ targets:
       ansible_connection: local
       ansible_user: eva
       ansible_become: true
-      ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호. ex) demo-sudo-only (예시 전용)
+      ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호
     values:
       iam:
         config:
@@ -158,7 +151,7 @@ targets:
               EVA_IAM_ADMIN_EMAIL: "admin@eva.com"
           realmPatch:
             realmAdmin:
-              password: "<REALM_ADMIN_PASSWORD>" # 필수: realm 관리자 비밀번호. ex) Demo-Realm-Only!42 (예시 전용)
+              password: "<REALM_ADMIN_PASSWORD>" # 필수: realm 관리자 비밀번호
             evaApp:
               redirectUris:
                 - "https://app.example.com/*"
@@ -190,13 +183,13 @@ targets:
             redis:
               port: 32079
               db: 0
-              password: eva-redis-pass # IAM Redis와 동일하게 맞추고 변경
+              password: "<IAM_REDIS_PASSWORD>" # IAM Redis와 동일하게 설정
               url: "" # 선택 override; 비우면 App이 SSO 변수로 조합
           license:
             activation_mode: online # Online 기본값. 사전 결정한 라이선스 방식에 맞게 변경합니다.
             product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
-            api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key. ex) demo-license-api-key (예시 전용)
-            shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key. ex) demo-license-shared-key (예시 전용)
+            api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key
+            shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key
 ```
 
 `targets.server-a`는 inventory alias이며, `values`에는 target별 Chart Values를 그대로
@@ -219,6 +212,17 @@ sudo eva workspace validate --config /home/eva/eva-install.yaml
 
 위 명령은 설치 설정의 필수 입력과 형식을 검증합니다. 설정 파일에는 credential이 포함되므로
 Git, 채팅, Release artifact에 넣지 않습니다.
+
+### Vision 모델 공급
+
+Vision 모델은 컨테이너 이미지와 별도로 S3에서 공급됩니다. 기존 `eva install` 과정에서
+모델을 다운로드해 영구 캐시에 저장하고, 모델 준비가 끝나면 서비스를 시작합니다.
+필요한 인증은 입력한 AWS credential로 자동 구성하므로 추가 명령이나 Secret 생성은 필요하지 않습니다.
+
+- 대상 서버에서 `s3://spectrabrain-eva-vision/model_dir`에 접근할 수 있어야 합니다.
+- 첫 설치에는 모델 다운로드·준비 시간이 필요합니다. 모델과 준비 파일을 저장할 디스크 공간을 확보합니다.
+- 모델 캐시는 기본 `20Gi`이며 필요하면 `values.vision.modelCache.size`로 조정합니다.
+  **업그레이드·재시도에서 모델 PVC를 삭제하지 않습니다.**
 
 ## 6. 인증서 파일 준비
 

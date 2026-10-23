@@ -217,8 +217,6 @@ for marker in invalid_counter_markers:
         )
 
 for forbidden in (
-    "persistentvolume",
-    "persistentvolumeclaim",
     "storageclass",
     "kubectl annotate",
     "kubectl label",

@@ -133,7 +133,7 @@ func validatePreparationAssets(root, cacheRoot string, identity PreparationIdent
 	if err := ValidateQdrantArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject); err != nil {
 		return err
 	}
-	return nil
+	return ValidateVisionArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject)
 }
 
 func validateCompletedManifest(manifest Manifest, identity PreparationIdentity) error {
@@ -214,10 +214,10 @@ func validateSummaryReport(root string, identity PreparationIdentity) error {
 		return errors.New("summary identity does not match preparation identity")
 	}
 	assets, ok := report["assets"].([]any)
-	if !ok || len(assets) != 7 {
+	if !ok || len(assets) != 8 {
 		return errors.New("summary asset status is incomplete")
 	}
-	want := map[string]bool{"offline": true, "product-images": true, "infra-images": true, "models": true, "qdrant-snapshots": true, "runtime-artifact": true, "target-payload": true}
+	want := map[string]bool{"offline": true, "product-images": true, "infra-images": true, "models": true, "qdrant-snapshots": true, "vision-models": true, "runtime-artifact": true, "target-payload": true}
 	for _, asset := range assets {
 		value, ok := asset.(string)
 		if !ok || !want[value] {

@@ -105,6 +105,7 @@ load_deploy_versions() {
     EVA_APP_ALEMBIC_VERSION
     EVA_VISION_DEPLOY_VERSION
     EVA_VISION_CHART_VERSION
+    EVA_VISION_IMAGE_TAG
     EVA_AGENT_RELEASE
     EVA_AGENT_DEPLOY_VERSION
     EVA_AGENT_CHART_VERSION
@@ -123,6 +124,7 @@ load_deploy_versions() {
     [EVA_APP_ALEMBIC_VERSION]="eva_app_alembic_version"
     [EVA_VISION_DEPLOY_VERSION]="eva_vision_deploy_version"
     [EVA_VISION_CHART_VERSION]="eva_vision_chart_version"
+    [EVA_VISION_IMAGE_TAG]="eva_vision_image_tag eva_vision_deploy_version"
     [EVA_AGENT_RELEASE]="eva_agent_release eva_agent_deploy_version"
     [EVA_AGENT_DEPLOY_VERSION]="eva_agent_deploy_version"
     [EVA_AGENT_CHART_VERSION]="eva_agent_chart_version"
@@ -188,6 +190,31 @@ load_deploy_versions() {
         printf '[versions]   %-26s %s\n' "$env_name" "${!env_name:-(없음)}"
       fi
     done
+  fi
+}
+
+# Vision moved its published Chart and ECR repository at 3.3.0. Current
+# upstream main has older defaults; preparation must use published archives.
+eva_vision_source() {
+  local kind="$1" version="$2" owner=mellerikat
+  if [[ "$kind" != chart && "$kind" != image ]] ||
+     [[ ! "$version" =~ ^v?([0-9]+)\.([0-9]+)\.[0-9]+([-+][A-Za-z0-9.]+)?$ ]]; then
+    echo "[ERROR] invalid Vision source selection: $kind $version" >&2
+    return 1
+  fi
+  if (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 3) )); then
+    owner=spectrabrain
+  fi
+  if [[ "$kind" == chart ]]; then
+    if [[ "$owner" == spectrabrain ]]; then
+      printf 'https://raw.githubusercontent.com/spectrabrain/eva-vision-chart/chartmuseum\n'
+    else
+      printf 'https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum\n'
+    fi
+  elif [[ "$owner" == spectrabrain ]]; then
+    printf '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-vision\n'
+  else
+    printf '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-vision\n'
   fi
 }
 

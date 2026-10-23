@@ -10,7 +10,14 @@ except ImportError as error:
 EXPECTED_COMMAND = [
     "/bin/bash",
     "-lc",
-    "mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled 2>/dev/null || true; exec uv run ./run.sh serve --log-profile prod --foreground",
+    "if [ -f /app/scripts/warmup.py ]; then mv /app/scripts/warmup.py /app/scripts/warmup.py.disabled || exit 1; fi; "
+    {% if eva_vision_chart_version | default('3.2.0') is version('3.3.0', '>=') %}
+    'exec /app/scripts/docker-entrypoint.sh "$@"',
+    "eva-vision-entrypoint",
+    {% else %}
+    'exec uv run ./run.sh serve "$@"',
+    "eva-vision-serve",
+    {% endif %}
 ]
 EXPECTED_PROGRESS_DEADLINE = {{ eva_vision_progress_deadline_seconds | int }}
 SKIP_STARTUP_WARMUP = {{ eva_vision_skip_startup_warmup | bool | ternary('True', 'False') }}
@@ -80,6 +87,10 @@ def main():
 
     container = vision_containers[0]
     if SKIP_STARTUP_WARMUP:
+        # Kubernetes appends container.args to command. Preserve custom arguments;
+        # otherwise reproduce the image CMD, which a command override suppresses.
+        if "args" not in container:
+            container["args"] = ["--log-profile", "prod", "--foreground"]
         current_command = container.get("command")
         if current_command is None:
             container["command"] = EXPECTED_COMMAND

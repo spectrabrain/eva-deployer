@@ -39,7 +39,7 @@ func TestBuildTargetPayloadIsDeterministicAndExcludesHarborAssets(t *testing.T) 
 		t.Fatalf("archive entries are not stable: %v", entries)
 	}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry, "cache/") || strings.HasPrefix(entry, "cache/images/") || strings.HasPrefix(entry, "cache/qdrant-snapshots/") || strings.HasPrefix(entry, "cache/aws/") {
+		if !strings.HasPrefix(entry, "cache/") || strings.HasPrefix(entry, "cache/images/") || strings.HasPrefix(entry, "cache/qdrant-snapshots/") || strings.HasPrefix(entry, "cache/vision-models/") || strings.HasPrefix(entry, "cache/aws/") {
 			t.Fatalf("unexpected payload archive entry %q", entry)
 		}
 	}
@@ -117,10 +117,12 @@ func TestBuildTargetPayloadExcludesUnapprovedCacheRoots(
 	mustRemove(t, TargetPayloadPath(root, identity))
 
 	excluded := map[string]string{
-		"cache/credentials/aws_key.ini": "not-a-real-key",
-		"cache/aws/credentials":         "not-a-real-key",
-		"cache/images/private.key":      "not-a-real-key",
-		"cache/qdrant-snapshots/token":  "not-a-real-token",
+		"cache/credentials/aws_key.ini":                          "not-a-real-key",
+		"cache/aws/credentials":                                  "not-a-real-key",
+		"cache/images/private.key":                               "not-a-real-key",
+		"cache/qdrant-snapshots/token":                           "not-a-real-token",
+		"cache/vision-models/.aws/credentials":                   "vision-secret-do-not-transport",
+		"cache/vision-models/model_dir/Owl-v2/weights/model.bin": "vision-weights-do-not-transport",
 	}
 
 	for relative, contents := range excluded {
@@ -165,6 +167,33 @@ func TestBuildTargetPayloadExcludesUnapprovedCacheRoots(
 				"unapproved cache root was included: %s",
 				relative,
 			)
+		}
+	}
+	file, err := os.Open(filepath.Join(payload.Directory, payload.Manifest.Archive))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		if _, err := tr.Next(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, excludedBody := range excluded {
+			if bytes.Contains(body, []byte(excludedBody)) {
+				t.Fatal("excluded credentials or Vision weights leaked into payload content")
+			}
 		}
 	}
 }

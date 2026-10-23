@@ -58,9 +58,11 @@ var DefaultStepNames = []string{
 	"download-infra-images",
 	"download-models",
 	"download-qdrant-snapshots",
+	"download-vision-models",
 	"publish-product-images",
 	"publish-infra-images",
 	"publish-qdrant-snapshots",
+	"publish-vision-models",
 	"write-manifest",
 	"verify",
 }

@@ -17,6 +17,7 @@ import (
 
 	"golang.org/x/term"
 
+	"eva-deployer/tools/eva/internal/access"
 	"eva-deployer/tools/eva/internal/airgap"
 	"eva-deployer/tools/eva/internal/apply"
 	"eva-deployer/tools/eva/internal/apt"
@@ -1225,6 +1226,7 @@ func runInstall(args []string) error {
 		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
+	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
 	return err
 }
 
@@ -1489,6 +1491,7 @@ func runCheck(args []string) error {
 
 	resolvedRuntime, runtimeErr := runtime.Resolve(*runtimeRoot)
 	input := health.Input{RuntimeError: runtimeErr}
+	var installedPlan plan.Document
 	if runtimeErr == nil {
 		input.RuntimeVersion = resolvedRuntime.Descriptor.Version
 	}
@@ -1502,11 +1505,16 @@ func runCheck(args []string) error {
 			input.OperationError = err
 		} else {
 			input.Components = checkComponents(document)
+			installedPlan = document
 		}
 	}
 
 	report := health.Check(input, checkRunner(resolvedRuntime, runtimeErr == nil))
 	printCheck(report, *verbose)
+	access.Print(os.Stdout, access.Discover(installedPlan, access.Options{
+		Run: checkRunner(resolvedRuntime, runtimeErr == nil), PreferLive: true,
+		HarborReceiptPath: defaultRemoteBootstrapReceiptPath,
+	}))
 	if !report.Healthy {
 		fmt.Fprintln(os.Stderr, "\nRun:")
 		fmt.Fprintln(os.Stderr, "  sudo eva check --verbose")
@@ -1943,6 +1951,7 @@ func runApply(args []string) error {
 		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
+	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
 	return err
 }
 
@@ -1990,7 +1999,23 @@ func runRetry(args []string) error {
 		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, retry)
 	printOperation(completed)
+	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
 	return err
+}
+
+func printCompletedAccess(record operation.Record, stateRoot, runtimeRoot string) {
+	if record.Status != operation.Succeeded {
+		return
+	}
+	document, err := operation.LoadPlan(stateRoot, record)
+	if err != nil {
+		return
+	}
+	resolvedRuntime, runtimeErr := runtime.Resolve(runtimeRoot)
+	access.Print(os.Stdout, access.Discover(document, access.Options{
+		Run:               checkRunner(resolvedRuntime, runtimeErr == nil),
+		HarborReceiptPath: defaultRemoteBootstrapReceiptPath,
+	}))
 }
 
 func confirmApply(record operation.Record) error {

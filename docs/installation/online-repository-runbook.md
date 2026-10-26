@@ -312,6 +312,9 @@ sudo eva retry --yes
 
 ## 9. 설치 결과 확인
 
+설치 성공 시와 `eva check`의 `Access URLs`에서 설치한 App/IAM 접속 주소를 확인합니다.
+n8n을 설치했다면 n8n 주소도 표시됩니다. 각 주소에는 설정한 HTTP/HTTPS, 공개 포트와 경로가 반영됩니다.
+
 설치 상태 점검으로 시작합니다. 선택된 Agent 또는 Vision component가 있으면 node의 GPU 또는
 MIG allocatable resource, NVIDIA Device Plugin readiness, Agent/Vision Pod의 GPU 또는
 MIG 할당도 함께 확인합니다.

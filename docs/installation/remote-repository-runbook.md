@@ -495,6 +495,9 @@ Target payload는 managed cache로 materialize되고 image·Qdrant snapshot·Vis
 
 ## 12. 설치 결과 확인
 
+설치 성공 시와 `eva check`의 `Access URLs`에서 설치한 App/IAM과 Main Harbor 접속 주소를 확인합니다.
+n8n을 설치했다면 n8n 주소도 표시됩니다. 여러 타겟에 설치한 경우 서비스 주소에 타겟 이름이 함께 표시됩니다.
+
 설치 상태와 작업 결과를 확인합니다.
 
 ```bash

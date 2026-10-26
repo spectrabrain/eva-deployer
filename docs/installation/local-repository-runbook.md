@@ -420,6 +420,9 @@ IAM/App 재설치 시 workload 재시작에 따른 일시 중단이 발생할 �
 
 ## 8. 결과 확인과 인계
 
+설치 성공 시와 `eva check`의 `Access URLs`에서 설치한 App/IAM과 Local Harbor 접속 주소를 확인합니다.
+n8n을 설치했다면 n8n 주소도 표시됩니다. 각 주소에는 설정한 HTTP/HTTPS, 공개 포트와 경로가 반영됩니다.
+
 ```bash
 sudo eva status
 sudo eva check --verbose

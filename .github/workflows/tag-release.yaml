@@ -132,6 +132,7 @@ jobs:
           scripts/test/test_eva_vision_gpu_resource.sh
           scripts/test/test_eva_vision_reconciliation.sh
           scripts/test/test_eva_vision_postrenderer.sh
+          python3 scripts/test/test_eva_vision_ecr_auth.py
           scripts/test/test_k3s_gpu_validation.sh
           scripts/test/test_tls_san_validation.sh
           scripts/test/test_precondition_argocd_tracking.sh

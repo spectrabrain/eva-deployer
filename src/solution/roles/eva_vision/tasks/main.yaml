@@ -283,6 +283,12 @@
     - not ansible_check_mode
     - eva_vision_chart_version is version('3.3.0', '>=')
 
+- name: Prepare EVA Vision image pull authentication
+  ansible.builtin.include_tasks: image_pull_secret.yaml
+  when:
+    - not ansible_check_mode
+    - eva_vision_chart_version is version('3.3.0', '>=')
+
 - name: Check existing EVA Vision deployment
   no_log: true
   ansible.builtin.command: kubectl get deployment {{ eva_vision_name }} -n {{ eva_vision_namespace }} -o json

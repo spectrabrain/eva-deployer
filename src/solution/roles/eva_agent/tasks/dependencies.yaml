@@ -239,6 +239,12 @@
       }}
     eva_agent_vllm_router_image_tag: "{{ eva_agent_vllm_router_image_tag | default('v0.1.10') }}"
 
+# Check deployment tools before changing credentials, storage or workloads.
+- name: Prepare and validate EVA Agent managed kustomize on the target
+  ansible.builtin.import_tasks: managed_kustomize.yaml
+  tags:
+    - eva_agent_managed_kustomize
+
 # Prepare only the selected namespace after repository defaults are validated.
 # Missing credentials must fail before NFS changes, migrations or Pod shutdown.
 - name: Prepare namespace registry and model credentials before deploying Agent workloads
@@ -519,14 +525,6 @@
     state: unmounted
   when: not ansible_check_mode
 
-- name: Validate EVA managed kustomize
-  ansible.builtin.command:
-    cmd: kustomize version
-  register: eva_agent_kustomize_version
-  changed_when: false
-  tags:
-    - eva_agent_managed_kustomize
-
 - name: Remove EVA dependency workspace if it exists
   ansible.builtin.file:
     path: "{{ eva_agent_workdir }}"
@@ -705,6 +703,9 @@
   when:
     - not ansible_check_mode
     - airgap_mode | default(false) | bool
+
+- name: Prepare Qdrant post-renderer managed executable path
+  ansible.builtin.import_tasks: managed_qdrant_postrenderer.yaml
 
 - name: Ensure Qdrant post-renderer executable bit
   ansible.builtin.file:

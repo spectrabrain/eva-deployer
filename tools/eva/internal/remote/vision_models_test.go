@@ -67,6 +67,18 @@ func mutateVisionManifest(t *testing.T, root string, mutate func(map[string]any)
 	mustWrite(t, path, string(data))
 }
 
+func TestVisionDefaultModelsIncludeDARTFWeights(t *testing.T) {
+	t.Setenv("EVA_VISION_MODELS", defaultVisionModels)
+	names, err := visionModelSelection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF", "DARTF-light", "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("default Vision weights = %v, want %v", names, want)
+	}
+}
+
 func TestValidateVisionModelsExactSafeCache(t *testing.T) {
 	root := t.TempDir()
 	writeVisionFixture(t, root, nil)

@@ -105,6 +105,7 @@ load_deploy_versions() {
     EVA_APP_ALEMBIC_VERSION
     EVA_VISION_DEPLOY_VERSION
     EVA_VISION_CHART_VERSION
+    EVA_VISION_IMAGE_TAG
     EVA_AGENT_RELEASE
     EVA_AGENT_DEPLOY_VERSION
     EVA_AGENT_CHART_VERSION
@@ -123,6 +124,7 @@ load_deploy_versions() {
     [EVA_APP_ALEMBIC_VERSION]="eva_app_alembic_version"
     [EVA_VISION_DEPLOY_VERSION]="eva_vision_deploy_version"
     [EVA_VISION_CHART_VERSION]="eva_vision_chart_version"
+    [EVA_VISION_IMAGE_TAG]="eva_vision_image_tag"
     [EVA_AGENT_RELEASE]="eva_agent_release eva_agent_deploy_version"
     [EVA_AGENT_DEPLOY_VERSION]="eva_agent_deploy_version"
     [EVA_AGENT_CHART_VERSION]="eva_agent_chart_version"

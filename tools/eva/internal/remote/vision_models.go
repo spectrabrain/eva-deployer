@@ -18,7 +18,7 @@ import (
 
 // Keep this contract aligned with scripts/lib/vision_models.py. Model names
 // retain their original case in the cache; only OCI repository names fold case.
-const defaultVisionModels = "Owl-v2,OmDet,LLMDet,RT-DETRV2,DINOv2Small,E5EmbeddingSmall,Qwen3VLEmbed2B"
+const defaultVisionModels = "Owl-v2,OmDet,LLMDet,RT-DETRV2,DARTF,DARTF-light,DINOv2Small,E5EmbeddingSmall,Qwen3VLEmbed2B"
 const visionModelsSource = "s3://spectrabrain-eva-vision/model_dir"
 
 var visionModelName = regexp.MustCompile(`^[A-Za-z0-9]+(?:(?:__?|-+)[A-Za-z0-9]+)*$`)

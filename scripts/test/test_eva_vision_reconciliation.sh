@@ -25,7 +25,13 @@ fi
   "$main_file" \
   "$reconcile_file" <<'PY'
 from pathlib import Path
+import copy
+import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import yaml
 
 
@@ -271,6 +277,99 @@ print("[OK] Vision pods must be absent before cleanup")
 print("[OK] only non-persistent Vision resources are recreated")
 print("[OK] Vision deletion counters use arithmetic expansion")
 print("[OK] Vision reconciliation precedes Helm deployment")
+
+resolve_name = "Resolve EVA Vision Helm field ownership reconciliation arguments"
+check_name = "Check existing EVA Vision deployment"
+scale_name = "Scale down existing EVA Vision deployment before reinstall"
+assert task_names.index(check_name) < task_names.index(resolve_name) < task_names.index(scale_name)
+selected_tasks = [next(task for task in main_tasks if task.get("name") == name)
+                  for name in (check_name, resolve_name, online_name, offline_name)]
+assert selected_tasks[0]["no_log"] is True
+
+command_fields = {"f:command": {}}
+for field in ('k:{"name":"eva-vision"}', "f:containers", "f:spec", "f:template", "f:spec"):
+    command_fields = {field: command_fields}
+deployment = {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {
+    "name": "eva-vision", "namespace": "eva-vision",
+    "labels": {"app.kubernetes.io/managed-by": "Helm"},
+    "annotations": {"meta.helm.sh/release-name": "eva-vision", "meta.helm.sh/release-namespace": "eva-vision"},
+    "managedFields": [{"manager": "kubectl-patch", "operation": "Update", "apiVersion": "apps/v1",
+                       "fieldsType": "FieldsV1", "fieldsV1": command_fields}]},
+    "spec": {"template": {"spec": {"containers": [{"name": "eva-vision",
+        "command": ["/bin/bash", "-lc", "exec uv run ./run.sh serve"]}]}}}}
+cases = [("fresh", None, False), ("patched-helm-release", deployment, True)]
+for case_name, section, field, value in (
+    ("foreign-release", "annotations", "meta.helm.sh/release-name", "other"),
+    ("foreign-namespace", "annotations", "meta.helm.sh/release-namespace", "other"),
+    ("foreign-manager", "labels", "app.kubernetes.io/managed-by", "argocd"),
+    ("partial-ownership", "annotations", "meta.helm.sh/release-namespace", None),
+):
+    fixture = copy.deepcopy(deployment)
+    if value is None:
+        fixture["metadata"][section].pop(field)
+    else:
+        fixture["metadata"][section][field] = value
+    cases.append((case_name, fixture, False))
+
+with tempfile.TemporaryDirectory(prefix="eva-vision-upgrade-") as temporary:
+    directory = Path(temporary)
+    binary = directory / "bin"
+    binary.mkdir()
+    kubectl = binary / "kubectl"
+    kubectl.write_text(f"#!{sys.executable}\n" + '''
+import os, pathlib, sys
+assert sys.argv[1:] == ["get", "deployment", "eva-vision", "-n", "eva-vision", "-o", "json"]
+fixture = pathlib.Path(os.environ["VISION_UPGRADE_FIXTURE"])
+if not fixture.exists():
+    raise SystemExit(1)
+print(fixture.read_text())
+''')
+    kubectl.chmod(0o700)
+    helm = binary / "helm"
+    helm.write_text(f"#!{sys.executable}\n" + '''
+import json, os, pathlib, sys
+args = sys.argv[1:]
+assert args[:3] == ["upgrade", "--install", "eva-vision"], args
+force = "--force-conflicts" in args
+expected = os.environ["VISION_UPGRADE_FORCE"] == "1"
+if expected and not (force and "--server-side=true" in args):
+    raise SystemExit('conflict with "kubectl-patch": containers[name="eva-vision"].command')
+assert force == expected, args
+assert ("--server-side=true" in args) == expected, args
+assert "--force-replace" not in args and "--take-ownership" not in args, args
+assert args[args.index("--post-renderer") + 1] == "eva-vision-postrenderer"
+pathlib.Path(os.environ["VISION_UPGRADE_CALL"]).write_text(json.dumps(args))
+print("Release eva-vision has been upgraded")
+''')
+    helm.chmod(0o700)
+    ansible = (os.environ.get("ANSIBLE_PLAYBOOK") or shutil.which("ansible-playbook")
+               or str(Path(sys.executable).with_name("ansible-playbook")))
+    for case_name, fixture, force in cases:
+        for offline in (False, True):
+            case = directory / (case_name + ("-offline" if offline else "-online"))
+            case.mkdir()
+            fixture_path = case / "deployment.json"
+            if fixture is not None:
+                fixture_path.write_text(json.dumps(fixture))
+            chart = "/cache/eva-vision-3.3.0.tgz" if offline else "eva-vision/eva-vision"
+            playbook = case / "play.yaml"
+            playbook.write_text(yaml.safe_dump([{"hosts": "localhost", "connection": "local", "gather_facts": False,
+                "vars": {"eva_vision_name": "eva-vision", "eva_vision_namespace": "eva-vision",
+                         "eva_vision_kubeconfig": str(case / "absent-kubeconfig"), "eva_vision_workdir": str(case),
+                         "eva_vision_chart_source": chart, "eva_vision_chart_version": "3.3.0",
+                         "airgap_mode": offline}, "tasks": selected_tasks}]))
+            environment = {**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"],
+                "ANSIBLE_NOCOLOR": "1", "ANSIBLE_STDOUT_CALLBACK": "default",
+                "VISION_UPGRADE_FIXTURE": str(fixture_path), "VISION_UPGRADE_FORCE": "1" if force else "0",
+                "VISION_UPGRADE_CALL": str(case / "helm-call.json")}
+            process = subprocess.run([ansible, "-i", "localhost,", str(playbook)], env=environment,
+                                     text=True, capture_output=True, timeout=60)
+            assert process.returncode == 0, (case_name, offline, process.stdout, process.stderr)
+            command = json.loads((case / "helm-call.json").read_text())
+            assert command[3] == chart, command
+
+print("[OK] Helm-owned Vision command conflicts are recovered in online/offline upgrades (12 Ansible cases)")
+print("[OK] fresh, foreign and partial Vision ownership never enable forced field reconciliation")
 PY
 
 echo 'EVA Vision reconciliation contract tests passed.'

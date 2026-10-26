@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/lib/vision_models.py"
 DOWNLOAD = ROOT / "scripts/download/download_vision_models.sh"
 PUBLISH = ROOT / "scripts/publish/push_vision_models_to_harbor.sh"
-DEFAULTS = ["Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"]
+DEFAULTS = ["Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF", "DARTF-light",
+            "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"]
 SOURCE = "s3://spectrabrain-eva-vision/model_dir"
 SECRET = "private-password-DO-NOT-PRINT"
 ACCESS_KEY = "private-aws-access-DO-NOT-PRINT"
@@ -125,7 +126,7 @@ class VisionModelsTests(unittest.TestCase):
             "FAKE_EXPECTED_PASSWORD": SECRET, "LOCAL_HARBOR_YML": str(self.root / "absent.yml"),
             "TMPDIR": str(self.cache_root),
         })
-        for name in DEFAULTS + ["DARTF"]:
+        for name in DEFAULTS:
             folder = self.models / name
             (folder / "nested").mkdir(parents=True)
             (folder / "config.json").write_text('{"model":"test"}\n')
@@ -183,9 +184,9 @@ class VisionModelsTests(unittest.TestCase):
         for entry in self.calls(self.oras_log):
             self.assertFalse(Path(entry["config"]).exists())
 
-    def test_default_seven_and_manifest_contract(self):
+    def test_default_models_and_manifest_contract(self):
         result = self.call("download")
-        self.assertEqual(json.loads(result.stdout)["model_count"], 7)
+        self.assertEqual(json.loads(result.stdout)["model_count"], len(DEFAULTS))
         self.assertEqual(self.call("models").stdout.splitlines(), DEFAULTS)
         manifest_bytes = (self.cache / "manifest.json").read_bytes()
         manifest = json.loads(manifest_bytes)
@@ -204,10 +205,10 @@ class VisionModelsTests(unittest.TestCase):
                 self.assertFalse(Path(record["path"]).is_absolute())
         self.assertNotIn(str(self.root).encode(), manifest_bytes)
         self.assertFalse(list(self.cache.rglob(".cache")))
-        self.assertEqual(json.loads(self.call("validate").stdout)["file_count"], 14)
+        self.assertEqual(json.loads(self.call("validate").stdout)["file_count"], 2 * len(DEFAULTS))
         self.call("manifest")
         self.assertEqual((self.cache / "manifest.json").read_bytes(), manifest_bytes)
-        self.assertEqual(len(self.calls(self.aws_log)), 7)
+        self.assertEqual(len(self.calls(self.aws_log)), len(DEFAULTS))
         self.assert_clean_credentials()
 
     def test_selection_cli_optional_dartf_and_profile_region(self):

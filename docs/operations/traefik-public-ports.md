@@ -117,14 +117,10 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
 | `eva_traefik_ports_timeout` | `300` | controller·ServiceLB 반영 대기 초 |
 | `eva_traefik_ports_backup_root` | `/var/lib/eva/backups/traefik-ports` | 대상 서버의 private snapshot 디렉터리 |
 
-## 소유권 기록이 없는 기존 EVA listener 자동 복구
+## 기존 EVA listener 재사용
 
-이전 Deployer에서는 추가 `eva-h-<port>`/`eva-s-<port>` listener를 비활성화한 뒤 현재 endpoint
-기록에서 제외했다. 예를 들어 HTTP 32010에서 HTTPS 443으로 바꾸면 `eva-h-32010`은
-`expose.default: false`로 남지만 endpoint 기록에는 `websecure`만 남을 수 있다. 이후 HTTP
-32010으로 설치하면 이전 버전에서는 `Foreign Traefik entrypoint collision`으로 중단되었다.
-수정 버전은 이 상태를 설치 과정에서 자동 복구한다. Online/Offline 공통 처리이며
-`vision: true` 자체가 이 검사를 바꾸지는 않는다.
+Deployer는 설치 설정의 공개 URL에 맞춰 기존 EVA listener를 재사용한다.
+Online/Offline 설치에 동일하게 적용된다.
 
 `eva-h-<port>`와 `eva-s-<port>`는 Deployer의 EVA 전용 listener 이름이다. 해당 이름의 번호와
 실제 container/public 포트가 같고 TCP 설정이 일치하면, 활성·비활성 여부와 관계없이 기존
@@ -142,8 +138,7 @@ HTTP 관리 listener의 리다이렉트도 기존 정책에 따라 정리한다.
 이름의 번호와 다른 실제 포트, UDP/다른 routing target, 실제 포트 충돌 등 설정 불일치는
 소유권 누락과 별도로 확인한다.
 
-수정 코드가 포함된 Deployer Release를 배포한 뒤 새 설치 작업을 실행한다.
-이미 배포된 이전 Release의 파일은 저장소 수정만으로 갱신되지 않는다.
+설치 설정을 변경했다면 원본 설정 파일로 새 설치 작업을 실행한다.
 
 ```bash
 sudo eva install --config <설정 파일> --yes

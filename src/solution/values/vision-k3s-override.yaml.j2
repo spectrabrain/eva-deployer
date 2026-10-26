@@ -1,6 +1,6 @@
 image:
   repository: "{{ eva_vision_image_repository }}"
-  tag: "{{ eva_vision_chart_version }}"
+  tag: "{{ eva_vision_image_tag | default(eva_vision_chart_version) }}"
   pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
 
 runtimeClassName: "nvidia"

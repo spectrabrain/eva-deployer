@@ -36,14 +36,19 @@ renderer_template = environment.from_string((role / "templates/post-renderer/pos
 
 defaults = dict(eva_vision_image_repository="registry.example/eva/eva-vision",
                 eva_vision_deploy_version="3.3.0",
+                eva_vision_image_tag="3.3.0rc3",
                 eva_vision_chart_version="3.3.0", repository_registry="harbor.example:32080",
                 repository_project="eva", eva_vision_gpu_count=1,
                 eva_vision_gpu_resource_name="nvidia.com/gpu",
                 eva_vision_storage_class="local-path", eva_vision_pvc_size="20Gi")
 
-# Image tags follow the Chart version even when the deployment workdir version differs.
-for mode in ("online_repository", "remote_repository", "local_repository"):
+# Image tags are independent of Chart and deployment workdir versions.
+for mode in ("online_repository", "cloud_repository", "remote_repository", "local_repository"):
     variables = {**defaults, "eva_vision_deploy_version": "3.2.0", "repository_mode": mode}
+    assert yaml.safe_load(values_template.render(**variables))["image"]["tag"] == "3.3.0rc3"
+    variables["eva_vision_image_tag"] = "3.3.0rc-test"
+    assert yaml.safe_load(values_template.render(**variables))["image"]["tag"] == "3.3.0rc-test"
+    del variables["eva_vision_image_tag"]
     assert yaml.safe_load(values_template.render(**variables))["image"]["tag"] == "3.3.0"
 
 mock_kubectl = r'''#!/usr/bin/env python3
@@ -81,8 +86,9 @@ elif args == ["create", "-f", "-"]:
         raise SystemExit("Secret already exists; preserve concurrent operator credentials")
     (state / "created").touch()
     print("secret/model-secret created")
-elif args == ["get", "deployment", "eva-vision", "-n", "eva-vision"]:
-    print("eva-vision 1/1")
+elif args == ["get", "deployment", "eva-vision", "-n", "eva-vision", "-o", "json"]:
+    print(json.dumps({"apiVersion": "apps/v1", "kind": "Deployment",
+                      "metadata": {"name": "eva-vision", "namespace": "eva-vision"}}))
 elif args == ["scale", "deployment", "eva-vision", "-n", "eva-vision", "--replicas=0"]:
     (state / "scaled").touch()
     print("deployment.apps/eva-vision scaled")
@@ -122,6 +128,20 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
     chart_defaults = {}
     if chart:
         chart_defaults = yaml.safe_load(subprocess.check_output(["helm", "show", "values", chart], text=True))
+        model_environment = {key: value for key, value in os.environ.items() if key != "EVA_VISION_MODELS"}
+        prepared_models = subprocess.check_output([sys.executable, "-B", str(root / "scripts/lib/vision_models.py"),
+            "models"], env=model_environment, text=True).splitlines()
+        required_models = set()
+        for mar in chart_defaults["appConfig"]["load_models"].split(","):
+            name = mar.strip().removesuffix(".mar")
+            if name in {"Owl-v2", "ig"}:
+                required_models.add("Owl-v2")
+            elif name == "Embedding":
+                required_models.update(chart_defaults["appConfig"]["embedding"]["enabledModels"].split(","))
+            else:
+                required_models.add(name)
+        assert set(prepared_models) == required_models, "Prepared default weights differ from the published chart's model selection"
+        print("[OK] prepared default weights cover the published chart's full model selection")
 
     # Check the role's image repository calculation, not just the Values fixture.
     main = yaml.safe_load((role / "tasks/main.yaml").read_text())
@@ -182,6 +202,28 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         assert not (app / "scripts/warmup.py").exists()
         assert (app / "scripts/warmup.py.disabled").exists()
         print("[OK] upstream entrypoint retains fetch -> offline archive -> offline serve, without warmup")
+        if chart:
+            fetch.write_text(upstream("scripts/fetch_models.sh"))
+            for name in prepared_models:
+                model_dir = app / "model_dir" / name
+                model_dir.mkdir(parents=True)
+                (model_dir / "weights.bin").write_bytes(b"fixture weights")
+                if name in {"DARTF", "DARTF-light"}:
+                    (model_dir / "sam3.pt").write_bytes(b"fixture weights")
+                    (model_dir / "LICENSE").write_text("fixture license")
+                if name == "DARTF-light":
+                    (model_dir / "onnx").mkdir()
+                    for filename in ("vision_int8.onnx", "vision_int8.onnx.data"):
+                        (model_dir / "onnx" / filename).write_bytes(b"fixture weights")
+            fetch_environment = {**os.environ, "MODEL_SOURCE": "none", "MODEL_DIR": str(app / "model_dir"),
+                "TORCHSERVE_LOAD_MODELS": chart_defaults["appConfig"]["load_models"],
+                "EMBEDDING_ENABLED_MODELS": chart_defaults["appConfig"]["embedding"]["enabledModels"]}
+            result = subprocess.check_output(["bash", str(fetch)], env=fetch_environment, text=True)
+            assert set(result.split("done: ", 1)[1].split()) == required_models
+            fetch_environment["TORCHSERVE_LOAD_MODELS"] = "DARTF-light.mar"
+            result = subprocess.check_output(["bash", str(fetch)], env=fetch_environment, text=True)
+            assert result.split("done: ", 1)[1].split() == ["DARTF-light"]
+            print("[OK] upstream model fetch accepts all prepared defaults and independent DARTF-light selection")
 
     def run_case(name, mode, *, helm_set=(), source=None, secret=None,
                  existing=False, bad_keys=False, credentials=False, fail=False,
@@ -205,7 +247,7 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                 selected_source = setting.split("=", 1)[1]
         local_publish = mode == "local_repository" and selected_source == "harbor"
         values = yaml.safe_load(values_template.render(**defaults, repository_mode=mode))
-        assert values["image"]["tag"] == "3.3.0"
+        assert values["image"]["tag"] == "3.3.0rc3"
         assert values["imagePullSecrets"]["ExistingSecret"] == "ecr-registry"
         assert "name" not in values["imagePullSecrets"]
         assert values["harbor"]["existingSecret"] == "eva-vision-harbor"
@@ -462,10 +504,15 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                          "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]}, text=True)
                 assert all(canary not in rendered for canary in canaries)
                 documents = [doc for doc in yaml.safe_load_all(rendered) if doc]
+                assert all(isinstance(doc, dict) and doc.get("apiVersion") and doc.get("kind")
+                           and doc.get("metadata", {}).get("name") for doc in documents), \
+                    "Published Vision chart renders a document without Kubernetes apiVersion/kind/metadata.name"
+                assert any(doc["kind"] == "Service" and doc["metadata"]["name"] == "eva-vision"
+                           for doc in documents), "Published Vision chart does not render Service/eva-vision"
                 deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
                 pod = deployment["spec"]["template"]["spec"]
                 container = pod["containers"][0]
-                assert container["image"].endswith(":3.3.0")
+                assert container["image"] == resolved["image"]["repository"] + ":" + resolved["image"]["tag"]
                 assert 'exec /app/scripts/docker-entrypoint.sh "$@"' in container["command"][2]
                 assert container["args"] == ["--log-profile", "prod", "--foreground"]
                 runtime_env = {item["name"]: item for item in container["env"]}
@@ -507,6 +554,8 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
     run_case("online-create-cli-secret", "online_repository", credentials=True,
              helm_set=["s3.existingSecret=cli-s3-secret"], registry_config=None)
     run_case("online-reuse-without-aws-file", "online_repository", existing=True, registry_config=None)
+    run_case("online-image-tag-override", "online_repository", existing=True,
+             helm_set=["image.tag=3.3.0rc-test"], registry_config=None)
     run_case("online-workspace-secret", "online_repository", secret="workspace-s3", existing=True, registry_config="[")
     run_case("cloud-alias-reuses-secret", "cloud_repository", existing=True, registry_config=None)
     run_case("invalid-existing-secret", "online_repository", existing=True, bad_keys=True, fail=True, registry_config=None)
@@ -569,6 +618,8 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
     local_settings = ["harbor.registry=override.example:8443", "harbor.project=models",
                       "harbor.plainHttp=false", "harbor.insecure=true"]
     run_case("local-packaged-publish-effective-harbor", "local_repository", existing=True, helm_set=local_settings, registry_config="[")
+    run_case("local-image-tag-override", "local_repository", existing=True,
+             helm_set=local_settings + ["image.tag=3.3.0rc-test"], registry_config="[")
     run_case("local-default-auto-create-and-publish", "local_repository", helm_set=local_settings, home_mode="ssh")
     run_case("local-cli-custom-secret-auto-create-and-publish", "local_repository", helm_set=local_settings + ["harbor.existingSecret=cli-model-reader"])
     run_case("local-missing-registry-before-publish", "local_repository", fail=True, helm_set=local_settings,

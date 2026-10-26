@@ -22,7 +22,7 @@ import (
 func archiveTestVisionCache(t *testing.T, cache string) {
 	t.Helper()
 	var models []map[string]any
-	for _, name := range []string{"Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"} {
+	for _, name := range []string{"Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF", "DARTF-light", "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"} {
 		var files []map[string]any
 		for _, file := range []struct{ path, body string }{
 			{"manifest.txt", "model data, not a relocatable cache manifest: " + cache + "/unchanged\n"},

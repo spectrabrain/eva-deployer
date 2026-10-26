@@ -190,7 +190,7 @@ done
 VERSIONS_QUIET=1 bash -c '
   source "$1"
   load_deploy_versions
-  [[ -n "$EVA_AGENT_RELEASE" && -n "$K3S_DEFAULT_VERSION" && "$EVA_VISION_IMAGE_TAG" == 3.3.0rc2 ]]
+  [[ -n "$EVA_AGENT_RELEASE" && -n "$K3S_DEFAULT_VERSION" && "$EVA_VISION_CHART_VERSION" == 3.3.0 ]]
 ' bash "$install_root/opt/eva/tool/libexec/remote-root/scripts/lib/load_versions.sh"
 
 # A failure after receipt publication must restore the prior Tool, command

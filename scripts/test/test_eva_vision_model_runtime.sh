@@ -35,11 +35,16 @@ values_template = environment.from_string((root / "src/solution/values/vision-k3
 renderer_template = environment.from_string((role / "templates/post-renderer/post-renderer.py.j2").read_text())
 
 defaults = dict(eva_vision_image_repository="registry.example/eva/eva-vision",
-                eva_vision_deploy_version="3.3.0", eva_vision_image_tag="3.3.0rc2",
+                eva_vision_deploy_version="3.3.0",
                 eva_vision_chart_version="3.3.0", repository_registry="harbor.example:32080",
                 repository_project="eva", eva_vision_gpu_count=1,
                 eva_vision_gpu_resource_name="nvidia.com/gpu",
                 eva_vision_storage_class="local-path", eva_vision_pvc_size="20Gi")
+
+# Image tags follow the Chart version even when the deployment workdir version differs.
+for mode in ("online_repository", "remote_repository", "local_repository"):
+    variables = {**defaults, "eva_vision_deploy_version": "3.2.0", "repository_mode": mode}
+    assert yaml.safe_load(values_template.render(**variables))["image"]["tag"] == "3.3.0"
 
 mock_kubectl = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -200,7 +205,7 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                 selected_source = setting.split("=", 1)[1]
         local_publish = mode == "local_repository" and selected_source == "harbor"
         values = yaml.safe_load(values_template.render(**defaults, repository_mode=mode))
-        assert values["image"]["tag"] == "3.3.0rc2"
+        assert values["image"]["tag"] == "3.3.0"
         assert values["imagePullSecrets"]["ExistingSecret"] == "ecr-registry"
         assert "name" not in values["imagePullSecrets"]
         assert values["harbor"]["existingSecret"] == "eva-vision-harbor"
@@ -460,7 +465,7 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                 deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
                 pod = deployment["spec"]["template"]["spec"]
                 container = pod["containers"][0]
-                assert container["image"].endswith(":3.3.0rc2")
+                assert container["image"].endswith(":3.3.0")
                 assert 'exec /app/scripts/docker-entrypoint.sh "$@"' in container["command"][2]
                 assert container["args"] == ["--log-profile", "prod", "--foreground"]
                 runtime_env = {item["name"]: item for item in container["env"]}

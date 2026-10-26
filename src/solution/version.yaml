@@ -4,8 +4,6 @@ eva_app_deploy_version: 3.3.0-beta.3
 eva_app_chart_version: 3.3.0-beta.3
 eva_vision_deploy_version: 3.3.0
 eva_vision_chart_version: 3.3.0
-# The published 3.3.0 chart defaults to rc1; deploy and mirror rc2 explicitly.
-eva_vision_image_tag: 3.3.0rc2
 eva_agent_deploy_version: 3.2.0
 eva_agent_chart_version: 3.2.1
 eva_agent_vllm_chart_version: 3.2.0

@@ -101,6 +101,11 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
   표시된 private snapshot과 현재 리소스를 비교한 뒤 재실행 여부를 결정한다.
 - 같은 설치의 App/IAM을 순차 실행하거나 한쪽만 재설치해도 다른 쪽의 확인된 포트를 유지한다.
   이후 Helm upgrade에도 post-renderer로 최종 router annotation을 보존한다.
+  현재 endpoint는 `eva.spectrabrain.com/traefik-public-endpoints`, 추가 listener의 소유권은
+  `eva.spectrabrain.com/traefik-owned-entrypoints` annotation에 별도로 기록한다. 포트 변경이나
+  HTTP/HTTPS 전환으로 비활성화된 추가 listener도 소유권을 유지하여 이후 재사용할 수 있다.
+  소유권 annotation이 없는 기존 설치도 EVA 전용 listener 이름과 실제 포트 설정에서
+  관리 대상을 복구한다. annotation 누락만으로 EVA 설치를 중단하지 않는다.
 - 기존 HCC를 파일/GitOps로 별도 관리한다면 자동화끼리 덮어쓰지 않도록 관리 주체를 먼저 정한다.
   Secret이 포함될 수 있는 snapshot/HCC 전체를 일반 로그나 지원 티켓에 올리지 않는다.
 
@@ -111,6 +116,38 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
 | `eva_traefik_ports_manage` | `true` | 공개 listener/router 자동 관리. `false`면 운영자가 양쪽을 직접 책임짐 |
 | `eva_traefik_ports_timeout` | `300` | controller·ServiceLB 반영 대기 초 |
 | `eva_traefik_ports_backup_root` | `/var/lib/eva/backups/traefik-ports` | 대상 서버의 private snapshot 디렉터리 |
+
+## 소유권 기록이 없는 기존 EVA listener 자동 복구
+
+이전 Deployer에서는 추가 `eva-h-<port>`/`eva-s-<port>` listener를 비활성화한 뒤 현재 endpoint
+기록에서 제외했다. 예를 들어 HTTP 32010에서 HTTPS 443으로 바꾸면 `eva-h-32010`은
+`expose.default: false`로 남지만 endpoint 기록에는 `websecure`만 남을 수 있다. 이후 HTTP
+32010으로 설치하면 이전 버전에서는 `Foreign Traefik entrypoint collision`으로 중단되었다.
+수정 버전은 이 상태를 설치 과정에서 자동 복구한다. Online/Offline 공통 처리이며
+`vision: true` 자체가 이 검사를 바꾸지는 않는다.
+
+`eva-h-<port>`와 `eva-s-<port>`는 Deployer의 EVA 전용 listener 이름이다. 해당 이름의 번호와
+실제 container/public 포트가 같고 TCP 설정이 일치하면, 활성·비활성 여부와 관계없이 기존
+관리 대상으로 복구한다. Chart/HelmChart/HCC의 병합된 설정을 확인하며, 소유권 annotation이
+두 개 모두 없어도 처리한다. 기존 EVA Ingress도 설치된 공개 URL과 정확한 Helm 이력을
+대조하여 해당 공개 포트와 프로토콜에 맞는 EVA entrypoint annotation을 이어받는다.
+
+예를 들어 App/IAM이 HTTPS 443으로 기록된 상태에서 비활성 `eva-h-32010`이 남아 있어도,
+IAM HTTP 32010 설치 시 해당 listener를 재사용하고 App의 HTTPS 443을 보존한다. 수동 HCC
+편집이나 listener 삭제는 필요하지 않다. 설치 시 원본을 private snapshot으로 백업하고,
+복구한 추가 listener의 소유권을 다시 기록한다. 사용하지 않는 EVA listener는 비활성화하며
+HTTP 관리 listener의 리다이렉트도 기존 정책에 따라 정리한다.
+
+무관한 Ingress/IngressRoute가 있는 공유 환경에서는 기존 외부 라우터 보호 조건을 적용한다.
+이름의 번호와 다른 실제 포트, UDP/다른 routing target, 실제 포트 충돌 등 설정 불일치는
+소유권 누락과 별도로 확인한다.
+
+수정 코드가 포함된 Deployer Release를 배포한 뒤 새 설치 작업을 실행한다.
+이미 배포된 이전 Release의 파일은 저장소 수정만으로 갱신되지 않는다.
+
+```bash
+sudo eva install --config <설정 파일> --yes
+```
 
 ## HTTP·HTTPS 리다이렉트 확인
 

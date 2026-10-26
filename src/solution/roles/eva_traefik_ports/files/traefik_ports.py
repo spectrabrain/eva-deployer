@@ -30,6 +30,7 @@ import yaml
 
 
 STATE = "eva.spectrabrain.com/traefik-public-endpoints"
+OWNED = "eva.spectrabrain.com/traefik-owned-entrypoints"
 ENTRY = "traefik.ingress.kubernetes.io/router.entrypoints"
 TLS = "traefik.ingress.kubernetes.io/router.tls"
 RESOURCE = "helmchartconfigs.helm.cattle.io"
@@ -199,6 +200,40 @@ def managed_http_entries(selected, owned_entries, unrelated):
     return entries
 
 
+def owned_entrypoints(config):
+    annotations = (config or {}).get("metadata", {}).get("annotations", {})
+    recorded = json.loads(annotations.get(OWNED, "[]"))
+    require(isinstance(recorded, list)
+            and all(isinstance(name, str) and re.fullmatch(r"eva-[hs]-\d+", name) for name in recorded),
+            "Invalid EVA entrypoint ownership annotation")
+    state = json.loads(annotations.get(STATE, "{}"))
+    require(isinstance(state, dict), "Invalid EVA endpoint ownership annotation")
+    return set(recorded) | {item.get("entrypoint") for item in state.values() if isinstance(item, dict)}
+
+
+def eva_entrypoints(listener_ports):
+    """Recognize EVA's reserved listener names even when ownership records are missing."""
+    names = set()
+    for name, item in listener_ports.items():
+        match = re.fullmatch(r"eva-[hs]-(\d+)", name)
+        if not match:
+            continue
+        number = int(match[1])
+        if (0 < number < 65536 and str(number) == match[1]
+                and item.get("port") == number and item.get("exposedPort", number) == number
+                and item.get("protocol", "TCP") == "TCP"
+                and item.get("targetPort") in (None, name, number)):
+            names.add(name)
+    return names
+
+
+def ownership_annotation(config, selected, recovered):
+    # Endpoint state changes on port/protocol transitions and reinstallations;
+    # retain ownership of disabled listeners so later reuse is still authorized.
+    names = owned_entrypoints(config) | recovered | {item["entrypoint"] for item in selected.values()}
+    return json.dumps(sorted(name for name in names if name and re.fullmatch(r"eva-[hs]-\d+", name)), separators=(",", ":"))
+
+
 def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
     """Preserve the entire config, modifying only owned port leaves + state annotation."""
     for source in (chart, config or {}):
@@ -223,8 +258,7 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
         require(not item.get("hostPort") and not item.get("nodePort") and not item.get("http3", {}).get("enabled"), "Traefik hostPort/nodePort/HTTP3 overrides are unsupported")
         check_redirects(item)
     updated = copy.deepcopy(original)
-    old_state = json.loads((config or {}).get("metadata", {}).get("annotations", {}).get(STATE, "{}"))
-    owned_entries = {item.get("entrypoint") for item in old_state.values() if isinstance(item, dict)}
+    owned_entries = owned_entrypoints(config) | (eva_entrypoints(ports) if not unrelated else set())
     overrides = updated.setdefault("ports", {})
     selected = copy.deepcopy(endpoints)
     endpoint_list = list(selected.values())
@@ -250,7 +284,8 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
         for number in wanted:
             name = primary if number == primary_port else f"eva-{'s' if scheme == 'https' else 'h'}-{number}"
             if name != primary:
-                require(name not in ports or name in owned_entries, "Foreign Traefik entrypoint collision")
+                require(name not in ports or name in owned_entries,
+                        f"Existing EVA entrypoint {name} has incompatible listener configuration")
                 # Container port equals public port for additional named listeners.
                 overrides[name] = merge(overrides.get(name, {}), {"port": number, "exposedPort": number, "protocol": "TCP"})
                 set_exposure(overrides[name], True, modern)
@@ -259,8 +294,8 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
         item["entrypoint"] = assigned[(item["scheme"], item["port"])]
     # Disable obsolete owned extra entrypoints, leaving foreign entries untouched.
     owned_names = {item["entrypoint"] for item in selected.values()}
-    for name in original.get("ports", {}):
-        if name in owned_entries and re.fullmatch(r"eva-[hs]-\d+", name) and name not in owned_names:
+    for name in owned_entries:
+        if name in ports and re.fullmatch(r"eva-[hs]-\d+", name) and name not in owned_names:
             set_exposure(overrides.setdefault(name, {}), False, modern)
     http_entries = managed_http_entries(selected, owned_entries, unrelated)
     has_https = any(item["scheme"] == "https" for item in selected.values())
@@ -398,10 +433,11 @@ def verified_installed(cluster, ingress, maps, component, namespace, release):
     return live
 
 
-def managed_router(ingress, prior):
+def managed_router(ingress, prior, installed):
     annotations = ingress["metadata"].get("annotations", {})
     entry = annotations.get(ENTRY, "")
     allowed = {"web", "websecure"}
+    allowed.add(f"eva-{'s' if installed['scheme'] == 'https' else 'h'}-{installed['port']}")
     if prior:
         previous = prior.get("entrypoint", "")
         require(previous in allowed or re.fullmatch(r"eva-[hs]-\d+", previous),
@@ -447,7 +483,7 @@ def discover(cluster, current, old_state):
         if prior and key != current_key:
             require(isinstance(prior, dict) and endpoint_facts(prior) == endpoint_facts(other),
                     "Installed EVA endpoint changed outside listener management; reconcile its installed state first")
-        managed_router(ingress, prior)
+        managed_router(ingress, prior, other)
         originals[key] = copy.deepcopy(ingress)
         evidence[key] = copy.deepcopy(candidates[0])
         selected[key] = other
@@ -517,25 +553,26 @@ def verify_routers(cluster, originals, selected):
         require(current == target, "EVA Ingress changed during router migration; stop without rollback")
 
 
-def write_config(cluster, config, values, selected, backup):
+def write_config(cluster, config, values, selected, backup, ownership):
     content = yaml.safe_dump(values, sort_keys=False)
     state = json.dumps(selected, sort_keys=True, separators=(",", ":"))
     if config:
         annotations = config.get("metadata", {}).get("annotations", {})
         before = yaml.safe_load(config.get("spec", {}).get("valuesContent", "")) or {}
-        if before == values and annotations.get(STATE) == state:
+        if before == values and annotations.get(STATE) == state and annotations.get(OWNED) == ownership:
             return False, None
     try:
         if config:
             patch = [{"op": "test", "path": "/metadata/resourceVersion", "value": config["metadata"]["resourceVersion"]},
                      {"op": "add", "path": "/spec/valuesContent", "value": content}]
             if "annotations" not in config["metadata"]:
-                patch.append({"op": "add", "path": "/metadata/annotations", "value": {STATE: state}})
+                patch.append({"op": "add", "path": "/metadata/annotations", "value": {STATE: state, OWNED: ownership}})
             else:
-                patch.append({"op": "add", "path": "/metadata/annotations/" + STATE.replace("~", "~0").replace("/", "~1"), "value": state})
+                for key, value in ((STATE, state), (OWNED, ownership)):
+                    patch.append({"op": "add", "path": "/metadata/annotations/" + key.replace("~", "~0").replace("/", "~1"), "value": value})
             cluster.run(["kubectl", "patch", RESOURCE, "traefik", "-n", "kube-system", "--type=json", "--patch-file=/dev/stdin"], json.dumps(patch))
         else:
-            resource = {"apiVersion": "helm.cattle.io/v1", "kind": "HelmChartConfig", "metadata": {"name": "traefik", "namespace": "kube-system", "annotations": {STATE: state}}, "spec": {"valuesContent": content}}
+            resource = {"apiVersion": "helm.cattle.io/v1", "kind": "HelmChartConfig", "metadata": {"name": "traefik", "namespace": "kube-system", "annotations": {STATE: state, OWNED: ownership}}, "spec": {"valuesContent": content}}
             cluster.run(["kubectl", "create", "-f", "-"], json.dumps(resource))
     except Unsafe as exc:
         raise Unsafe(f"HelmChartConfig CAS/create conflict; no adoption or blind retry. Original backup: {backup}") from exc
@@ -659,9 +696,11 @@ def reconcile(cluster, request, planned, defaults=None):
     require(isinstance(old_state, dict), "Invalid EVA endpoint ownership annotation")
     selected, unrelated, originals, evidence = discover(cluster, planned, old_state)
     values, selected, expected = plan(defaults, chart, config, selected, unrelated, preserve_primary=bool(originals))
-    owned_entries = {item.get("entrypoint") for item in old_state.values() if isinstance(item, dict)}
-    http_entries = managed_http_entries(selected, owned_entries, unrelated)
     effective = merge(merge(defaults, yaml.safe_load(chart.get("spec", {}).get("valuesContent", "")) or {}), values)
+    recovered = eva_entrypoints(effective["ports"]) if not unrelated else set()
+    owned_entries = owned_entrypoints(config) | recovered
+    ownership = ownership_annotation(config, selected, recovered)
+    http_entries = managed_http_entries(selected, owned_entries, unrelated)
     # Even non-exposed entrypoints (e.g. the dashboard) exist in Traefik args.
     addresses = {name: item["port"] for name, item in effective["ports"].items()}
     current_key = planned["namespace"] + "/" + planned["release"]
@@ -701,13 +740,14 @@ def reconcile(cluster, request, planned, defaults=None):
         before_chart = cluster.get(CHART, name="traefik")
         require(before_chart["metadata"]["resourceVersion"] == chart["metadata"]["resourceVersion"],
                 "Traefik HelmChart changed before listener mutation")
-        config_changed, _ = write_config(cluster, config, values, selected, backup)
+        config_changed, _ = write_config(cluster, config, values, selected, backup, ownership)
         changed = config_changed or changed
     except Exception as exc:
         raise Unsafe(f"EVA router/HCC CAS migration stopped; no blind retry or rollback. Review private original backup: {backup}") from exc
     try:
         return converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
-                        addresses, current_key, changed, backup, timeout, http_entries)
+                        addresses, current_key, changed, backup, timeout,
+                        ownership, http_entries)
     except Unsafe as exc:
         raise Unsafe(f"{exc}. Original backup: {backup}") from exc
     except Exception as exc:
@@ -715,12 +755,13 @@ def reconcile(cluster, request, planned, defaults=None):
 
 
 def converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
-             addresses, current_key, changed, backup, timeout, http_entries=()):
+             addresses, current_key, changed, backup, timeout, ownership, http_entries=()):
     deadline = time.monotonic() + timeout
     while True:
         observed = cluster.get(RESOURCE, name="traefik")
         require((yaml.safe_load(observed.get("spec", {}).get("valuesContent", "")) or {}) == values
-            and observed.get("metadata", {}).get("annotations", {}).get(STATE) == json.dumps(selected, sort_keys=True, separators=(",", ":")),
+            and observed.get("metadata", {}).get("annotations", {}).get(STATE) == json.dumps(selected, sort_keys=True, separators=(",", ":"))
+            and observed.get("metadata", {}).get("annotations", {}).get(OWNED) == ownership,
             f"HelmChartConfig changed during controller convergence; stop and reassess. Original backup: {backup}")
         chart_now = cluster.get(CHART, name="traefik")
         require(chart_now.get("spec") == chart.get("spec"), "HelmChart spec changed during convergence")

@@ -268,7 +268,9 @@ class FakeCluster:
                 elif op["path"] == "/metadata/annotations":
                     self.config["metadata"]["annotations"] = op["value"]
                 else:
-                    self.config["metadata"].setdefault("annotations", {})[ports.STATE] = op["value"]
+                    key = op["path"].split("/")[-1].replace("~1", "/").replace("~0", "~")
+                    assert key in (ports.STATE, ports.OWNED)
+                    self.config["metadata"].setdefault("annotations", {})[key] = op["value"]
             self.config["metadata"]["resourceVersion"] = str(int(self.config["metadata"]["resourceVersion"]) + 1)
             return "patched"
         raise AssertionError(args)
@@ -336,6 +338,222 @@ class TraefikPortsTests(unittest.TestCase):
         self.cluster.install(ports.isolate(objects(), first["endpoint"]))
         self.reconcile(endpoint("iam", 32443, True))
         self.assertEqual(set(self.cluster.state_ports()), {"web", "eva-s-32443"})
+
+    def test_owned_listener_can_be_reused_after_port_change(self):
+        for secure in (False, True):
+            for modern in (False, True):
+                with self.subTest(secure=secure, modern=modern):
+                    self.cluster = FakeCluster(self.directory, modern)
+                    self.cluster.install(objects(secure=secure))
+                    self.cluster.install(objects("iam", 32011, secure))
+                    first = self.reconcile(endpoint(secure=secure))
+                    self.cluster.install(ports.isolate(objects(secure=secure), first["endpoint"]))
+                    original = self.reconcile(endpoint("iam", 32011, secure))["endpoint"]
+                    # Migrate an existing installation with only the old endpoint annotation.
+                    self.cluster.config["metadata"]["annotations"].pop(ports.OWNED)
+                    changed = self.reconcile(endpoint("iam", 32111, secure))
+                    self.cluster.install(ports.isolate(objects("iam", 32111, secure), changed["endpoint"]))
+                    self.assertIn(original["entrypoint"], json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED]))
+                    self.assertFalse(ports.enabled(self.cluster.effective_values()["ports"][original["entrypoint"]]))
+                    restored = self.reconcile(endpoint("iam", 32011, secure))
+                    self.assertEqual(restored["endpoint"], original)
+                    self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 32011})
+                    self.assertFalse(self.reconcile(endpoint("iam", 32011, secure))["changed"])
+
+    def test_owned_http_listener_survives_https_switch_and_reinstall(self):
+        self.cluster.install(objects())
+        self.cluster.install(objects("iam", 32011))
+        first = self.reconcile()
+        self.cluster.install(ports.isolate(objects(), first["endpoint"]))
+        original = first["endpoint"]["entrypoint"]
+        for component, path in (("app", "/"), ("iam", "/iam")):
+            changed = self.reconcile(endpoint(component, 443, True, path))
+            self.cluster.install(ports.isolate(objects(component, 443, True, path=path), changed["endpoint"]))
+        state = json.loads(self.cluster.config["metadata"]["annotations"][ports.STATE])
+        self.assertTrue(all(item["entrypoint"] == "websecure" for item in state.values()))
+        self.assertFalse(ports.enabled(self.cluster.effective_values()["ports"][original]))
+        # Deleting releases drops endpoint state on the next reconciliation,
+        # but must not orphan their retained port definitions.
+        self.cluster.live.clear()
+        self.cluster.history.clear()
+        installed = self.reconcile(endpoint("iam", 443, True, "/iam"))
+        self.cluster.install(ports.isolate(objects("iam", 443, True, path="/iam"), installed["endpoint"]))
+        restored = self.reconcile()
+        self.assertEqual(restored["endpoint"]["entrypoint"], original)
+        self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 443})
+        self.assertFalse(self.reconcile()["changed"])
+
+    def test_eva_listener_without_ownership_is_recovered(self):
+        for modern in (False, True):
+            for secure in (False, True):
+                for exposed in (False, True):
+                    for source in ("chart", "config"):
+                        with self.subTest(modern=modern, secure=secure, exposed=exposed, source=source):
+                            self.cluster = FakeCluster(self.directory, modern)
+                            name = f"eva-{'s' if secure else 'h'}-32010"
+                            values = {"resources": {"limits": {"memory": "384Mi"}}, "ports": {
+                                name: {"port": 32010, "exposedPort": 32010,
+                                       "expose": {"default": exposed} if modern else exposed},
+                                "private-listener": {"port": 12345, "expose": {"default": False} if modern else False}}}
+                            self.cluster.install(objects("iam", 443, True, path="/iam"))
+                            if source == "chart":
+                                self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                            else:
+                                self.cluster.config = {"metadata": {"resourceVersion": "1", "annotations": {"operator": "keep"}},
+                                                       "spec": {"valuesContent": yaml.safe_dump(values)}}
+                            before = copy.deepcopy(self.cluster.config)
+                            chart = copy.deepcopy(self.cluster.chart)
+                            desired = endpoint(secure=secure)
+                            result = self.reconcile(desired)
+                            self.assertEqual(result["endpoint"]["entrypoint"], name)
+                            self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 443})
+                            self.assertEqual(json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED]), [name])
+                            effective = self.cluster.effective_values()
+                            self.assertEqual(effective["resources"], values["resources"])
+                            self.assertEqual(effective["ports"]["private-listener"], values["ports"]["private-listener"])
+                            self.assertEqual(json.loads(Path(result["backup"]).read_text())["helmchartconfig"], before)
+                            self.assertEqual(self.cluster.chart, chart)
+                            if source == "config":
+                                self.assertEqual(self.cluster.config["metadata"]["annotations"]["operator"], "keep")
+                            self.assertFalse(self.reconcile(desired)["changed"])
+
+    def test_reported_https_state_with_orphan_http_listener_installs_without_cleanup(self):
+        state = {}
+        for component, path in (("app", "/"), ("iam", "/iam")):
+            selected = dict(endpoint(component, 443, True, path), entrypoint="websecure")
+            self.cluster.install(ports.isolate(objects(component, 443, True, path=path), selected))
+            state[f"eva-{component}/eva-{component}"] = selected
+        self.cluster.config = {"metadata": {"resourceVersion": "1", "annotations": {ports.STATE: json.dumps(state)}},
+                               "spec": {"valuesContent": yaml.safe_dump({"ports": {
+                                   "eva-h-32010": {"port": 32010, "exposedPort": 32010, "expose": {"default": False}},
+                                   "web": {"exposedPort": 80, "expose": {"default": False}},
+                                   "websecure": {"exposedPort": 443, "expose": {"default": True}}}})}}
+        before = copy.deepcopy(self.cluster.config)
+        app = copy.deepcopy([obj for obj in self.cluster.live if obj["metadata"]["namespace"] == "eva-app"])
+        desired = endpoint("iam", 32010, path="/iam")
+        result = self.reconcile(desired)
+        self.assertEqual(result["endpoint"]["entrypoint"], "eva-h-32010")
+        self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 443})
+        self.assertEqual([obj for obj in self.cluster.live if obj["metadata"]["namespace"] == "eva-app"], app)
+        self.assertEqual(json.loads(Path(result["backup"]).read_text())["helmchartconfig"], before)
+        self.assertIn("eva-h-32010", json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED]))
+        self.assertFalse(self.reconcile(desired)["changed"])
+
+    def test_missing_endpoint_and_listener_records_restore_installed_eva_routers(self):
+        for secure in (False, True):
+            with self.subTest(secure=secure):
+                self.cluster = FakeCluster(self.directory)
+                for component, number in (("app", 32010), ("iam", 32011)):
+                    self.cluster.install(objects(component, number, secure))
+                first = self.reconcile(endpoint(secure=secure))
+                self.cluster.install(ports.isolate(objects(secure=secure), first["endpoint"]))
+                second = self.reconcile(endpoint("iam", 32011, secure))
+                self.cluster.install(ports.isolate(objects("iam", 32011, secure), second["endpoint"]))
+                self.cluster.config["metadata"]["annotations"].pop(ports.STATE)
+                self.cluster.config["metadata"]["annotations"].pop(ports.OWNED)
+                live = copy.deepcopy(self.cluster.live)
+                restored = self.reconcile(endpoint("iam", 32011, secure))
+                self.assertEqual(restored["endpoint"], second["endpoint"])
+                self.assertEqual(self.cluster.live, live)
+                self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 32011})
+                self.assertEqual(len(json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED])), 2)
+                self.assertFalse(self.reconcile(endpoint("iam", 32011, secure))["changed"])
+
+    def test_unrecorded_extra_listener_is_disabled_when_primary_is_reused(self):
+        for source in ("chart", "config"):
+            with self.subTest(source=source):
+                self.cluster = FakeCluster(self.directory)
+                values = {"ports": {"eva-h-32010": {"port": 32010, "exposedPort": 32010, "expose": {"default": True}}}}
+                if source == "chart":
+                    self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
+                else:
+                    self.cluster.config = {"metadata": {"resourceVersion": "1"}, "spec": {"valuesContent": yaml.safe_dump(values)}}
+                result = self.reconcile()
+                self.assertEqual(result["endpoint"]["entrypoint"], "web")
+                self.assertEqual(set(self.cluster.state_ports()), {"web"})
+                self.assertFalse(ports.enabled(self.cluster.effective_values()["ports"]["eva-h-32010"]))
+                self.assertIn("eva-h-32010", json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED]))
+                self.assertFalse(self.reconcile()["changed"])
+
+    def test_recovered_http_listeners_clear_redirects_without_ownership_records(self):
+        self.cluster.install(objects("iam", 443, True, path="/iam"))
+        redirect = {"http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}}
+        values = {"ports": {f"eva-h-{number}": {"port": number, "exposedPort": number,
+                                               "expose": {"default": False}, **redirect} for number in (32010, 32011)},
+                  "additionalArguments": ["--entryPoints.eva-h-32011.http.redirections.entryPoint.to=websecure"]}
+        self.cluster.config = {"metadata": {"resourceVersion": "1"}, "spec": {"valuesContent": yaml.safe_dump(values)}}
+        self.reconcile()
+        effective = self.cluster.effective_values()
+        self.assertFalse(ports.check_redirects(effective["ports"]["eva-h-32010"]))
+        self.assertFalse(ports.check_redirects(effective["ports"]["eva-h-32011"]))
+        self.assertFalse(ports.enabled(effective["ports"]["eva-h-32011"]))
+        self.assertFalse(any(".http.redirections." in arg.lower() for arg in self.cluster.controller_args()))
+        self.assertEqual(json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED]), ["eva-h-32010", "eva-h-32011"])
+        self.assertFalse(self.reconcile()["changed"])
+
+    def test_incompatible_eva_listener_configuration_is_not_overwritten(self):
+        for incompatible in ({"port": 32123}, {"exposedPort": 32123}, {"protocol": "UDP"}, {"targetPort": "foreign"}):
+            with self.subTest(incompatible=incompatible):
+                self.cluster = FakeCluster(self.directory)
+                self.cluster.install(objects("iam", 443, True, path="/iam"))
+                listener = {"port": 32010, "exposedPort": 32010, "expose": {"default": False}, **incompatible}
+                self.cluster.config = {"metadata": {"resourceVersion": "1"},
+                                       "spec": {"valuesContent": yaml.safe_dump({"ports": {"eva-h-32010": listener}})}}
+                before = copy.deepcopy(self.cluster.config)
+                live = copy.deepcopy(self.cluster.live)
+                with self.assertRaisesRegex(ports.Unsafe, "eva-h-32010 has incompatible listener configuration"):
+                    self.reconcile()
+                self.assertEqual(self.cluster.config, before)
+                self.assertEqual(self.cluster.live, live)
+                self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def test_unrelated_router_prevents_automatic_listener_recovery(self):
+        for number in (80, 32010):
+            with self.subTest(number=number):
+                self.cluster = FakeCluster(self.directory)
+                self.cluster.live = [{"kind": "Ingress", "metadata": {"name": "foreign", "namespace": "other"},
+                                      "spec": {"rules": [{"host": "other.example"}]}}]
+                listener = {"port": 32010, "exposedPort": 32010, "expose": {"default": False}}
+                self.cluster.config = {"metadata": {"resourceVersion": "1"},
+                                       "spec": {"valuesContent": yaml.safe_dump({"ports": {"eva-h-32010": listener}})}}
+                before = copy.deepcopy(self.cluster.config)
+                if number == 80:
+                    self.reconcile(endpoint(number=number))
+                    self.assertEqual(json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED]), [])
+                    self.assertEqual(self.cluster.effective_values()["ports"]["eva-h-32010"], listener)
+                else:
+                    with self.assertRaisesRegex(ports.Unsafe, "Unrelated Traefik ingresses prevent relocation"):
+                        self.reconcile()
+                    self.assertEqual(self.cluster.config, before)
+                    self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def test_invalid_entrypoint_ownership_refused_before_mutation(self):
+        for recorded in ({}, ["web"], ["foreign"], [123], ["eva-h-invalid"]):
+            with self.subTest(recorded=recorded):
+                self.cluster = FakeCluster(self.directory)
+                self.cluster.config = {"metadata": {"resourceVersion": "1", "annotations": {ports.OWNED: json.dumps(recorded)}},
+                                       "spec": {}}
+                before = copy.deepcopy(self.cluster.config)
+                with self.assertRaisesRegex(ports.Unsafe, "Invalid EVA entrypoint ownership annotation"):
+                    self.reconcile()
+                self.assertEqual(self.cluster.config, before)
+                self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def test_ownership_annotation_change_during_convergence_is_not_overwritten(self):
+        self.cluster.install(objects())
+        self.cluster.install(objects("iam", 32011))
+        original_get = self.cluster.get
+
+        def operator_edit(resource, namespace="kube-system", name=None, optional=False):
+            if resource == ports.RESOURCE and self.cluster.config:
+                self.cluster.config["metadata"]["annotations"][ports.OWNED] = "[]"
+            return original_get(resource, namespace, name, optional)
+
+        with patch.object(self.cluster, "get", side_effect=operator_edit):
+            with self.assertRaisesRegex(ports.Unsafe, "HelmChartConfig changed during controller convergence"):
+                self.reconcile()
+        self.assertEqual(self.cluster.config["metadata"]["annotations"][ports.OWNED], "[]")
+        self.assertTrue(list((self.directory / "backups").glob("before-*.json")))
 
     def test_shared_port_different_paths_allowed_same_paths_rejected(self):
         selected = {"app": endpoint(path="/app"), "iam": endpoint("iam", 32010, path="/iam")}
@@ -470,13 +688,13 @@ class TraefikPortsTests(unittest.TestCase):
                     self.assertEqual(before, self.cluster.live)
 
     def test_custom_entrypoint_refused_but_legacy_web_list_is_migrated(self):
-        for entry in ("private-listener", "web,private-listener", "eva-h-32011", "web,websecure", None):
+        for entry in ("private-listener", "web,private-listener", "eva-h-32111", "eva-s-32011", "eva-h-32011", "web,websecure", None):
             with self.subTest(entry=entry):
                 self.cluster = FakeCluster(self.directory)
                 self.cluster.install(objects("iam", 32011))
                 if entry is not None:
                     self.cluster.live[-1]["metadata"]["annotations"][ports.ENTRY] = entry
-                if entry in ("web,websecure", None):
+                if entry in ("eva-h-32011", "web,websecure", None):
                     self.reconcile()
                     self.assertEqual(self.cluster.live[-1]["metadata"]["annotations"][ports.ENTRY], "eva-h-32011")
                 else:
@@ -800,13 +1018,13 @@ class TraefikPortsTests(unittest.TestCase):
         self.cluster.install(ports.isolate(objects(number=443, secure=True), first["endpoint"]))
         redirect = {"http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}}
         values = {"ports": {"web": redirect,
-                            "eva-h-12345": {"port": 12345, "expose": {"default": False}, **redirect}}}
+                            "foreign-http": {"port": 12345, "expose": {"default": False}, **redirect}}}
         self.cluster.chart["spec"]["valuesContent"] = yaml.safe_dump(values)
         self.reconcile(endpoint("iam", 32011))
         after = self.cluster.effective_values()
-        self.assertEqual(after["ports"]["eva-h-12345"]["http"], redirect["http"])
+        self.assertEqual(after["ports"]["foreign-http"]["http"], redirect["http"])
         self.assertFalse(ports.check_redirects(after["ports"]["web"]))
-        self.assertTrue(any("--entryPoints.eva-h-12345.http.redirections." in arg for arg in self.cluster.controller_args()))
+        self.assertTrue(any("--entryPoints.foreign-http.http.redirections." in arg for arg in self.cluster.controller_args()))
         self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {443, 32011})
 
     def test_https_existing_redirect_source_and_target_remain_exposed(self):

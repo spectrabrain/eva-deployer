@@ -22,7 +22,11 @@
     eva_agent_force_conflicts: "{{ eva_agent_force_conflicts | default(0) }}"
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
-         | default('https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/' ~ eva_agent_deploy_version) }}
+         | default('https://raw.githubusercontent.com/'
+           ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
+              | ternary('spectrabrain/eva-agent-chart/' ~ (eva_agent_values_revision | default('chartmuseum')),
+                        'mellerikat/eva-agent/chartmuseum'))
+           ~ '/release/' ~ eva_agent_deploy_version) }}
     eva_agent_image_tag: "{{ eva_agent_image_tag | default('') }}"
     eva_agent_offline_dir: "{{ eva_agent_offline_dir | default(eva_agent_cache_root ~ '/eva-agent') }}"
     eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"
@@ -44,7 +48,9 @@
         eva_agent_image_repository | default(
           (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary(
-              '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent',
+              (eva_agent_deploy_version is version('3.3.0', '>='))
+              | ternary('211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-agent',
+                        '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent'),
               repository_registry ~ '/' ~ repository_project ~ '/eva-agent'
             )
         )
@@ -54,7 +60,7 @@
   ansible.builtin.shell: >-
     set -euo pipefail &&
     if [ -f "{{ eva_agent_offline_images_pulled_list }}" ]; then
-      sed -n 's#^.*/mellerikat/release/eva-agent:\\([^[:space:]]*\\)$#\\1#p' "{{ eva_agent_offline_images_pulled_list }}" | head -n1;
+      sed -n 's#^.*/eva-agent:\\([^[:space:]]*\\)$#\\1#p' "{{ eva_agent_offline_images_pulled_list }}" | head -n1;
     fi
   args:
     executable: /bin/bash
@@ -122,7 +128,7 @@
   changed_when: false
 
 - name: Add Helm repository for EVA Agent
-  ansible.builtin.command: helm repo add eva-agent https://spectrabrain.github.io/eva-agent-chart
+  ansible.builtin.command: helm repo add eva-agent {{ eva_agent_chart_repository_url }} --force-update
   register: helm_repo_eva_agent
   changed_when: "'already exists' not in (helm_repo_eva_agent.stdout + helm_repo_eva_agent.stderr)"
   failed_when:
@@ -393,6 +399,25 @@
     - eva_agent_deployment_exists.rc == 0
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Preserve obsolete Agent model storage before upgrading to the Vision client chart
+  when:
+    - not ansible_check_mode
+    - not (eva_agent_models_required | default(true) | bool)
+  block:
+    - name: Copy legacy Agent model storage preservation helper
+      ansible.builtin.copy:
+        src: preserve_model_storage.py
+        dest: "{{ eva_agent_workdir }}/preserve_model_storage.py"
+        mode: '0700'
+
+    - name: Keep Helm-owned legacy Agent model PV and PVC during upgrade
+      ansible.builtin.command:
+        argv: [python3, "{{ eva_agent_workdir }}/preserve_model_storage.py", --namespace, "{{ eva_agent_namespace }}"]
+      environment:
+        KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+      register: eva_agent_storage_preserve
+      changed_when: (eva_agent_storage_preserve.stdout | from_json).changed
 
 - name: Reconcile exact legacy Argo CD-managed EVA Agent resources
   ansible.builtin.include_tasks: reconcile_agent.yaml

@@ -39,7 +39,7 @@ fi
 EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in src/solution/version.yaml)}"
 EVA_AGENT_QDRANT_SNAPSHOT_SOURCE="${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE:-local_pv}"
 case "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" in
-  local_pv) qdrant_default_values_file="values-k3s.yaml" ;;
+  local_pv) qdrant_default_values_file="$(eva_agent_source qdrant-values "$EVA_AGENT_RELEASE")" ;;
   harbor)   qdrant_default_values_file="values-k3s.harbor.yaml" ;;
   *)
     echo "[ERROR] EVA_AGENT_QDRANT_SNAPSHOT_SOURCE must be local_pv or harbor" >&2
@@ -57,29 +57,10 @@ QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set 
 EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in src/solution/version.yaml)}"
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:?missing KUSTOMIZE_VERSION (set in src/infra/version.yaml)}"
 
-agent_release_major="${EVA_AGENT_RELEASE%%.*}"
-agent_release_remainder="${EVA_AGENT_RELEASE#*.}"
-agent_release_minor="${agent_release_remainder%%.*}"
-
-if [[ ! "$agent_release_major" =~ ^[0-9]+$ ||
-      ! "$agent_release_minor" =~ ^[0-9]+$ ]]; then
-  echo "[ERROR] invalid EVA_AGENT_RELEASE: ${EVA_AGENT_RELEASE}" >&2
-  exit 1
-fi
-
-if (( agent_release_major < 3 ||
-      agent_release_major == 3 &&
-      agent_release_minor <= 2 )); then
-  EVA_AGENT_CHART_BASE="${EVA_AGENT_CHART_BASE:-https://mellerikat.github.io/eva-agent}"
-  EVA_AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE:-https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/${EVA_AGENT_RELEASE}}"
-  EVA_AGENT_REPOSITORY_RAW_BASE="${EVA_AGENT_REPOSITORY_RAW_BASE:-https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum}"
-  EVA_AGENT_SOURCE_NAME="mellerikat/eva-agent"
-else
-  EVA_AGENT_CHART_BASE="${EVA_AGENT_CHART_BASE:-https://spectrabrain.github.io/eva-agent-chart}"
-  EVA_AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE:-https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/${EVA_AGENT_RELEASE}}"
-  EVA_AGENT_REPOSITORY_RAW_BASE="${EVA_AGENT_REPOSITORY_RAW_BASE:-https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum}"
-  EVA_AGENT_SOURCE_NAME="spectrabrain/eva-agent-chart"
-fi
+EVA_AGENT_CHART_BASE="${EVA_AGENT_CHART_BASE:-$(eva_agent_source chart "$EVA_AGENT_RELEASE")}"
+EVA_AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE:-$(eva_agent_source release "$EVA_AGENT_RELEASE")}"
+EVA_AGENT_REPOSITORY_RAW_BASE="${EVA_AGENT_REPOSITORY_RAW_BASE:-$(eva_agent_source scripts "$EVA_AGENT_RELEASE")}"
+EVA_AGENT_SOURCE_NAME="$(eva_agent_source image "$EVA_AGENT_RELEASE")"
 
 EVA_AGENT_QDRANT_VALUES_URL="${EVA_AGENT_QDRANT_VALUES_URL:-${EVA_AGENT_RELEASE_BASE}/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}}"
 EVA_AGENT_VALUES_LAYOUT="$(eva_agent_values_layout "$EVA_AGENT_RELEASE")"

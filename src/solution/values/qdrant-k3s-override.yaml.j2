@@ -3,6 +3,17 @@ image:
   tag: "{{ eva_agent_qdrant_image_tag }}"
   pullPolicy: IfNotPresent
 
+{% if airgap_mode | default(false) | bool %}
+{% if eva_agent_repository_pull_secrets | default([]) | length > 0 %}
+imagePullSecrets:
+{% for secret in eva_agent_repository_pull_secrets %}
+  - name: "{{ secret }}"
+{% endfor %}
+{% else %}
+imagePullSecrets: []
+{% endif %}
+{% endif %}
+
 # The Qdrant chart emits this image only for `helm test`, but keep it in the
 # same registry as the StatefulSet so an air-gapped test does not pull SUSE.
 chartTests:

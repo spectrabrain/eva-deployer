@@ -33,7 +33,7 @@ EVA_AGENT_VLLM_VALUES_FILE="${EVA_AGENT_VLLM_VALUES_FILE:-$(eva_agent_values_fil
 echo "[info] EVA Agent values layout=${EVA_AGENT_VALUES_LAYOUT}, agent=${EVA_AGENT_VALUES_FILE}, vllm=${EVA_AGENT_VLLM_VALUES_FILE}"
 EVA_AGENT_QDRANT_SNAPSHOT_SOURCE="${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE:-local_pv}"
 case "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" in
-  local_pv) qdrant_default_values_file="values-k3s.yaml" ;;
+  local_pv) qdrant_default_values_file="$(eva_agent_source qdrant-values "$EVA_AGENT_RELEASE")" ;;
   harbor)   qdrant_default_values_file="values-k3s.harbor.yaml" ;;
   *)
     echo "[ERROR] EVA_AGENT_QDRANT_SNAPSHOT_SOURCE must be local_pv or harbor" >&2
@@ -43,9 +43,9 @@ esac
 EVA_AGENT_QDRANT_VALUES_FILE="${EVA_AGENT_QDRANT_VALUES_FILE:-$qdrant_default_values_file}"
 echo "[info] Qdrant snapshot source=${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE}, values=${EVA_AGENT_QDRANT_VALUES_FILE}"
 # The Harbor values intentionally point at the target-side Local Harbor.  The
-# preparation host must instead pull the published source image before it is
-# re-tagged and pushed into that Harbor.
-EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE="${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE:-339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent-qdrant-snapshot-sync:0.1.0}"
+# preparation host pulls the AWS CLI/ORAS transfer tool from ECR, then the
+# publisher preserves its basename in <registry>/<project>/eva-harbor-oras.
+EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE="${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE:-$(eva_agent_source snapshot-image "$EVA_AGENT_RELEASE")}"
 PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
 
 # 받을 컴포넌트. 기본은 전부. 일부만 설치할 때는 그 컴포넌트만 지정하면 required 검사·렌더·
@@ -125,15 +125,22 @@ want eva-vision       && helm template eva-vision "$VISION_CHART" \
   --set-string image.tag="$EVA_VISION_IMAGE_TAG" \
   --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-vision.yaml"
 want eva-agent-init   && helm template eva-agent-init "$INIT_CHART" -f "$RELEASE_DIR/eva-agent-init/values-k3s.yaml" > "$RENDER_DIR/eva-agent-init.yaml"
+qdrant_source_override=()
+if [[ "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" == harbor ]]; then
+  qdrant_source_override=(--set-string "sidecarContainers[0].image=${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE}")
+fi
 want eva-agent-qdrant && helm template eva-agent-qdrant "$QDRANT_CHART" \
   -f "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}" \
   --set-string "image.repository=docker.io/qdrant/qdrant" \
   --set-string "image.tag=v${QDRANT_CHART_VERSION}" \
   --set-string "chartTests.dbInteraction.image=registry.suse.com/bci/bci-base:latest" \
-  --set-string "sidecarContainers[0].image=${EVA_AGENT_QDRANT_SNAPSHOT_SYNC_SOURCE_IMAGE}" \
+  "${qdrant_source_override[@]}" \
   > "$RENDER_DIR/eva-agent-qdrant.yaml"
 want eva-agent-vllm   && helm template eva-agent-vllm "$VLLM_CHART" -f "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}" > "$RENDER_DIR/eva-agent-vllm.yaml"
-want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/${EVA_AGENT_VALUES_FILE}" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" > "$RENDER_DIR/eva-agent.yaml"
+want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR/eva-agent/${EVA_AGENT_VALUES_FILE}" -f "$RELEASE_DIR/eva-agent/values-secret.yaml" \
+  --set-string image.repository="$(eva_agent_source image "$EVA_AGENT_RELEASE")" \
+  --set-string image.tag="${EVA_AGENT_IMAGE_TAG:-$EVA_AGENT_CHART_VERSION}" \
+  --set ecrRefresh.enabled=false --set dockerConfig.enabled=false --set-json imagePullSecrets='[]' > "$RENDER_DIR/eva-agent.yaml"
 # imagePullSecrets off = airgap 렌더. 켜두면 ECR 로그인 cronjob 의 amazon/aws-cli 까지
 # 목록에 들어오는데, airgap 에서는 쓰이지 않습니다.
 want eva-iam          && helm template eva-iam "$IAM_CHART" \

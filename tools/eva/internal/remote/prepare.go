@@ -208,6 +208,18 @@ func (service PrepareService) steps(
 	command := func(step string, environment map[string]string, evidence []string, validate func() error) PreparationStep {
 		return PreparationStep{Name: step, Run: func(ctx context.Context) (StepResult, error) {
 			fmt.Fprintf(streams.Stdout, "[INFO] Step %d/%d %s\n", stepIndex(step), len(DefaultStepNames), step)
+			// Read product pins from the selected Release, independently of the
+			// installed Tool's own bundled catalog.
+			prepared, err := release.Prepare(resolved, filepath.Join(root, "work", "releases"))
+			if err != nil {
+				return StepResult{}, fmt.Errorf("prepare selected Release catalogs: %w", err)
+			}
+			for key, relative := range map[string]string{"EVA_INFRA_VERSION_FILE": "src/infra/version.yaml", "EVA_SOLUTION_VERSION_FILE": "src/solution/version.yaml"} {
+				if err := nonEmptyRegular(prepared.Root, relative); err != nil {
+					return StepResult{}, err
+				}
+				environment[key] = filepath.Join(prepared.Root, relative)
+			}
 			if service.Preflight.RegistryProtocol != nil {
 				protocol, err := service.Preflight.RegistryProtocol(identity.RepositoryRegistry)
 				if err != nil {

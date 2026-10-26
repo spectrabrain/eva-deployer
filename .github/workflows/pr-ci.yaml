@@ -116,7 +116,10 @@ jobs:
         run: python3 scripts/test/test_traefik_ports.py
 
       - name: Test EVA Agent and Vision values contracts
+        env:
+          EVA_TEST_HELM_DOWNLOAD: "1"
         run: |
+          python3 scripts/test/test_eva_agent_rc2.py
           python3 scripts/test/test_n8n_remote.py
           scripts/test/test_eva_component_values.sh
           scripts/test/test_eva_agent_dependency_defaults.sh

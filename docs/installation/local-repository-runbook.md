@@ -3,7 +3,7 @@
 ## 1. Airgap Bundle 준비 — 인터넷 준비 서버에서 먼저 실행
 
 폐쇄망 반입 전에 **인터넷에 연결된 별도 준비 서버**에서 `eva airgap prepare`로 Bundle을 만듭니다.
-이 명령이 포함된 Tool을 설치하고 `eva airgap prepare --help`로 지원 여부를 확인합니다.
+준비 서버에 EVA Tool을 설치하고 `eva airgap prepare --help`로 실행 옵션을 확인합니다.
 대상 서버에서 자산을 다운로드하거나 `eva remote prepare`를 대신 실행하지 않습니다.
 
 ### 준비 서버의 필수 조건과 승인
@@ -57,7 +57,7 @@ sudo eva airgap prepare --release "$original_release" \
   포함 여부와 관계없이 모든 하드웨어의 Display Mode·GPU·MIG 준비 완료를 보장하지 않습니다.
 
 명령은 선택한 원본 Release의 Infra/Solution version catalog를 기준으로 **Infra·App·IAM·Agent·Vision의
-패키지·Chart·helper, n8n 이미지, 선택한 vLLM 이미지, Agent 모델, Vision 모델 캐시, Harbor용 Qdrant snapshot,
+패키지·Chart·helper, n8n 이미지, 선택한 vLLM 이미지·모델, Vision 모델 캐시, Harbor용 Qdrant snapshot,
 Harbor offline installer, NVIDIA driver 의존성 repo**를 준비합니다. 유효한 Managed Runtime은
 재사용하고 없으면 온라인으로 bootstrap합니다. 손상된 기존 Runtime은 먼저 복구해야 합니다.
 
@@ -115,8 +115,8 @@ Local은 Repository 공급 방식이며, 서비스의 HTTP/HTTPS나 IAM 함께 �
 | 내부 Repository 담당자 | private Harbor 설치, 이미지 적재, 필요한 Qdrant snapshot OCI artifact 게시, endpoint·기존 Harbor 인증 설정 인계 |
 | 설치 담당자 | 대상 서버 사전 확인, 설정·인증서·라이선스 준비, CLI 설치 실행과 결과 검증 |
 
-**현재 `eva install`은 Local Harbor 생성, 제품 이미지 load/push, Qdrant snapshot artifact 게시,
-전체 오프라인 캐시 배치를 대신하지 않습니다.** 이 준비가 끝나지 않았다면 설치를 시작하지 않습니다.
+**설치 전에 Local Harbor 준비, 제품 이미지 load/push, Qdrant snapshot artifact 게시,
+전체 오프라인 캐시 배치를 완료합니다.** 이 준비가 끝나지 않았다면 설치를 시작하지 않습니다.
 Docker가 필요한 Harbor·이미지 적재 작업과 EVA Managed Runtime 준비는 별개입니다.
 
 앞 절의 Bundle 생성과 아래의 대상 캐시 배치·Harbor 인계를 모두 완료해야 합니다.
@@ -146,6 +146,22 @@ Base Release만 받은 상태나 Bundle 검증만 통과한 상태를 폐쇄망 
   `local_pv` 방식과 혼합하지 않습니다.
 - Local 설정에는 `credentials.aws`를 넣지 않습니다. 대상 서버에 AWS credential을 복사해
   외부 Registry나 S3에서 빠진 자산을 받는 방식으로 진행하지 않습니다.
+
+### Agent 자산 준비
+
+Agent의 차트·이미지·기본 Values와 snapshot 파일은 선택한 Release에 맞춰 준비합니다.
+인터넷 준비 서버에는 다음 권한이 필요합니다.
+
+- Agent 및 전송 도구 이미지의 ECR pull:
+  `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-agent`,
+  `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras`
+- vLLM 모델과 Qdrant snapshot의 S3 list/read: `spectrabrain-eva-agent` bucket
+
+대상 서버에는 필요한 이미지를 내부 Harbor에 적재하고 Bundle의 vLLM 모델을 배치합니다.
+대상에 AWS credential을 반입하지 않습니다. Agent의 Vision 기능을 사용하려면 Vision도 설치합니다.
+기본 연결 주소는 `http://eva-vision.eva-vision:8000`입니다.
+모델 캐시를 위한 충분한 디스크 공간을 확보하며, 재설치·업그레이드에서 모델 캐시와
+Qdrant 데이터의 PV/PVC를 삭제하지 않습니다.
 
 ### Vision 모델 공급
 

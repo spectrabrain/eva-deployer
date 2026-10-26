@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -401,7 +402,11 @@ func ValidateModels(root string) error {
 	if err := rejectSecretContent(lines); err != nil {
 		return err
 	}
-	for _, tree := range []string{"models/agent", "models/vllm"} {
+	trees := []string{"models/vllm"}
+	if !slices.Contains(lines, "agent_models_required: false") {
+		trees = append(trees, "models/agent")
+	}
+	for _, tree := range trees {
 		if err := secureNonEmptyTree(root, tree); err != nil {
 			return err
 		}

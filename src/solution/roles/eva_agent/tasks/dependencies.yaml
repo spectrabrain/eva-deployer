@@ -28,6 +28,13 @@
     airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
     eva_agent_namespace: "{{ eva_agent_namespace | default('eva-agent') }}"
     eva_agent_deploy_version: "{{ eva_agent_deploy_version | mandatory }}"
+    eva_agent_models_required: "{{ eva_agent_models_required | default(eva_agent_deploy_version is version('3.3.0', '<')) }}"
+    eva_agent_init_chart_version: "{{ eva_agent_init_chart_version | default('1.0.0') }}"
+    eva_agent_chart_repository_url: >-
+      {{ eva_agent_chart_repository_url | default(
+          (eva_agent_deploy_version is version('3.3.0', '>='))
+          | ternary('https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum',
+                    'https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum')) }}
     eva_agent_workdir: "{{ eva_agent_workdir | default('/opt/eva-agent/' ~ eva_agent_deploy_version) }}"
     eva_agent_qdrant_deploy_values_dir: "{{ eva_agent_qdrant_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/qdrant') }}"
     eva_agent_vllm_deploy_values_dir: "{{ eva_agent_vllm_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/vllm') }}"
@@ -65,11 +72,15 @@
     eva_agent_vllm_engine_deployment_name: "{{ eva_agent_vllm_engine_deployment_name | default('eva-agent-vllm-qwen35-vl-9b-fp8-deployment-vllm') }}"
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
-         | default('https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/release/' ~ eva_agent_deploy_version) }}
+         | default('https://raw.githubusercontent.com/'
+           ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
+              | ternary('spectrabrain/eva-agent-chart/' ~ (eva_agent_values_revision | default('chartmuseum')),
+                        'mellerikat/eva-agent/chartmuseum'))
+           ~ '/release/' ~ eva_agent_deploy_version) }}
     eva_agent_offline_release_dir: "{{ eva_agent_offline_release_dir | default(eva_agent_offline_dir ~ '/release/' ~ eva_agent_deploy_version) }}"
     eva_agent_offline_qdrant_chart_tgz: "{{ eva_agent_offline_qdrant_chart_tgz | default(eva_agent_cache_root ~ '/qdrant/qdrant-' ~ (eva_agent_qdrant_chart_version | default(qdrant_chart_version)) ~ '.tgz') }}"
     eva_agent_offline_vllm_chart_tgz: "{{ eva_agent_offline_vllm_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-vllm-' ~ eva_agent_vllm_chart_version ~ '.tgz') }}"
-    eva_agent_offline_init_chart_tgz: "{{ eva_agent_offline_init_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-init-1.0.0.tgz') }}"
+    eva_agent_offline_init_chart_tgz: "{{ eva_agent_offline_init_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-init-' ~ (eva_agent_init_chart_version | default('1.0.0')) ~ '.tgz') }}"
     eva_agent_offline_kustomize_bin: "{{ eva_agent_offline_kustomize_bin | default(eva_agent_cache_root ~ '/tools/kustomize') }}"
     eva_agent_offline_models_dir: "{{ eva_agent_offline_models_dir | default(eva_agent_cache_root ~ '/models') }}"
     eva_agent_offline_agent_model_dir: >-
@@ -228,6 +239,12 @@
       }}
     eva_agent_vllm_router_image_tag: "{{ eva_agent_vllm_router_image_tag | default('v0.1.10') }}"
 
+# Prepare only the selected namespace after repository defaults are validated.
+# Missing credentials must fail before NFS changes, migrations or Pod shutdown.
+- name: Prepare namespace registry and model credentials before deploying Agent workloads
+  ansible.builtin.include_tasks: credentials.yaml
+  when: not ansible_check_mode
+
 - name: Preserve existing EVA Agent dependency Helm user Values
   ansible.builtin.include_role:
     name: eva_helm_values_backup
@@ -311,17 +328,22 @@
     mode: '0775'
   loop:
     - "{{ eva_agent_nfs_share_path }}"
-    - "{{ eva_agent_nfs_share_path }}/agent-cache"
-    - "{{ eva_agent_nfs_share_path }}/agent-cache/hf"
     - "{{ eva_agent_nfs_share_path }}/vllm-cache"
   when: not ansible_check_mode
+
+- name: Ensure legacy Agent model cache directory exists when required
+  ansible.builtin.file:
+    path: "{{ eva_agent_nfs_share_path }}/agent-cache/hf"
+    state: directory
+    mode: '0775'
+  when:
+    - not ansible_check_mode
+    - eva_agent_models_required | bool
 
 - name: Check offline EVA model directories for airgap
   ansible.builtin.stat:
     path: "{{ item }}"
-  loop:
-    - "{{ eva_agent_offline_agent_model_dir }}"
-    - "{{ eva_agent_offline_vllm_model_dir }}"
+  loop: "{{ ([eva_agent_offline_agent_model_dir] if eva_agent_models_required else []) + [eva_agent_offline_vllm_model_dir] }}"
   register: eva_agent_offline_model_dir_stats
   when:
     - airgap_mode | default(false) | bool
@@ -330,11 +352,12 @@
 - name: Assert offline EVA model directories exist for airgap
   ansible.builtin.assert:
     that:
-      - (eva_agent_offline_model_dir_stats.results | selectattr('stat.exists', 'equalto', true) | list | length) == 2
+      - (eva_agent_offline_model_dir_stats.results | selectattr('stat.exists', 'equalto', true) | list | length) == ((eva_agent_models_required | bool) | ternary(2, 1))
     fail_msg: >-
       airgap_mode=true 인 경우 모델 캐시가 필요합니다.
       먼저 ./scripts/download/download_eva_models.sh 실행 후
-      {{ eva_agent_offline_agent_model_dir }} 와 {{ eva_agent_offline_vllm_model_dir }} 경로를 준비하세요.
+      {{ eva_agent_offline_vllm_model_dir }} 경로를 준비하세요.
+      Agent 3.2 이하에서는 {{ eva_agent_offline_agent_model_dir }}도 필요합니다.
   when:
     - airgap_mode | default(false) | bool
     - not ansible_check_mode
@@ -345,6 +368,7 @@
   register: eva_agent_agent_cache_sync_marker
   when:
     - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
     - not ansible_check_mode
 
 - name: Copy offline EVA agent model cache into NFS share
@@ -355,6 +379,7 @@
     executable: /bin/bash
   when:
     - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
     - not ansible_check_mode
     - not eva_agent_agent_cache_sync_marker.stat.exists
 
@@ -365,6 +390,7 @@
     mode: '0644'
   when:
     - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
     - not ansible_check_mode
     - not eva_agent_agent_cache_sync_marker.stat.exists
 
@@ -378,6 +404,7 @@
   changed_when: false
   when:
     - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
     - not ansible_check_mode
 
 - name: Check EVA vLLM model cache sync marker
@@ -541,7 +568,7 @@
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
 - name: Add Helm repository for EVA Agent
-  ansible.builtin.command: helm repo add eva-agent https://spectrabrain.github.io/eva-agent-chart
+  ansible.builtin.command: helm repo add eva-agent {{ eva_agent_chart_repository_url }} --force-update
   register: helm_repo_eva_agent
   changed_when: "'already exists' not in (helm_repo_eva_agent.stdout + helm_repo_eva_agent.stderr)"
   failed_when:
@@ -790,8 +817,14 @@
 - name: Point Harbor Qdrant snapshot-sync image at the selected repository
   ansible.builtin.replace:
     path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
-    regexp: 'localhost:32080/eva/eva-agent-qdrant-snapshot-sync:0.1.0'
-    replace: '{{ repository_registry }}/{{ repository_project }}/eva-agent-qdrant-snapshot-sync:0.1.0'
+    # Release profiles can still name the earlier tool. Match only that tool's
+    # image field, preserving the sidecar script, environment and snapshot data.
+    regexp: '(?m)^([ \t]*image:[ \t]*)[^\r\n]*(?:eva-agent-qdrant-snapshot-sync|eva-harbor-oras):0[.]1[.]0[^\r\n]*$'
+    replace: >-
+      \g<1>"{{ eva_agent_qdrant_snapshot_sync_image | default(
+        repository_registry ~ '/' ~ repository_project ~ '/'
+        ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
+           | ternary('eva-harbor-oras', 'eva-agent-qdrant-snapshot-sync')) ~ ':0.1.0') }}"
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
@@ -812,6 +845,16 @@
   when:
     - not ansible_check_mode
     - eva_agent_qdrant_snapshot_source == 'harbor'
+
+- name: Align Qdrant S3 credentials with the selected Agent AWS Secret
+  ansible.builtin.replace:
+    path: "{{ eva_agent_workdir }}/eva-agent-qdrant/{{ eva_agent_qdrant_values_file }}"
+    regexp: '(?m)^(\s+name: )aws-credentials\s*$'
+    replace: '\g<1>{{ eva_agent_aws_credentials_secret_name }}'
+  when:
+    - not ansible_check_mode
+    - not (airgap_mode | bool)
+    - eva_agent_qdrant_values_file == 'values-k3s.s3.yaml'
 
 - name: Check offline Qdrant snapshot files for airgap
   ansible.builtin.stat:
@@ -1089,6 +1132,14 @@
             },
             recursive=True
           )
+        | combine(
+            ({'imagePullSecret': eva_agent_repository_pull_secret_name}
+             if (airgap_mode | bool) and (eva_agent_repository_pull_secrets | default([]) | length > 0)
+             else {}), recursive=True)
+        | combine(
+            ({'envFromSecret': {'name': eva_agent_aws_credentials_secret_name | default('aws-credentials')}}
+             if not (airgap_mode | bool) and 'initContainer' in eva_agent_vllm_profile_values.servingEngineSpec.modelSpec[0]
+             else {}), recursive=True)
       }}
   when: not ansible_check_mode
 
@@ -1105,7 +1156,10 @@
                     {
                       'repository': eva_agent_vllm_router_image_repository,
                       'tag': eva_agent_vllm_router_image_tag,
-                      'imagePullPolicy': 'IfNotPresent'
+                      'imagePullPolicy': 'IfNotPresent',
+                      'imagePullSecrets': ([{'name': eva_agent_repository_pull_secret_name}]
+                         if (airgap_mode | bool) and (eva_agent_repository_pull_secrets | default([]) | length > 0)
+                         else (eva_agent_vllm_profile_values.routerSpec.imagePullSecrets | default([])))
                     },
                     recursive=True
                   )
@@ -1351,7 +1405,7 @@
 - name: Install eva-agent-init from online Helm repo
   ansible.builtin.command: >-
     helm upgrade --install eva-agent-init eva-agent/eva-agent-init
-    --version 1.0.0
+    --version {{ eva_agent_init_chart_version }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
     --values {{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml
@@ -1396,73 +1450,6 @@
   changed_when: true
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
-
-- name: Check Local Harbor configuration for Qdrant snapshot credentials
-  ansible.builtin.stat:
-    path: "{{ eva_agent_harbor_config_path }}"
-  register: eva_agent_local_harbor_config
-  when:
-    - not ansible_check_mode
-    - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_mode == 'local_repository'
-    - harbor_admin_password is not defined
-
-- name: Read Local Harbor admin password for Qdrant snapshot credentials
-  ansible.builtin.slurp:
-    src: "{{ eva_agent_harbor_config_path }}"
-  register: eva_agent_local_harbor_config_raw
-  no_log: true
-  when:
-    - not ansible_check_mode
-    - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_mode == 'local_repository'
-    - harbor_admin_password is not defined
-    - eva_agent_local_harbor_config.stat.exists
-
-- name: Resolve Local Harbor password for Qdrant snapshot credentials
-  ansible.builtin.set_fact:
-    eva_agent_qdrant_harbor_password: >-
-      {{ (eva_agent_local_harbor_config_raw.content | b64decode | from_yaml).harbor_admin_password }}
-  no_log: true
-  when:
-    - not ansible_check_mode
-    - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_mode == 'local_repository'
-    - harbor_admin_password is not defined
-    - eva_agent_local_harbor_config.stat.exists
-
-- name: Require Local Harbor configuration or an explicit password for Qdrant snapshots
-  ansible.builtin.assert:
-    that:
-      - eva_agent_local_harbor_config.stat.exists
-    fail_msg: >-
-      Local Harbor 설정 파일을 찾지 못했습니다: {{ eva_agent_harbor_config_path }}
-      Harbor를 먼저 설치하거나 -e harbor_admin_password=<Harbor 관리자 비밀번호>를 지정하세요.
-  when:
-    - not ansible_check_mode
-    - eva_agent_qdrant_snapshot_source == 'harbor'
-    - repository_mode == 'local_repository'
-    - harbor_admin_password is not defined
-
-- name: Create or update Harbor snapshot credentials for Qdrant
-  ansible.builtin.shell: >-
-    set -euo pipefail &&
-    kubectl create secret generic qdrant-snapshot-harbor
-    --namespace {{ eva_agent_namespace }}
-    --from-literal=username="$HARBOR_USERNAME"
-    --from-literal=password="$HARBOR_PASSWORD"
-    --dry-run=client -o yaml |
-    kubectl apply -f -
-  args:
-    executable: /bin/bash
-  environment:
-    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
-    HARBOR_USERNAME: "{{ harbor_admin_user | default('admin') }}"
-    HARBOR_PASSWORD: "{{ harbor_admin_password | default(eva_agent_qdrant_harbor_password | default('EVA123@')) }}"
-  no_log: true
-  when:
-    - not ansible_check_mode
-    - eva_agent_qdrant_snapshot_source == 'harbor'
 
 - name: Reconcile exact legacy Argo CD-managed eva-agent-vllm resources
   ansible.builtin.include_tasks: migrate_legacy_vllm.yaml

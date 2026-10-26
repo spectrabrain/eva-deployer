@@ -119,7 +119,6 @@ curl --connect-timeout 5 --max-time 10 -fsS http://harbor.example.com:32080/api/
 
 `/v2/`의 `401 Unauthorized`는 인증이 필요한 정상 registry 응답입니다.
 health의 전체 상태와 core·registry를 포함한 component 상태가 `healthy`인지 확인합니다.
-정지된 과거 Compose 컨테이너를 시작할 필요가 없습니다.
 
 기존 Harbor에 private `eva` project와 이미지·OCI artifact 게시 권한을 준비한 뒤,
 승인된 계정으로 login합니다. 비밀번호는 대화형 입력으로 받습니다.
@@ -153,6 +152,23 @@ sudo eva remote prepare
 성공하면 Remote Runtime과 Target의 패키지·Chart·helper·Agent 모델 자산이 준비되고,
 제품 이미지(n8n 포함)·Infra 이미지와 Qdrant snapshot은 Main Harbor에 게시됩니다.
 
+### Agent 이미지·모델 공급
+
+Main은 선택한 Release에 필요한 Agent 이미지·모델·snapshot을 자동 준비합니다.
+개별 차트·이미지 버전이나 snapshot 파일명을 따로 지정하지 않습니다.
+
+- Agent 이미지는 SpectraBrain ECR에서, vLLM 모델과 Qdrant snapshot은
+  `spectrabrain-eva-agent` S3 bucket에서 받습니다. Main의 AWS 계정에 ECR pull과 S3 list/read 권한이 필요합니다.
+- Main에는 전송 도구 이미지 저장소
+  `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras`의 ECR pull 권한도 필요합니다.
+- Target에는 vLLM 모델 캐시를 전달하고 이미지와 Qdrant snapshot은 선택한 Main Harbor에서 공급합니다.
+- Target에는 유효한 Harbor 인증을 준비합니다. 설치가 필요한 Secret을 자동 구성하므로
+  수동 Secret 생성은 필요하지 않습니다. Target에 AWS credential을 전달하지 않습니다.
+- Agent의 Vision 기능을 사용하려면 Target에 Vision도 설치되어 있어야 합니다.
+  기본 연결 주소는 `http://eva-vision.eva-vision:8000`입니다.
+- Target에 모델 캐시를 위한 충분한 디스크 공간을 확보합니다.
+  재설치·업그레이드에서 모델 캐시와 Qdrant 데이터의 PV/PVC를 삭제하지 않습니다.
+
 ### Vision 모델 공급
 
 Vision weights는 컨테이너 이미지와 별도로 공급하며 Target payload에 포함하지 않습니다.
@@ -185,7 +201,7 @@ root 전용 credential store에 저장하고, 등록한 SSH host key가 바뀌�
 SSH·sudo 인증도 저장 전에 검증합니다.
 
 ```bash
-sudo eva remote target add site-dev-196
+sudo eva remote target add target-a
 ```
 
 이미 등록된 이름으로 다시 `add`하면 입력을 받기 전에 거부되며 기존 설정과 credential은
@@ -198,7 +214,7 @@ sudo eva remote target list
 
 ```text
 NAME          HOST           PORT  USER  AUTH      STATUS
-site-dev-196  10.159.56.196  22    eva   password  ok
+target-a      10.159.56.196  22    eva   password  ok
 ```
 
 잘못 등록한 Target은 이름으로 삭제한 뒤 다시 `add`합니다. 삭제 전 host 정보를 보여주고
@@ -206,21 +222,21 @@ site-dev-196  10.159.56.196  22    eva   password  ok
 삭제하며 다른 Target이나 Release·cache는 건드리지 않습니다.
 
 ```bash
-sudo eva remote target remove site-dev-196
+sudo eva remote target remove target-a
 ```
 
 게시 전에는 Target 연결과 권한, `linux/amd64`, storage 및 inbox parent를 다시 확인합니다.
 이 preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.
 
 ```bash
-sudo eva remote target verify site-dev-196
+sudo eva remote target verify target-a
 ```
 
 검증한 Base Release와 생성된 delivery artifact를 등록한 Target으로 게시합니다.
 
 ```bash
 sudo eva remote publish \
-  --target site-dev-196
+  --target target-a
 ```
 
 Base Release, Remote Runtime 및 Target payload는 하나의 Target staging area로 전달되고,
@@ -270,12 +286,12 @@ eva install configure
 
 sudo 없이 Target에서 실행하고 설치환경 **remote**를 고릅니다. 현재 Target의 Infra-only/Solution,
 HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 선택합니다. 결과는 사용자 홈의
-`eva-install.yaml`입니다. 기존 옵션/자동화용 `eva config sample --mode remote`도 유지합니다.
-이 기존 명령에서 IAM만 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
+`eva-install.yaml`입니다. 자동화용 설정 샘플은 `eva config sample --mode remote`의 옵션으로 생성할 수 있습니다.
+외부 IAM에 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
 App의 외부 SSO·Redis 연결값을 입력합니다. Target에서 IAM/Redis로의 내부망 접근이 필요합니다.
 검증한 Release에 포함된 Tool·자산을 함께 사용합니다.
 HTTP는 격리 테스트용이며, 운영 환경에서는 HTTPS를 사용합니다.
-기존 `config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
+`config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
 명시합니다. `--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
 제거하기 전에는 검증에 실패합니다.
 
@@ -348,8 +364,7 @@ targets:
 ```
 
 TLS certificate/key는 target의 `hostPath`에 별도로 준비합니다. `targets`는 inventory alias별
-mapping이며 `ansible_host`를 지정하면 Deployer가 해당 주소를 기존 Values target key로
-자동 변환합니다. SSH private key의 상대 경로는 설정 파일 기준입니다.
+mapping이며, SSH 접속 주소는 `ansible_host`에 지정합니다. SSH private key의 상대 경로는 설정 파일 기준입니다.
 필요한 Agent/Vision Chart override만 `values.agent`/`values.vision`에 추가하고,
 GPU/MIG/profile과 repository-derived image 설정은 고정하지 않습니다.
 
@@ -361,7 +376,7 @@ Remote/Local 설정의 `credentials.aws`는 거부됩니다. AWS/S3/ECR credenti
 관리하며 Target 입력과 Release에 넣지 않습니다. 원본 설정과 내부 생성 Workspace는
 Secret이며 커밋하지 않습니다. Deployer가 내부 Workspace를
 `/var/lib/eva/workspaces/<site-id>/<content-sha256>/`에 생성하므로 폴더와 여러 파일을
-직접 만들 필요가 없습니다. 디렉터리 `0700`, 파일 `0600`이며 기존 `--workspace`도 지원합니다.
+직접 만들 필요가 없습니다. 디렉터리 권한은 `0700`, 파일 권한은 `0600`입니다.
 
 ### 기존 k3s에 n8n만 설치
 
@@ -405,7 +420,7 @@ n8n 설정은 `targets.server-a.ansible`에 둡니다. 기존 Target `registries
 
 설치는 Harbor의 n8n 이미지를 선택하고 해당 registry의 HTTP 연결 설정만 추가합니다.
 기존 registry·CA 설정을 보존하며, n8n 단독 설치에서는 k3s를 재시작하지 않습니다.
-실행 중인 containerd의 registry `config_path`를 사용할 수 없는 구버전·custom 설정은
+실행 중인 containerd의 registry `config_path`를 사용할 수 없다면
 먼저 운영자가 k3s registry 설정을 준비해야 합니다.
 임시 Pod로 실제 이미지 pull을 확인한 뒤 n8n Deployment와 PVC를 적용합니다.
 

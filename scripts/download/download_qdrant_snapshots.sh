@@ -7,7 +7,6 @@ EVA_CACHE_ROOT="${EVA_CACHE_ROOT:-$REPO_ROOT/out/cache}"
 SNAPSHOT_DIR="${EVA_CACHE_ROOT}/qdrant-snapshots"
 AWS_PROFILE="${AWS_PROFILE:-default}"
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
-EVA_QDRANT_SNAPSHOT_BUCKET="${EVA_QDRANT_SNAPSHOT_BUCKET:-s3-an2-mellerikat-release-eva-agent}"
 
 AWS_ARGS=(--region "${AWS_REGION}")
 if [[ -z "${AWS_ACCESS_KEY_ID:-}" ||
@@ -19,9 +18,10 @@ source "$REPO_ROOT/scripts/lib/load_versions.sh"
 load_deploy_versions
 
 EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in src/solution/version.yaml)}"
+EVA_QDRANT_SNAPSHOT_BUCKET="${EVA_QDRANT_SNAPSHOT_BUCKET:-$(eva_agent_source bucket "$EVA_AGENT_RELEASE")}"
 EVA_AGENT_QDRANT_SNAPSHOT_SOURCE="${EVA_AGENT_QDRANT_SNAPSHOT_SOURCE:-local_pv}"
 case "$EVA_AGENT_QDRANT_SNAPSHOT_SOURCE" in
-  local_pv) qdrant_default_values_file="values-k3s.yaml" ;;
+  local_pv) qdrant_default_values_file="$(eva_agent_source qdrant-values "$EVA_AGENT_RELEASE")" ;;
   harbor)   qdrant_default_values_file="values-k3s.harbor.yaml" ;;
   *)
     echo "[ERROR] EVA_AGENT_QDRANT_SNAPSHOT_SOURCE must be local_pv or harbor" >&2

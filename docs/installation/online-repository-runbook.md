@@ -93,7 +93,7 @@ eva install configure
 타겟마다 선택은 독립적이며 Infra-only 타겟에는 Solution Values를 넣지 않습니다.
 타겟별 `components`에 따라 실제 Ansible 단계의 대상도 제한합니다. 같은 설치 옵션을 재사용해도
 연결 비밀번호와 서비스 주소·Secret은 복사하지 않습니다. 여러 타겟은 하나의 cluster를 만드는 기능이 아닙니다.
-기존 단일 서버용 `eva config sample --mode online`과 비대화형 옵션도 유지합니다.
+자동화용 설정 샘플은 `eva config sample --mode online`의 옵션으로 생성할 수 있습니다.
 
 두 명령 모두 `--output FILE`로 위치를 바꿀 수 있고 새 파일만 `0600`으로 만들며 덮어쓰지 않습니다.
 
@@ -192,9 +192,8 @@ targets:
             shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key
 ```
 
-`targets.server-a`는 inventory alias이며, `values`에는 target별 Chart Values를 그대로
-씁니다. 기존처럼 target 이름을 Values 안에 한 번 더 감싸지 않습니다. 여러 대상은
-`targets` 아래에 추가합니다. SSH 대상은 `ansible_connection: ssh`, `ansible_host`,
+`targets.server-a`는 inventory alias이며, `values`에는 해당 target의 Chart Values를 직접
+작성합니다. 여러 대상은 `targets` 아래에 추가합니다. SSH 대상은 `ansible_connection: ssh`, `ansible_host`,
 `ansible_user`와 password 또는 private key 경로를 `ansible`에 지정합니다.
 상대 SSH key 경로는 설정 파일 위치 기준이며, 대상 서버의 TLS·데이터 경로는 절대 경로로 씁니다.
 
@@ -213,9 +212,25 @@ sudo eva workspace validate --config /home/eva/eva-install.yaml
 위 명령은 설치 설정의 필수 입력과 형식을 검증합니다. 설정 파일에는 credential이 포함되므로
 Git, 채팅, Release artifact에 넣지 않습니다.
 
+### Agent 이미지·모델 공급
+
+Agent 설치에 필요한 차트·이미지·기본 Values는 선택한 Release에서 정합니다.
+개별 버전을 입력하거나 파일을 별도로 다운로드할 필요가 없습니다.
+
+- Agent 이미지 저장소: `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-agent`
+- vLLM 모델: `s3://spectrabrain-eva-agent/vllm/hf`
+- Qdrant snapshot: `s3://spectrabrain-eva-agent/agent/qdrant/`
+- 대상 서버의 AWS 계정에 해당 ECR pull 및 S3 list/read 권한이 필요합니다.
+  입력한 AWS credential로 필요한 인증을 자동 구성하므로 수동 Secret 생성은 필요하지 않습니다.
+  기존 AWS Secret을 사용한다면 해당 저장소에 접근 가능한 유효한 인증인지 확인합니다.
+- Agent의 Vision 기능을 사용하려면 Vision도 설치합니다.
+  기본 연결 주소는 `http://eva-vision.eva-vision:8000`입니다.
+- 첫 설치에는 모델 다운로드 시간이 필요합니다. 캐시를 위한 충분한 디스크 공간을 확보합니다.
+  재설치·업그레이드에서 모델 캐시와 Qdrant 데이터의 PV/PVC를 삭제하지 않습니다.
+
 ### Vision 모델 공급
 
-Vision 모델은 컨테이너 이미지와 별도로 S3에서 공급됩니다. 기존 `eva install` 과정에서
+Vision 모델은 컨테이너 이미지와 별도로 S3에서 공급됩니다. `eva install` 과정에서
 모델을 다운로드해 영구 캐시에 저장하고, 모델 준비가 끝나면 서비스를 시작합니다.
 필요한 인증은 입력한 AWS credential로 자동 구성하므로 추가 명령이나 Secret 생성은 필요하지 않습니다.
 

@@ -7,7 +7,11 @@ EVA_CACHE_ROOT="${EVA_CACHE_ROOT:-$REPO_ROOT/out/cache}"
 MODEL_DIR="${EVA_CACHE_ROOT}/models"
 AWS_PROFILE="${AWS_PROFILE:-default}"
 AWS_REGION="${AWS_REGION:-ap-northeast-2}"
-EVA_MODEL_BUCKET="${EVA_MODEL_BUCKET:-s3-an2-mellerikat-release-eva-agent}"
+source "$REPO_ROOT/scripts/lib/load_versions.sh"
+load_deploy_versions
+EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE}"
+EVA_MODEL_BUCKET="${EVA_MODEL_BUCKET:-$(eva_agent_source bucket "$EVA_AGENT_RELEASE")}"
+AGENT_MODELS_REQUIRED="$(eva_agent_source models-required "$EVA_AGENT_RELEASE")"
 
 AWS_ARGS=(--region "${AWS_REGION}")
 if [[ -z "${AWS_ACCESS_KEY_ID:-}" ||
@@ -23,12 +27,18 @@ if ! command -v aws >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "${MODEL_DIR}/agent/hf" "${MODEL_DIR}/vllm/hf"
+model_trees=("${MODEL_DIR}/vllm/hf")
+if [[ "$AGENT_MODELS_REQUIRED" == "true" ]]; then
+  model_trees+=("${MODEL_DIR}/agent/hf")
+fi
+mkdir -p "${model_trees[@]}"
 
-echo "[sync] s3://${EVA_MODEL_BUCKET}/${AGENT_PREFIX} -> ${MODEL_DIR}/agent/hf"
-aws "${AWS_ARGS[@]}" s3 sync \
-  "s3://${EVA_MODEL_BUCKET}/${AGENT_PREFIX}" \
-  "${MODEL_DIR}/agent/hf"
+if [[ "$AGENT_MODELS_REQUIRED" == "true" ]]; then
+  echo "[sync] s3://${EVA_MODEL_BUCKET}/${AGENT_PREFIX} -> ${MODEL_DIR}/agent/hf"
+  aws "${AWS_ARGS[@]}" s3 sync \
+    "s3://${EVA_MODEL_BUCKET}/${AGENT_PREFIX}" \
+    "${MODEL_DIR}/agent/hf"
+fi
 
 echo "[sync] s3://${EVA_MODEL_BUCKET}/${VLLM_PREFIX} -> ${MODEL_DIR}/vllm/hf"
 aws "${AWS_ARGS[@]}" s3 sync \
@@ -44,7 +54,7 @@ cleanup_manifest_temp() {
 trap cleanup_manifest_temp EXIT
 
 mapfile -t model_files < <(
-  find "${MODEL_DIR}"     -type f     -size +0c     -print     | grep -Fvx "${manifest_path}"     | grep -Fv "${MODEL_DIR}/.manifest."     | sort
+  find "${model_trees[@]}" -type f -size +0c -print | sort
 )
 
 if [[ "${#model_files[@]}" -eq 0 ]]; then
@@ -55,6 +65,7 @@ fi
 {
   echo "Generated: $(date -Iseconds)"
   echo "bucket: ${EVA_MODEL_BUCKET}"
+  echo "agent_models_required: ${AGENT_MODELS_REQUIRED}"
   echo "agent_prefix: ${AGENT_PREFIX}"
   echo "vllm_prefix: ${VLLM_PREFIX}"
   echo "files:"

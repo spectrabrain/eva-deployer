@@ -1,6 +1,9 @@
 package remote
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -474,6 +477,33 @@ func writeOriginalRelease(t *testing.T, includeOffline bool) release.Resolved {
 		"eva-tool-installer.sh": "installer",
 		"eva-infra.tar.gz":      "infra",
 		"eva-solution.tar.gz":   "solution",
+	}
+	for artifact, entries := range map[string]map[string]string{
+		"eva-infra.tar.gz": {
+			"ansible.cfg": "[defaults]\n", "src/playbook-preflight.yaml": "[]\n", "src/playbook-vars.yaml": "{}\n",
+			"src/infra/playbooks/site_precondition.yaml": "[]\n", "src/infra/playbooks/site_infra.yaml": "[]\n",
+			"src/infra/version.yaml": "k3s_default_version: v1.35.2+k3s1\n",
+		},
+		"eva-solution.tar.gz": {"src/solution/version.yaml": "eva_agent_deploy_version: 3.3.0\neva_agent_chart_version: 3.3.0-rc.2\n"},
+	} {
+		var contents bytes.Buffer
+		compressed := gzip.NewWriter(&contents)
+		writer := tar.NewWriter(compressed)
+		for name, value := range entries {
+			if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(value)), Typeflag: tar.TypeReg}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writer.Write([]byte(value)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := compressed.Close(); err != nil {
+			t.Fatal(err)
+		}
+		files[artifact] = contents.String()
 	}
 	if includeOffline {
 		files["eva-offline.tar.gz"] = "offline"

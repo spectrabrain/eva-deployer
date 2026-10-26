@@ -168,6 +168,8 @@
 
     persistent_count=0
 
+    if [[ "${EVA_AGENT_MODELS_REQUIRED:-1}" == '1' ]]; then
+
     if kubectl get pv \
       "$static_pv" \
       >/dev/null 2>&1
@@ -233,6 +235,8 @@
         echo "[ERROR] EVA Agent PV/PVC binding identity mismatch"
         exit 1
       fi
+    fi
+
     fi
 
     kubectl get \
@@ -820,6 +824,7 @@
     EVA_AGENT_CHART_VERSION: "{{ eva_agent_chart_version }}"
     EVA_AGENT_VALUES_FILE: "{{ eva_agent_workdir }}/eva-agent/effective-input-values.yaml"
     EVA_AGENT_CHART_SOURCE: "{{ eva_agent_chart_source }}"
+    EVA_AGENT_MODELS_REQUIRED: "{{ (eva_agent_models_required | default(true) | bool) | ternary('1', '0') }}"
     EVA_AGENT_USE_CHART_VERSION: >-
       {{ ((eva_cli_chart_path | default('') | length) == 0)
          | ternary('1', '0') }}

@@ -109,6 +109,8 @@ load_deploy_versions() {
     EVA_AGENT_RELEASE
     EVA_AGENT_DEPLOY_VERSION
     EVA_AGENT_CHART_VERSION
+    EVA_AGENT_IMAGE_TAG
+    EVA_AGENT_VALUES_REVISION
     EVA_AGENT_VLLM_CHART_VERSION
     EVA_AGENT_INIT_CHART_VERSION
     EVA_IAM_CHART_VERSION
@@ -128,6 +130,8 @@ load_deploy_versions() {
     [EVA_AGENT_RELEASE]="eva_agent_release eva_agent_deploy_version"
     [EVA_AGENT_DEPLOY_VERSION]="eva_agent_deploy_version"
     [EVA_AGENT_CHART_VERSION]="eva_agent_chart_version"
+    [EVA_AGENT_IMAGE_TAG]="eva_agent_image_tag"
+    [EVA_AGENT_VALUES_REVISION]="eva_agent_values_revision"
     [EVA_AGENT_VLLM_CHART_VERSION]="eva_agent_vllm_chart_version"
     [EVA_AGENT_INIT_CHART_VERSION]="eva_agent_init_chart_version"
     [EVA_IAM_CHART_VERSION]="eva_iam_chart_version"
@@ -242,6 +246,48 @@ eva_product_chart_base() {
 # the preparation host; the "harbor" variant names the Harbor placeholder and is
 # deployed into Remote and Local Repository targets.
 EVA_AGENT_VLLM_PROFILES=(A6000x1 L40sx1 PRO5000x3 PRO6000-MIGx4)
+
+eva_agent_source() {
+  local kind="$1" version="$2" owner=mellerikat repo=eva-agent revision=chartmuseum
+  if [[ ! "$version" =~ ^v?([0-9]+)\.([0-9]+)\.[0-9]+([-+][A-Za-z0-9.]+)?$ ]]; then
+    echo "[ERROR] invalid EVA Agent release version: ${version}" >&2
+    return 1
+  fi
+  if (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 3) )); then
+    owner=spectrabrain
+    repo=eva-agent-chart
+    revision="${EVA_AGENT_VALUES_REVISION:-chartmuseum}"
+  fi
+  case "$kind" in
+    chart) printf 'https://raw.githubusercontent.com/%s/%s/chartmuseum\n' "$owner" "$repo" ;;
+    release) printf 'https://raw.githubusercontent.com/%s/%s/%s/release/%s\n' "$owner" "$repo" "$revision" "$version" ;;
+    scripts) printf 'https://raw.githubusercontent.com/%s/%s/chartmuseum\n' "$owner" "$repo" ;;
+    image)
+      if [[ "$owner" == spectrabrain ]]; then
+        printf '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-agent\n'
+      else
+        printf '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent\n'
+      fi
+      ;;
+    snapshot-image)
+      if [[ "$owner" == spectrabrain ]]; then
+        printf '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras:0.1.0\n'
+      else
+        printf '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-agent-qdrant-snapshot-sync:0.1.0\n'
+      fi
+      ;;
+    bucket)
+      if [[ "$owner" == spectrabrain ]]; then printf 'spectrabrain-eva-agent\n'; else printf 's3-an2-mellerikat-release-eva-agent\n'; fi
+      ;;
+    models-required)
+      if [[ "$owner" == spectrabrain ]]; then printf 'false\n'; else printf 'true\n'; fi
+      ;;
+    qdrant-values)
+      if [[ "$owner" == spectrabrain ]]; then printf 'values-k3s.s3.yaml\n'; else printf 'values-k3s.yaml\n'; fi
+      ;;
+    *) echo "[ERROR] invalid EVA Agent source kind: $kind" >&2; return 1 ;;
+  esac
+}
 
 eva_agent_values_layout() {
   local version="$1"

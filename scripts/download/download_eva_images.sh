@@ -52,7 +52,7 @@ PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
 # pull 이 모두 좁혀집니다. vllm 이미지가 커서 app/iam 만 볼 때는 차이가 큽니다.
 #   COMPONENTS="eva-app eva-iam" ./scripts/download/download_eva_images.sh
 COMPONENTS="${COMPONENTS:-all}"
-ALL_COMPONENTS="eva-app eva-vision eva-agent eva-agent-init eva-agent-vllm eva-agent-qdrant eva-iam"
+ALL_COMPONENTS="eva-app eva-vision eva-agent eva-agent-init eva-agent-vllm eva-agent-qdrant eva-iam n8n"
 
 # eva-agent는 agent-init·Qdrant·vLLM 릴리스를 함께 배포합니다. 선택 설치에서도
 # 해당 차트가 요구하는 이미지를 빠짐없이 받도록 의존성을 자동으로 포함합니다.
@@ -138,6 +138,9 @@ want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR
 # 목록에 들어오는데, airgap 에서는 쓰이지 않습니다.
 want eva-iam          && helm template eva-iam "$IAM_CHART" \
   --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-iam.yaml"
+if want n8n; then
+  printf 'image: "%s"\n' "${N8N_IMAGE:?missing N8N_IMAGE (set in src/solution/version.yaml)}" > "$RENDER_DIR/n8n.yaml"
+fi
 
 awk '
   /^[[:space:]]*image:[[:space:]]*/ {

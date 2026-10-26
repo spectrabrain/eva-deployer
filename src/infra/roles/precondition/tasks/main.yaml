@@ -18,6 +18,14 @@
       - url: "https://s3.ap-northeast-2.amazonaws.com"
         domain: "s3.ap-northeast-2.amazonaws.com"
     infra_aws_cli_download_url: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+    infra_external_checks_enabled: >-
+      {{ (repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository']
+         and not (airgap_mode | default(false) | bool) }}
+  changed_when: false
+
+- name: Select external connectivity probes for the repository mode
+  ansible.builtin.set_fact:
+    infra_check_urls: "{{ infra_check_urls if infra_external_checks_enabled else [] }}"
   changed_when: false
 
 - name: Validate ingress certificate SANs before apply
@@ -39,7 +47,7 @@
   register: infra_public_ip_cmd
   changed_when: false
   failed_when: false
-  when: not ansible_check_mode
+  when: not ansible_check_mode and infra_external_checks_enabled
 
 - name: Resolve DNS for external service domains
   ansible.builtin.command:
@@ -91,11 +99,12 @@
   register: infra_aws_cli_download_cmd
   changed_when: false
   failed_when: false
-  when: not ansible_check_mode
+  when: not ansible_check_mode and infra_external_checks_enabled
 
 - name: Build AWS CLI download report
   ansible.builtin.set_fact:
     infra_aws_cli_download_report:
+      skipped: "{{ not infra_external_checks_enabled }}"
       url: "{{ infra_aws_cli_download_url }}"
       command: "curl -fL --range 0-1023 --connect-timeout 10 --max-time 30 --output /dev/null {{ infra_aws_cli_download_url }}"
       downloadable: "{{ (infra_aws_cli_download_cmd.rc | default(1) | int) == 0 }}"
@@ -273,9 +282,10 @@
       hostname: "{{ ansible_facts.hostname | default(inventory_hostname) }}"
       local_ip: "{{ ansible_facts.default_ipv4.address | default(ansible_host | default(inventory_hostname)) }}"
       public_outbound:
+        skipped: {{ not infra_external_checks_enabled }}
         success: {{ (infra_public_ip_cmd.rc | default(1)) == 0 and ((infra_public_ip_cmd.stdout | default('') | trim | length) > 0) }}
         public_ip: "{{ (infra_public_ip_cmd.stdout | trim) if ((infra_public_ip_cmd.rc | default(1)) == 0) else '' }}"
-      external_services:
+      external_services: {{ '[]' if not infra_external_checks_enabled else '' }}
       {% for idx in range(infra_check_urls | length) %}
         - url: "{{ infra_check_urls[idx].url }}"
           domain: "{{ infra_check_urls[idx].domain }}"

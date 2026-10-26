@@ -47,6 +47,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+from docker_registry_auth import registry_auth
 import os
 from pathlib import Path
 import re
@@ -337,9 +338,10 @@ def publish(cache: Path, names: list[str], cache_root: Path) -> dict:
                              default="false" if raw_registry.startswith("https://") else "true"))
     insecure = boolean(env("REPOSITORY_INSECURE", "HARBOR_INSECURE", default="false"))
     password = env("REPOSITORY_PASSWORD", "HARBOR_PASSWORD", "HARBOR_ADMIN_PASSWORD")
-    if not password:
+    use_docker_auth = boolean(env("REPOSITORY_USE_DOCKER_AUTH", default="false"))
+    if not password and not use_docker_auth:
         password = local_password(endpoint, plain_http, username)
-    if not password:
+    if not password and not use_docker_auth:
         raise ModelError("Explicit repository credentials are required for this registry")
     oras = env("ORAS_CMD", default=str(cache_root / "tools/oras"))
     report = Path(env("HARBOR_ARTIFACT_MANIFEST", default=str(cache / "harbor-artifacts.txt"))).absolute()
@@ -352,12 +354,18 @@ def publish(cache: Path, names: list[str], cache_root: Path) -> dict:
     checksum = digest(cache / "manifest.json")
     lines = []
     with private_registry_config(cache_root, cache) as config:
+        if use_docker_auth:
+            try:
+                config.write_text(json.dumps(registry_auth(endpoint)))
+            except ValueError:
+                raise ModelError("Matching Docker registry credential is unavailable") from None
         flags = ["--registry-config", str(config)]
         if plain_http:
             flags.append("--plain-http")
         if insecure:
             flags.append("--insecure")
-        run([oras, "login", *flags, endpoint, "--username", username, "--password-stdin"], password=password)
+        if not use_docker_auth:
+            run([oras, "login", *flags, endpoint, "--username", username, "--password-stdin"], password=password)
         for name in names:
             ref = f"{endpoint}/{project}/{name.lower()}:latest"
             # No manifest-exists skip: latest may exist with different contents.

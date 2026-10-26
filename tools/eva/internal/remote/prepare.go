@@ -208,6 +208,13 @@ func (service PrepareService) steps(
 	command := func(step string, environment map[string]string, evidence []string, validate func() error) PreparationStep {
 		return PreparationStep{Name: step, Run: func(ctx context.Context) (StepResult, error) {
 			fmt.Fprintf(streams.Stdout, "[INFO] Step %d/%d %s\n", stepIndex(step), len(DefaultStepNames), step)
+			if service.Preflight.RegistryProtocol != nil {
+				protocol, err := service.Preflight.RegistryProtocol(identity.RepositoryRegistry)
+				if err != nil {
+					return StepResult{}, err
+				}
+				environment["REPOSITORY_PLAIN_HTTP"] = fmt.Sprintf("%t", protocol == "http")
+			}
 			if err := service.Run(ctx, ProcessOptions{Path: backend[step], Env: environment, Dir: filepath.Join(root, "work"), Streams: streams}); err != nil {
 				return StepResult{}, fmt.Errorf("run %s: %w", step, err)
 			}
@@ -236,6 +243,7 @@ func (service PrepareService) steps(
 		return nil, err
 	}
 	base := map[string]string{"EVA_CACHE_ROOT": cacheRoot, "COMPONENTS": "all", "EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor", "EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "PULL_PLATFORM": "linux/amd64", "REPOSITORY_REGISTRY": identity.RepositoryRegistry, "REPOSITORY_PROJECT": identity.RepositoryProject}
+	base["REPOSITORY_USE_DOCKER_AUTH"] = "true"
 	base["EVA_VISION_MODELS"] = strings.Join(visionModels, ",")
 	env := func(values map[string]string) map[string]string {
 		copy := map[string]string{}
@@ -297,7 +305,10 @@ func (service PrepareService) steps(
 		}},
 		command("prepare-offline-assets", awsEnv(nil), []string{"reports/cache-offline-assets.yaml"}, func() error { return ValidateOfflineAssets(cacheRoot) }),
 		command("download-product-images", awsEnv(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"reports/cache-product-images.yaml"}, func() error {
-			return ValidateImageLists(cacheRoot, "images-all.txt", "images-pulled.txt", "images-missing.txt")
+			if err := ValidateImageLists(cacheRoot, "images-all.txt", "images-pulled.txt", "images-missing.txt"); err != nil {
+				return err
+			}
+			return ValidateN8nImage(cacheRoot)
 		}),
 		command("download-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "true"}), []string{"reports/cache-infra-images.yaml"}, func() error {
 			return ValidateImageLists(cacheRoot, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt")

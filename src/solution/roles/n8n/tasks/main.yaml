@@ -1,4 +1,11 @@
 ---
+- name: Resolve n8n target address
+  ansible.builtin.set_fact:
+    n8n_target_address: >-
+      {{ ansible_default_ipv4.address | default(ansible_host | default(inventory_hostname))
+         if (ansible_connection | default('ssh')) == 'local'
+         else ansible_host | default(inventory_hostname) }}
+
 - name: Set n8n defaults
   ansible.builtin.set_fact:
     repository_mode: "{{ repository_mode | default('online_repository') }}"
@@ -12,8 +19,8 @@
       }}
     airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
     n8n_enabled: "{{ n8n_enabled | default(true) | bool }}"
-    n8n_pinned_image: "{{ n8n_pinned_image | default(deploy_versions.n8n_image) }}"
-    n8n_image_tag: "{{ n8n_image_tag | default((n8n_pinned_image | default(deploy_versions.n8n_image)) | regex_replace('^.*:', '')) }}"
+    n8n_pinned_image: "{{ n8n_pinned_image | default(n8n_image) }}"
+    n8n_image_tag: "{{ n8n_image_tag | default((n8n_pinned_image | default(n8n_image)) | regex_replace('^.*:', '')) }}"
     n8n_namespace: "{{ n8n_namespace | default('n8n') }}"
     n8n_app_name: "{{ n8n_app_name | default('n8n') }}"
     n8n_replicas: "{{ n8n_replicas | default(1) | int }}"
@@ -24,8 +31,8 @@
     n8n_storage_class_name: "{{ n8n_storage_class_name | default('local-path') }}"
     n8n_timezone: "{{ n8n_timezone | default('Asia/Seoul') }}"
     n8n_protocol: "{{ n8n_protocol | default('http') }}"
-    n8n_public_host: "{{ n8n_public_host | default(ansible_host | default(inventory_hostname)) }}"
-    n8n_api_host: "{{ n8n_api_host | default(n8n_public_host | default(ansible_host | default(inventory_hostname))) }}"
+    n8n_public_host: "{{ n8n_public_host | default(n8n_target_address) }}"
+    n8n_api_host: "{{ n8n_api_host | default(n8n_public_host | default(n8n_target_address)) }}"
     n8n_webhook_path: "{{ n8n_webhook_path | default('/webhook/eva-alert') }}"
     n8n_workflow_webhook_node_path: "{{ (n8n_webhook_path | default('/webhook/eva-alert')) | regex_replace('^/webhook/', '') | regex_replace('^/', '') }}"
     n8n_workflow_name: "{{ n8n_workflow_name | default('EVA Alert Workflow') }}"
@@ -65,7 +72,7 @@
   ansible.builtin.set_fact:
     n8n_deployment_image: >-
       {{
-        n8n_image | default(
+        n8n_deployment_image | default(
           (repository_mode in ['online_repository', 'cloud_repository'])
           | ternary(n8n_pinned_image, repository_registry ~ '/' ~ repository_project ~ '/n8n:' ~ n8n_image_tag)
         )
@@ -102,6 +109,39 @@
     - n8n_enabled
     - not ansible_check_mode
 
+- name: Prepare Harbor access for n8n on existing k3s
+  ansible.builtin.include_role:
+    name: eva_k3s_registry
+  vars:
+    eva_registry_namespace: "{{ n8n_namespace }}"
+    eva_registry_secret: "{{ n8n_image_pull_secret_name | default('eva-harbor-pull') }}"
+  when:
+    - n8n_enabled
+    - repository_mode in ['remote_repository', 'local_repository']
+    - not ansible_check_mode
+
+- name: Check n8n namespace image pull Secret
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ n8n_namespace }}", get, secret, "{{ n8n_image_pull_secret_name | default('eva-harbor-pull') }}", --ignore-not-found, -o, name]
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: n8n_pull_secret_check
+  changed_when: false
+  when:
+    - n8n_enabled
+    - not ansible_check_mode
+
+- name: Resolve n8n image pull Secret reference
+  ansible.builtin.set_fact:
+    n8n_image_pull_secrets: "{{ [{'name': n8n_image_pull_secret_name | default('eva-harbor-pull')}] if (n8n_pull_secret_check.stdout | default('') | length > 0) else [] }}"
+
+- name: Verify n8n image can be pulled before changing the workload
+  ansible.builtin.include_tasks: verify_image.yaml
+  when:
+    - n8n_enabled
+    - repository_mode in ['remote_repository', 'local_repository']
+    - not ansible_check_mode
+
 - name: Render n8n k3s manifest
   ansible.builtin.copy:
     dest: /tmp/n8n-k3s.yaml
@@ -127,6 +167,8 @@
         namespace: {{ n8n_namespace }}
       spec:
         replicas: {{ n8n_replicas }}
+        strategy:
+          type: Recreate
         selector:
           matchLabels:
             app: {{ n8n_app_name }}
@@ -135,23 +177,44 @@
             labels:
               app: {{ n8n_app_name }}
           spec:
+            securityContext:
+              runAsUser: 1000
+              runAsGroup: 1000
+              fsGroup: 1000
+            imagePullSecrets: {{ n8n_image_pull_secrets | to_json }}
             containers:
               - name: {{ n8n_app_name }}
                 image: {{ n8n_deployment_image }}
                 imagePullPolicy: IfNotPresent
                 ports:
-                  - containerPort: 5678
+                  - name: http
+                    containerPort: 5678
+                startupProbe:
+                  httpGet: {path: /healthz, port: http}
+                  periodSeconds: 10
+                  failureThreshold: 60
+                readinessProbe:
+                  httpGet: {path: /healthz/readiness, port: http}
+                  periodSeconds: 10
+                livenessProbe:
+                  httpGet: {path: /healthz, port: http}
+                  periodSeconds: 10
+                  failureThreshold: 6
                 env:
                   - name: TZ
+                    value: "{{ n8n_timezone }}"
+                  - name: GENERIC_TIMEZONE
                     value: "{{ n8n_timezone }}"
                   - name: N8N_PROTOCOL
                     value: "{{ n8n_protocol }}"
                   - name: N8N_HOST
-                    value: "0.0.0.0"
+                    value: "{{ n8n_public_host }}"
                   - name: N8N_PORT
                     value: "5678"
                   - name: N8N_SECURE_COOKIE
-                    value: "false"
+                    value: "{{ (n8n_protocol == 'https') | ternary('true', 'false') }}"
+                  - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
+                    value: "true"
                   - name: N8N_EDITOR_BASE_URL
                     value: "{{ n8n_protocol }}://{{ n8n_public_host }}:{{ n8n_node_port }}"
                   - name: WEBHOOK_URL

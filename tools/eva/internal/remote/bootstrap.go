@@ -18,6 +18,7 @@ import (
 
 type BootstrapOptions struct {
 	Registry, Project                    string
+	Protocol                             string
 	Yes, ExternalHarbor, ReplaceRegistry bool
 	ReceiptPath                          string
 	Streams                              Streams
@@ -33,6 +34,7 @@ type BootstrapService struct {
 	Login                   func(context.Context, string, string, string) error
 	Credential              func(string) bool
 	Password                func(HarborReceipt) (string, error)
+	ProbeExistingHarbor     func(context.Context, string, string) (bool, error)
 }
 
 func NewBootstrapService() BootstrapService {
@@ -47,6 +49,7 @@ func NewBootstrapService() BootstrapService {
 		Login:                   dockerLogin,
 		Credential:              dockerCredentialPresent,
 		Password:                managedHarborPassword,
+		ProbeExistingHarbor:     probeExistingHarbor,
 	}
 }
 func ensureManagedRuntime(context.Context) error {
@@ -98,11 +101,11 @@ func checkManagedHarbor(ctx context.Context, receipt HarborReceipt) error {
 		return errors.New("Docker daemon is unavailable")
 	}
 	preflight := NewPreflight()
-	if err := preflight.checkHarbor(ctx, receipt.Registry); err != nil {
+	if err := preflight.checkHarborProtocol(ctx, receipt.Registry, receipt.Protocol); err != nil {
 		return err
 	}
 	if receipt.ManagedBy != "eva" {
-		return nil
+		return checkHarborHealth(ctx, &http.Client{Timeout: 8 * time.Second}, receipt.Protocol+"://"+receipt.Registry)
 	}
 	client := &http.Client{Timeout: 8 * time.Second}
 	ping, err := http.NewRequestWithContext(ctx, http.MethodGet, receipt.Protocol+"://"+receipt.Registry+"/api/v2.0/ping", nil)
@@ -236,6 +239,9 @@ func (s BootstrapService) prepareCredential(ctx context.Context, receipt HarborR
 	return nil
 }
 func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOptions) (HarborReceipt, error) {
+	if options.Protocol != "" && options.Protocol != "http" && options.Protocol != "https" {
+		return HarborReceipt{}, errors.New("--protocol must be http or https")
+	}
 	if options.Project == "" {
 		options.Project = defaultRemoteProject
 	}
@@ -266,6 +272,15 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 		if !options.ReplaceRegistry {
 			if s.CheckHarbor == nil {
 				return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")
+			}
+			if options.Protocol != "" && options.Protocol != existing.Protocol && !options.ExternalHarbor {
+				return HarborReceipt{}, errors.New("protocol differs from Harbor receipt; use --external-harbor to revalidate an externally managed endpoint")
+			}
+			if options.ExternalHarbor {
+				existing.ManagedBy, existing.HarborVersion = "external", "external"
+				if options.Protocol != "" {
+					existing.Protocol = options.Protocol
+				}
 			}
 			if existing.ManagedBy == "eva" &&
 				existing.Protocol == "http" &&
@@ -311,6 +326,11 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 			if err := s.CheckHarbor(ctx, existing); err != nil {
 				return HarborReceipt{}, fmt.Errorf("validate managed Harbor: %w", err)
 			}
+			if options.ExternalHarbor {
+				if err := WriteHarborReceipt(options.ReceiptPath, existing); err != nil {
+					return HarborReceipt{}, err
+				}
+			}
 			return existing, nil
 		}
 	} else if !errors.Is(loadErr, os.ErrNotExist) {
@@ -327,14 +347,31 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 	if _, err := ValidateProject(options.Project); err != nil {
 		return HarborReceipt{}, err
 	}
+	if options.Protocol == "" {
+		options.Protocol = defaultRegistryProtocol(options.Registry)
+	}
+	// Detect before Docker transport changes or Compose installation. A k3s
+	// NodePort does not appear in docker ps or require a listening host socket.
+	if !options.ExternalHarbor && s.ProbeExistingHarbor != nil {
+		present, err := s.ProbeExistingHarbor(ctx, options.Registry, options.Protocol)
+		if err != nil {
+			return HarborReceipt{}, fmt.Errorf("inspect existing Harbor without modifying it: %w", err)
+		}
+		options.ExternalHarbor = present
+	}
+	if !options.ExternalHarbor && options.Protocol != "http" {
+		return HarborReceipt{}, errors.New("new managed Harbor uses HTTP; configure an existing HTTPS Harbor with --external-harbor")
+	}
 	if s.EnsureRuntime == nil || s.EnsureDocker == nil || s.EnsureHarbor == nil || s.CheckHarbor == nil {
 		return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")
 	}
 	if err := s.EnsureRuntime(ctx); err != nil {
 		return HarborReceipt{}, fmt.Errorf("prepare managed Runtime: %w", err)
 	}
-	if err := s.EnsureDocker(ctx); err != nil {
-		return HarborReceipt{}, fmt.Errorf("prepare Docker: %w", err)
+	if !options.ExternalHarbor {
+		if err := s.EnsureDocker(ctx); err != nil {
+			return HarborReceipt{}, fmt.Errorf("prepare Docker: %w", err)
+		}
 	}
 	if !options.ExternalHarbor &&
 		s.EnsureRegistryTransport != nil {
@@ -351,6 +388,9 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 	receipt, err := s.EnsureHarbor(ctx, options.Registry, options.Project, options.ExternalHarbor)
 	if err != nil {
 		return HarborReceipt{}, fmt.Errorf("prepare Harbor: %w", err)
+	}
+	if options.ExternalHarbor {
+		receipt.Protocol = options.Protocol
 	}
 	if receipt.Registry != options.Registry || receipt.Project != options.Project {
 		return HarborReceipt{}, errors.New("Harbor result does not match requested registry or project")

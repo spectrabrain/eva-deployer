@@ -14,11 +14,12 @@ Main bootstrap과 Target 설치는 Docker, k3s, NVIDIA runtime 및 호스트 영
 | [Main] 저장 공간 | image, model, package 및 Harbor 데이터를 위한 충분한 공간 |
 | [Main] Harbor | Target node와 Pod가 접근 가능한 `host:port` endpoint |
 | [Target] OS/platform | Ubuntu 24.04, `linux/amd64` |
-| [Target] GPU | 지원 NVIDIA GPU, driver 및 `nvidia-smi` |
+| [Target] GPU | GPU를 사용하는 구성에서는 지원 NVIDIA GPU, driver 및 `nvidia-smi` |
 | [Target] 네트워크 | Main Harbor 및 Main SSH 경로만 사용; 외부 인터넷은 사용하지 않음 |
 | 권한 | Main과 Target에서 `sudo eva ...`를 실행할 수 있는 사용자 |
 
-Main은 EVA Managed Runtime, Docker/Compose, Harbor와 private `eva` project(`public: false`)를 준비합니다.
+Main은 EVA Managed Runtime, 이미지 게시용 Docker, Harbor와 private `eva` project(`public: false`)를 준비합니다.
+기존 k3s 또는 별도 방식으로 운영하는 Harbor도 재사용할 수 있습니다.
 Target에는 Main의 Runtime, package/model payload 및 Harbor image를 사용해 EVA를
 설치합니다. Target에서 AWS, S3, ECR, Docker Hub 또는 Hugging Face로 fallback하지
 않습니다.
@@ -68,7 +69,8 @@ Main Harbor endpoint에는 URL scheme을 넣지 않으며 `localhost` 또는 loo
 Managed Harbor 인증은 승인된 Secret 관리 절차로 준비합니다. `EVA_HARBOR_ADMIN_PASSWORD`가
 비어 있지 않으면 그 값을 우선합니다. 비밀번호 CLI option은 없고, receipt와 로그에 비밀번호를
 기록하지 않습니다. 공개 기본 비밀번호로 운영하지 않습니다.
-Main 게시는 기존 bootstrap의 Harbor 인증을 재사용하며 별도 게시 credential 준비 단계는 없습니다.
+새 Managed Harbor 게시는 bootstrap의 인증을 재사용합니다. 기존 외부 Harbor를 재사용할 때는
+승인된 게시 계정으로 Main의 root Docker 인증을 먼저 준비합니다. Qdrant·Vision 모델 게시도 같은 인증을 사용합니다.
 credential을 Release·payload에 넣지 않습니다.
 
 Remote preparation에는 Main 서버에서 사용할 AWS credential이 필요합니다.
@@ -103,8 +105,41 @@ sudo eva remote bootstrap \
 receipt를 기록합니다. 별도의 `docker login`은 정상 절차에 필요하지 않습니다. credential
 오류가 발생하면 수동 login 대신 `sudo eva remote bootstrap --yes`를 다시 실행합니다.
 Target의 k3s, GPU, NFS 또는 EVA component를
-Main에 설치하지 않습니다. 이미 승인된 외부 Harbor를 쓸 때만 advanced
-`--external-harbor` option을 사용합니다.
+Main에 설치하지 않습니다.
+
+### 기존 Harbor 재사용
+
+k3s에 설치된 Harbor는 `docker ps`에 나타나지 않으며, NodePort는 `ss`의 listening
+목록에 없을 수 있습니다. Harbor 주소에서 API를 조회합니다.
+
+```bash
+curl --connect-timeout 5 --max-time 10 -i http://harbor.example.com:32080/v2/
+curl --connect-timeout 5 --max-time 10 -fsS http://harbor.example.com:32080/api/v2.0/health
+```
+
+`/v2/`의 `401 Unauthorized`는 인증이 필요한 정상 registry 응답입니다.
+health의 전체 상태와 core·registry를 포함한 component 상태가 `healthy`인지 확인합니다.
+정지된 과거 Compose 컨테이너를 시작할 필요가 없습니다.
+
+기존 Harbor에 private `eva` project와 이미지·OCI artifact 게시 권한을 준비한 뒤,
+승인된 계정으로 login합니다. 비밀번호는 대화형 입력으로 받습니다.
+HTTP Harbor는 Main Docker에서 해당 registry의 HTTP 연결이 이미 허용되어 있어야 합니다.
+
+```bash
+sudo docker login harbor.example.com:32080
+sudo eva remote bootstrap \
+  --registry harbor.example.com:32080 \
+  --external-harbor \
+  --protocol http \
+  --yes
+```
+
+이 경로는 기존 Harbor의 데이터·설정과 Docker 서비스를 변경하지 않습니다.
+HTTPS Harbor는 `--protocol https`를 사용하고 Main과 Target에 신뢰할 수 있는 CA를 준비합니다.
+receipt가 없는 정상 Harbor는 자동으로 기존 Harbor로 인식합니다. 이미 Managed receipt가
+기록된 주소를 외부 관리로 전환할 때도 `--external-harbor`를 명시합니다.
+기존 endpoint의 상태나 프로토콜을 확인하지 못하면 설치를 중단하고 기존 서비스를 보존합니다.
+외부 Harbor 인증 만료 시에는 같은 `sudo docker login`으로 인증을 갱신한 뒤 bootstrap을 다시 실행합니다.
 
 ## 5. [Main] Remote 자산 준비
 
@@ -116,7 +151,7 @@ sudo eva remote prepare
 ```
 
 성공하면 Remote Runtime과 Target의 패키지·Chart·helper·Agent 모델 자산이 준비되고,
-제품·Infra 이미지와 Qdrant snapshot은 Main Harbor에 게시됩니다.
+제품 이미지(n8n 포함)·Infra 이미지와 Qdrant snapshot은 Main Harbor에 게시됩니다.
 
 ### Vision 모델 공급
 
@@ -268,6 +303,8 @@ targets:
       ansible_user: eva
       ansible_become: true
       ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호
+      repository_username: "<HARBOR_PULL_USERNAME>"
+      repository_password: "<HARBOR_PULL_PASSWORD>" # Target에 기존 registry 인증이 없을 때 필요
     values:
       iam:
         config:
@@ -326,9 +363,66 @@ Secret이며 커밋하지 않습니다. Deployer가 내부 Workspace를
 `/var/lib/eva/workspaces/<site-id>/<content-sha256>/`에 생성하므로 폴더와 여러 파일을
 직접 만들 필요가 없습니다. 디렉터리 `0700`, 파일 `0600`이며 기존 `--workspace`도 지원합니다.
 
+### 기존 k3s에 n8n만 설치
+
+단일 노드 Target에 정상인 k3s와 `local-path` StorageClass가 있으면 `infra: false`로
+n8n만 설치할 수 있습니다. Main에서 Remote 자산 준비·검증·게시를 먼저 완료합니다.
+Target에서 외부 인터넷용 `eva runtime bootstrap`을 실행하지 않습니다.
+
+```yaml
+schema_version: v1
+site:
+  id: automation-a
+repository:
+  mode: remote
+  registry: harbor.example.com:32080
+  project: eva
+components:
+  infra: false
+  iam: false
+  agent: false
+  vision: false
+  app: false
+  n8n: true
+targets:
+  server-a:
+    ansible:
+      ansible_connection: local
+      ansible_user: eva
+      ansible_become: true
+      ansible_become_password: "<SUDO_PASSWORD>"
+      n8n_public_host: "<TARGET_IP>"
+      n8n_node_port: 30678
+      repository_protocol: http
+      repository_username: "<HARBOR_PULL_USERNAME>"
+      repository_password: "<HARBOR_PULL_PASSWORD>"
+```
+
+n8n 설정은 `targets.server-a.ansible`에 둡니다. 기존 Target `registries.yaml`에
+해당 Harbor 인증이 있거나 n8n namespace에 사용할 pull Secret이 있으면 계정 입력을
+생략할 수 있습니다. Secret 이름을 지정할 때는 `n8n_image_pull_secret_name`을 사용합니다.
+기존 Secret은 덮어쓰지 않으므로 인증 만료 시 운영자가 갱신합니다.
+
+설치는 Harbor의 n8n 이미지를 선택하고 해당 registry의 HTTP 연결 설정만 추가합니다.
+기존 registry·CA 설정을 보존하며, n8n 단독 설치에서는 k3s를 재시작하지 않습니다.
+실행 중인 containerd의 registry `config_path`를 사용할 수 없는 구버전·custom 설정은
+먼저 운영자가 k3s registry 설정을 준비해야 합니다.
+임시 Pod로 실제 이미지 pull을 확인한 뒤 n8n Deployment와 PVC를 적용합니다.
+
+```bash
+sudo eva install --config /home/eva/eva-install.yaml --yes
+sudo eva exec kubectl -n n8n get pods,svc,pvc
+```
+
+Pod `1/1 Running`, PVC `Bound`를 확인하고 `http://<TARGET_IP>:30678/`에 접속합니다.
+기본 데이터 저장소는 `n8n-data` PVC이며, 재설치·업그레이드 시 삭제하지 않습니다.
+수동 manifest로 설치한 n8n은 배포 이름·namespace·PVC를 맞추고 기존 owner 계정 입력도
+확인한 뒤 Tool 설치로 전환합니다. EVA Alert Workflow는 Tool의 n8n 설치 단계에서 구성합니다.
+
 ## 9. [Target] GPU 사전 조건 확인
 
-설치 전에 NVIDIA driver와 감지된 GPU/MIG 상태를 확인합니다.
+GPU를 사용하는 Agent/Vision 또는 GPU Infra를 설치할 때 NVIDIA driver와 감지된 GPU/MIG 상태를 확인합니다.
+n8n 단독 설치에는 GPU 점검이 필요하지 않습니다.
 
 ```bash
 sudo eva preflight gpu

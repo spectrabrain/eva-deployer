@@ -598,7 +598,7 @@ func runRemoteTargetVerify(name string) error {
 }
 
 func remoteBootstrapUsage() {
-	fmt.Println("Usage: eva remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
+	fmt.Println("Usage: eva remote bootstrap [--registry HOST[:PORT]] --yes [--external-harbor] [--protocol http|https] [--replace-registry]")
 	fmt.Println("")
 	fmt.Println("Configures the Remote Main Preparation Plane.")
 }
@@ -614,6 +614,7 @@ func runRemoteBootstrap(args []string) error {
 	registry := flags.String("registry", "", "repository registry")
 	yes := flags.Bool("yes", false, "confirm Main Preparation Plane changes")
 	external := flags.Bool("external-harbor", false, "use an existing external Harbor")
+	protocol := flags.String("protocol", "", "Harbor protocol: http or https")
 	replaceRegistry := flags.Bool("replace-registry", false, "replace the configured registry after validation")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -621,7 +622,7 @@ func runRemoteBootstrap(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("remote bootstrap does not accept a Release path")
 	}
-	receipt, err := newRemoteBootstrapService().Bootstrap(context.Background(), remote.BootstrapOptions{Registry: *registry, Yes: *yes, ExternalHarbor: *external, ReplaceRegistry: *replaceRegistry, ReceiptPath: defaultRemoteBootstrapReceiptPath, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
+	receipt, err := newRemoteBootstrapService().Bootstrap(context.Background(), remote.BootstrapOptions{Registry: *registry, Protocol: *protocol, Yes: *yes, ExternalHarbor: *external, ReplaceRegistry: *replaceRegistry, ReceiptPath: defaultRemoteBootstrapReceiptPath, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
 	if err != nil {
 		return displayRemoteContextError(err)
 	}

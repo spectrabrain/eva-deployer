@@ -31,7 +31,7 @@ var requiredPreparationTools = []toolProbe{
 var DefaultExternalSources = []string{
 	"s3.ap-northeast-2.amazonaws.com:443", "339713051385.dkr.ecr.ap-northeast-2.amazonaws.com:443",
 	"211722900905.dkr.ecr.ap-northeast-2.amazonaws.com:443",
-	"registry-1.docker.io:443", "registry.k8s.io:443", "github.com:443", "get.helm.sh:443",
+	"registry-1.docker.io:443", "docker.n8n.io:443", "registry.k8s.io:443", "github.com:443", "get.helm.sh:443",
 	"download.docker.com:443", "nvidia.github.io:443", "pypi.org:443",
 }
 
@@ -56,18 +56,19 @@ type CommandProbe func(context.Context, string, ...string) error
 type VersionProbe func(context.Context, string, ...string) (string, error)
 type DockerProbe func(context.Context) (architecture, dataRoot string, err error)
 type Preflight struct {
-	LookPath        func(string) (string, error)
-	Run             CommandProbe
-	Version         VersionProbe
-	Dial            func(context.Context, string, string) (net.Conn, error)
-	HTTP            func(*http.Request) (*http.Response, error)
-	Credential      func(string) bool
-	Docker          DockerProbe
-	PlaneReady      func(string, string) error
-	DockerRoot      string
-	Timeout         time.Duration
-	ExternalSources []string
-	AWSValidate     func(context.Context, AWSCredential) error
+	LookPath         func(string) (string, error)
+	Run              CommandProbe
+	Version          VersionProbe
+	Dial             func(context.Context, string, string) (net.Conn, error)
+	HTTP             func(*http.Request) (*http.Response, error)
+	Credential       func(string) bool
+	Docker           DockerProbe
+	PlaneReady       func(string, string) error
+	RegistryProtocol func(string) (string, error)
+	DockerRoot       string
+	Timeout          time.Duration
+	ExternalSources  []string
+	AWSValidate      func(context.Context, AWSCredential) error
 }
 
 func NewPreflight() Preflight {
@@ -89,6 +90,13 @@ func NewPreflight() Preflight {
 			return errors.New("Harbor receipt does not match requested registry or project")
 		}
 		return nil
+	}
+	p.RegistryProtocol = func(registry string) (string, error) {
+		receipt, err := LoadHarborReceipt(DefaultHarborReceiptPath)
+		if err != nil || receipt.Registry != registry {
+			return "", errors.New("matching Harbor receipt is unavailable")
+		}
+		return receipt.Protocol, nil
 	}
 	p.Timeout = 8 * time.Second
 	p.ExternalSources = append([]string(nil), DefaultExternalSources...)
@@ -195,7 +203,29 @@ func (p Preflight) checkAWS(ctx context.Context, credential AWSCredential) error
 	return p.AWSValidate(c, credential)
 }
 func (p Preflight) checkHarbor(ctx context.Context, registry string) error {
+	protocol := defaultRegistryProtocol(registry)
+	if p.RegistryProtocol != nil {
+		var err error
+		protocol, err = p.RegistryProtocol(registry)
+		if err != nil {
+			return err
+		}
+	}
+	return p.checkHarborProtocol(ctx, registry, protocol)
+}
+
+func defaultRegistryProtocol(registry string) string {
+	if strings.HasSuffix(registry, ":32080") {
+		return "http"
+	}
+	return "https"
+}
+
+func (p Preflight) checkHarborProtocol(ctx context.Context, registry, scheme string) error {
 	host, port := registry, "443"
+	if scheme == "http" {
+		port = "80"
+	}
 	if value, portValue, found := strings.Cut(registry, ":"); found {
 		host, port = value, portValue
 	}
@@ -208,10 +238,6 @@ func (p Preflight) checkHarbor(ctx context.Context, registry string) error {
 	conn.Close()
 	if p.Credential == nil || !p.Credential(registry) {
 		return errors.New("Docker credential for registry is unavailable")
-	}
-	scheme := "https"
-	if port == "32080" {
-		scheme = "http"
 	}
 	req, err := http.NewRequestWithContext(c, http.MethodGet, scheme+"://"+registry+"/v2/", nil)
 	if err != nil {
@@ -291,7 +317,7 @@ func dockerCredentialPresent(registry string) bool {
 	var config struct {
 		Auths map[string]json.RawMessage `json:"auths"`
 	}
-	return json.Unmarshal(contents, &config) == nil && (config.Auths[registry] != nil || config.Auths["https://"+registry] != nil)
+	return json.Unmarshal(contents, &config) == nil && (config.Auths[registry] != nil || config.Auths["https://"+registry] != nil || config.Auths["http://"+registry] != nil)
 }
 func checkStorage(releaseRoot, root string) error {
 	cleanRoot, err := filepath.Abs(root)

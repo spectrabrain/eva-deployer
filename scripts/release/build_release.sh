@@ -127,6 +127,7 @@ remote_backend_paths=(
   scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
   scripts/lib/vision_models.py
+  scripts/lib/docker_registry_auth.py
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
   scripts/publish/push_vision_models_to_harbor.sh

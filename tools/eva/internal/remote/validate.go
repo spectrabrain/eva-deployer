@@ -115,6 +115,9 @@ func validatePreparationAssets(root, cacheRoot string, identity PreparationIdent
 	if err := ValidateImageLists(cacheRoot, "images-all.txt", "images-pulled.txt", "images-missing.txt"); err != nil {
 		return fmt.Errorf("product images: %w", err)
 	}
+	if err := ValidateN8nImage(cacheRoot); err != nil {
+		return err
+	}
 	if err := ValidateImageLists(cacheRoot, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt"); err != nil {
 		return fmt.Errorf("infra images: %w", err)
 	}
@@ -134,6 +137,34 @@ func validatePreparationAssets(root, cacheRoot string, identity PreparationIdent
 		return err
 	}
 	return ValidateVisionArtifacts(cacheRoot, root, identity.RepositoryRegistry, identity.RepositoryProject)
+}
+
+// n8n has no Helm chart, so its rendered image declaration must also be
+// present in the downloaded product list before Remote preparation is ready.
+func ValidateN8nImage(cacheRoot string) error {
+	if err := nonEmptyRegular(cacheRoot, "images/rendered/n8n.yaml"); err != nil {
+		return errors.New("n8n image preparation evidence is unavailable")
+	}
+	contents, err := os.ReadFile(filepath.Join(cacheRoot, "images/rendered/n8n.yaml"))
+	if err != nil {
+		return errors.New("n8n image preparation evidence is unavailable")
+	}
+	var rendered struct {
+		Image string `yaml:"image"`
+	}
+	if yaml.Unmarshal(contents, &rendered) != nil || !imageReferencePattern.MatchString(rendered.Image) || !strings.Contains(rendered.Image, "/n8n:") {
+		return errors.New("n8n image preparation evidence is invalid")
+	}
+	images, err := os.ReadFile(filepath.Join(cacheRoot, "images/images-pulled.txt"))
+	if err != nil {
+		return errors.New("n8n product image list is unavailable")
+	}
+	for _, image := range strings.Fields(string(images)) {
+		if image == rendered.Image {
+			return nil
+		}
+	}
+	return errors.New("pinned n8n image is missing from prepared product images")
 }
 
 func validateCompletedManifest(manifest Manifest, identity PreparationIdentity) error {

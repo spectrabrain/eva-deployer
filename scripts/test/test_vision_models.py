@@ -2,6 +2,7 @@
 """Offline contract tests: tiny local models and fake AWS/ORAS, no network."""
 
 import hashlib
+import base64
 import json
 import os
 from pathlib import Path
@@ -82,7 +83,13 @@ elif args[0] == "push":
     assert not Path(name).is_absolute() and "/" not in name and ":" not in name
     assert (Path.cwd() / name).is_dir()
     assert ref.endswith("/" + name.lower() + ":latest")
-    assert json.loads(config.read_text())["auths"]["private"] == os.environ["FAKE_EXPECTED_PASSWORD"]
+    auths = json.loads(config.read_text())["auths"]
+    if os.environ.get("REPOSITORY_USE_DOCKER_AUTH") == "true":
+        import base64
+        assert set(auths) == {"harbor.test:32080"}
+        assert base64.b64decode(auths["harbor.test:32080"]["auth"]).decode() == "pull-user:" + os.environ["FAKE_EXPECTED_PASSWORD"]
+    else:
+        assert auths["private"] == os.environ["FAKE_EXPECTED_PASSWORD"]
 else:
     raise AssertionError("No latest existence probes or project creation allowed")
 with open(os.environ["FAKE_ORAS_LOG"], "a") as stream:
@@ -417,6 +424,22 @@ class VisionModelsTests(unittest.TestCase):
         self.call("publish", ok=False, updates={"REPOSITORY_REGISTRY": "harbor.test:443"})
         self.assertFalse(self.oras_log.exists())
         self.call("publish")
+        self.assert_clean_credentials()
+
+    def test_remote_external_harbor_reuses_docker_auth_and_ignores_stale_compose(self):
+        self.prepare("Owl-v2")
+        docker = self.root / "docker"
+        docker.mkdir()
+        config = {"auths": {"harbor.test:32080": {"auth": base64.b64encode(("pull-user:" + SECRET).encode()).decode()},
+                            "other.test": {"auth": "unrelated-credential"}}}
+        (docker / "config.json").write_text(json.dumps(config))
+        before = (docker / "config.json").read_bytes()
+        harbor = self.root / "old-harbor.yml"
+        harbor.write_text('hostname: harbor.test\nhttp:\n  port: 32080\nharbor_admin_password: stale-password\n')
+        self.call("publish", updates={"REPOSITORY_PASSWORD": None, "REPOSITORY_USE_DOCKER_AUTH": "true",
+                                      "DOCKER_CONFIG": str(docker), "LOCAL_HARBOR_YML": str(harbor)})
+        self.assertEqual(before, (docker / "config.json").read_bytes())
+        self.assertTrue(all(entry["args"][0] == "push" for entry in self.calls(self.oras_log)))
         self.assert_clean_credentials()
 
     def test_failed_push_preserves_report_and_removes_private_config(self):

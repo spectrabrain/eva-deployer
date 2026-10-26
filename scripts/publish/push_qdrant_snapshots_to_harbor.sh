@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set +x
 set -euo pipefail
 
 # Store each Qdrant snapshot as a single-file OCI artifact in Harbor.  The
@@ -35,7 +36,7 @@ REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY#http://}"
 REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY#https://}"
 REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY%/}"
 
-if [[ -z "$REPOSITORY_PASSWORD" ]]; then
+if [[ -z "$REPOSITORY_PASSWORD" && "${REPOSITORY_USE_DOCKER_AUTH:-false}" != "true" ]]; then
   # Only use the local installation's password for the endpoint configured in
   # its harbor.yml. This preserves automatic Local Harbor seeding without
   # sending that password to an unrelated remote registry.
@@ -64,7 +65,7 @@ if hostname and password and registry == f'{hostname}:32080':
 PY
 )"
 fi
-[[ -n "$REPOSITORY_PASSWORD" ]] || { echo "[ERROR] REPOSITORY_PASSWORD or HARBOR_ADMIN_PASSWORD is required" >&2; exit 1; }
+[[ -n "$REPOSITORY_PASSWORD" || "${REPOSITORY_USE_DOCKER_AUTH:-false}" == "true" ]] || { echo "[ERROR] REPOSITORY_PASSWORD or HARBOR_ADMIN_PASSWORD is required" >&2; exit 1; }
 
 snapshot_specs="$(awk '
   BEGIN { invalue = 0; keyindent = -1 }
@@ -84,9 +85,19 @@ snapshot_specs="$(awk '
 # surprising and makes airgap verification harder to reproduce.
 ORAS_REGISTRY_CONFIG="$(mktemp "${TMPDIR:-/tmp}/eva-oras-registry.XXXXXX")"
 trap 'rm -f "$ORAS_REGISTRY_CONFIG"' EXIT
-printf '%s' "$REPOSITORY_PASSWORD" | "$ORAS_CMD" login --plain-http "$REPOSITORY_REGISTRY" \
-  --username "$REPOSITORY_USERNAME" --password-stdin \
-  --registry-config "$ORAS_REGISTRY_CONFIG"
+oras_transport=()
+case "${REPOSITORY_PLAIN_HTTP:-true}" in
+  true) oras_transport+=(--plain-http) ;;
+  false) ;;
+  *) echo "[ERROR] REPOSITORY_PLAIN_HTTP must be true or false" >&2; exit 1 ;;
+esac
+if [[ "${REPOSITORY_USE_DOCKER_AUTH:-false}" == "true" ]]; then
+  python3 "$REPO_ROOT/scripts/lib/docker_registry_auth.py" "$REPOSITORY_REGISTRY" > "$ORAS_REGISTRY_CONFIG"
+else
+  printf '%s' "$REPOSITORY_PASSWORD" | "$ORAS_CMD" login "${oras_transport[@]}" "$REPOSITORY_REGISTRY" \
+    --username "$REPOSITORY_USERNAME" --password-stdin \
+    --registry-config "$ORAS_REGISTRY_CONFIG"
+fi
 
 # The deployer bundle may be mounted read-only while testing an air-gapped VM.
 # The manifest is only a local report, so use /tmp when the snapshot bundle is
@@ -102,7 +113,7 @@ while IFS='|' read -r artifact_tag snapshot_file logical_collection _ignored; do
   snapshot_path="$SNAPSHOT_DIR/$snapshot_file"
   [[ -s "$snapshot_path" ]] || { echo "[ERROR] snapshot missing or empty: $snapshot_path" >&2; exit 1; }
   artifact_ref="$REPOSITORY_REGISTRY/$REPOSITORY_PROJECT/qdrant-snapshots:$artifact_tag"
-  if "$ORAS_CMD" manifest fetch --plain-http \
+  if "$ORAS_CMD" manifest fetch "${oras_transport[@]}" \
     --registry-config "$ORAS_REGISTRY_CONFIG" "$artifact_ref" >/dev/null 2>&1; then
     echo "[skip] $artifact_ref already exists"
   else
@@ -112,7 +123,7 @@ while IFS='|' read -r artifact_tag snapshot_file logical_collection _ignored; do
     # title as path traversal inside the pod.
     (
       cd "$SNAPSHOT_DIR"
-      "$ORAS_CMD" push --plain-http --registry-config "$ORAS_REGISTRY_CONFIG" "$artifact_ref" \
+      "$ORAS_CMD" push "${oras_transport[@]}" --registry-config "$ORAS_REGISTRY_CONFIG" "$artifact_ref" \
         "$snapshot_file:application/vnd.mellerikat.qdrant.snapshot.v1"
     )
   fi

@@ -1,4 +1,4 @@
-# v3.3 게시 App 3.3.0-beta.3 / IAM 3.3.0-beta.1 기준.
+# v3.3 게시 App 3.3.0-beta.9 / IAM 3.3.0-beta.1 기준.
 # 다른 도메인 + HTTPS: App /, IAM /. ex) https://app.eva.com/, https://iam.eva.com/
 # APP_HOST와 IAM_HOST는 서로 다른 도메인입니다. scheme, port, path 없이 작성합니다.
 iam:

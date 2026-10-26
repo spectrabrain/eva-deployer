@@ -7,7 +7,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 HELM="${HELM:-helm}"
 PYTHON="${PYTHON:-python3}"
-EVA_APP_CHART_ARCHIVE="${EVA_APP_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-app/eva-app-3.3.0-beta.3.tgz}"
+EVA_APP_CHART_ARCHIVE="${EVA_APP_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-app/eva-app-3.3.0-beta.9.tgz}"
 EVA_IAM_CHART_ARCHIVE="${EVA_IAM_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-iam/eva-iam-3.3.0-beta.1.tgz}"
 
 for archive in "$EVA_APP_CHART_ARCHIVE" "$EVA_IAM_CHART_ARCHIVE"; do
@@ -29,7 +29,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 # Source only the shared functions, never any preparation/download entrypoint.
 source "$REPO_ROOT/scripts/lib/load_versions.sh"
-for version in 3.1.8 3.2.0 3.3.0-beta.3 3.3.0-beta.1 3.3.0 4.0.0; do
+for version in 3.1.8 3.2.0 3.3.0-beta.9 3.3.0-beta.1 3.3.0 4.0.0; do
   for component in app iam; do
     printf '%s\t%s\t%s\n' "$component" "$version" "$(eva_product_chart_base "$component" "$version")"
   done
@@ -51,7 +51,7 @@ import yaml
 repo, tmp = map(Path, sys.argv[1:3])
 ansible, helm = (shutil.which(value) for value in sys.argv[3:5])
 archives = dict(zip(("app", "iam"), (str(Path(p).resolve()) for p in sys.argv[5:7])))
-versions = {"app": "3.3.0-beta.3", "iam": "3.3.0-beta.1"}
+versions = {"app": "3.3.0-beta.9", "iam": "3.3.0-beta.1"}
 catalog = yaml.safe_load((repo / "src/solution/version.yaml").read_text())
 for key, expected in (("eva_app_deploy_version", versions["app"]),
                       ("eva_app_chart_version", versions["app"]),
@@ -225,6 +225,12 @@ def add_case(name, mode="online_repository", protocol="https", host_kind="dns", 
         variables["eva_iam_redis_tls_enabled"] = options["redis_tls"]
     if options.get("account"):
         variables["eva_app_ecr_account"] = options["account"]
+    if "sync_pending" in options:
+        values["app"]["app"].setdefault("sso", {})["syncPendingInfo"] = options["sync_pending"]
+    if "cli_sync_pending" in options:
+        cli_path = directory / "app-cli.yaml"
+        cli_path.write_text(yaml.safe_dump({"app": {"sso": {"syncPendingInfo": options["cli_sync_pending"]}}}))
+        variables["eva_cli_values_path"] = str(cli_path)
     for component in ("app", "iam"):
         if options.get("no_create"):
             values[component]["ingress"]["tls"]["create"] = False
@@ -254,6 +260,10 @@ add_case("custom-app-account", account="123456789012")
 add_case("https-no-create", no_create=True)
 add_case("https-secret-auth", secret_auth=True)
 add_case("https-no-ingress", no_ingress=True)
+add_case("sso-sync-pending-enabled", sync_pending=True)
+add_case("sso-sync-pending-disabled", sync_pending=False)
+add_case("sso-sync-pending-cli-enabled", sync_pending=False, cli_sync_pending=True)
+add_case("sso-sync-pending-cli-disabled", sync_pending=True, cli_sync_pending=False)
 
 fixture_tasks = [fact("Load fixture IAM site file (as wizard host-keyed values)",
                       eva_iam_values_loaded="{{ lookup('ansible.builtin.file', fixture_dir ~ '/iam.yaml') | from_yaml }}")]
@@ -283,7 +293,8 @@ fixture_tasks += [fact("Read rendered handoff instead of slurping a deployed nod
 fixture_tasks += tasks("app", "Load same-target IAM-to-App handoff", "Validate same-target IAM-to-App handoff metadata",
                        "Require complete Workspace SSO or valid IAM handoff", "Use validated same-target IAM handoff",
                        "Build IAM SSO values for EVA App", "Merge generated and installer EVA App values",
-                       "Merge IAM handoff into EVA App values", "Merge Workspace EVA App values", "Merge CLI EVA App values",
+                       "Merge IAM handoff into EVA App values", "Load CLI EVA App values override",
+                       "Merge Workspace EVA App values", "Merge CLI EVA App values",
                        "Disable ECR refresh resources for repository-backed EVA App",
                        "Determine whether EVA App TLS Job is enabled")
 fixture_tasks += [caller_probe("app"), check("Require real handoff and typed TLS facts",
@@ -479,6 +490,12 @@ for case in cases:
         assert iam_config["KC_HOSTNAME_STRICT_HTTPS"] == str(tls).lower()
         assert app_config["SSO_BASE_URL"] == expected_url
         assert app_config["SSO_ADMIN_CLIENT_SECRET"] == "fixture-runtime-secret"
+        sync_pending = options.get("cli_sync_pending", options.get("sync_pending", False))
+        assert defaults["app"]["app"]["sso"]["syncPendingInfo"] is False
+        assert "syncPendingInfo" not in app_role["app"]["sso"], "Role must preserve the chart's SSO sync default"
+        assert app_config["SSO_SYNC_PENDING_INFO"] == str(sync_pending).lower()
+        if "sync_pending" in options:
+            assert app_effective["app"]["sso"]["syncPendingInfo"] is sync_pending
         assert app_config["BACKEND_SECURE"] == str(tls).lower()
         assert "tls" not in app_effective["app"].get("sso", {}).get("redis", {}), "Ingress must not force App Redis TLS"
         patch = one(iam_resources, "Job", "-realm-patch")["spec"]["template"]["spec"]["containers"][0]

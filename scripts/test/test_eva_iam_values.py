@@ -389,8 +389,8 @@ esac
                         "ansible_facts": {"env": {"HOME": str(self.root)}, **facts},
                         "config_effective_gpu_count": 0,
                         "eva_site_config_root": str(self.root),
-                        "eva_app_chart_version": "3.3.0-beta.3",
-                        "eva_app_deploy_version": "3.3.0-beta.3",
+                        "eva_app_chart_version": "3.3.0-beta.9",
+                        "eva_app_deploy_version": "3.3.0-beta.9",
                         **overrides,
                     }
                     output = self.run_play([

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -251,7 +252,9 @@ class ECRTests(unittest.TestCase):
             "vars": variables, "tasks": [{"ansible.builtin.include_role": {"name": "eva_vision", "tasks_from": "image_pull_secret.yaml"}}]}]))
         ansible = (os.environ.get("ANSIBLE_PLAYBOOK") or shutil.which("ansible-playbook")
                    or str(Path(sys.executable).with_name("ansible-playbook")))
-        env = {**self.env, "ANSIBLE_ROLES_PATH": str(ROLE.parent)}
+        # pip --user installs belong to the controller HOME; the role sets the target AWS HOME.
+        env = {**self.env, "HOME": os.environ.get("HOME", str(Path.home())),
+               "ANSIBLE_ROLES_PATH": str(ROLE.parent)}
         result = subprocess.run([ansible, "-i", "localhost,", str(playbook)], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
         self.assertNotIn(TOKEN, result.stdout + result.stderr)
@@ -273,6 +276,23 @@ class ECRTests(unittest.TestCase):
             result = subprocess.run(["systemd-analyze", "verify", str(self.root / "units/eva-vision-ecr-eva-vision-eva-vision.service"),
                                      str(self.root / "units/eva-vision-ecr-eva-vision-eva-vision.timer")], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_role_preserves_controller_home_and_target_aws_home(self):
+        ansible = (os.environ.get("ANSIBLE_PLAYBOOK") or shutil.which("ansible-playbook")
+                   or str(Path(sys.executable).with_name("ansible-playbook")))
+        controller_home = os.environ.get("HOME", str(Path.home()))
+        launcher = self.root / "ansible-controller-home"
+        launcher.write_text(
+            "#!" + sys.executable + "\nimport os, sys\n"
+            f"assert os.environ['HOME'] == {controller_home!r}, 'Ansible must retain the controller HOME'\n"
+            f"os.execvp({ansible!r}, [{ansible!r}, *sys.argv[1:]])\n"
+        )
+        launcher.chmod(0o700)
+        with patch.dict(os.environ, {"ANSIBLE_PLAYBOOK": str(launcher)}):
+            self.run_role()
+        self.assert_auth()
+        self.assertEqual(self.env["HOME"], str(self.root / "home"))
+        self.assertEqual(len(self.calls("aws")), 1)
 
     def test_online_custom_secret_does_not_install_renewal(self):
         before = self.existing("operator-pull-secret")

@@ -52,7 +52,7 @@ func TestConfigSampleInteractiveChoices(t *testing.T) {
 			if !strings.Contains(messages.String(), "v3.3") || !strings.Contains(yamlOutput.String(), "v3.3") {
 				t.Fatal("v3.3 sample target not displayed")
 			}
-			for _, version := range []string{"3.3.0-beta.3", "3.3.0-beta.1"} {
+			for _, version := range []string{"3.3.0-beta.9", "3.3.0-beta.1"} {
 				if !strings.Contains(messages.String(), version) || !strings.Contains(yamlOutput.String(), version) {
 					t.Fatal("published App/IAM version baseline not displayed")
 				}

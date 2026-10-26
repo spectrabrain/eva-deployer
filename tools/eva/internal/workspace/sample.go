@@ -104,7 +104,7 @@ func InstallerSampleFor(options SampleOptions) ([]byte, error) {
 		}
 		mergeSampleMapping(values, sso.Content[0])
 	}
-	base.HeadComment = "EVA 설치 틀: " + options.Mode + " / " + profileName + " / " + options.Protocol + "\nv3.3 게시 App 3.3.0-beta.3 / IAM 3.3.0-beta.1 기준. 사용하는 Release catalog와 일치하는지 확인합니다. 실제 설치 E2E는 별도 검증합니다.\n필수 입력: <UPPER_CASE> placeholder를 모두 교체합니다. 반복된 placeholder는 같은 값을 사용합니다. 예시 Secret은 사용하지 않습니다."
+	base.HeadComment = "EVA 설치 틀: " + options.Mode + " / " + profileName + " / " + options.Protocol + "\nv3.3 게시 App 3.3.0-beta.9 / IAM 3.3.0-beta.1 기준. 사용하는 Release catalog와 일치하는지 확인합니다. 실제 설치 E2E는 별도 검증합니다.\n필수 입력: <UPPER_CASE> placeholder를 모두 교체합니다. 반복된 placeholder는 같은 값을 사용합니다. 예시 Secret은 사용하지 않습니다."
 	var output bytes.Buffer
 	encoder := yaml.NewEncoder(&output)
 	encoder.SetIndent(2)

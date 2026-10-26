@@ -133,7 +133,7 @@ func TestInstallConfigureOnlineHTTP(t *testing.T) {
 	if app["backendSecure"] != false || app["backendPublicPort"] != 80 {
 		t.Fatal("HTTP frontend protocol/port mismatch")
 	}
-	if !strings.Contains(messages, "3.3.0-beta.3") || !strings.Contains(messages, "3.3.0-beta.1") || !strings.Contains(messages, "E2E") {
+	if !strings.Contains(messages, "3.3.0-beta.9") || !strings.Contains(messages, "3.3.0-beta.1") || !strings.Contains(messages, "E2E") {
 		t.Fatal("completion must state published baseline and outstanding live verification")
 	}
 }

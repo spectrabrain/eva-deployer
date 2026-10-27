@@ -13,10 +13,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"eva-deployer/tools/eva/internal/argocd"
 	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/workspace"
 	"golang.org/x/crypto/ssh"
+	"gopkg.in/yaml.v3"
 )
 
 func installerTestInput() workspace.Installer {
@@ -51,7 +54,17 @@ func TestInstallerVerifiesAllTargetsBeforePublishingAndRunsScopedInstallation(t 
 	resolved := writeOriginalRelease(t, false)
 	var calls []string
 	var output bytes.Buffer
+	receiptRoot := t.TempDir()
+	receipt := argocd.Receipt{SchemaVersion: "v1", SiteID: input.Site.ID, ClusterName: "legacy-a", ClusterServer: "https://node-a.example.com:6443", Applications: []string{"legacy-a-eva-app"}, CompletedAt: time.Now().UTC(),
+		RegistrationApplication: "registration", RegistrationRepository: "https://git.example.com/registration.git", RegistrationBranch: "main", RegistrationManifest: "clusters/legacy-a.yaml", RegistrationCommit: strings.Repeat("a", 40)}
+	stateRoot := argocd.TargetStateRoot(receiptRoot, "node-a", input.Targets["node-a"])
+	if err := argocd.WriteReceipt(stateRoot, receipt); err != nil {
+		t.Fatal(err)
+	}
 	service := InstallerService{
+		LoadHandoffReceipt: func(site, name string, target workspace.InstallerTarget) ([]byte, error) {
+			return LoadInstallerHandoffReceipt(receiptRoot, site, name, target)
+		},
 		Connect: func(_ context.Context, _, name string, _ workspace.InstallerTarget, size int64) (TargetConnection, error) {
 			if size <= 0 {
 				t.Fatal("storage requirement missing")
@@ -72,6 +85,14 @@ func TestInstallerVerifiesAllTargetsBeforePublishingAndRunsScopedInstallation(t 
 			if action.Action != "install" || !strings.Contains(string(action.Config), "ansible_connection: local") || strings.Contains(string(action.Config), "private-") {
 				t.Fatal("installation did not scope/remove transport credentials")
 			}
+			if action.Name == "node-a" {
+				var received argocd.Receipt
+				if err := yaml.Unmarshal(action.HandoffReceipt, &received); err != nil || received.ClusterName != "legacy-a" {
+					t.Fatalf("matching target receipt not delivered: %v", err)
+				}
+			} else if len(action.HandoffReceipt) != 0 {
+				t.Fatal("another target's receipt leaked")
+			}
 			return nil
 		},
 	}
@@ -91,6 +112,16 @@ func TestInstallerVerifiesAllTargetsBeforePublishingAndRunsScopedInstallation(t 
 	calls = nil
 	if _, err := service.Install(context.Background(), input, resolved, nil, Streams{Stdout: &output}); err == nil || len(calls) != 0 {
 		t.Fatal("a target failed preflight but publish/install still ran")
+	}
+	service.LoadHandoffReceipt = func(string, string, workspace.InstallerTarget) ([]byte, error) {
+		return nil, errors.New("invalid receipt")
+	}
+	service.Connect = func(context.Context, string, string, workspace.InstallerTarget, int64) (TargetConnection, error) {
+		t.Fatal("SSH started with invalid handoff state")
+		return TargetConnection{}, nil
+	}
+	if _, err := service.Install(context.Background(), input, resolved, nil, Streams{}); err == nil {
+		t.Fatal("invalid receipt accepted")
 	}
 }
 
@@ -172,11 +203,10 @@ func TestTargetActionSeparatesSudoInputFromConfigIncludingCachedSudo(t *testing.
 	script, _ := json.Marshal(targetActionScript)
 	harness := `import json, os, subprocess, sys
 calls = []
-temporary = None
+temporaries = []
 class Result:
     returncode = 0
 def run(args, input):
-    global temporary
     prefix = ["sudo", "-S", "-p", ""] if os.environ["TEST_SUDO"] else ["sudo", "-n"]
     assert args[:len(prefix)] == prefix
     assert input == (os.environ["TEST_SUDO"] + "\n").encode() if os.environ["TEST_SUDO"] else input == b""
@@ -184,27 +214,37 @@ def run(args, input):
     calls.append(command)
     if command[:3] == ["install", "-m", "0600"]:
         temporary = command[3]
+        temporaries.append(temporary)
         assert os.stat(temporary).st_mode & 0o777 == 0o600
         with open(temporary, "rb") as stream:
-            assert stream.read() == b"license: private-license\n"
-        assert command[4].startswith("/var/lib/eva/install-configs/customer-a/node-a/")
+            contents = stream.read()
+        if command[4].endswith("/argocd-handoff.yaml"):
+            assert contents == b"site_id: customer-a\ncluster_name: legacy-a\n"
+            assert command[4] == "/var/lib/eva/sites/customer-a/argocd-handoff.yaml"
+            assert not any(call[:2] == ["eva", "install"] for call in calls)
+        else:
+            assert contents == b"license: private-license\n"
+            assert command[4].startswith("/var/lib/eva/install-configs/customer-a/node-a/")
     return Result()
 subprocess.run = run
 exec(` + string(script) + `)
-assert temporary and not os.path.exists(temporary)
-assert len(calls) == 4
+assert temporaries and all(not os.path.exists(path) for path in temporaries)
+assert len(calls) == (6 if os.environ["TEST_RECEIPT"] else 4)
 assert calls[2] == ["bash", "/var/lib/eva/inbox/releases/3.3.0/eva-tool-installer.sh"]
-assert calls[3][:5] == ["eva", "install", "--release", "/var/lib/eva/inbox/releases/3.3.0", "--config"]
-assert "--yes" in calls[3]
+assert calls[-1][:5] == ["eva", "install", "--release", "/var/lib/eva/inbox/releases/3.3.0", "--config"]
+assert "--yes" in calls[-1]
 `
 	for _, password := range []string{"private-sudo", ""} {
-		action := TargetAction{Action: "install", Site: "customer-a", Name: "node-a", ReleaseRoot: "/var/lib/eva/inbox/releases/3.3.0", Config: []byte("license: private-license\n"), SudoPassword: password}
-		contents, _ := json.Marshal(action)
-		command := exec.Command("python3", "-c", harness)
-		command.Stdin = bytes.NewReader(contents)
-		command.Env = append(os.Environ(), "TEST_SUDO="+password)
-		if output, err := command.CombinedOutput(); err != nil {
-			t.Fatalf("target action failed (password configured=%t): %v %s", password != "", err, output)
+		for _, receipt := range []string{"", "site_id: customer-a\ncluster_name: legacy-a\n"} {
+			action := TargetAction{Action: "install", Site: "customer-a", Name: "node-a", ReleaseRoot: "/var/lib/eva/inbox/releases/3.3.0", Config: []byte("license: private-license\n"), SudoPassword: password}
+			action.HandoffReceipt = []byte(receipt)
+			contents, _ := json.Marshal(action)
+			command := exec.Command("python3", "-c", harness)
+			command.Stdin = bytes.NewReader(contents)
+			command.Env = append(os.Environ(), "TEST_SUDO="+password, "TEST_RECEIPT="+receipt)
+			if output, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("target action failed (password configured=%t): %v %s", password != "", err, output)
+			}
 		}
 	}
 }

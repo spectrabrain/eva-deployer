@@ -217,12 +217,10 @@ Git, 채팅, Release artifact에 넣지 않습니다.
 ### Agent 이미지·모델 공급
 
 Agent 설치에 필요한 차트·이미지·기본 Values는 선택한 Release에서 정합니다.
+vLLM 모델과 Qdrant snapshot은 S3에서 자동으로 받습니다.
 개별 버전을 입력하거나 파일을 별도로 다운로드할 필요가 없습니다.
 
-- Agent 이미지 저장소: `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-agent`
-- vLLM 모델: `s3://spectrabrain-eva-agent/vllm/hf`
-- Qdrant snapshot: `s3://spectrabrain-eva-agent/agent/qdrant/`
-- 대상 서버의 AWS 계정에 해당 ECR pull 및 S3 list/read 권한이 필요합니다.
+- 대상 서버의 AWS 계정에 이미지 ECR pull 및 모델 S3 list/read 권한이 필요합니다.
   입력한 AWS credential로 필요한 인증을 자동 구성하므로 수동 Secret 생성은 필요하지 않습니다.
   기존 AWS Secret을 사용한다면 해당 저장소에 접근 가능한 유효한 인증인지 확인합니다.
 - Agent의 Vision 기능을 사용하려면 Vision도 설치합니다.
@@ -236,7 +234,7 @@ Vision 모델은 컨테이너 이미지와 별도로 S3에서 공급됩니다. `
 모델을 다운로드해 영구 캐시에 저장하고, 모델 준비가 끝나면 서비스를 시작합니다.
 필요한 인증은 입력한 AWS credential로 자동 구성하므로 추가 명령이나 Secret 생성은 필요하지 않습니다.
 
-- 대상 서버에서 `s3://spectrabrain-eva-vision/model_dir`에 접근할 수 있어야 합니다.
+- 대상 서버의 AWS 계정에 모델 S3 list/read 권한이 필요합니다.
 - 첫 설치에는 모델 다운로드·준비 시간이 필요합니다. 모델과 준비 파일을 저장할 디스크 공간을 확보합니다.
 - 모델 캐시는 기본 `20Gi`이며 필요하면 `values.vision.modelCache.size`로 조정합니다.
   **업그레이드·재시도에서 모델 PVC를 삭제하지 않습니다.**
@@ -257,18 +255,20 @@ Vision 모델은 컨테이너 이미지와 별도로 S3에서 공급됩니다. `
 ## 7. Argo CD 관리 연결 확인
 
 기존 Argo CD로 관리하던 서버에서만 설치 전에 실행합니다. 이미 연결을 해제한 서버도
-동일한 명령으로 확인할 수 있습니다. 관련 metadata가 없으면 추가 입력 없이 종료합니다.
+동일한 명령으로 확인할 수 있습니다. Bastion에서 여러 타겟을 설치할 때도 설정 파일 하나로 실행합니다.
 
 ```bash
 sudo eva preflight argocd --config /home/eva/eva-install.yaml
 ```
 
-- 요청 시 관리 서버 주소·SSH 계정·비밀번호와 Git 인증 정보를 입력합니다. 처음 접속하는
-  SSH host key는 fingerprint를 확인한 뒤 승인합니다. Argo CD 계정은 필요하지 않습니다.
-- 연결 해제는 대상 site의 Git 등록 변경을 별도 승인한 뒤 진행합니다. 관리 서버에서
+- 명령 시작 시 Argo CD 관리 서버 주소·SSH 계정·비밀번호를 한 번 입력합니다. 설정에 포함된
+  모든 타겟에 같은 관리 서버 연결을 사용합니다. 처음 접속하는 SSH host key는 fingerprint를
+  확인한 뒤 승인합니다. Argo CD 계정은 필요하지 않습니다. 타겟의 SSH 접속 정보는 설치 설정을 사용합니다.
+- 타겟별로 관리 상태를 확인하고, 연결 해제와 해당 클러스터의 Git 등록 변경을 별도 승인한 뒤
+  요청 시 Git 인증 정보를 입력합니다. 관리 서버에서
   `kubectl`·`git`을 사용할 수 있어야 하며 저장소 읽기·push 권한이 필요합니다.
 - 배포된 workload와 데이터, 다른 site는 유지합니다. 이미 해제된 경우에는 읽기 전용으로
-  상태를 검증하고 완료를 기록합니다.
+  상태를 검증하고 타겟별로 완료를 기록합니다. 관리 metadata가 없는 타겟은 연결 해제 없이 통과합니다.
 - 연결 해제 완료가 확인되지 않으면 Solution 설치를 중단합니다. `--yes`로 우회할 수 없습니다.
 
 ## 8. 설치

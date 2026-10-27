@@ -213,15 +213,22 @@ func TestInstallConfigUsesGeneratedWorkspaceBeforeRuntimeValidation(t *testing.T
 
 func TestArgoCDPreflightAcceptsConfig(t *testing.T) {
 	input := installerTestInput(t)
-	previousPrecondition, previousHandoff := runArgoCDPrecondition, runArgoCDHandoff
-	t.Cleanup(func() { runArgoCDPrecondition, runArgoCDHandoff = previousPrecondition, previousHandoff })
+	previousPrecondition, previousPrepare := runArgoCDPrecondition, newArgoCDPreflight
+	t.Cleanup(func() { runArgoCDPrecondition, newArgoCDPreflight = previousPrecondition, previousPrepare })
 	var selected plan.Document
+	prepared := false
 	runArgoCDPrecondition = func(_ apply.Options, document plan.Document) (string, error) {
+		if !prepared {
+			t.Fatal("management input was not collected before target precondition")
+		}
 		selected = document
 		return document.ReleaseRoot, nil
 	}
 	handoff := false
-	runArgoCDHandoff = func(plan.Document, string) error { handoff = true; return nil }
+	newArgoCDPreflight = func() (argoCDPreflightSession, error) {
+		prepared = true
+		return &testArgoCDPreflightSession{run: func(plan.Document, string) error { handoff = true; return nil }}, nil
+	}
 	if err := run([]string{"preflight", "argocd", "--config", input, "--release", writePreparableRelease(t), "--install-root", t.TempDir(), "--runtime-root", writeRetryRuntime(t)}); err != nil {
 		t.Fatal(err)
 	}

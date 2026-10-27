@@ -1000,9 +1000,9 @@ func TestRemoteTargetRemoveRequiresConfirmationAndRoot(t *testing.T) {
 // and it never supplied the Remote Runtime its Ansible precondition needs.
 func TestArgoCDPreflightUsesCurrentReleaseAndRemoteRuntime(t *testing.T) {
 	releaseRoot := writePreparableRelease(t)
-	previousReceipt, previousBootstrap, previousPrecondition, previousHandoff := defaultCurrentReleaseReceiptPath, bootstrapRemoteRuntime, runArgoCDPrecondition, runArgoCDHandoff
+	previousReceipt, previousBootstrap, previousPrecondition, previousPrepare := defaultCurrentReleaseReceiptPath, bootstrapRemoteRuntime, runArgoCDPrecondition, newArgoCDPreflight
 	t.Cleanup(func() {
-		defaultCurrentReleaseReceiptPath, bootstrapRemoteRuntime, runArgoCDPrecondition, runArgoCDHandoff = previousReceipt, previousBootstrap, previousPrecondition, previousHandoff
+		defaultCurrentReleaseReceiptPath, bootstrapRemoteRuntime, runArgoCDPrecondition, newArgoCDPreflight = previousReceipt, previousBootstrap, previousPrecondition, previousPrepare
 	})
 	defaultCurrentReleaseReceiptPath = filepath.Join(t.TempDir(), "releases", "current.yaml")
 	resolved, err := release.Resolve(releaseRoot)
@@ -1029,7 +1029,11 @@ func TestArgoCDPreflightUsesCurrentReleaseAndRemoteRuntime(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(previousDirectory) })
 
 	var bootstrapped []string
+	prepared := false
 	bootstrapRemoteRuntime = func(resolved release.Resolved, registry, project, root string) (runtime.Resolved, error) {
+		if !prepared {
+			t.Fatal("Runtime started before management input")
+		}
 		bootstrapped = append(bootstrapped, resolved.Root+"|"+registry+"|"+project)
 		return runtime.Resolved{Root: root}, nil
 	}
@@ -1039,9 +1043,9 @@ func TestArgoCDPreflightUsesCurrentReleaseAndRemoteRuntime(t *testing.T) {
 		return "/prepared", nil
 	}
 	handoffCalled := false
-	runArgoCDHandoff = func(plan.Document, string) error {
-		handoffCalled = true
-		return nil
+	newArgoCDPreflight = func() (argoCDPreflightSession, error) {
+		prepared = true
+		return &testArgoCDPreflightSession{run: func(plan.Document, string) error { handoffCalled = true; return nil }}, nil
 	}
 	installRoot := t.TempDir()
 	missingRuntime := filepath.Join(t.TempDir(), "runtime")

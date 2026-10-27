@@ -1,0 +1,11 @@
+---
+- name: Check existing target k3s before preparing Harbor access
+  ansible.builtin.stat:
+    path: "{{ eva_registry_kubeconfig | default('/etc/rancher/k3s/k3s.yaml') }}"
+  register: precondition_k3s_config
+
+- name: Prepare Harbor access on existing target k3s before component installation
+  ansible.builtin.include_role:
+    name: k3s
+    tasks_from: registry.yaml
+  when: precondition_k3s_config.stat.exists

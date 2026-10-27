@@ -32,6 +32,8 @@ with (state / 'calls.jsonl').open('a') as stream:
     stream.write(json.dumps(args) + '\n')
 if args[:2] == ['get', 'nodes']:
     print('fixture-node Ready')
+elif args == ['get', '--raw=/readyz']:
+    print('ok')
 elif args[:2] == ['create', 'namespace']:
     print(json.dumps({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': args[2]}}))
 elif args[:2] == ['create', '-f']:
@@ -175,6 +177,9 @@ class N8nAnsibleTests(unittest.TestCase):
         tool = self.bin / 'kubectl'
         tool.write_text('#!' + sys.executable + '\n' + FAKE_KUBECTL)
         tool.chmod(0o755)
+        k3s = self.bin / 'k3s'
+        k3s.write_text('#!/bin/sh\nshift\nexec kubectl "$@"\n')
+        k3s.chmod(0o755)
         self.registry_config = self.root / 'registries.yaml'
         self.registry_config.write_text(yaml.safe_dump(self.request['config']))
         self.env = os.environ.copy()
@@ -182,7 +187,43 @@ class N8nAnsibleTests(unittest.TestCase):
                          'ANSIBLE_ROLES_PATH': str(ROLES), 'N8N_FIXTURE': str(self.root),
                          'ANSIBLE_NOCOLOR': '1', 'ANSIBLE_LOCAL_TEMP': str(self.root / 'ansible')})
 
-    def run_role(self, mode='remote_repository', fail=False, overrides=None):
+    def registry_precondition(self):
+        kubeconfig = self.root / 'k3s.yaml'
+        kubeconfig.write_text('fixture kubeconfig')
+        # Simulate the k3s restart regenerating certs.d from registries.yaml.
+        # Never invoke a real host service during the Ansible regression test.
+        restart = self.root / 'restart.py'
+        restart.write_text(r'''
+import json, os, pathlib, yaml
+root = pathlib.Path(os.environ['N8N_FIXTURE'])
+with (root / 'calls.jsonl').open('a') as stream:
+    stream.write(json.dumps(['restart-k3s']) + '\n')
+config = yaml.safe_load((root / 'registries.yaml').read_text())
+for registry, mirror in config.get('mirrors', {}).items():
+    hosts = root / 'certs.d' / registry / 'hosts.toml'
+    hosts.parent.mkdir(parents=True, exist_ok=True)
+    endpoint = mirror['endpoint'][0]
+    hosts.write_text('server = ' + json.dumps(endpoint) + '\n[host.' + json.dumps(endpoint) + ']\ncapabilities = ["pull", "resolve"]\n')
+''')
+        registry_tasks = yaml.safe_load((ROOT / 'src/infra/roles/k3s/tasks/registry.yaml').read_text())
+        for task in registry_tasks[0]['block']:
+            if 'ansible.builtin.service' in task:
+                del task['ansible.builtin.service']
+                task['ansible.builtin.command'] = {'argv': [sys.executable, str(restart)]}
+        fixture_role = self.root / 'k3s-fixture'
+        (fixture_role / 'tasks').mkdir(parents=True)
+        (fixture_role / 'tasks/registry.yaml').write_text(yaml.safe_dump(registry_tasks, sort_keys=False))
+        source = ROOT / 'src/infra/roles/precondition/tasks'
+        registry_precondition = yaml.safe_load((source / 'registry.yaml').read_text())
+        registry_precondition[1]['ansible.builtin.include_role']['name'] = str(fixture_role)
+        precondition_file = self.root / 'precondition-registry.yaml'
+        precondition_file.write_text(yaml.safe_dump(registry_precondition, sort_keys=False))
+        task = next(task for task in yaml.safe_load((source / 'main.yaml').read_text())
+                    if task['name'] == 'Prepare existing target k3s registry access')
+        task['ansible.builtin.import_tasks'] = str(precondition_file)
+        return task
+
+    def run_role(self, mode='remote_repository', fail=False, overrides=None, precondition=False):
         tasks = yaml.safe_load((ROLES / 'n8n/tasks/main.yaml').read_text())
         stop = next(index for index, task in enumerate(tasks) if task['name'] == 'Wait for n8n API endpoint to become reachable')
         tasks = tasks[:stop]
@@ -197,11 +238,13 @@ class N8nAnsibleTests(unittest.TestCase):
         variables = {'repository_mode': mode, 'repository_registry': REGISTRY, 'repository_project': 'eva',
                      'ansible_default_ipv4': {'address': '192.0.2.75'}, 'eva_site_config_root': str(self.root),
                      'eva_registry_config_path': str(self.registry_config),
+                     'eva_registry_kubeconfig': str(self.root / 'k3s.yaml'),
                      'eva_registry_containerd_config': str(self.containerd),
                      'eva_registry_helper_path': str(self.root / 'registry.py')}
         variables.update(overrides or {})
         plays = [{'hosts': 'all', 'gather_facts': False, 'vars': variables,
-                  'tasks': [{'ansible.builtin.include_vars': {'file': str(ROOT / 'src/solution/version.yaml')}}] + tasks}]
+                  'tasks': ([self.registry_precondition()] if precondition else [])
+                           + [{'ansible.builtin.include_vars': {'file': str(ROOT / 'src/solution/version.yaml')}}] + tasks}]
         source = self.root / 'play.yaml'
         source.write_text(yaml.safe_dump(plays, sort_keys=False))
         environment = self.env.copy()
@@ -215,6 +258,44 @@ class N8nAnsibleTests(unittest.TestCase):
         else:
             self.assertEqual(result.returncode, 0, result.stdout)
         return list(yaml.safe_load_all(manifest.read_text())) if manifest.exists() else []
+
+    def test_install_precondition_replaces_stale_https_mirror_before_n8n_pull(self):
+        existing = copy.deepcopy(self.request['config'])
+        existing['mirrors'] = {REGISTRY: {'endpoint': ['https://' + REGISTRY]},
+                               'other.test': {'endpoint': ['https://other.test']}}
+        existing['configs']['other.test'] = {'tls': {'insecure_skip_verify': False},
+                                             'auth': {'username': 'operator', 'password': 'other-private'}}
+        self.registry_config.write_text(yaml.safe_dump(existing))
+        directory = self.hosts_root / REGISTRY
+        directory.mkdir()
+        (directory / 'hosts.toml').write_text('server = "https://' + REGISTRY + '"\n')
+        self.run_role(overrides={'repository_protocol': 'http'}, precondition=True)
+        merged = yaml.safe_load(self.registry_config.read_text())
+        self.assertEqual(merged['mirrors'][REGISTRY]['endpoint'], ['http://' + REGISTRY])
+        self.assertTrue(merged['configs'][REGISTRY]['tls']['insecure_skip_verify'])
+        self.assertEqual(merged['configs'][REGISTRY]['auth'], existing['configs'][REGISTRY]['auth'])
+        self.assertEqual(merged['configs']['other.test'], existing['configs']['other.test'])
+        self.assertEqual(merged['mirrors']['other.test'], existing['mirrors']['other.test'])
+        calls = [json.loads(line) for line in (self.root / 'calls.jsonl').read_text().splitlines()]
+        self.assertEqual(calls.count(['restart-k3s']), 1)
+        self.assertLess(calls.index(['restart-k3s']), next(index for index, call in enumerate(calls) if 'get' in call and 'secret' in call))
+        self.assertIn(['get', '--raw=/readyz'], calls)
+
+    def test_install_precondition_leaves_online_target_registries_unchanged(self):
+        before = self.registry_config.read_bytes()
+        (self.root / 'probe.json').write_text('{}')
+        self.run_role('online_repository', precondition=True)
+        self.assertEqual(before, self.registry_config.read_bytes())
+        self.assertNotIn('restart-k3s', (self.root / 'calls.jsonl').read_text())
+
+    def test_install_precondition_reuses_current_settings_without_restart(self):
+        existing = copy.deepcopy(self.request['config'])
+        existing['mirrors'] = {REGISTRY: {'endpoint': ['http://' + REGISTRY]}}
+        existing['configs'][REGISTRY]['tls'] = {'insecure_skip_verify': True}
+        self.registry_config.write_text(yaml.safe_dump(existing))
+        self.run_role(overrides={'repository_protocol': 'http'}, precondition=True)
+        self.assertEqual(yaml.safe_load(self.registry_config.read_text()), existing)
+        self.assertNotIn('restart-k3s', (self.root / 'calls.jsonl').read_text())
 
     def test_remote_role_uses_harbor_and_keeps_pvc_settings(self):
         documents = self.run_role()
@@ -256,7 +337,9 @@ class N8nAnsibleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertNotIn(PASSWORD, result.stdout)
         merged = yaml.safe_load(self.registry_config.read_text())
-        self.assertEqual(merged['configs'], existing['configs'])
+        expected_configs = copy.deepcopy(existing['configs'])
+        expected_configs[REGISTRY]['tls']['insecure_skip_verify'] = True
+        self.assertEqual(merged['configs'], expected_configs)
         self.assertEqual(merged['mirrors']['other.test'], existing['mirrors']['other.test'])
 
     def test_closed_network_precondition_skips_all_external_probes(self):

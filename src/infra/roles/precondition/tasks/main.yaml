@@ -322,3 +322,9 @@
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
+
+- name: Prepare existing target k3s registry access
+  ansible.builtin.import_tasks: registry.yaml
+  when:
+    - not ansible_check_mode
+    - repository_mode | default('online_repository') in ['remote_repository', 'local_repository']

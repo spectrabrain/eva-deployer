@@ -9,21 +9,20 @@ import (
 	"strings"
 
 	"eva-deployer/tools/eva/internal/argocd"
-	"eva-deployer/tools/eva/internal/plan"
 	"golang.org/x/term"
 )
 
-func argoCDPreflightHandoff(document plan.Document, releaseRoot string) error {
-	prompt := &argoCDPrompter{reader: bufio.NewReader(os.Stdin)}
-	return argocd.RunPreflight(document.SiteID, releaseRoot, prompt, argocd.ConnectSSH)
-}
-
-func requireNoArgoCDTracking(document plan.Document, releaseRoot string) error {
-	return argocd.RequireNoTracking(document, releaseRoot)
-}
-
 type argoCDPrompter struct {
-	reader *bufio.Reader
+	reader            *bufio.Reader
+	credentials       *argocd.Credentials
+	stateRoot, target string
+}
+
+func (prompt *argoCDPrompter) receiptRoot() string {
+	if prompt.stateRoot != "" {
+		return prompt.stateRoot
+	}
+	return defaultArgoCDReceiptRoot
 }
 
 func (prompt *argoCDPrompter) Confirm(detection argocd.Detection) (bool, error) {
@@ -35,6 +34,9 @@ func (prompt *argoCDPrompter) Confirm(detection argocd.Detection) (bool, error) 
 		"[WARN] Existing Argo CD-managed EVA resources were detected.",
 	)
 	fmt.Fprintf(os.Stderr, "Workspace site: %s\n", detection.SiteID)
+	if prompt.target != "" {
+		fmt.Fprintf(os.Stderr, "Target: %s\n", prompt.target)
+	}
 	fmt.Fprintln(os.Stderr, "Detected legacy Argo CD Applications:")
 	for _, application := range detection.Applications {
 		fmt.Fprintf(os.Stderr, "  %s\n", application)
@@ -53,6 +55,9 @@ func (prompt *argoCDPrompter) Confirm(detection argocd.Detection) (bool, error) 
 }
 
 func (prompt *argoCDPrompter) Credentials() (argocd.Credentials, error) {
+	if prompt.credentials != nil {
+		return *prompt.credentials, nil
+	}
 	if err := requireInteractiveArgoCDHandoff(); err != nil {
 		return argocd.Credentials{}, err
 	}
@@ -206,7 +211,7 @@ func (prompt *argoCDPrompter) RecordReceipt(
 	receipt argocd.Receipt,
 ) error {
 	return argocd.WriteReceipt(
-		argocd.DefaultReceiptRoot,
+		prompt.receiptRoot(),
 		receipt,
 	)
 }
@@ -215,7 +220,7 @@ func (prompt *argoCDPrompter) LoadPending(
 	siteID string,
 ) (argocd.PendingHandoff, bool, error) {
 	pending, err := argocd.LoadPending(
-		argocd.DefaultReceiptRoot,
+		prompt.receiptRoot(),
 		siteID,
 	)
 	if err == nil {
@@ -237,7 +242,7 @@ func (prompt *argoCDPrompter) LoadCompletedReceipt(
 	siteID string,
 ) (argocd.Receipt, bool, error) {
 	receipt, err := argocd.LoadReceipt(
-		argocd.DefaultReceiptRoot,
+		prompt.receiptRoot(),
 		siteID,
 	)
 	if err == nil {
@@ -259,7 +264,7 @@ func (prompt *argoCDPrompter) RecordPending(
 	pending argocd.PendingHandoff,
 ) error {
 	return argocd.WritePending(
-		argocd.DefaultReceiptRoot,
+		prompt.receiptRoot(),
 		pending,
 	)
 }
@@ -268,7 +273,7 @@ func (prompt *argoCDPrompter) RemovePending(
 	siteID string,
 ) error {
 	return argocd.RemovePending(
-		argocd.DefaultReceiptRoot,
+		prompt.receiptRoot(),
 		siteID,
 	)
 }
@@ -290,5 +295,5 @@ func requireInteractiveArgoCDHandoff() error {
 	if info.Mode()&os.ModeCharDevice != 0 {
 		return nil
 	}
-	return errors.New("Argo CD-managed EVA resources were detected, but interactive approval is required. Remove the site Applications with non-cascade deletion and the exact site cluster registration from the Argo CD management server, then rerun EVA")
+	return errors.New("eva preflight argocd requires an interactive terminal for management SSH credentials and handoff approval")
 }

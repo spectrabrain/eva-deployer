@@ -2,7 +2,7 @@ package remote
 
 import (
 	"context"
-	"crypto/x509"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,24 +13,18 @@ import (
 	"time"
 )
 
-// An omitted protocol probes the same endpoint using HTTPS and HTTP. A TLS
-// certificate failure is terminal, rather than a reason to downgrade to HTTP.
+// Prefer a working HTTP endpoint. HTTPS inspection permits private certificates
+// so bootstrap can identify a local Harbor before converting its Helm endpoint.
 func detectExistingHarbor(ctx context.Context, registry, protocol string) (string, bool, error) {
 	if protocol != "" {
 		present, err := probeExistingHarbor(ctx, registry, protocol)
 		return protocol, present, err
 	}
 	var failures []error
-	for _, candidate := range []string{"https", "http"} {
-		present, err := probeExistingHarbor(ctx, registry, candidate)
+	for _, candidate := range []string{"http", "https"} {
+		present, err := probeExistingHarborWithTLS(ctx, registry, candidate, candidate == "https")
 		if present && err == nil {
 			return candidate, true, nil
-		}
-		var unknown x509.UnknownAuthorityError
-		var hostname x509.HostnameError
-		var invalid x509.CertificateInvalidError
-		if errors.As(err, &unknown) || errors.As(err, &hostname) || errors.As(err, &invalid) {
-			return "", false, errors.New("existing HTTPS Harbor certificate is not trusted or does not match the endpoint; prepare its trusted CA")
 		}
 		if err != nil {
 			failures = append(failures, err)
@@ -43,6 +37,10 @@ func detectExistingHarbor(ctx context.Context, registry, protocol string) (strin
 }
 
 func probeExistingHarbor(ctx context.Context, registry, protocol string) (bool, error) {
+	return probeExistingHarborWithTLS(ctx, registry, protocol, false)
+}
+
+func probeExistingHarborWithTLS(ctx context.Context, registry, protocol string, skipVerify bool) (bool, error) {
 	address := registry
 	if _, _, err := net.SplitHostPort(address); err != nil {
 		port := "443"
@@ -60,7 +58,25 @@ func probeExistingHarbor(ctx context.Context, registry, protocol string) (bool, 
 		return false, errors.New("endpoint could not be checked; verify address, protocol and connectivity")
 	}
 	connection.Close()
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(request *http.Request, previous []*http.Request) error {
+		if request.URL.Scheme != previous[0].URL.Scheme || request.URL.Host != previous[0].URL.Host {
+			return http.ErrUseLastResponse
+		}
+		if len(previous) >= 10 {
+			return errors.New("too many Harbor redirects")
+		}
+		return nil
+	}}
+	if skipVerify {
+		transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+		if current, ok := http.DefaultTransport.(*http.Transport); ok {
+			transport = current.Clone()
+		}
+		// This credential-free health probe identifies Harbor for HTTP conversion.
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		client.Transport = transport
+		defer transport.CloseIdleConnections()
+	}
 	if err := checkHarborHealth(ctx, client, protocol+"://"+registry); err != nil {
 		return false, err
 	}

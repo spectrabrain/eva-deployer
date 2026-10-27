@@ -150,12 +150,11 @@ Base Release만 받은 상태나 Bundle 검증만 통과한 상태를 폐쇄망 
 ### Agent 자산 준비
 
 Agent의 차트·이미지·기본 Values와 snapshot 파일은 선택한 Release에 맞춰 준비합니다.
+인터넷 준비 서버에서 이미지는 ECR에서, vLLM 모델과 Qdrant snapshot은 S3에서 받습니다.
 인터넷 준비 서버에는 다음 권한이 필요합니다.
 
-- Agent 및 전송 도구 이미지의 ECR pull:
-  `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-agent`,
-  `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras`
-- vLLM 모델과 Qdrant snapshot의 S3 list/read: `spectrabrain-eva-agent` bucket
+- Agent 및 전송 도구 이미지의 ECR pull
+- vLLM 모델과 Qdrant snapshot의 S3 list/read
 
 대상 서버에는 필요한 이미지를 내부 Harbor에 적재하고 Bundle의 vLLM 모델을 배치합니다.
 대상에 AWS credential을 반입하지 않습니다. Agent의 Vision 기능을 사용하려면 Vision도 설치합니다.

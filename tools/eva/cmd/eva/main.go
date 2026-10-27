@@ -60,7 +60,6 @@ var (
 	materializeRemotePayload          = remote.MaterializeTargetPayload
 	bootstrapRemoteRuntime            = remote.BootstrapTargetRuntime
 	runArgoCDPrecondition             = apply.RunPrecondition
-	runArgoCDHandoff                  = argoCDPreflightHandoff
 	defaultCurrentReleaseReceiptPath  = release.DefaultCurrentReceiptPath
 	defaultRemoteInboxRoot            = release.DefaultRemoteInboxRoot
 	defaultWorkspaceCacheRoot         = workspace.DefaultCacheRoot
@@ -1731,6 +1730,11 @@ func runArgoCDPreflight(args []string) error {
 	if err != nil {
 		return err
 	}
+	preflight, err := newArgoCDPreflight()
+	if err != nil {
+		return err
+	}
+	defer preflight.Close()
 	// Select the Release exactly like eva install: explicit, then the Current
 	// Release, then the working directory. On a Remote Target the Current
 	// Release is the published inbox Release, not the operator's directory.
@@ -1775,7 +1779,7 @@ func runArgoCDPreflight(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := runArgoCDHandoff(document, releaseRoot); err != nil {
+	if err := preflight.Run(document, releaseRoot); err != nil {
 		return err
 	}
 	printStatus(

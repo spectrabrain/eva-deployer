@@ -19,6 +19,7 @@ import (
 
 type Detection struct {
 	SiteID       string
+	Target       string
 	Applications []string
 }
 
@@ -45,6 +46,23 @@ func LoadDetection(releaseRoot, siteID string) (Detection, error) {
 			err,
 		)
 	}
+	return loadDetectionReports(paths, siteID)
+}
+
+// LoadTargetDetection reads only the selected target's fresh report. Reports
+// left by a previous configuration must not join another cluster's handoff.
+func LoadTargetDetection(releaseRoot, siteID, host string) (Detection, error) {
+	if host == "" || filepath.Base(host) != host || host == "." || host == ".." {
+		return Detection{}, errors.New("invalid target report identity")
+	}
+	path := filepath.Join(releaseRoot, "out", "work", "config", siteID, host, "precondition.yaml")
+	if _, err := os.Stat(path); err != nil {
+		return Detection{}, err
+	}
+	return loadDetectionReports([]string{path}, siteID)
+}
+
+func loadDetectionReports(paths []string, siteID string) (Detection, error) {
 	applications := map[string]struct{}{}
 	for _, path := range paths {
 		contents, err := os.ReadFile(path)
@@ -68,6 +86,9 @@ func LoadDetection(releaseRoot, siteID string) (Detection, error) {
 				"Argo CD tracking detection failed on target reported by %s; resolve the target kubectl access before installing Solution components",
 				path,
 			)
+		}
+		if report.ArgoCDTracking.Status != "ok" && report.ArgoCDTracking.Status != "unavailable" {
+			return Detection{}, fmt.Errorf("precondition report %s has missing or unsupported Argo CD tracking status %q", path, report.ArgoCDTracking.Status)
 		}
 		for _, application := range report.ArgoCDTracking.Applications {
 			if !validLegacyApplication(application) {
@@ -324,6 +345,10 @@ func RunPreflight(
 	if err != nil {
 		return err
 	}
+	return RunDetectedPreflight(detection, prompt, connect)
+}
+
+func RunDetectedPreflight(detection Detection, prompt Prompter, connect Connector) error {
 	if len(detection.Applications) == 0 {
 		return nil
 	}

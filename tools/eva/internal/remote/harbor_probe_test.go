@@ -59,12 +59,18 @@ func TestHarborProtocolDetectionSupportsHTTPOnAnyPortAndTrustedHTTPS(t *testing.
 	}
 }
 
-func TestHarborProtocolDetectionDoesNotDowngradeAnUntrustedCertificate(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("untrusted TLS reached Harbor API") }))
+func TestHarborProtocolDetectionRecognizesPrivateTLSForHTTPConversion(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"healthy","components":[{"name":"core","status":"healthy"},{"name":"registry","status":"healthy"}]}`))
+	}))
 	defer server.Close()
-	_, present, err := detectExistingHarbor(context.Background(), strings.TrimPrefix(server.URL, "https://"), "")
-	if present || err == nil || !strings.Contains(err.Error(), "certificate") {
-		t.Fatalf("untrusted TLS was accepted: %v", err)
+	registry := strings.TrimPrefix(server.URL, "https://")
+	protocol, present, err := detectExistingHarbor(context.Background(), registry, "")
+	if !present || err != nil || protocol != "https" {
+		t.Fatalf("private HTTPS Harbor could not be identified for conversion: %v", err)
+	}
+	if present, err := probeExistingHarbor(context.Background(), registry, "https"); present || err == nil {
+		t.Fatal("explicit HTTPS access bypassed verification")
 	}
 }
 
@@ -100,6 +106,13 @@ func TestBootstrapAutomaticallyReusesHarborWithoutOperatorFlags(t *testing.T) {
 						t.Fatal("protocol had to be selected by the operator")
 					}
 					return protocol, true, nil
+				},
+				EnsureExistingHarborHTTP: func(context.Context, string) error {
+					if protocol == "http" {
+						t.Fatal("existing HTTP Harbor was changed")
+					}
+					protocol = "http"
+					return nil
 				},
 				EnsureRuntime: func(context.Context) error { return nil },
 				EnsureDocker: func(context.Context) error {

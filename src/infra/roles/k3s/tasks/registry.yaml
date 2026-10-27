@@ -24,6 +24,8 @@
       ansible.builtin.assert:
         that:
           - k3s_registry_existing is mapping
+          - k3s_registry_existing.get('mirrors', {}) is mapping
+          - k3s_registry_existing.get('configs', {}) is mapping
           - repository_protocol | default('http') in ['http', 'https']
           - (repository_username | default(harbor_admin_user | default('')) | length > 0) == (repository_password | default(harbor_admin_password | default('')) | length > 0)
 
@@ -38,6 +40,10 @@
     - name: Merge Harbor mirror without replacing other registries
       ansible.builtin.set_fact:
         k3s_registry_merged: "{{ k3s_registry_existing | combine({'mirrors': {k3s_selected_registry: k3s_registry_mirror}}, recursive=true) }}"
+
+    - name: Enable certificate verification bypass only for the selected Harbor
+      ansible.builtin.set_fact:
+        k3s_registry_merged: "{{ k3s_registry_merged | combine({'configs': {k3s_selected_registry: {'tls': {'insecure_skip_verify': true}}}}, recursive=true) }}"
 
     - name: Merge explicitly provided registry credentials
       ansible.builtin.set_fact:
@@ -64,6 +70,18 @@
       ansible.builtin.service:
         name: k3s
         state: restarted
+      when: k3s_registry_write.changed | default(false)
+
+    - name: Wait for target Kubernetes API after registry configuration restart
+      ansible.builtin.command:
+        argv: [k3s, kubectl, get, '--raw=/readyz']
+      environment:
+        KUBECONFIG: "{{ eva_registry_kubeconfig | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: k3s_registry_api_ready
+      changed_when: false
+      until: k3s_registry_api_ready.rc == 0 and k3s_registry_api_ready.stdout | trim == 'ok'
+      retries: 30
+      delay: 2
       when: k3s_registry_write.changed | default(false)
   always:
     - name: Clear transient k3s registry credential facts

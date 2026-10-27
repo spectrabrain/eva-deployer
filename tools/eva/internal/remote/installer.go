@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"time"
 
+	"eva-deployer/tools/eva/internal/argocd"
 	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/workspace"
 	"gopkg.in/yaml.v3"
@@ -188,14 +189,15 @@ func installerConnectionSettings(name string, target workspace.InstallerTarget) 
 }
 
 type TargetAction struct {
-	Action       string   `json:"action"`
-	Site         string   `json:"site"`
-	Name         string   `json:"name"`
-	ReleaseRoot  string   `json:"release_root"`
-	Config       []byte   `json:"config,omitempty"`
-	Args         []string `json:"args,omitempty"`
-	Verbose      bool     `json:"verbose,omitempty"`
-	SudoPassword string   `json:"sudo_password,omitempty"`
+	Action         string   `json:"action"`
+	Site           string   `json:"site"`
+	Name           string   `json:"name"`
+	ReleaseRoot    string   `json:"release_root"`
+	Config         []byte   `json:"config,omitempty"`
+	HandoffReceipt []byte   `json:"argocd_handoff,omitempty"`
+	Args           []string `json:"args,omitempty"`
+	Verbose        bool     `json:"verbose,omitempty"`
+	SudoPassword   string   `json:"sudo_password,omitempty"`
 }
 
 type InstallerTargetResult struct {
@@ -205,15 +207,27 @@ type InstallerTargetResult struct {
 }
 
 type InstallerService struct {
-	Publish         Service
-	Connect         func(context.Context, string, string, workspace.InstallerTarget, int64) (TargetConnection, error)
-	ConnectForCheck func(context.Context, string, string, workspace.InstallerTarget) (TargetConnection, error)
-	Action          func(context.Context, TargetConnection, TargetAction, Streams) error
+	Publish            Service
+	Connect            func(context.Context, string, string, workspace.InstallerTarget, int64) (TargetConnection, error)
+	ConnectForCheck    func(context.Context, string, string, workspace.InstallerTarget) (TargetConnection, error)
+	Action             func(context.Context, TargetConnection, TargetAction, Streams) error
+	LoadHandoffReceipt func(string, string, workspace.InstallerTarget) ([]byte, error)
 }
 
 func NewInstallerService() InstallerService {
 	connector := NewInstallerConnector()
-	return InstallerService{Publish: NewService(), Connect: connector.Connect, ConnectForCheck: connector.ConnectForCheck, Action: runTargetAction}
+	return InstallerService{Publish: NewService(), Connect: connector.Connect, ConnectForCheck: connector.ConnectForCheck, Action: runTargetAction,
+		LoadHandoffReceipt: func(site, name string, target workspace.InstallerTarget) ([]byte, error) {
+			return LoadInstallerHandoffReceipt(argocd.DefaultReceiptRoot, site, name, target)
+		}}
+}
+
+func LoadInstallerHandoffReceipt(root, site, name string, target workspace.InstallerTarget) ([]byte, error) {
+	receipt, err := argocd.LoadInstallerTargetReceipt(root, site, name, target)
+	if err != nil || receipt == nil {
+		return nil, err
+	}
+	return yaml.Marshal(receipt)
 }
 
 func (service InstallerService) Install(ctx context.Context, input workspace.Installer, resolved release.Resolved, args []string, streams Streams) ([]InstallerTargetResult, error) {
@@ -234,6 +248,7 @@ func (service InstallerService) Install(ctx context.Context, input workspace.Ins
 		return nil, errors.New("Remote installer has no selected targets")
 	}
 	configs := map[string][]byte{}
+	receipts := map[string][]byte{}
 	for _, name := range names {
 		if _, _, _, err := installerConnectionSettings(name, input.Targets[name]); err != nil {
 			return nil, fmt.Errorf("target %s: %w", name, err)
@@ -243,6 +258,13 @@ func (service InstallerService) Install(ctx context.Context, input workspace.Ins
 			return nil, err
 		}
 		configs[name] = config
+		if service.LoadHandoffReceipt != nil {
+			receipt, err := service.LoadHandoffReceipt(input.Site.ID, name, input.Targets[name])
+			if err != nil {
+				return nil, fmt.Errorf("target %s Argo CD handoff receipt: %w", name, err)
+			}
+			receipts[name] = receipt
+		}
 	}
 	payload, err := service.Publish.ResolvePayload(resolved, input.Repository.Registry, input.Repository.Project)
 	if err != nil {
@@ -290,7 +312,7 @@ func (service InstallerService) Install(ctx context.Context, input workspace.Ins
 		_, err := publisher.PublishWithResult(PublishOptions{Release: resolved, Target: publishName, Registry: input.Repository.Registry, Project: input.Repository.Project, Streams: streams})
 		if err == nil {
 			err = service.Action(ctx, connections[name], TargetAction{Action: "install", Site: input.Site.ID, Name: name,
-				ReleaseRoot: filepath.Join("/var/lib/eva/inbox/releases", resolved.Metadata.Version), Config: configs[name], Args: args}, streams)
+				ReleaseRoot: filepath.Join("/var/lib/eva/inbox/releases", resolved.Metadata.Version), Config: configs[name], HandoffReceipt: receipts[name], Args: args}, streams)
 		}
 		if err != nil {
 			result.Err = errors.New("Remote target installation failed; inspect the target output and operation logs")
@@ -385,6 +407,17 @@ else:
         root(["install", "-d", "-m", "0700", directory])
         root(["install", "-m", "0600", temporary, destination])
         root(["bash", request["release_root"] + "/eva-tool-installer.sh"])
+        if request.get("argocd_handoff"):
+            receipt = base64.b64decode(request["argocd_handoff"], validate=True)
+            receipt_fd, receipt_temp = tempfile.mkstemp(prefix="eva-argocd-", suffix=".yaml")
+            try:
+                with os.fdopen(receipt_fd, "wb") as stream:
+                    stream.write(receipt)
+                receipt_directory = "/var/lib/eva/sites/" + request["site"]
+                root(["install", "-d", "-m", "0700", receipt_directory])
+                root(["install", "-m", "0600", receipt_temp, receipt_directory + "/argocd-handoff.yaml"])
+            finally:
+                os.unlink(receipt_temp)
         root(["eva", "install", "--release", request["release_root"], "--config", destination, "--yes"] + request.get("args", []))
     finally:
         os.unlink(temporary)

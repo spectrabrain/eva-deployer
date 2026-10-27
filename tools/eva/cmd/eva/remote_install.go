@@ -79,7 +79,13 @@ func executeRemoteOperation(record operation.Record, document plan.Document, sta
 	if err := operation.Update(stateRoot, record); err != nil {
 		return record, err
 	}
-	results, installErr := newRemoteInstallerService().Install(context.Background(), input, selected.Resolved, document.TargetInstallArgs,
+	service := newRemoteInstallerService()
+	if service.LoadHandoffReceipt != nil {
+		service.LoadHandoffReceipt = func(site, name string, target workspace.InstallerTarget) ([]byte, error) {
+			return remote.LoadInstallerHandoffReceipt(defaultArgoCDReceiptRoot, site, name, target)
+		}
+	}
+	results, installErr := service.Install(context.Background(), input, selected.Resolved, document.TargetInstallArgs,
 		remote.Streams{Stdin: os.Stdin, Stdout: io.MultiWriter(os.Stdout, log), Stderr: io.MultiWriter(os.Stderr, log)})
 	record.Status = operation.Succeeded
 	if installErr != nil {

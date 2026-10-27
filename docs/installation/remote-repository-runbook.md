@@ -20,6 +20,7 @@ Main bootstrap과 Target 설치는 Docker, k3s, NVIDIA runtime 및 호스트 영
 | 권한 | Main과 Target에서 `sudo eva ...`를 실행할 수 있는 사용자 |
 
 Main은 EVA Managed Runtime, 이미지 게시용 Docker, Harbor와 private `eva` project(`public: false`)를 준비합니다.
+신규 Main의 Harbor는 Docker Compose와 HTTP endpoint로 구성합니다.
 기존 k3s 또는 별도 방식으로 운영하는 Harbor도 재사용할 수 있습니다.
 Target에는 Main의 Runtime, package/model payload 및 Harbor image를 사용해 EVA를
 설치합니다. Target에서 AWS, S3, ECR, Docker Hub 또는 Hugging Face로 fallback하지
@@ -104,12 +105,16 @@ sudo eva remote bootstrap \
 
 이 명령은 Managed Runtime과 이미지 게시용 Docker를 준비하고, 지정한 주소에 정상 Harbor가
 있으면 자동 재사용하며 없으면 Harbor를 설치합니다. Docker·k3s 등 기존 설치 방식과
-HTTP/HTTPS를 자동 확인하므로 기존 Harbor도 같은 명령으로 진행합니다.
+HTTP/HTTPS를 자동 확인하며 정상 HTTP endpoint가 있으면 우선 사용하므로,
+기존 Harbor도 같은 명령으로 진행합니다.
 
 bootstrap은 private `eva` project(`public: false`), 이미지·OCI artifact 게시 권한과 인증을
 준비·검증하고 연결 설정을 저장합니다. 기존 데이터와 artifact는 보존합니다.
 HTTP 연결 설정이 추가되면 Main Docker가 재시작될 수 있습니다.
-HTTPS Harbor를 사용한다면 Main과 Target에 신뢰할 수 있는 CA를 준비합니다.
+Main k3s의 Helm Harbor가 HTTPS만 제공하면 기존 차트·버전·Values와 영속 데이터를 유지하면서
+같은 NodePort를 HTTP로 전환합니다. 기존 설정은
+`/var/lib/eva/preparation/main/harbor-backups`에 비공개로 백업하며, 전환 후 정상 응답을
+확인하지 못하면 원래 Helm revision으로 복구합니다. 이미 HTTP인 Harbor는 연결 설정을 변경하지 않습니다.
 주소가 다른 서비스이거나 기존 Harbor의 정상 상태를 확인할 수 없으면 기존 서비스를 보존하고 중단합니다.
 
 인증이 만료되었다면 `sudo eva remote bootstrap --yes`를 다시 실행하여 게시 계정을 갱신합니다.
@@ -132,10 +137,8 @@ sudo eva remote prepare
 Main은 선택한 Release에 필요한 Agent 이미지·모델·snapshot을 자동 준비합니다.
 개별 차트·이미지 버전이나 snapshot 파일명을 따로 지정하지 않습니다.
 
-- Agent 이미지는 SpectraBrain ECR에서, vLLM 모델과 Qdrant snapshot은
-  `spectrabrain-eva-agent` S3 bucket에서 받습니다. Main의 AWS 계정에 ECR pull과 S3 list/read 권한이 필요합니다.
-- Main에는 전송 도구 이미지 저장소
-  `211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras`의 ECR pull 권한도 필요합니다.
+- Agent 및 전송 도구 이미지는 ECR에서, vLLM 모델과 Qdrant snapshot은 S3에서 받습니다.
+  Main의 AWS 계정에 ECR pull과 S3 list/read 권한이 필요합니다.
 - Target에는 vLLM 모델 캐시를 전달하고 이미지와 Qdrant snapshot은 선택한 Main Harbor에서 공급합니다.
 - Target에는 유효한 Harbor 인증을 준비합니다. 설치가 필요한 Secret을 자동 구성하므로
   수동 Secret 생성은 필요하지 않습니다. Target에 AWS credential을 전달하지 않습니다.
@@ -316,10 +319,9 @@ n8n 설정은 `targets.server-a.ansible`에 둡니다. 기존 Target `registries
 생략할 수 있습니다. Secret 이름을 지정할 때는 `n8n_image_pull_secret_name`을 사용합니다.
 기존 Secret은 덮어쓰지 않으므로 인증 만료 시 운영자가 갱신합니다.
 
-설치는 Harbor의 n8n 이미지를 선택하고 해당 registry의 HTTP 연결 설정만 추가합니다.
-기존 registry·CA 설정을 보존하며, n8n 단독 설치에서는 k3s를 재시작하지 않습니다.
-실행 중인 containerd의 registry `config_path`를 사용할 수 없다면
-먼저 운영자가 k3s registry 설정을 준비해야 합니다.
+설치는 Harbor의 n8n 이미지를 선택하고 타겟의 registry 연결 설정과 pull 인증을 준비합니다.
+기존 registry·CA 설정을 보존하며, 해당 Harbor 설정이 변경된 경우에만 k3s를 재시작하고
+Kubernetes API가 준비될 때까지 기다립니다.
 임시 Pod로 실제 이미지 pull을 확인한 뒤 n8n Deployment와 PVC를 적용합니다.
 
 ```bash
@@ -334,13 +336,37 @@ Pod `1/1 Running`, PVC `Bound`를 확인하고 `http://<TARGET_IP>:30678/`에 �
 
 ## 7. 설치 전 타겟 확인
 
+설치는 각 타겟의 `/etc/rancher/k3s/registries.yaml`에 Main에서 확인한 Harbor의 HTTP/HTTPS
+endpoint를 자동 반영합니다. Infra를 선택하지 않은 기존 k3s 타겟도 설치 앞단에서 처리하므로
+타겟마다 파일을 직접 작성하거나 k3s를 수동 재시작할 필요가 없습니다.
+선택한 Harbor에는 `configs.<registry>.tls.insecure_skip_verify: true`를 자동 적용합니다.
+다른 registry와 기존 인증·CA 설정은 보존하며 변경이 있을 때만 k3s를 재시작합니다.
+HTTP endpoint에는 인증서 검증 설정이 사용되지 않습니다.
+
 Agent/Vision 또는 GPU Infra를 설치할 타겟에는 NVIDIA driver가 준비되어 있어야 합니다.
 타겟에서 `nvidia-smi`로 GPU 상태를 확인하고 MIG를 사용할 경우 의도한 구성을 적용합니다.
 n8n 단독 설치에는 GPU 점검이 필요하지 않습니다. TLS certificate/key도 설정한 타겟의
 `hostPath`에 준비합니다. `infra`와 Config 단계가 타겟의 GPU/MIG 자원과 Device Plugin을 확인합니다.
 
-기존 Argo CD가 EVA 리소스를 관리하고 있다면 설치 전에 해당 관리 연결을 정리하거나
-승인된 handoff 절차를 수행합니다. 설치는 확인되지 않은 관리 리소스를 임의로 덮어쓰지 않습니다.
+### Argo CD 관리 연결 확인
+
+기존 Argo CD로 EVA를 관리하던 타겟이 있다면 Main에서 설치 전에 실행합니다.
+이미 연결을 해제한 타겟도 같은 명령으로 확인할 수 있습니다.
+
+```bash
+sudo eva preflight argocd --config /home/eva/eva-install.yaml
+```
+
+- 명령 시작 시 Argo CD 관리 서버 주소·SSH 계정·비밀번호를 한 번 입력합니다.
+  설정에 포함된 모든 타겟에 같은 관리 서버 연결을 사용합니다. 타겟의 SSH 접속 정보는
+  설치 설정을 사용하며, 타겟마다 관리 서버 정보를 다시 입력하지 않습니다.
+- 처음 접속하는 SSH host key는 fingerprint를 확인한 뒤 승인합니다. 관리 서버에서
+  `kubectl`·`git`을 사용할 수 있어야 하며 등록 저장소 읽기·push 권한이 필요합니다.
+- 타겟별로 관리 상태를 확인하고 연결 해제와 해당 클러스터의 Git 등록 변경을 별도 승인합니다.
+  Git 변경이 필요한 경우 요청 시 Git 인증 정보를 입력합니다. 배포된 workload와 PVC, 다른 클러스터는 유지합니다.
+- 완료 기록은 타겟별로 저장되며, 설치 시 해당 타겟에 자동 전달됩니다. 수동으로 복사할 필요가 없습니다.
+  관리 metadata가 없는 타겟은 연결 해제 없이 통과합니다.
+- 연결 해제 완료가 확인되지 않으면 Solution 설치를 중단합니다. `--yes`로 우회할 수 없습니다.
 
 ## 8. [Main] EVA 설치
 

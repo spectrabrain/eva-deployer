@@ -24,43 +24,45 @@ type BootstrapOptions struct {
 	Streams                              Streams
 }
 type BootstrapService struct {
-	EnsureRuntime           func(context.Context) error
-	EnsureDocker            func(context.Context) error
-	EnsureRegistryTransport func(context.Context, string) error
-	ProbeManagedHarbor      func(context.Context, HarborReceipt, time.Duration) error
-	RecoverManagedHarbor    func(context.Context, HarborReceipt) error
-	EnsureHarbor            func(context.Context, string, string, bool) (HarborReceipt, error)
-	CheckHarbor             func(context.Context, HarborReceipt) error
-	Login                   func(context.Context, string, string, string) error
-	Credential              func(string) bool
-	Password                func(HarborReceipt) (string, error)
-	ProbeExistingHarbor     func(context.Context, string, string) (bool, error)
-	DetectExistingHarbor    func(context.Context, string, string) (string, bool, error)
-	OwnsManagedHarbor       func(context.Context, HarborReceipt) (bool, error)
-	EnsurePublishingDocker  func(context.Context) error
-	ReadCredential          func(context.Context, string) (HarborCredential, error)
-	RequestCredential       func(HarborReceipt) (HarborCredential, error)
-	EnsurePublication       func(context.Context, HarborReceipt, HarborCredential) error
+	EnsureRuntime            func(context.Context) error
+	EnsureDocker             func(context.Context) error
+	EnsureRegistryTransport  func(context.Context, string) error
+	ProbeManagedHarbor       func(context.Context, HarborReceipt, time.Duration) error
+	RecoverManagedHarbor     func(context.Context, HarborReceipt) error
+	EnsureHarbor             func(context.Context, string, string, bool) (HarborReceipt, error)
+	CheckHarbor              func(context.Context, HarborReceipt) error
+	Login                    func(context.Context, string, string, string) error
+	Credential               func(string) bool
+	Password                 func(HarborReceipt) (string, error)
+	ProbeExistingHarbor      func(context.Context, string, string) (bool, error)
+	DetectExistingHarbor     func(context.Context, string, string) (string, bool, error)
+	OwnsManagedHarbor        func(context.Context, HarborReceipt) (bool, error)
+	EnsurePublishingDocker   func(context.Context) error
+	ReadCredential           func(context.Context, string) (HarborCredential, error)
+	RequestCredential        func(HarborReceipt) (HarborCredential, error)
+	EnsurePublication        func(context.Context, HarborReceipt, HarborCredential) error
+	EnsureExistingHarborHTTP func(context.Context, string) error
 }
 
 func NewBootstrapService() BootstrapService {
 	return BootstrapService{
-		EnsureRuntime:           ensureManagedRuntime,
-		EnsureDocker:            ensureManagedDocker,
-		EnsureRegistryTransport: ensureManagedRegistryTransport,
-		ProbeManagedHarbor:      waitForManagedHarborAPI,
-		RecoverManagedHarbor:    recoverManagedHarbor,
-		EnsureHarbor:            ensureManagedHarbor,
-		CheckHarbor:             checkManagedHarbor,
-		Login:                   dockerLogin,
-		Credential:              dockerCredentialPresent,
-		Password:                managedHarborPassword,
-		ProbeExistingHarbor:     probeExistingHarbor,
-		DetectExistingHarbor:    detectExistingHarbor,
-		OwnsManagedHarbor:       ownsManagedHarbor,
-		EnsurePublishingDocker:  ensurePublishingDocker,
-		ReadCredential:          readHarborDockerCredential,
-		EnsurePublication:       ensureHarborPublication,
+		EnsureRuntime:            ensureManagedRuntime,
+		EnsureDocker:             ensureManagedDocker,
+		EnsureRegistryTransport:  ensureManagedRegistryTransport,
+		ProbeManagedHarbor:       waitForManagedHarborAPI,
+		RecoverManagedHarbor:     recoverManagedHarbor,
+		EnsureHarbor:             ensureManagedHarbor,
+		CheckHarbor:              checkManagedHarbor,
+		Login:                    dockerLogin,
+		Credential:               dockerCredentialPresent,
+		Password:                 managedHarborPassword,
+		ProbeExistingHarbor:      probeExistingHarbor,
+		DetectExistingHarbor:     detectExistingHarbor,
+		OwnsManagedHarbor:        ownsManagedHarbor,
+		EnsurePublishingDocker:   ensurePublishingDocker,
+		ReadCredential:           readHarborDockerCredential,
+		EnsurePublication:        ensureHarborPublication,
+		EnsureExistingHarborHTTP: ensureExistingHarborHTTP,
 	}
 }
 func ensureManagedRuntime(context.Context) error {
@@ -309,6 +311,7 @@ func (s BootstrapService) finishExternalCredential(ctx context.Context, receipt 
 	return nil
 }
 func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOptions) (HarborReceipt, error) {
+	optionsProtocolWasAutomatic := options.Protocol == ""
 	if options.Protocol != "" && options.Protocol != "http" && options.Protocol != "https" {
 		return HarborReceipt{}, errors.New("--protocol must be http or https")
 	}
@@ -350,6 +353,12 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 					return HarborReceipt{}, fmt.Errorf("inspect existing Harbor: %w", err)
 				}
 				if present {
+					if protocol == "https" && options.Protocol == "" && s.EnsureExistingHarborHTTP != nil {
+						if err := s.EnsureExistingHarborHTTP(ctx, existing.Registry); err != nil {
+							return HarborReceipt{}, err
+						}
+						protocol = "http"
+					}
 					existing.Protocol = protocol
 				}
 				if existing.ManagedBy == "eva" && s.OwnsManagedHarbor != nil {
@@ -454,6 +463,15 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 			return HarborReceipt{}, errors.New("existing Harbor endpoint is unavailable; it was not replaced")
 		}
 		options.Protocol, options.ExternalHarbor = protocol, present
+		if present && protocol == "https" && s.EnsureExistingHarborHTTP != nil {
+			// An explicit HTTPS selection remains available for advanced callers.
+			if optionsProtocolWasAutomatic {
+				if err := s.EnsureExistingHarborHTTP(ctx, options.Registry); err != nil {
+					return HarborReceipt{}, err
+				}
+				options.Protocol = "http"
+			}
+		}
 	} else if !options.ExternalHarbor && s.ProbeExistingHarbor != nil {
 		if options.Protocol == "" {
 			options.Protocol = defaultRegistryProtocol(options.Registry)

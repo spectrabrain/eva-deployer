@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"eva-deployer/tools/eva/internal/argocd"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/remote"
@@ -57,6 +58,51 @@ targets:
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestRemoteControllerTransfersOnlyMatchingCompletedArgoCDReceipt(t *testing.T) {
+	config := remoteControllerConfig(t)
+	previous := defaultArgoCDReceiptRoot
+	defaultArgoCDReceiptRoot = t.TempDir()
+	t.Cleanup(func() { defaultArgoCDReceiptRoot = previous })
+	resolved, err := workspace.Resolve(workspace.Options{ConfigFile: config, CacheRoot: defaultWorkspaceCacheRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := workspace.InstallerFromWorkspace(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := completeTargetArgoCDReceipt(input.Site.ID, "legacy-a", "legacy-a-eva-app")
+	if err := argocd.WriteReceipt(argocd.TargetStateRoot(defaultArgoCDReceiptRoot, "node-a", input.Targets["node-a"]), receipt); err != nil {
+		t.Fatal(err)
+	}
+	installs := 0
+	mockRemoteInstaller(t, func(request remote.TargetAction) error {
+		if request.Name == "node-a" {
+			var received argocd.Receipt
+			if err := yaml.Unmarshal(request.HandoffReceipt, &received); err != nil || received.ClusterName != "legacy-a" || !received.CompletedAt.Equal(receipt.CompletedAt) {
+				t.Fatalf("matching receipt missing: %v", err)
+			}
+		} else if len(request.HandoffReceipt) != 0 {
+			t.Fatal("receipt leaked across targets")
+		}
+		installs++
+		return nil
+	})
+	factory := newRemoteInstallerService
+	newRemoteInstallerService = func() remote.InstallerService {
+		service := factory()
+		service.LoadHandoffReceipt = remote.NewInstallerService().LoadHandoffReceipt
+		return service
+	}
+	captureRemoteTargetStdout(t, func() error {
+		return run([]string{"install", "--release", writeRemotePublishRelease(t), "--config", config,
+			"--state-root", t.TempDir(), "--log-root", t.TempDir(), "--yes"})
+	})
+	if installs != 2 {
+		t.Fatalf("expected both targets installed, got %d", installs)
+	}
 }
 
 func TestRemoteInstallSendsDetectedHarborProtocolToTarget(t *testing.T) {

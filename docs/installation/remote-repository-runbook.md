@@ -56,7 +56,7 @@ Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에�
 명시합니다. 아래 Main preparation/verify/install도 인자 없이 같은 Current Release를
 사용합니다. 다른 Release가 필요한 경우에만 해당 Remote 명령에 `RELEASE_PATH`를 명시합니다.
 
-## 3. [Main] AWS와 Harbor 입력 확인
+## 3. [Main] Harbor 입력 확인
 
 정상 작업에 사용할 Main Harbor endpoint를 확인합니다.
 
@@ -75,23 +75,6 @@ Harbor 게시는 bootstrap에서 준비한 인증을 재사용합니다. 저장�
 bootstrap 안에서 게시 계정·비밀번호 또는 robot token을 입력받습니다.
 Qdrant·Vision 모델 게시도 같은 인증을 사용합니다.
 credential을 Release·payload에 넣지 않습니다.
-
-Remote preparation에는 Main 서버에서 사용할 AWS credential이 필요합니다.
-`sudo eva remote prepare`는 EVA managed credential을 확인하며, credential이 없고
-대화형 terminal에서 실행 중이면 AWS Access Key ID, AWS Secret Access Key 및 AWS Region을
-입력받습니다. Region의 기본값은 `ap-northeast-2`입니다.
-
-검증된 credential은 `/var/lib/eva/credentials/aws_key.ini`에 권한 `0600`으로 안전하게
-저장됩니다. 다음 형식만 사용하며, credential을 명령행이나 Release에 넣지 않습니다.
-
-```ini
-aws_access_key_id = <AWS_ACCESS_KEY_ID>
-aws_secret_access_key = <AWS_SECRET_ACCESS_KEY>
-region = ap-northeast-2
-```
-
-credential은 preparation evidence, Target payload, Remote publish 결과에 포함되지 않으며
-Target 서버에 AWS credential을 준비하지 않습니다.
 
 ## 4. [Main] Preparation Plane bootstrap
 

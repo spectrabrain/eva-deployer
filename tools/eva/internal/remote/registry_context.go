@@ -13,6 +13,7 @@ type RegistryContext struct {
 	Project     string
 	ReceiptPath string
 	Source      string
+	Protocol    string
 }
 
 // RegistryConflictError identifies an attempted identity change. Its fields
@@ -53,15 +54,15 @@ func ResolveRegistryContext(requestedRegistry, requestedProject, receiptPath str
 			if requestedRegistry == "" {
 				return RegistryContext{}, errors.New("Remote registry is not configured; run remote bootstrap first")
 			}
-			return RegistryContext{Registry: requestedRegistry, Project: requestedProject, ReceiptPath: receiptPath, Source: "explicit"}, nil
+			return RegistryContext{Registry: requestedRegistry, Project: requestedProject, ReceiptPath: receiptPath, Source: "explicit", Protocol: defaultRegistryProtocol(requestedRegistry)}, nil
 		}
 		return RegistryContext{}, fmt.Errorf("load configured Harbor receipt: %w", err)
 	}
 	if requestedRegistry == "" {
-		return RegistryContext{Registry: receipt.Registry, Project: receipt.Project, ReceiptPath: receiptPath, Source: "receipt"}, nil
+		return RegistryContext{Registry: receipt.Registry, Project: receipt.Project, ReceiptPath: receiptPath, Source: "receipt", Protocol: receipt.Protocol}, nil
 	}
 	if receipt.Registry != requestedRegistry || receipt.Project != requestedProject {
 		return RegistryContext{}, &RegistryConflictError{ConfiguredRegistry: receipt.Registry, ConfiguredProject: receipt.Project, RequestedRegistry: requestedRegistry, RequestedProject: requestedProject}
 	}
-	return RegistryContext{Registry: receipt.Registry, Project: receipt.Project, ReceiptPath: receiptPath, Source: "explicit"}, nil
+	return RegistryContext{Registry: receipt.Registry, Project: receipt.Project, ReceiptPath: receiptPath, Source: "explicit", Protocol: receipt.Protocol}, nil
 }

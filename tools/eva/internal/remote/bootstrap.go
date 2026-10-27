@@ -35,6 +35,12 @@ type BootstrapService struct {
 	Credential              func(string) bool
 	Password                func(HarborReceipt) (string, error)
 	ProbeExistingHarbor     func(context.Context, string, string) (bool, error)
+	DetectExistingHarbor    func(context.Context, string, string) (string, bool, error)
+	OwnsManagedHarbor       func(context.Context, HarborReceipt) (bool, error)
+	EnsurePublishingDocker  func(context.Context) error
+	ReadCredential          func(context.Context, string) (HarborCredential, error)
+	RequestCredential       func(HarborReceipt) (HarborCredential, error)
+	EnsurePublication       func(context.Context, HarborReceipt, HarborCredential) error
 }
 
 func NewBootstrapService() BootstrapService {
@@ -50,6 +56,11 @@ func NewBootstrapService() BootstrapService {
 		Credential:              dockerCredentialPresent,
 		Password:                managedHarborPassword,
 		ProbeExistingHarbor:     probeExistingHarbor,
+		DetectExistingHarbor:    detectExistingHarbor,
+		OwnsManagedHarbor:       ownsManagedHarbor,
+		EnsurePublishingDocker:  ensurePublishingDocker,
+		ReadCredential:          readHarborDockerCredential,
+		EnsurePublication:       ensureHarborPublication,
 	}
 }
 func ensureManagedRuntime(context.Context) error {
@@ -61,6 +72,17 @@ func ensureManagedRuntime(context.Context) error {
 }
 func ensureManagedDocker(ctx context.Context) error {
 	if exec.CommandContext(ctx, "docker", "info").Run() == nil && exec.CommandContext(ctx, "docker", "compose", "version").Run() == nil {
+		return nil
+	}
+	backend, err := ResolveBackend("scripts/install/install_docker.sh")
+	if err != nil {
+		return err
+	}
+	return exec.CommandContext(ctx, backend).Run()
+}
+
+func ensurePublishingDocker(ctx context.Context) error {
+	if exec.CommandContext(ctx, "docker", "info").Run() == nil {
 		return nil
 	}
 	backend, err := ResolveBackend("scripts/install/install_docker.sh")
@@ -218,10 +240,39 @@ func managedHarborPasswordAt(receipt HarborReceipt, path string) (string, error)
 
 func (s BootstrapService) prepareCredential(ctx context.Context, receipt HarborReceipt) error {
 	if receipt.ManagedBy == "external" {
-		if s.Credential == nil || !s.Credential(receipt.Registry) {
-			return errors.New("external Harbor Docker credential is unavailable; configure it before remote bootstrap")
+		if s.ReadCredential == nil {
+			if s.Credential == nil || !s.Credential(receipt.Registry) {
+				return ErrHarborCredentialRequired
+			}
+			return nil
 		}
-		return nil
+		credential, err := s.ReadCredential(ctx, receipt.Registry)
+		if err != nil && !errors.Is(err, ErrHarborCredentialRequired) {
+			return err
+		}
+		if errors.Is(err, ErrHarborCredentialRequired) {
+			// An older Compose installation can have a matching local password,
+			// even when the live endpoint is now managed externally.
+			local := receipt
+			local.ManagedBy = "eva"
+			if password, readErr := managedHarborPassword(local); readErr == nil {
+				credential, err = HarborCredential{Username: "admin", Password: password}, nil
+			}
+		}
+		if err == nil {
+			err = s.finishExternalCredential(ctx, receipt, credential)
+			if err == nil || !errors.Is(err, ErrHarborCredentialRequired) {
+				return err
+			}
+		}
+		if s.RequestCredential == nil {
+			return fmt.Errorf("%w; run remote bootstrap interactively to supply a publication account", ErrHarborCredentialRequired)
+		}
+		credential, err = s.RequestCredential(receipt)
+		if err != nil {
+			return err
+		}
+		return s.finishExternalCredential(ctx, receipt, credential)
 	}
 	if s.Login == nil || s.Credential == nil || s.Password == nil {
 		return errors.New("Remote bootstrap credential service is not configured")
@@ -235,6 +286,25 @@ func (s BootstrapService) prepareCredential(ctx context.Context, receipt HarborR
 	}
 	if !s.Credential(receipt.Registry) {
 		return errors.New("validate Managed Harbor credential: matching Docker credential is unavailable")
+	}
+	if s.EnsurePublication != nil {
+		return s.EnsurePublication(ctx, receipt, HarborCredential{Username: "admin", Password: password})
+	}
+	return nil
+}
+
+func (s BootstrapService) finishExternalCredential(ctx context.Context, receipt HarborReceipt, credential HarborCredential) error {
+	if s.EnsurePublication == nil || s.Login == nil || s.Credential == nil {
+		return errors.New("Harbor publication credential service is not configured")
+	}
+	if err := s.EnsurePublication(ctx, receipt, credential); err != nil {
+		return err
+	}
+	if err := s.Login(ctx, receipt.Registry, credential.Username, credential.Password); err != nil {
+		return fmt.Errorf("prepare existing Harbor credential: %w", err)
+	}
+	if !s.Credential(receipt.Registry) {
+		return errors.New("matching Docker credential is unavailable after Harbor login")
 	}
 	return nil
 }
@@ -273,13 +343,39 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 			if s.CheckHarbor == nil {
 				return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")
 			}
-			if options.Protocol != "" && options.Protocol != existing.Protocol && !options.ExternalHarbor {
-				return HarborReceipt{}, errors.New("protocol differs from Harbor receipt; use --external-harbor to revalidate an externally managed endpoint")
+			original := existing
+			if s.DetectExistingHarbor != nil {
+				protocol, present, err := s.DetectExistingHarbor(ctx, existing.Registry, options.Protocol)
+				if err != nil {
+					return HarborReceipt{}, fmt.Errorf("inspect existing Harbor: %w", err)
+				}
+				if present {
+					existing.Protocol = protocol
+				}
+				if existing.ManagedBy == "eva" && s.OwnsManagedHarbor != nil {
+					owned, err := s.OwnsManagedHarbor(ctx, existing)
+					if err != nil {
+						return HarborReceipt{}, err
+					}
+					if !owned {
+						existing.ManagedBy, existing.HarborVersion = "external", "external"
+					}
+				}
+				if !present && existing.ManagedBy == "external" {
+					return HarborReceipt{}, errors.New("existing Harbor endpoint is unavailable; it was not replaced")
+				}
+			} else if options.Protocol != "" {
+				existing.Protocol = options.Protocol
 			}
 			if options.ExternalHarbor {
 				existing.ManagedBy, existing.HarborVersion = "external", "external"
 				if options.Protocol != "" {
 					existing.Protocol = options.Protocol
+				}
+			}
+			if existing.ManagedBy == "external" {
+				if err := s.prepareExternalTransport(ctx, existing); err != nil {
+					return HarborReceipt{}, err
 				}
 			}
 			if existing.ManagedBy == "eva" &&
@@ -326,7 +422,7 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 			if err := s.CheckHarbor(ctx, existing); err != nil {
 				return HarborReceipt{}, fmt.Errorf("validate managed Harbor: %w", err)
 			}
-			if options.ExternalHarbor {
+			if existing != original {
 				if err := WriteHarborReceipt(options.ReceiptPath, existing); err != nil {
 					return HarborReceipt{}, err
 				}
@@ -347,20 +443,32 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 	if _, err := ValidateProject(options.Project); err != nil {
 		return HarborReceipt{}, err
 	}
-	if options.Protocol == "" {
-		options.Protocol = defaultRegistryProtocol(options.Registry)
-	}
 	// Detect before Docker transport changes or Compose installation. A k3s
 	// NodePort does not appear in docker ps or require a listening host socket.
-	if !options.ExternalHarbor && s.ProbeExistingHarbor != nil {
+	if s.DetectExistingHarbor != nil {
+		protocol, present, err := s.DetectExistingHarbor(ctx, options.Registry, options.Protocol)
+		if err != nil {
+			return HarborReceipt{}, fmt.Errorf("inspect existing Harbor without modifying it: %w", err)
+		}
+		if options.ExternalHarbor && !present {
+			return HarborReceipt{}, errors.New("existing Harbor endpoint is unavailable; it was not replaced")
+		}
+		options.Protocol, options.ExternalHarbor = protocol, present
+	} else if !options.ExternalHarbor && s.ProbeExistingHarbor != nil {
+		if options.Protocol == "" {
+			options.Protocol = defaultRegistryProtocol(options.Registry)
+		}
 		present, err := s.ProbeExistingHarbor(ctx, options.Registry, options.Protocol)
 		if err != nil {
 			return HarborReceipt{}, fmt.Errorf("inspect existing Harbor without modifying it: %w", err)
 		}
 		options.ExternalHarbor = present
 	}
+	if options.Protocol == "" {
+		options.Protocol = "http"
+	}
 	if !options.ExternalHarbor && options.Protocol != "http" {
-		return HarborReceipt{}, errors.New("new managed Harbor uses HTTP; configure an existing HTTPS Harbor with --external-harbor")
+		return HarborReceipt{}, errors.New("new managed Harbor uses HTTP; the requested HTTPS endpoint is unavailable")
 	}
 	if s.EnsureRuntime == nil || s.EnsureDocker == nil || s.EnsureHarbor == nil || s.CheckHarbor == nil {
 		return HarborReceipt{}, errors.New("Remote bootstrap service is not configured")
@@ -391,6 +499,9 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 	}
 	if options.ExternalHarbor {
 		receipt.Protocol = options.Protocol
+		if err := s.prepareExternalTransport(ctx, receipt); err != nil {
+			return HarborReceipt{}, err
+		}
 	}
 	if receipt.Registry != options.Registry || receipt.Project != options.Project {
 		return HarborReceipt{}, errors.New("Harbor result does not match requested registry or project")
@@ -408,4 +519,23 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 		return HarborReceipt{}, fmt.Errorf("write Harbor receipt: %w", err)
 	}
 	return receipt, nil
+}
+
+func (s BootstrapService) prepareExternalTransport(ctx context.Context, receipt HarborReceipt) error {
+	if s.EnsurePublishingDocker != nil {
+		if err := s.EnsurePublishingDocker(ctx); err != nil {
+			return fmt.Errorf("prepare image publication Docker: %w", err)
+		}
+	}
+	if receipt.Protocol == "http" && s.EnsureRegistryTransport != nil {
+		if err := s.EnsureRegistryTransport(ctx, receipt.Registry); err != nil {
+			return fmt.Errorf("prepare existing Harbor HTTP transport: %w", err)
+		}
+		if s.ProbeManagedHarbor != nil {
+			if err := s.ProbeManagedHarbor(ctx, receipt, time.Minute); err != nil {
+				return fmt.Errorf("wait for existing Harbor after Docker transport preparation: %w", err)
+			}
+		}
+	}
+	return nil
 }

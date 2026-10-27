@@ -19,7 +19,7 @@ func TestResolveRegistryContextUsesReceiptAndIsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if context.Registry != testReceipt().Registry || context.Project != "eva" || context.Source != "receipt" {
+	if context.Registry != testReceipt().Registry || context.Project != "eva" || context.Source != "receipt" || context.Protocol != "http" {
 		t.Fatalf("context = %#v", context)
 	}
 	after, err := os.ReadFile(path)
@@ -28,6 +28,25 @@ func TestResolveRegistryContextUsesReceiptAndIsReadOnly(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Fatal("resolver changed receipt")
+	}
+}
+
+func TestRegistryContextUsesDetectedProtocolRatherThanPortConvention(t *testing.T) {
+	for _, protocol := range []string{"http", "https"} {
+		t.Run(protocol, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "harbor.yaml")
+			receipt := testReceipt()
+			receipt.Registry, receipt.Protocol = "harbor.example.internal:8090", protocol
+			if err := WriteHarborReceipt(path, receipt); err != nil {
+				t.Fatal(err)
+			}
+			for _, requested := range []string{"", receipt.Registry} {
+				resolved, err := ResolveRegistryContext(requested, "", path)
+				if err != nil || resolved.Protocol != protocol {
+					t.Fatalf("detected protocol was lost: %#v %v", resolved, err)
+				}
+			}
+		})
 	}
 }
 

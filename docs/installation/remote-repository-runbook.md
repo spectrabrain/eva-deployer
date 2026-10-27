@@ -70,8 +70,9 @@ Main Harbor endpoint에는 URL scheme을 넣지 않으며 `localhost` 또는 loo
 Managed Harbor 인증은 승인된 Secret 관리 절차로 준비합니다. `EVA_HARBOR_ADMIN_PASSWORD`가
 비어 있지 않으면 그 값을 우선합니다. 비밀번호 CLI option은 없고, receipt와 로그에 비밀번호를
 기록하지 않습니다. 공개 기본 비밀번호로 운영하지 않습니다.
-새 Managed Harbor 게시는 bootstrap의 인증을 재사용합니다. 기존 외부 Harbor를 재사용할 때는
-승인된 게시 계정으로 Main의 root Docker 인증을 먼저 준비합니다. Qdrant·Vision 모델 게시도 같은 인증을 사용합니다.
+Harbor 게시는 bootstrap에서 준비한 인증을 재사용합니다. 저장된 인증이 없거나 유효하지 않으면
+bootstrap 안에서 게시 계정·비밀번호 또는 robot token을 입력받습니다.
+Qdrant·Vision 모델 게시도 같은 인증을 사용합니다.
 credential을 Release·payload에 넣지 않습니다.
 
 Remote preparation에는 Main 서버에서 사용할 AWS credential이 필요합니다.
@@ -101,45 +102,18 @@ sudo eva remote bootstrap \
   --yes
 ```
 
-이 명령은 Managed Runtime, Docker Engine/Compose, Harbor 및 private `eva` project(`public: false`)를 준비하거나
-검증하고, 같은 `sudo` 실행 identity의 Docker registry credential까지 확인한 뒤 Harbor
-receipt를 기록합니다. 별도의 `docker login`은 정상 절차에 필요하지 않습니다. credential
-오류가 발생하면 수동 login 대신 `sudo eva remote bootstrap --yes`를 다시 실행합니다.
-Target의 k3s, GPU, NFS 또는 EVA component를
-Main에 설치하지 않습니다.
+이 명령은 Managed Runtime과 이미지 게시용 Docker를 준비하고, 지정한 주소에 정상 Harbor가
+있으면 자동 재사용하며 없으면 Harbor를 설치합니다. Docker·k3s 등 기존 설치 방식과
+HTTP/HTTPS를 자동 확인하므로 기존 Harbor도 같은 명령으로 진행합니다.
 
-### 기존 Harbor 재사용
+bootstrap은 private `eva` project(`public: false`), 이미지·OCI artifact 게시 권한과 인증을
+준비·검증하고 연결 설정을 저장합니다. 기존 데이터와 artifact는 보존합니다.
+HTTP 연결 설정이 추가되면 Main Docker가 재시작될 수 있습니다.
+HTTPS Harbor를 사용한다면 Main과 Target에 신뢰할 수 있는 CA를 준비합니다.
+주소가 다른 서비스이거나 기존 Harbor의 정상 상태를 확인할 수 없으면 기존 서비스를 보존하고 중단합니다.
 
-k3s에 설치된 Harbor는 `docker ps`에 나타나지 않으며, NodePort는 `ss`의 listening
-목록에 없을 수 있습니다. Harbor 주소에서 API를 조회합니다.
-
-```bash
-curl --connect-timeout 5 --max-time 10 -i http://harbor.example.com:32080/v2/
-curl --connect-timeout 5 --max-time 10 -fsS http://harbor.example.com:32080/api/v2.0/health
-```
-
-`/v2/`의 `401 Unauthorized`는 인증이 필요한 정상 registry 응답입니다.
-health의 전체 상태와 core·registry를 포함한 component 상태가 `healthy`인지 확인합니다.
-
-기존 Harbor에 private `eva` project와 이미지·OCI artifact 게시 권한을 준비한 뒤,
-승인된 계정으로 login합니다. 비밀번호는 대화형 입력으로 받습니다.
-HTTP Harbor는 Main Docker에서 해당 registry의 HTTP 연결이 이미 허용되어 있어야 합니다.
-
-```bash
-sudo docker login harbor.example.com:32080
-sudo eva remote bootstrap \
-  --registry harbor.example.com:32080 \
-  --external-harbor \
-  --protocol http \
-  --yes
-```
-
-이 경로는 기존 Harbor의 데이터·설정과 Docker 서비스를 변경하지 않습니다.
-HTTPS Harbor는 `--protocol https`를 사용하고 Main과 Target에 신뢰할 수 있는 CA를 준비합니다.
-receipt가 없는 정상 Harbor는 자동으로 기존 Harbor로 인식합니다. 이미 Managed receipt가
-기록된 주소를 외부 관리로 전환할 때도 `--external-harbor`를 명시합니다.
-기존 endpoint의 상태나 프로토콜을 확인하지 못하면 설치를 중단하고 기존 서비스를 보존합니다.
-외부 Harbor 인증 만료 시에는 같은 `sudo docker login`으로 인증을 갱신한 뒤 bootstrap을 다시 실행합니다.
+인증이 만료되었다면 `sudo eva remote bootstrap --yes`를 다시 실행하여 게시 계정을 갱신합니다.
+Target의 k3s, GPU, NFS 또는 EVA component는 이후 Target 설치 단계에서 준비합니다.
 
 ## 5. [Main] Remote 자산 준비
 

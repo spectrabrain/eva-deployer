@@ -38,13 +38,155 @@ func TestExistingHarborProbeUsesAPIInsteadOfDockerOrHostListener(t *testing.T) {
 	}
 }
 
+func TestHarborProtocolDetectionSupportsHTTPOnAnyPortAndTrustedHTTPS(t *testing.T) {
+	health := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"status":"healthy","components":[{"name":"core","status":"healthy"},{"name":"registry","status":"healthy"}]}`))
+	})
+	plain := httptest.NewServer(health)
+	defer plain.Close()
+	protocol, present, err := detectExistingHarbor(context.Background(), strings.TrimPrefix(plain.URL, "http://"), "")
+	if err != nil || !present || protocol != "http" {
+		t.Fatalf("HTTP auto detection failed: %s %v", protocol, err)
+	}
+	secure := httptest.NewTLSServer(health)
+	defer secure.Close()
+	original := http.DefaultTransport
+	http.DefaultTransport = secure.Client().Transport
+	defer func() { http.DefaultTransport = original }()
+	protocol, present, err = detectExistingHarbor(context.Background(), strings.TrimPrefix(secure.URL, "https://"), "")
+	if err != nil || !present || protocol != "https" {
+		t.Fatalf("HTTPS auto detection failed: %s %v", protocol, err)
+	}
+}
+
+func TestHarborProtocolDetectionDoesNotDowngradeAnUntrustedCertificate(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("untrusted TLS reached Harbor API") }))
+	defer server.Close()
+	_, present, err := detectExistingHarbor(context.Background(), strings.TrimPrefix(server.URL, "https://"), "")
+	if present || err == nil || !strings.Contains(err.Error(), "certificate") {
+		t.Fatalf("untrusted TLS was accepted: %v", err)
+	}
+}
+
+func TestHarborProtocolDetectionDistinguishesAbsentAndUnhealthyEndpoints(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	listener.Close()
+	protocol, present, err := detectExistingHarbor(context.Background(), address, "")
+	if err != nil || present || protocol != "http" {
+		t.Fatalf("absent endpoint should allow a new HTTP Harbor: %s %v %v", protocol, present, err)
+	}
+	for _, response := range []string{"another service", `{"status":"unhealthy","components":[{"name":"core","status":"unhealthy"},{"name":"registry","status":"healthy"}]}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(response)) }))
+		_, present, err := detectExistingHarbor(context.Background(), strings.TrimPrefix(server.URL, "http://"), "")
+		server.Close()
+		if present || err == nil {
+			t.Fatalf("unhealthy or unrelated service was accepted: %v", err)
+		}
+	}
+}
+
+func TestBootstrapAutomaticallyReusesHarborWithoutOperatorFlags(t *testing.T) {
+	for _, protocol := range []string{"http", "https"} {
+		t.Run(protocol, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "harbor.yaml")
+			transport, publishingDocker, checks := 0, 0, 0
+			service := BootstrapService{
+				DetectExistingHarbor: func(_ context.Context, _ string, requested string) (string, bool, error) {
+					if requested != "" {
+						t.Fatal("protocol had to be selected by the operator")
+					}
+					return protocol, true, nil
+				},
+				EnsureRuntime: func(context.Context) error { return nil },
+				EnsureDocker: func(context.Context) error {
+					t.Fatal("existing Harbor triggered managed Docker installation")
+					return nil
+				},
+				EnsurePublishingDocker:  func(context.Context) error { publishingDocker++; return nil },
+				EnsureRegistryTransport: func(context.Context, string) error { transport++; return nil },
+				EnsureHarbor: func(_ context.Context, registry, project string, external bool) (HarborReceipt, error) {
+					if !external {
+						t.Fatal("existing Harbor triggered managed Harbor installation")
+					}
+					receipt := testReceipt()
+					receipt.Registry, receipt.Project, receipt.ManagedBy, receipt.HarborVersion = registry, project, "external", "external"
+					return receipt, nil
+				},
+				ReadCredential: func(context.Context, string) (HarborCredential, error) {
+					return HarborCredential{Username: "publisher", Password: "private-token"}, nil
+				},
+				RequestCredential: func(HarborReceipt) (HarborCredential, error) {
+					t.Fatal("valid saved credential was not reused")
+					return HarborCredential{}, nil
+				},
+				EnsurePublication: func(context.Context, HarborReceipt, HarborCredential) error { return nil },
+				Login:             func(context.Context, string, string, string) error { return nil },
+				Credential:        func(string) bool { return true },
+				CheckHarbor: func(_ context.Context, receipt HarborReceipt) error {
+					checks++
+					if receipt.Protocol != protocol || receipt.ManagedBy != "external" {
+						t.Fatal("auto-detected Harbor settings were lost")
+					}
+					return nil
+				},
+			}
+			receipt, err := service.Bootstrap(context.Background(), BootstrapOptions{Registry: "harbor.example.internal:8090", Yes: true, ReceiptPath: path})
+			if err != nil || receipt.Protocol != protocol {
+				t.Fatalf("automatic reuse failed: %#v %v", receipt, err)
+			}
+			if _, err := service.Bootstrap(context.Background(), BootstrapOptions{Yes: true, ReceiptPath: path}); err != nil {
+				t.Fatalf("same bootstrap command could not reuse its stored configuration: %v", err)
+			}
+			wantTransport := 0
+			if protocol == "http" {
+				wantTransport = 2
+			}
+			if transport != wantTransport || publishingDocker != 2 || checks != 2 {
+				t.Fatalf("unexpected preparation: transport=%d docker=%d checks=%d", transport, publishingDocker, checks)
+			}
+		})
+	}
+}
+
+func TestBootstrapReclassifiesAStaleManagedReceiptWithoutRedeploying(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "harbor.yaml")
+	if err := WriteHarborReceipt(path, testReceipt()); err != nil {
+		t.Fatal(err)
+	}
+	service := BootstrapService{
+		DetectExistingHarbor:    func(context.Context, string, string) (string, bool, error) { return "http", true, nil },
+		OwnsManagedHarbor:       func(context.Context, HarborReceipt) (bool, error) { return false, nil },
+		EnsurePublishingDocker:  func(context.Context) error { return nil },
+		EnsureRegistryTransport: func(context.Context, string) error { return nil },
+		EnsureHarbor: func(context.Context, string, string, bool) (HarborReceipt, error) {
+			t.Fatal("existing Harbor was redeployed")
+			return HarborReceipt{}, nil
+		},
+		Password:    func(HarborReceipt) (string, error) { t.Fatal("stale managed password was reused"); return "", nil },
+		Credential:  func(string) bool { return true },
+		CheckHarbor: func(context.Context, HarborReceipt) error { return nil },
+	}
+	receipt, err := service.Bootstrap(context.Background(), BootstrapOptions{Yes: true, ReceiptPath: path})
+	if err != nil || receipt.ManagedBy != "external" {
+		t.Fatalf("existing deployment was not reclassified: %v", err)
+	}
+	stored, err := LoadHarborReceipt(path)
+	if err != nil || stored.ManagedBy != "external" {
+		t.Fatalf("validated receipt was not updated: %v", err)
+	}
+}
+
 func TestBootstrapAdoptsExistingHarborBeforeHostMutations(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "harbor.yaml")
 	service := BootstrapService{
 		ProbeExistingHarbor:     func(context.Context, string, string) (bool, error) { return true, nil },
 		EnsureRuntime:           func(context.Context) error { return nil },
 		EnsureDocker:            func(context.Context) error { t.Fatal("existing Harbor caused Docker installation"); return nil },
-		EnsureRegistryTransport: func(context.Context, string) error { t.Fatal("existing Harbor caused Docker restart"); return nil },
+		EnsureRegistryTransport: func(context.Context, string) error { return nil },
 		EnsureHarbor: func(_ context.Context, registry, project string, external bool) (HarborReceipt, error) {
 			if !external {
 				t.Fatal("existing Harbor caused Compose installation")

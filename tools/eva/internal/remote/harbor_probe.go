@@ -2,14 +2,45 @@ package remote
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"syscall"
 	"time"
 )
+
+// An omitted protocol probes the same endpoint using HTTPS and HTTP. A TLS
+// certificate failure is terminal, rather than a reason to downgrade to HTTP.
+func detectExistingHarbor(ctx context.Context, registry, protocol string) (string, bool, error) {
+	if protocol != "" {
+		present, err := probeExistingHarbor(ctx, registry, protocol)
+		return protocol, present, err
+	}
+	var failures []error
+	for _, candidate := range []string{"https", "http"} {
+		present, err := probeExistingHarbor(ctx, registry, candidate)
+		if present && err == nil {
+			return candidate, true, nil
+		}
+		var unknown x509.UnknownAuthorityError
+		var hostname x509.HostnameError
+		var invalid x509.CertificateInvalidError
+		if errors.As(err, &unknown) || errors.As(err, &hostname) || errors.As(err, &invalid) {
+			return "", false, errors.New("existing HTTPS Harbor certificate is not trusted or does not match the endpoint; prepare its trusted CA")
+		}
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if len(failures) != 0 {
+		return "", false, errors.New("existing endpoint could not be identified as healthy Harbor; existing services were preserved")
+	}
+	return "http", false, nil
+}
 
 func probeExistingHarbor(ctx context.Context, registry, protocol string) (bool, error) {
 	address := registry
@@ -43,7 +74,7 @@ func checkHarborHealth(ctx context.Context, client *http.Client, endpoint string
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return errors.New("Harbor health probe failed; verify protocol and TLS configuration")
+		return fmt.Errorf("Harbor health probe failed; verify protocol and TLS configuration: %w", err)
 	}
 	defer response.Body.Close()
 	var health struct {

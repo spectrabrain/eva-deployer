@@ -314,7 +314,7 @@ func TestBootstrapPreparesManagedRegistryTransport(
 	}
 }
 
-func TestBootstrapDoesNotConfigureExternalRegistryTransport(
+func TestBootstrapAutomaticallyConfiguresExternalHTTPRegistryTransport(
 	t *testing.T,
 ) {
 	path := filepath.Join(t.TempDir(), "harbor.yaml")
@@ -369,8 +369,8 @@ func TestBootstrapDoesNotConfigureExternalRegistryTransport(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if transportCalled {
-		t.Fatal("External Harbor changed Docker registry transport")
+	if !transportCalled {
+		t.Fatal("External HTTP Harbor transport was not prepared automatically")
 	}
 }
 
@@ -390,6 +390,8 @@ func TestBootstrapRecoversManagedHarborAfterTransportRestart(
 	loginCalled := false
 
 	service := withTestCredentialHooks(BootstrapService{
+		DetectExistingHarbor: func(context.Context, string, string) (string, bool, error) { return "http", true, nil },
+		OwnsManagedHarbor:    func(context.Context, HarborReceipt) (bool, error) { return true, nil },
 		EnsureRegistryTransport: func(
 			context.Context,
 			string,
@@ -452,5 +454,39 @@ func TestBootstrapRecoversManagedHarborAfterTransportRestart(
 	}
 	if !loginCalled {
 		t.Fatal("Docker login was not called after recovery")
+	}
+}
+
+func TestBootstrapRecoversUnavailableHarborOnlyWhenDeploymentMatches(t *testing.T) {
+	for _, owned := range []bool{true, false} {
+		t.Run(map[bool]string{true: "owned", false: "stale"}[owned], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "harbor.yaml")
+			if err := WriteHarborReceipt(path, testReceipt()); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.ReadFile(path)
+			recovered := false
+			service := withTestCredentialHooks(BootstrapService{
+				DetectExistingHarbor: func(context.Context, string, string) (string, bool, error) { return "http", false, nil },
+				OwnsManagedHarbor:    func(context.Context, HarborReceipt) (bool, error) { return owned, nil },
+				EnsureRegistryTransport: func(context.Context, string) error {
+					if !owned {
+						t.Fatal("stale receipt changed Docker transport")
+					}
+					return nil
+				},
+				ProbeManagedHarbor:   func(context.Context, HarborReceipt, time.Duration) error { return context.DeadlineExceeded },
+				RecoverManagedHarbor: func(context.Context, HarborReceipt) error { recovered = true; return nil },
+				CheckHarbor:          func(context.Context, HarborReceipt) error { return nil },
+			})
+			_, err := service.Bootstrap(context.Background(), BootstrapOptions{Yes: true, ReceiptPath: path})
+			if recovered != owned || (err == nil) != owned {
+				t.Fatalf("unsafe or missing recovery: recovered=%v err=%v", recovered, err)
+			}
+			after, _ := os.ReadFile(path)
+			if string(before) != string(after) {
+				t.Fatal("unavailable endpoint replaced the stored receipt")
+			}
+		})
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -635,16 +636,49 @@ func runRemoteBootstrap(args []string) error {
 	if flags.NArg() != 0 {
 		return errors.New("remote bootstrap does not accept a Release path")
 	}
-	receipt, err := newRemoteBootstrapService().Bootstrap(context.Background(), remote.BootstrapOptions{Registry: *registry, Protocol: *protocol, Yes: *yes, ExternalHarbor: *external, ReplaceRegistry: *replaceRegistry, ReceiptPath: defaultRemoteBootstrapReceiptPath, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
+	service := newRemoteBootstrapService()
+	if service.RequestCredential == nil {
+		service.RequestCredential = func(receipt remote.HarborReceipt) (remote.HarborCredential, error) {
+			if !term.IsTerminal(int(os.Stdin.Fd())) {
+				return remote.HarborCredential{}, errors.New("Harbor publication credential is unavailable; run eva remote bootstrap from an interactive terminal to configure it")
+			}
+			return promptHarborCredential(receipt, os.Stdin, os.Stderr, func() (string, error) {
+				password, err := term.ReadPassword(int(os.Stdin.Fd()))
+				fmt.Fprintln(os.Stderr)
+				return string(password), err
+			})
+		}
+	}
+	receipt, err := service.Bootstrap(context.Background(), remote.BootstrapOptions{Registry: *registry, Protocol: *protocol, Yes: *yes, ExternalHarbor: *external, ReplaceRegistry: *replaceRegistry, ReceiptPath: defaultRemoteBootstrapReceiptPath, Streams: remote.Streams{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}})
 	if err != nil {
 		return displayRemoteContextError(err)
 	}
-	if receipt.ManagedBy == "eva" {
-		fmt.Printf("[INFO] Managed Harbor credential ready: registry=%s\n", receipt.Registry)
-	}
+	fmt.Printf("[INFO] Harbor credential ready: registry=%s management=%s protocol=%s\n", receipt.Registry, receipt.ManagedBy, receipt.Protocol)
 	fmt.Println("[OK] Remote Preparation Plane ready")
 	fmt.Printf("[INFO] registry=%s project=%s\n", receipt.Registry, receipt.Project)
 	return nil
+}
+
+func promptHarborCredential(receipt remote.HarborReceipt, input io.Reader, output io.Writer, password func() (string, error)) (remote.HarborCredential, error) {
+	fmt.Fprintf(output, "Harbor 게시 계정이 필요합니다: %s (project=%s)\n", receipt.Registry, receipt.Project)
+	fmt.Fprint(output, "Harbor 사용자 이름 [admin]: ")
+	username, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil {
+		return remote.HarborCredential{}, errors.New("Harbor credential input was cancelled")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = "admin"
+	}
+	if strings.ContainsAny(username, "\r\n\x00") {
+		return remote.HarborCredential{}, errors.New("Harbor username must be a single-line value")
+	}
+	fmt.Fprint(output, "Harbor 비밀번호 또는 robot token (숨김 입력): ")
+	secret, err := password()
+	if err != nil || secret == "" || strings.ContainsAny(secret, "\r\n\x00") {
+		return remote.HarborCredential{}, errors.New("a nonempty single-line Harbor password or robot token is required")
+	}
+	return remote.HarborCredential{Username: username, Password: secret}, nil
 }
 
 func remotePrepareUsage() {

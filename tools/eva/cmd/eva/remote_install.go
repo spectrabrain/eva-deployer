@@ -50,6 +50,11 @@ func executeRemoteOperation(record operation.Record, document plan.Document, sta
 		return record, displayRemoteContextError(err)
 	}
 	input.Repository.Registry, input.Repository.Project = registry.Registry, registry.Project
+	for _, target := range input.Targets {
+		if _, explicit := target.Ansible["repository_protocol"]; !explicit {
+			target.Ansible["repository_protocol"] = registry.Protocol
+		}
+	}
 	selected, err := selectRelease(document.ReleaseRoot)
 	if err != nil {
 		return record, err

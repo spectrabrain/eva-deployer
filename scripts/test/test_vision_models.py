@@ -442,6 +442,44 @@ class VisionModelsTests(unittest.TestCase):
         self.assertTrue(all(entry["args"][0] == "push" for entry in self.calls(self.oras_log)))
         self.assert_clean_credentials()
 
+    def test_remote_harbor_credential_helper_is_reused_for_oras(self):
+        self.prepare("Owl-v2")
+        docker = self.root / "docker"
+        docker.mkdir()
+        helper = self.root / "docker-credential-fixture"
+        helper.write_text("#!" + sys.executable + "\n"
+                          "import json, os, sys\n"
+                          "assert sys.argv[1:] == ['get']\n"
+                          "assert sys.stdin.read().strip() == 'harbor.test:32080'\n"
+                          "print(json.dumps({'Username': 'pull-user', 'Secret': os.environ['FAKE_EXPECTED_PASSWORD']}))\n")
+        helper.chmod(0o700)
+        for settings in ({"credHelpers": {"harbor.test:32080": "fixture"}}, {"credsStore": "fixture"}):
+            with self.subTest(settings=settings):
+                settings["auths"] = {"harbor.test:32080": {}}
+                (docker / "config.json").write_text(json.dumps(settings))
+                before = (docker / "config.json").read_bytes()
+                self.call("publish", updates={"REPOSITORY_PASSWORD": None, "REPOSITORY_USE_DOCKER_AUTH": "true",
+                                              "DOCKER_CONFIG": str(docker), "PATH": str(self.root) + os.pathsep + self.env["PATH"]})
+                self.assertEqual(before, (docker / "config.json").read_bytes())
+                self.assert_clean_credentials()
+
+    def test_failed_credential_helper_does_not_expose_its_output(self):
+        self.prepare("Owl-v2")
+        docker = self.root / "docker"
+        docker.mkdir()
+        (docker / "config.json").write_text(json.dumps({"credsStore": "fixture"}))
+        helper = self.root / "docker-credential-fixture"
+        helper.write_text("#!" + sys.executable + "\n"
+                          "import os, sys\n"
+                          "print(os.environ['FAKE_EXPECTED_PASSWORD'])\n"
+                          "print(os.environ['FAKE_EXPECTED_PASSWORD'], file=sys.stderr)\n"
+                          "sys.exit(1)\n")
+        helper.chmod(0o700)
+        self.call("publish", ok=False, updates={"REPOSITORY_PASSWORD": None, "REPOSITORY_USE_DOCKER_AUTH": "true",
+                                                "DOCKER_CONFIG": str(docker), "PATH": str(self.root) + os.pathsep + self.env["PATH"]})
+        self.assertFalse(self.oras_log.exists())
+        self.assert_clean_credentials()
+
     def test_failed_push_preserves_report_and_removes_private_config(self):
         self.prepare()
         self.call("publish")

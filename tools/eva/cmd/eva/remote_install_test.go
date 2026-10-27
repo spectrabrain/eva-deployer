@@ -13,7 +13,9 @@ import (
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/remote"
+	"eva-deployer/tools/eva/internal/workspace"
 	"golang.org/x/crypto/ssh"
+	"gopkg.in/yaml.v3"
 )
 
 func remoteControllerConfig(t *testing.T) string {
@@ -55,6 +57,52 @@ targets:
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestRemoteInstallSendsDetectedHarborProtocolToTarget(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(map[bool]string{false: "detected", true: "explicit"}[explicit], func(t *testing.T) {
+			config := remoteControllerConfig(t)
+			if explicit {
+				contents, err := os.ReadFile(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				contents = []byte(strings.ReplaceAll(string(contents), "      repository_password:", "      repository_protocol: http\n      repository_password:"))
+				if err := os.WriteFile(config, contents, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			receipt := remote.HarborReceipt{SchemaVersion: "v1", ManagedBy: "external", Registry: "harbor.example.com:32080", Project: "eva",
+				HarborVersion: "external", InstallRoot: "/opt/eva/harbor", DataRoot: "/var/lib/eva/harbor", Protocol: "https"}
+			if err := remote.WriteHarborReceipt(defaultRemoteBootstrapReceiptPath, receipt); err != nil {
+				t.Fatal(err)
+			}
+			installs := 0
+			mockRemoteInstaller(t, func(request remote.TargetAction) error {
+				var input workspace.Installer
+				if err := yaml.Unmarshal(request.Config, &input); err != nil {
+					t.Fatal(err)
+				}
+				want := "https"
+				if explicit {
+					want = "http"
+				}
+				if input.Targets[request.Name].Ansible["repository_protocol"] != want {
+					t.Fatal("target did not receive the selected Harbor protocol")
+				}
+				installs++
+				return nil
+			})
+			captureRemoteTargetStdout(t, func() error {
+				return run([]string{"install", "--release", writeRemotePublishRelease(t), "--config", config,
+					"--state-root", t.TempDir(), "--log-root", t.TempDir(), "--yes"})
+			})
+			if installs != 2 {
+				t.Fatalf("expected both targets to be installed, got %d", installs)
+			}
+		})
+	}
 }
 
 func mockRemoteInstaller(t *testing.T, action func(remote.TargetAction) error) {

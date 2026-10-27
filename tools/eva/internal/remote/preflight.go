@@ -315,9 +315,11 @@ func dockerCredentialPresent(registry string) bool {
 		return false
 	}
 	var config struct {
-		Auths map[string]json.RawMessage `json:"auths"`
+		Auths   map[string]json.RawMessage `json:"auths"`
+		Helpers map[string]string          `json:"credHelpers"`
+		Store   string                     `json:"credsStore"`
 	}
-	return json.Unmarshal(contents, &config) == nil && (config.Auths[registry] != nil || config.Auths["https://"+registry] != nil || config.Auths["http://"+registry] != nil)
+	return json.Unmarshal(contents, &config) == nil && (config.Auths[registry] != nil || config.Auths["https://"+registry] != nil || config.Auths["http://"+registry] != nil || config.Helpers[registry] != "" || config.Store != "")
 }
 func checkStorage(releaseRoot, root string) error {
 	cleanRoot, err := filepath.Abs(root)

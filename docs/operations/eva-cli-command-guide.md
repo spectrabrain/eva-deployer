@@ -373,6 +373,8 @@ Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation
 
 첫 bootstrap 이후 registry는 receipt에서 해석한다. 준비·검증이 끝나면 Main에서
 설정 파일을 작성하고 `install`을 실행한다. 별도 Target 등록이나 수동 전달 명령은 필요하지 않다.
+Harbor 설치 방식과 HTTP/HTTPS는 bootstrap이 자동 확인한다. 기존 Harbor는 재사용하고,
+저장된 인증이 유효하지 않으면 같은 명령 안에서 게시 계정을 입력받는다. 별도 `docker login`은 필요하지 않다.
 `remote verify`는 준비 자산을 검증하며 실제 타겟 서비스는 설치 후 `eva check`로 확인한다.
 `status`·`retry`·`apply`는 Main의 설치 작업을 대상으로 한다. 타겟별 Values·Config·Helm 백업은 타겟에서 조회한다.
 

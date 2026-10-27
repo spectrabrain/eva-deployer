@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+
+	"eva-deployer/tools/eva/internal/apt"
 )
 
 // prerequisiteRunner streams diagnostics to the operator and also returns them
@@ -23,11 +25,29 @@ func prepareOnlineRuntimeHost(destination string) error {
 }
 
 func installOnlinePrerequisites(run prerequisiteRunner) error {
+	return installOnlinePrerequisitesWithRepository(run, apt.NewService())
+}
+
+func installOnlinePrerequisitesWithRepository(run prerequisiteRunner, repository apt.Service) error {
 	if run == nil {
 		return errors.New("Online Runtime prerequisite runner is not configured")
 	}
-	if _, err := run("apt-get", "update"); err != nil {
-		return fmt.Errorf("update APT package index for Online Runtime bootstrap: %w", err)
+	var updateFailure error
+	repository.Run = func(command apt.Command) (apt.Result, error) {
+		output, err := run(command.Name, command.Args...)
+		result := apt.Result{Output: output}
+		var exit interface{ ExitCode() int }
+		if errors.As(err, &exit) {
+			if command.Name == "apt-get" && len(command.Args) == 1 && command.Args[0] == "update" && updateFailure == nil {
+				updateFailure = err
+			}
+			result.ExitCode = exit.ExitCode()
+			return result, nil
+		}
+		return result, err
+	}
+	if _, err := repository.Ensure(os.Stdout); err != nil {
+		return fmt.Errorf("update APT package index for Online Runtime bootstrap: %w", errors.Join(err, updateFailure))
 	}
 	install := []string{"install", "--yes", "--no-remove", "ca-certificates", "python3", "python3-venv"}
 	output, installErr := run("apt-get", install...)

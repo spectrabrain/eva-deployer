@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"eva-deployer/tools/eva/internal/apt"
 )
 
 type prerequisiteExitError int
@@ -99,6 +101,47 @@ func TestInstallOnlinePrerequisitesHealthy(t *testing.T) {
 	commands := prerequisiteRepairCommands()
 	if err := runPrerequisiteSteps(t, []prerequisiteStep{{command: commands[0]}, {command: commands[1]}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOnlineRuntimeAutomaticallyRepairsKnownRepositoryBeforeInstallingPrerequisites(t *testing.T) {
+	for _, failValidation := range []bool{false, true} {
+		updates, fetches, packages, restored := 0, 0, 0, 0
+		run := func(name string, args ...string) (string, error) {
+			switch name {
+			case "apt-get":
+				if args[0] == "update" {
+					updates++
+					if updates == 1 || failValidation {
+						return "Err: https://pkg.jenkins.io/debian-stable binary/ Release\nNO_PUBKEY 7198F4B714ABFC68\n", prerequisiteExitError(100)
+					}
+				} else if args[0] == "install" {
+					packages++
+					if updates != 2 || failValidation {
+						t.Fatal("Runtime prerequisites started before successful APT revalidation")
+					}
+				}
+			case "test":
+				return "", prerequisiteExitError(1)
+			case "gpg":
+				return "fpr:::::::::5E386EADB55F01504CAE8BCF7198F4B714ABFC68:\n", nil
+			case "rm":
+				restored++
+			}
+			return "", nil
+		}
+		service := apt.Service{Fetch: func(string) ([]byte, error) { fetches++; return []byte("official key fixture"), nil }}
+		err := installOnlinePrerequisitesWithRepository(run, service)
+		if updates != 2 || fetches != 1 {
+			t.Fatalf("expected one repair and revalidation: updates=%d fetches=%d err=%v", updates, fetches, err)
+		}
+		if failValidation {
+			if err == nil || !strings.Contains(err.Error(), "were restored") || restored != 2 || packages != 0 {
+				t.Fatalf("failed bootstrap recovery did not roll back and stop: %v", err)
+			}
+		} else if err != nil || packages != 1 || restored != 0 {
+			t.Fatalf("bootstrap did not continue after automatic repository recovery: %v", err)
+		}
 	}
 }
 

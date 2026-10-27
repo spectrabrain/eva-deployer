@@ -683,65 +683,41 @@ func TestRunRetryClonesLatestFailedOperationAndAppliesIt(t *testing.T) {
 	}
 }
 
-func TestAPTPriorToInfraRequiresSeparateInteractiveApproval(t *testing.T) {
+func TestInternalAPTRepairWorksWithoutInteractiveApproval(t *testing.T) {
 	previousService := newAPTService
 	t.Cleanup(func() { newAPTService = previousService })
-	nonTerminalInput, err := os.CreateTemp(t.TempDir(), "stdin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer nonTerminalInput.Close()
-	nonTerminalInfo, err := nonTerminalInput.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
 	previousStdinStat := stdinStat
 	t.Cleanup(func() { stdinStat = previousStdinStat })
-	stdinStat = func() (os.FileInfo, error) { return nonTerminalInfo, nil }
+	stdinStat = func() (os.FileInfo, error) {
+		t.Fatal("automatic installation repair requested interactive approval")
+		return nil, nil
+	}
+	updates := 0
 	newAPTService = func() apt.Service {
-		return apt.Service{Run: func(command apt.Command) (apt.Result, error) {
-			return apt.Result{
-				ExitCode: 100,
-				Output:   "Err: https://pkg.jenkins.io/debian-stable binary/ Release\nNO_PUBKEY 7198F4B714ABFC68\n",
-			}, nil
-		}}
+		return apt.Service{
+			Fetch: func(string) ([]byte, error) { return []byte("official key fixture"), nil },
+			Run: func(command apt.Command) (apt.Result, error) {
+				switch command.Name {
+				case "apt-get":
+					updates++
+					if updates == 1 {
+						return apt.Result{ExitCode: 100, Output: "Err: https://pkg.jenkins.io/debian-stable binary/ Release\nNO_PUBKEY 7198F4B714ABFC68\n"}, nil
+					}
+				case "test":
+					return apt.Result{ExitCode: 1}, nil
+				case "gpg":
+					return apt.Result{Output: "fpr:::::::::5E386EADB55F01504CAE8BCF7198F4B714ABFC68:\n"}, nil
+				}
+				return apt.Result{}, nil
+			},
+		}
 	}
-	err = aptPrerequisite(plan.Document{
-		RepositoryMode: "online_repository",
-		Steps:          []plan.Step{{Component: "infra"}},
-	})
-	var displayed *displayedError
-	if !errors.As(err, &displayed) {
-		t.Fatalf("aptPrerequisite() error = %v, want displayed approval error", err)
+	output := captureRemoteTargetStdout(t, func() error { return runInternal([]string{"ensure-apt-repositories"}) })
+	if updates != 2 || strings.TrimSpace(output) != `{"changed":true}` {
+		t.Fatalf("target repair did not revalidate or report changes: updates=%d output=%s", updates, output)
 	}
-	if !strings.Contains(displayed.message, "Interactive approval is required") || !strings.Contains(displayed.message, "troubleshoot apt --fix-known --yes") {
-		t.Fatalf("approval error = %q", displayed.message)
-	}
-}
-
-func TestAPTPriorToInfraSkipsOfflineRepositories(t *testing.T) {
-	for _, repositoryMode := range []string{
-		"remote_repository",
-		"local_repository",
-	} {
-		t.Run(repositoryMode, func(t *testing.T) {
-			called := false
-			previousService := newAPTService
-			t.Cleanup(func() { newAPTService = previousService })
-			newAPTService = func() apt.Service {
-				called = true
-				return apt.Service{}
-			}
-			if err := aptPrerequisite(plan.Document{
-				RepositoryMode: repositoryMode,
-				Steps:          []plan.Step{{Component: "infra"}},
-			}); err != nil {
-				t.Fatalf("aptPrerequisite() error = %v", err)
-			}
-			if called {
-				t.Fatalf("%s unexpectedly ran APT diagnostic", repositoryMode)
-			}
-		})
+	if err := runInternal([]string{"ensure-apt-repositories", "--release", "/unused"}); err == nil {
+		t.Fatal("automatic repair accepted unrelated internal command arguments")
 	}
 }
 

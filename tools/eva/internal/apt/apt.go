@@ -1,5 +1,5 @@
-// Package apt provides explicit, operator-approved repair for known APT
-// repository failures before EVA starts an Operation.
+// Package apt validates APT repositories and repairs supported signing-key
+// failures during EVA installation and Runtime bootstrap.
 package apt
 
 import (
@@ -55,6 +55,30 @@ type Service struct {
 
 func NewService() Service {
 	return Service{Run: systemRunner, Fetch: fetchKey}
+}
+
+// Ensure repairs only a recognized failure and revalidates APT before returning.
+// The existing repair restores its original files when validation fails.
+func (service Service) Ensure(output io.Writer) (bool, error) {
+	if output == nil {
+		output = io.Discard
+	}
+	diagnosis, err := service.Check()
+	if err != nil {
+		if diagnosis.Output != "" {
+			fmt.Fprintln(output, diagnosis.Output)
+		}
+		return false, err
+	}
+	if diagnosis.Healthy {
+		return false, nil
+	}
+	fmt.Fprintln(output, "[INFO] Repairing the Jenkins APT repository signing key")
+	if err := service.RemediateKnownJenkins(); err != nil {
+		return false, err
+	}
+	fmt.Fprintln(output, "[OK] APT repository repair and validation succeeded")
+	return true, nil
 }
 
 // Check runs apt-get update and identifies the Jenkins 2026 signing-key

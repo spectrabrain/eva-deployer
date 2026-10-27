@@ -1,0 +1,76 @@
+---
+- name: Resolve controller EVA Tool for APT repository repair
+  ansible.builtin.set_fact:
+    eva_apt_controller_executable: "{{ lookup('ansible.builtin.env', 'EVA_TOOL_EXECUTABLE') }}"
+  changed_when: false
+
+- name: Require a controller EVA Tool and a supported installation platform
+  ansible.builtin.assert:
+    that:
+      - eva_apt_controller_executable is match('^/')
+      - ansible_facts.system == 'Linux'
+      - ansible_facts.architecture == 'x86_64'
+    fail_msg: "Run Online Infra installation through eva install or the EVA managed shell. The target must be linux/amd64."
+
+- name: Read controller EVA Tool checksum
+  ansible.builtin.stat:
+    path: "{{ eva_apt_controller_executable }}"
+    checksum_algorithm: sha256
+  register: eva_apt_controller_stat
+  delegate_to: localhost
+  become: false
+
+- name: Require the running controller EVA Tool executable
+  ansible.builtin.assert:
+    that:
+      - eva_apt_controller_stat.stat.isreg | default(false)
+      - eva_apt_controller_stat.stat.executable | default(false)
+      - eva_apt_controller_stat.stat.checksum is defined
+    fail_msg: "The controller EVA Tool executable is unavailable. Verify the installed EVA Tool."
+
+- name: Select local or SSH target APT helper
+  ansible.builtin.set_fact:
+    eva_apt_helper_executable: >-
+      {{ eva_apt_controller_executable
+         if (ansible_connection | default('ssh')) == 'local'
+         else (eva_apt_target_tools_root | default('/opt/eva/target-tools/apt'))
+              ~ '/' ~ eva_apt_controller_stat.stat.checksum ~ '/eva' }}
+  changed_when: false
+
+- name: Prepare the exact controller EVA Tool on the SSH target
+  when: (ansible_connection | default('ssh')) != 'local'
+  block:
+    - name: Ensure target APT helper directory exists
+      ansible.builtin.file:
+        path: "{{ eva_apt_helper_executable | dirname }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy the running EVA Tool to the SSH target
+      ansible.builtin.copy:
+        src: "{{ eva_apt_controller_executable }}"
+        dest: "{{ eva_apt_helper_executable }}"
+        mode: "0755"
+
+    - name: Verify target APT helper checksum
+      ansible.builtin.stat:
+        path: "{{ eva_apt_helper_executable }}"
+        checksum_algorithm: sha256
+      register: eva_apt_target_stat
+
+    - name: Require the exact transferred APT helper
+      ansible.builtin.assert:
+        that:
+          - eva_apt_target_stat.stat.checksum == eva_apt_controller_stat.stat.checksum
+        fail_msg: "The target APT helper checksum differs from the controller EVA Tool."
+
+- name: Automatically repair supported APT repository failures and validate the target
+  ansible.builtin.command:
+    argv:
+      - "{{ eva_apt_helper_executable }}"
+      - internal
+      - ensure-apt-repositories
+  register: eva_apt_repository_result
+  changed_when: >-
+    eva_apt_repository_result.rc == 0
+    and (eva_apt_repository_result.stdout | from_json).changed

@@ -34,6 +34,12 @@
     - airgap_mode | default(false) | bool
     - not ansible_check_mode
 
+- name: Validate and repair supported Online APT repositories on the installation target
+  ansible.builtin.import_tasks: apt_repositories.yaml
+  when:
+    - not (airgap_mode | default(false) | bool)
+    - not ansible_check_mode
+
 - name: Validate base and NFS offline package bundle
   ansible.builtin.import_tasks: validate_offline_debs.yaml
   when:

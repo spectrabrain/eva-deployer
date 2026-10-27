@@ -352,6 +352,14 @@ func commandEnvironment(
 		values["EVA_REMOTE_LIBEXEC_ROOT"] = filepath.Dir(filepath.Dir(filepath.Dir(backend)))
 	}
 	values["EVA_RUNTIME_ROOT"] = resolvedRuntime.Root
+	// Use the running Tool, rather than a target PATH lookup, for the shared
+	// repository repair helper copied to Online SSH installation targets.
+	values["EVA_TOOL_EXECUTABLE"] = ""
+	if executable, err := os.Executable(); err == nil {
+		if canonical, err := filepath.EvalSymlinks(executable); err == nil {
+			values["EVA_TOOL_EXECUTABLE"] = canonical
+		}
+	}
 	values["ANSIBLE_LOG_PATH"] = internalLogPath
 	values["ANSIBLE_COLLECTIONS_PATH"] = prependPath(
 		resolvedRuntime.CollectionPath(),

@@ -98,6 +98,9 @@ jobs:
           EVA_TEST_HELM_DOWNLOAD: "1"
         run: python3 scripts/test/test_helm_user_values_backup.py
 
+      - name: Test automatic APT repository repair during installation
+        run: python3 scripts/test/test_apt_repository_install.py
+
       - name: Test EVA App values contract
         run: |
           python3 scripts/test/test_eva_app_database_transition.py

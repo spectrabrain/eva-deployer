@@ -407,6 +407,9 @@ Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation
 
 `shell`/`exec`는 Operation에 기록되지 않는 고급 실행이다. 명령에 따라 cluster를 변경할 수 있다.
 `exec --runtime-root PATH`로 다른 관리 Runtime을 지정할 수 있다.
+Runtime bootstrap과 Online Infra 설치는 지원하는 APT 저장소 문제를 자동 복구하고 재검증한다.
+Bastion 설치는 각 타겟에서 처리한다. `troubleshoot apt`는 개별 진단이 필요할 때 사용하는 명령이며
+일반 설치 절차에서 별도 실행하지 않는다.
 내부 installer용 `eva internal ...`은 공개 설치자 명령이 아니며 직접 사용하지 않는다.
 
 ## 5. 조회 문제 해결

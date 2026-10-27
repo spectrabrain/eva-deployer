@@ -297,13 +297,10 @@ Agent, Vision, App 중 하나를 선택하면 Config가 자동으로 포함됩�
 않습니다. Component-only 작업은 선택하지 않은 제품 component를 실행하지 않습니다. Agent는
 Release 관리 values로 `eva-agent`, `eva-agent-vllm`, `eva-agent-qdrant`를 함께 설치합니다.
 
-precondition이 지원되는 APT repository 문제를 감지하면 별도로 진단합니다.
-`eva install --yes`는 외부 APT repository 변경을 승인하지 않습니다.
-
-```bash
-sudo eva troubleshoot apt
-sudo eva troubleshoot apt --fix-known --yes
-```
+Runtime bootstrap과 Online Infra 설치는 APT 저장소를 자동 확인합니다. 지원하는 서명 키 문제는
+자동 복구하고 재검증한 뒤 설치를 계속합니다. Bastion 설치에서도 각 타겟에서 처리하며
+별도 진단·복구 명령을 실행할 필요가 없습니다. 복구 후 검증이 실패하면 기존 저장소 설정을 되돌리고
+설치를 중단합니다. 지원하지 않는 오류는 설치 로그에서 원인을 확인합니다.
 
 인증서 SAN 검증이 실패하면 해당 IAM/App 외부 주소를 SAN에 포함한 인증서와 key를 같은 host path에
 다시 준비한 뒤, 설정 값을 바꾸지 않았다면 실패한 작업을 재시도합니다.

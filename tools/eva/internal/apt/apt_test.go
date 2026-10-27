@@ -1,10 +1,79 @@
 package apt
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestEnsureHealthyOrUnknownRepositoriesDoNotRepair(t *testing.T) {
+	for _, exitCode := range []int{0, 100} {
+		service := Service{
+			Fetch: func(string) ([]byte, error) { t.Fatal("unexpected key download"); return nil, nil },
+			Run: func(command Command) (Result, error) {
+				if command.Name != "apt-get" || strings.Join(command.Args, " ") != "update" {
+					t.Fatal("healthy/unknown APT failure changed repository files")
+				}
+				return Result{ExitCode: exitCode, Output: "unrelated repository output"}, nil
+			},
+		}
+		changed, err := service.Ensure(nil)
+		if changed || (exitCode == 0) != (err == nil) {
+			t.Fatalf("exit=%d changed=%t err=%v", exitCode, changed, err)
+		}
+	}
+}
+
+func TestEnsureRollsBackIfAPTStillFailsAfterAutomaticRepair(t *testing.T) {
+	var commands []Command
+	updates := 0
+	service := Service{
+		Fetch: func(string) ([]byte, error) { return []byte("official key fixture"), nil },
+		Run: func(command Command) (Result, error) {
+			commands = append(commands, command)
+			switch command.Name {
+			case "gpg":
+				return Result{Output: "fpr:::::::::" + jenkinsFingerprint + ":\n"}, nil
+			case "apt-get":
+				updates++
+				return Result{ExitCode: 100, Output: "Err: " + jenkinsRepositoryURL + "\nNO_PUBKEY 7198F4B714ABFC68\n"}, nil
+			}
+			return Result{}, nil
+		},
+	}
+	var output bytes.Buffer
+	changed, err := service.Ensure(&output)
+	if changed || err == nil || !strings.Contains(err.Error(), "were restored") || updates != 2 {
+		t.Fatalf("failed repair was not rolled back: changed=%t updates=%d err=%v", changed, updates, err)
+	}
+	if countCommand(commands, "install", jenkinsSourcePath) < 2 || countCommand(commands, "install", jenkinsKeyPath) < 2 {
+		t.Fatal("automatic recovery did not restore both original files")
+	}
+}
+
+func TestEnsureRejectsUnexpectedSigningKeyBeforeChangingRepositoryFiles(t *testing.T) {
+	service := Service{
+		Fetch: func(string) ([]byte, error) { return []byte("unexpected key fixture"), nil },
+		Run: func(command Command) (Result, error) {
+			switch command.Name {
+			case "apt-get":
+				return Result{ExitCode: 100, Output: "Err: " + jenkinsRepositoryURL + "\nNO_PUBKEY 7198F4B714ABFC68\n"}, nil
+			case "test":
+				return Result{ExitCode: 1}, nil
+			case "gpg":
+				return Result{Output: "fpr:::::::::UNEXPECTED:\n"}, nil
+			default:
+				t.Fatalf("repository files changed before fingerprint verification: %s", command.Name)
+				return Result{}, nil
+			}
+		},
+	}
+	changed, err := service.Ensure(nil)
+	if changed || err == nil || !strings.Contains(err.Error(), "fingerprint mismatch") {
+		t.Fatalf("unexpected signing key was accepted: changed=%t err=%v", changed, err)
+	}
+}
 
 func TestCheckRecognizesJenkins2026MissingKey(t *testing.T) {
 	service := Service{Run: func(command Command) (Result, error) {

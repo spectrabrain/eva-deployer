@@ -196,6 +196,17 @@ func runInternal(args []string) error {
 	if len(args) == 0 {
 		return errors.New("internal command is required")
 	}
+	if args[0] == "ensure-apt-repositories" {
+		if len(args) != 1 {
+			return errors.New("internal ensure-apt-repositories does not accept arguments")
+		}
+		changed, err := newAPTService().Ensure(os.Stderr)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("{\"changed\":%t}\n", changed)
+		return nil
+	}
 	flags := flag.NewFlagSet("internal "+args[0], flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	releaseRoot := flags.String("release", "", "Release directory")
@@ -1237,7 +1248,7 @@ func runInstall(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
+		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
 	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
@@ -1821,41 +1832,6 @@ func troubleshootUsage() {
 	fmt.Println("--fix-known repairs an explicitly supported issue only after dedicated approval.")
 }
 
-func aptPrerequisite(document plan.Document) error {
-	if !requiresAPTPriorToInfra(document) {
-		return nil
-	}
-	service := newAPTService()
-	diagnosis, err := service.Check()
-	if err != nil {
-		return err
-	}
-	if diagnosis.Healthy {
-		return nil
-	}
-	fmt.Fprint(os.Stderr, diagnosis.KnownProblemReport())
-	if err := confirmAPTRemediation(); err != nil {
-		return err
-	}
-	if err := service.RemediateKnownJenkins(); err != nil {
-		return err
-	}
-	fmt.Fprintln(os.Stderr, "Jenkins APT repository remediation succeeded.")
-	return nil
-}
-
-func requiresAPTPriorToInfra(document plan.Document) bool {
-	if offlineRepositoryMode(document.RepositoryMode) {
-		return false
-	}
-	for _, step := range document.Steps {
-		if step.Component == "infra" {
-			return true
-		}
-	}
-	return false
-}
-
 func confirmAPTRemediation() error {
 	info, err := stdinStat()
 	if err != nil {
@@ -1982,7 +1958,7 @@ func runApply(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
+		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
 	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
@@ -2039,7 +2015,7 @@ func runRetry(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
+		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, retry)
 	printOperation(completed)
 	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
@@ -2237,6 +2213,12 @@ func shellEnvironment(base []string, resolvedRuntime runtime.Resolved, siteID, w
 		}
 	}
 	values["EVA_RUNTIME_ROOT"] = resolvedRuntime.Root
+	values["EVA_TOOL_EXECUTABLE"] = ""
+	if executable, err := os.Executable(); err == nil {
+		if canonical, err := filepath.EvalSymlinks(executable); err == nil {
+			values["EVA_TOOL_EXECUTABLE"] = canonical
+		}
+	}
 	values["ANSIBLE_COLLECTIONS_PATH"] = prependEnvironmentPath(resolvedRuntime.CollectionPath(), values["ANSIBLE_COLLECTIONS_PATH"])
 	pathEntries := resolvedRuntime.ToolDirectories()
 	if values["PATH"] != "" {
@@ -2334,6 +2316,12 @@ func runtimeEnvironment(base []string, resolved runtime.Resolved) []string {
 		}
 	}
 	values["EVA_RUNTIME_ROOT"] = resolved.Root
+	values["EVA_TOOL_EXECUTABLE"] = ""
+	if executable, err := os.Executable(); err == nil {
+		if canonical, err := filepath.EvalSymlinks(executable); err == nil {
+			values["EVA_TOOL_EXECUTABLE"] = canonical
+		}
+	}
 	values["ANSIBLE_COLLECTIONS_PATH"] = prependEnvironmentPath(resolved.CollectionPath(), values["ANSIBLE_COLLECTIONS_PATH"])
 	environment := make([]string, 0, len(values))
 	for name, value := range values {

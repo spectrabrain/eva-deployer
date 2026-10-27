@@ -85,11 +85,7 @@ func argoCDTargets(document plan.Document) ([]argoCDTarget, bool, error) {
 		if host == "" {
 			host = name
 		}
-		root := defaultArgoCDReceiptRoot
-		connection, _ := target.Ansible["ansible_connection"].(string)
-		if connection != "local" || len(input.Targets) > 1 {
-			root = argocd.TargetStateRoot(root, name, target)
-		}
+		root := argocd.InstallerTargetStateRoot(defaultArgoCDReceiptRoot, name, target, len(input.Targets))
 		result = append(result, argoCDTarget{Name: name, Host: host, StateRoot: root})
 	}
 	return result, len(input.Targets) != 0, nil

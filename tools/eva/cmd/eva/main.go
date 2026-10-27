@@ -1281,6 +1281,7 @@ func runInstall(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
+		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
@@ -1996,6 +1997,7 @@ func runApply(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
+		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
@@ -2053,6 +2055,7 @@ func runRetry(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
+		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, retry)
 	printOperation(completed)

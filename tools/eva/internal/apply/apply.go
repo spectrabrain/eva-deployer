@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"eva-deployer/tools/eva/internal/argocd"
 	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
@@ -32,10 +34,11 @@ var expectedPlaybooks = map[string]string{
 }
 
 type Options struct {
-	StateRoot    string
-	LogRoot      string
-	RuntimeRoot  string
-	Prerequisite func(plan.Document) error
+	StateRoot         string
+	LogRoot           string
+	RuntimeRoot       string
+	ArgoCDReceiptRoot string
+	Prerequisite      func(plan.Document) error
 	// AfterPrecondition runs after the target precondition step succeeds and
 	// before any remaining installation step. It is used for interactive
 	// preflight actions which must not run before target state is collected.
@@ -129,6 +132,10 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 	if err != nil {
 		return record, err
 	}
+	handoffVars, err := appHandoffVars(document, options.ArgoCDReceiptRoot)
+	if err != nil {
+		return record, err
+	}
 	logDirectory, err := operationLogDirectory(options.LogRoot, record.ID)
 	if err != nil {
 		return record, err
@@ -160,6 +167,9 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 	for _, step := range document.Steps {
 		stepStartedAt := options.Now().UTC()
 		args := ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars, overrideVars[step.Component])
+		if step.Component == "app" && handoffVars != "" {
+			args = append(args, "-e", handoffVars)
+		}
 		if len(step.Targets) != 0 {
 			args = append(args, "--limit", strings.Join(step.Targets, ","))
 		}
@@ -193,6 +203,24 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 		}
 	}
 	return finish(options, record, result, operation.Succeeded, nil)
+}
+
+func appHandoffVars(document plan.Document, receiptRoot string) (string, error) {
+	for _, step := range document.Steps {
+		if step.Component != "app" {
+			continue
+		}
+		paths, err := argocd.WorkspaceReceiptPaths(document.Workspace, document.SiteID, receiptRoot)
+		if err != nil {
+			return "", fmt.Errorf("resolve EVA App Argo CD handoff paths: %w", err)
+		}
+		if len(paths) == 0 {
+			return "", nil // Legacy inventories retain their explicit/site receipt path.
+		}
+		contents, err := json.Marshal(map[string]any{"eva_argocd_handoff_paths": paths})
+		return string(contents), err
+	}
+	return "", nil
 }
 
 func preflight(runtimeRoot string, document plan.Document) (runtime.Resolved, string, string, error) {

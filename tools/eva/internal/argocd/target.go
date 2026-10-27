@@ -35,6 +35,34 @@ func TargetStateRoot(root, name string, target workspace.InstallerTarget) string
 	return filepath.Join(root, "targets", hex.EncodeToString(digest[:16]))
 }
 
+// InstallerTargetStateRoot is shared by preflight, the install guard and
+// Ansible. A single local target also consumes receipts delivered by Main.
+func InstallerTargetStateRoot(root, name string, target workspace.InstallerTarget, targetCount int) string {
+	if root == "" {
+		root = DefaultReceiptRoot
+	}
+	connection, _ := target.Ansible["ansible_connection"].(string)
+	if connection != "local" || targetCount > 1 {
+		return TargetStateRoot(root, name, target)
+	}
+	return root
+}
+
+// WorkspaceReceiptPaths derives controller-side receipt locations from the
+// operation's immutable inventory, without moving receipts or credentials.
+func WorkspaceReceiptPaths(workspaceRoot, siteID, root string) (map[string]string, error) {
+	input, err := workspace.InstallerFromWorkspace(workspace.Resolved{Root: workspaceRoot})
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]string, len(input.Targets))
+	for name, target := range input.Targets {
+		stateRoot := InstallerTargetStateRoot(root, name, target, len(input.Targets))
+		paths[name] = ReceiptPath(stateRoot, siteID)
+	}
+	return paths, nil
+}
+
 func RequireDetectionCleared(detection Detection, root string) error {
 	if len(detection.Applications) == 0 {
 		return nil

@@ -2,6 +2,7 @@ package apply
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"eva-deployer/tools/eva/internal/argocd"
 	"eva-deployer/tools/eva/internal/fieldoverride"
 	"eva-deployer/tools/eva/internal/operation"
 	"eva-deployer/tools/eva/internal/plan"
+	"eva-deployer/tools/eva/internal/workspace"
+	"gopkg.in/yaml.v3"
 )
 
 func TestExecuteRunsPlanAndRecordsResult(t *testing.T) {
@@ -119,6 +123,85 @@ func TestExecuteAndRetryPreserveTargetLimits(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "--limit iam-a,iam-b") || !strings.Contains(output.String(), "--limit app-a") {
 		t.Fatal("apply/retry lost per-step target limits")
+	}
+}
+
+func TestExecuteAndRetryPassPreflightReceiptPathsToApp(t *testing.T) {
+	for _, connections := range [][]string{{"ssh"}, {"ssh", "ssh"}, {"local"}, {"local", "local"}} {
+		t.Run(strings.Join(connections, "-"), func(t *testing.T) {
+			workspaceRoot := createWorkspace(t)
+			hostDirectory := filepath.Join(workspaceRoot, "inventory", "host_vars")
+			if err := os.MkdirAll(hostDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			stateRoot, receiptRoot := t.TempDir(), t.TempDir()
+			var names []string
+			expected := map[string]string{}
+			for index, connection := range connections {
+				name := []string{"mg-d", "mg-e"}[index]
+				target := workspace.InstallerTarget{Ansible: map[string]any{
+					"ansible_connection": connection, "ansible_host": []string{"192.0.2.10", "192.0.2.11"}[index], "ansible_port": []int{22, 2222}[index],
+				}}
+				variables, err := yaml.Marshal(target.Ansible)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(hostDirectory, name+".yaml"), variables, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				// This is the existing preflight persistence contract. Installation
+				// must reach these receipts without moving them to the site root.
+				targetRoot := receiptRoot
+				if connection != "local" || len(connections) > 1 {
+					targetRoot = argocd.TargetStateRoot(receiptRoot, name, target)
+				}
+				receipt := argocd.Receipt{SchemaVersion: "v1", SiteID: "customer-a", ClusterName: name, CompletedAt: time.Now(), Applications: []string{name + "-eva-app"},
+					RegistrationApplication: "registration", RegistrationRepository: "https://git.example.com/registration.git", RegistrationBranch: "main",
+					RegistrationManifest: "clusters/" + name + ".yaml", RegistrationCommit: strings.Repeat("a", 40)}
+				if err := argocd.WriteReceipt(targetRoot, receipt); err != nil {
+					t.Fatal(err)
+				}
+				names = append(names, name)
+				expected[name] = argocd.ReceiptPath(targetRoot, receipt.SiteID)
+			}
+			inventory := "[eva]\n" + strings.Join(names, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(workspaceRoot, "inventory", "inventory.ini"), []byte(inventory), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			record := createOperation(t, stateRoot, workspaceRoot, createReleaseSource(t, ""), []plan.Step{{Component: "app", Playbook: expectedPlaybooks["app"], Targets: names}})
+			runtimeRoot := createRuntime(t)
+			for _, retry := range []bool{false, true} {
+				if retry {
+					record.Status = operation.Failed
+					if err := operation.Update(stateRoot, record); err != nil {
+						t.Fatal(err)
+					}
+					var err error
+					record, err = operation.Retry(stateRoot, record, time.Now())
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				var output bytes.Buffer
+				completed, err := Execute(Options{StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: runtimeRoot, ArgoCDReceiptRoot: receiptRoot, Stdout: &output, Stderr: &output}, record)
+				if err != nil || completed.Status != operation.Succeeded {
+					t.Fatalf("app execution retry=%t: %v", retry, err)
+				}
+				encoded, err := json.Marshal(map[string]any{"eva_argocd_handoff_paths": expected})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(output.String(), "-e "+string(encoded)) {
+					t.Fatalf("app did not receive preflight paths, retry=%t: %s", retry, output.String())
+				}
+				for _, path := range expected {
+					if _, err := os.Stat(path); err != nil {
+						t.Fatal("installation moved/deleted a preflight receipt")
+					}
+				}
+				record = completed
+			}
+		})
 	}
 }
 

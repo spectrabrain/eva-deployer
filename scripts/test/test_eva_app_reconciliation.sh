@@ -429,7 +429,7 @@ for assessment, missing_error, site_error in (
 # Exercise the real delegation/register/environment boundary, not a hand-built
 # shell environment. Local target aliases deliberately share a filesystem: once
 # the controller snapshot is removed, even that shared path cannot mask a target
-# file read. Distinct sites/clusters also expose cross-host register leakage.
+# file read. One site with distinct clusters exposes shared-path/register leakage.
 receipt_task_names = (
     "Check Argo CD handoff receipt on control node",
     "Read Argo CD handoff receipt on control node",
@@ -461,6 +461,8 @@ for task, name, module, argument, register in zip(
     ):
         raise SystemExit("[ERROR] unsafe production controller receipt task: " + name)
 main_names = [task.get("name") for task in main_tasks if isinstance(task, dict)]
+defaults = find_task(main_tasks, "Set EVA App install defaults (on-premise)")
+receipt_default = defaults["ansible.builtin.set_fact"]["eva_app_argocd_handoff_path"]
 if not (
     main_names.index(receipt_task_names[0])
     < main_names.index(receipt_task_names[1])
@@ -476,16 +478,18 @@ with tempfile.TemporaryDirectory(prefix="eva-app-receipt-boundary-") as director
     root = Path(directory)
     install_mock_cli(root / "bin")
     hosts = {}
+    handoff_paths = {}
     aliases = ("receipt-target-a", "receipt-target-b")
     for suffix, alias in zip(("a", "b"), aliases):
         host_root = root / alias
-        controller = root / "controller" / alias / "argocd-handoff.yaml"
+        controller = root / "controller" / "targets" / alias / "site-a" / "argocd-handoff.yaml"
+        handoff_paths[alias] = str(controller)
         controller.parent.mkdir(parents=True)
         host_root.mkdir()
         target = host_root / "target-handoff.yaml"
         receipt = {
             **valid_receipt,
-            "site_id": "site-" + suffix,
+            "site_id": "site-a",
             "cluster_name": "cluster-" + suffix,
             "applications": ["cluster-" + suffix + "-eva-app", "cluster-" + suffix + "-eva-agent"],
             "registration_manifest": "registration/clusters/cluster-" + suffix + ".yaml",
@@ -513,7 +517,6 @@ with tempfile.TemporaryDirectory(prefix="eva-app-receipt-boundary-") as director
             "ansible_python_interpreter": sys.executable,
             "ansible_remote_tmp": str(host_root / "ansible-tmp"),
             "eva_site_id": receipt["site_id"],
-            "eva_app_argocd_handoff_path": str(controller),
             "eva_app_workdir": str(host_root),
             "eva_app_effective_values_dest": str(host_root / "effective.yaml"),
             "fixture_expected_receipt": encode_receipt(receipt),
@@ -522,6 +525,16 @@ with tempfile.TemporaryDirectory(prefix="eva-app-receipt-boundary-") as director
             "fixture_target_receipt": str(target),
         }
     inventory = root / "inventory.yaml"
+    # A valid but unrelated site-level receipt must never replace the selected
+    # target's receipt. Before target path wiring, the role read this location.
+    legacy_root = root / "legacy-sites" / "site-a"
+    legacy_root.mkdir(parents=True)
+    (legacy_root / "argocd-handoff.yaml").write_text(yaml.safe_dump({
+        **valid_receipt,
+        "cluster_name": "unrelated",
+        "applications": ["unrelated-eva-app"],
+        "registration_manifest": "registration/clusters/unrelated.yaml",
+    }))
     inventory.write_text(yaml.safe_dump({"all": {"children": {
         "receipt_targets": {"hosts": hosts},
         "receipt_controller": {"hosts": {"localhost": {
@@ -537,6 +550,13 @@ with tempfile.TemporaryDirectory(prefix="eva-app-receipt-boundary-") as director
     internal_rejected["failed_when"] = False
     reconcile_rejected["failed_when"] = False
     fixture_tasks = [
+        {"name": "Resolve receipt path using production App defaults",
+         "ansible.builtin.set_fact": {"eva_app_argocd_handoff_path": receipt_default}},
+        {"name": "Assert App uses the controller path supplied for this target",
+         "ansible.builtin.assert": {"that": [
+             "eva_app_argocd_handoff_path == eva_argocd_handoff_paths[inventory_hostname]",
+             "eva_app_argocd_handoff_path != eva_site_state_root ~ '/argocd-handoff.yaml'",
+         ]}},
         *copy.deepcopy(receipt_tasks),
         {"name": "Assert delegated results belong to each target alias",
          "no_log": True,
@@ -601,6 +621,8 @@ with tempfile.TemporaryDirectory(prefix="eva-app-receipt-boundary-") as director
         "hosts": "receipt_targets", "gather_facts": False, "become": False,
         "strategy": "linear",
         "vars": {
+            "eva_argocd_handoff_paths": handoff_paths,
+            "eva_site_state_root": str(legacy_root),
             # Keep real production become:true tasks runnable without requiring
             # sudo/root in a local fixture: controller files belong to this user.
             "ansible_become_user": getpass.getuser(),
@@ -642,9 +664,9 @@ with tempfile.TemporaryDirectory(prefix="eva-app-receipt-boundary-") as director
             and any(command.startswith("helm template eva-app") for command in commands)
         ):
             raise SystemExit("[ERROR] both production shells were not exercised for " + alias)
-        if Path(hosts[alias]["eva_app_argocd_handoff_path"]).exists():
+        if Path(handoff_paths[alias]).exists():
             raise SystemExit("[ERROR] controller receipt survived boundary fixture for " + alias)
-    print("[OK] actual delegated stat/slurp: two isolated aliases, deleted controller receipts, no target fallback, read-only CLIs")
+    print("[OK] production receipt path resolution and delegated stat/slurp: one site, two clusters, no shared/target fallback, read-only CLIs")
 PY
 
 for required in \

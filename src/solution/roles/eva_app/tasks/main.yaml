@@ -19,7 +19,11 @@
     eva_app_values_host: "{{ ansible_host | default(inventory_hostname) }}"
     eva_app_effective_values_dest: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}/effective-input-values.yaml"
     eva_app_kubeconfig: "{{ eva_app_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
-    eva_app_argocd_handoff_path: "{{ eva_app_argocd_handoff_path | default(eva_site_state_root ~ '/argocd-handoff.yaml') }}"
+    eva_app_argocd_handoff_path: >-
+      {{ eva_app_argocd_handoff_path | default(
+          eva_argocd_handoff_paths[inventory_hostname]
+          if eva_argocd_handoff_paths is defined
+          else eva_site_state_root ~ '/argocd-handoff.yaml') }}
     eva_app_chart_ref: "{{ eva_app_chart_ref | default('eva-app/eva-app') }}"
     eva_app_chart_repo_url: >-
       {{ eva_app_chart_repo_url | default(

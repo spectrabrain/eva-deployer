@@ -23,6 +23,8 @@ type Step struct {
 
 type Document struct {
 	SchemaVersion     string                             `yaml:"schema_version"`
+	ExecutionMode     string                             `yaml:"execution_mode,omitempty"`
+	TargetInstallArgs []string                           `yaml:"target_install_args,omitempty"`
 	OperationID       string                             `yaml:"operation_id,omitempty"`
 	GeneratedAt       time.Time                          `yaml:"generated_at"`
 	SiteID            string                             `yaml:"site_id"`
@@ -45,7 +47,7 @@ func Build(workspaceResolved workspace.Resolved, releaseResolved release.Resolve
 
 func BuildWithOverrides(workspaceResolved workspace.Resolved, releaseResolved release.Resolved, overrides fieldoverride.Request, now time.Time) Document {
 	config := workspaceResolved.Config
-	return Document{
+	document := Document{
 		SchemaVersion:     SchemaVersion,
 		GeneratedAt:       now.UTC(),
 		SiteID:            workspaceResolved.SiteID,
@@ -61,6 +63,10 @@ func BuildWithOverrides(workspaceResolved workspace.Resolved, releaseResolved re
 		Overrides:         overrides.Public(),
 		OverrideInputs:    overrides,
 	}
+	if workspaceResolved.RemoteTargets {
+		document.ExecutionMode = "remote_targets"
+	}
+	return document
 }
 
 func scopedSteps(config workspace.Config) []Step {

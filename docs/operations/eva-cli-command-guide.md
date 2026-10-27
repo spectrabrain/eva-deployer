@@ -10,8 +10,8 @@
 
 ## 1. 가장 자주 쓰는 조회
 
-설치를 실행한 서버에서 다음 명령을 사용한다. Remote 정상 흐름에서는 **Target에서** 조회한다.
-Main에서 `remote prepare`와 `publish`만 수행했다면 Target의 App 설치 Values는 Main에 없다.
+설치를 시작한 서버에서 `status`로 작업 결과를 확인한다. Remote Main 설치에서는 Main의
+`check`가 타겟별 서비스를 점검한다. 상세 App Values·Config·Helm 백업은 **Target에서** 조회한다.
 별도 Control Node에서 Ansible을 실행한 환경은 그 Control Node에서 생성 파일을 조회한다.
 
 ```bash
@@ -54,7 +54,7 @@ sudo eva inspect values --site customer-a --component app
 
 Target 폴더가 하나이면 자동으로 선택한다. 둘 이상이면 임의 선택하지 않고 후보를 안내한다.
 `--target`에는 Inventory의 `ansible_host` 값, 없으면 `inventory_hostname`을 지정한다.
-Main의 `remote target` 등록 이름이나 Site ID와 반드시 같은 것은 아니다.
+설정 파일의 타겟 닉네임이나 Site ID와 반드시 같은 것은 아니다.
 
 ```bash
 sudo eva inspect files --site customer-a
@@ -72,7 +72,7 @@ Release/Site/Target/Component별 작업 산출물이다. 같은 경로로 재설
 `sudo eva backup list --site customer-a --component app`으로 목록을,
 `sudo eva backup show --site customer-a --component app --latest`로 최신 메타데이터/경로를 조회한다.
 새 백업은 `<site>/<namespace>/<기존 App 또는 Chart 버전>/<시각-고유값>/`에 저장한다.
-`--version 3.3.0-beta.1`로 기존 배포 버전을 필터링하고, `backup values --path DIR`로 선택한
+`--version <DEPLOYED_VERSION>`으로 기존 배포 버전을 필터링하고, `backup values --path DIR`로 선택한
 Values 원문을 명시적으로 출력할 수 있다. `list`/`show`는 원문을 출력하지 않는다. 경로·대상·제약은
 [Helm 사용자 Values 백업](helm-user-values-backup.md)을 참고한다.
 
@@ -222,7 +222,7 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | --- | --- | --- |
 | `eva version` | Tool 버전·commit·build date | 조회 |
 | `eva help` | 공개 명령 목록 | 조회 |
-| `eva install configure [--output FILE]` | 환경·Online Bastion·타겟별 설치 옵션 질문 후 사용자 홈에 private YAML 생성 | 로컬 파일 생성 |
+| `eva install configure [--output FILE]` | 환경·현재 서버/SSH 설치·타겟별 옵션 질문 후 사용자 홈에 private YAML 생성 | 로컬 파일 생성 |
 | `eva config sample --mode online` | mode별 단일 설치 설정 샘플 출력 | 조회 |
 | `eva config sample --mode remote --output FILE` | 주소/프로토콜 선택 후 private 샘플 저장 | 로컬 파일 생성 |
 | `eva install --config FILE` | private YAML을 내부 Workspace로 변환해 설치 | 변경 |
@@ -240,14 +240,16 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva backup show ... --latest` | 한 release의 최신 백업 메타데이터·경로; Values 원문 제외 | 조회 |
 | `eva backup values --path DIR` | SHA-256 확인 후 선택한 백업 Values 원문 출력 | 민감정보 조회 |
 
-일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Online/Remote/Local → Online 현재 서버/Bastion →
+일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Online/Remote/Local → Online/Remote 현재 서버/SSH 설치 →
 타겟별 Infra-only/Solution·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
 Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입력하며 sudo도 같은 비밀번호를 쓴다.
 다음 타겟은 이전 설치 옵션을 재사용하거나 별도로 고른다. 서비스 주소/Secret은 복사하지 않는다.
 기본 결과는 사용자 홈의 `eva-install.yaml`(`0600`)이며, 필수 입력을 채우라는 안내만 하고 설치하지 않는다.
 기존 파일은 덮어쓰지 않으며 `--output FILE`로 다른 위치를 고른다. 타겟별 컴포넌트 선택은 Plan의
-Ansible `--limit`에 보존된다. Bastion은 설치 대상이 아니고 타겟의 upstream/인터넷 Repository 직접 접근이 별도로 필요하다.
-기존 `eva check`/`preflight gpu`는 실행 서버 기준이지 원격 타겟 일괄 검사 명령이 아니다.
+설치 범위에 보존된다. Bastion·Main은 설치 대상이 아니다. Online 타겟은 외부 저장소에 직접 접근하며
+Remote 타겟은 준비된 Main Harbor를 사용한다. Remote에서는 별도 `remote target` 등록 없이
+Main의 `eva install --config FILE`이 전달과 타겟 설치를 실행한다. 설치 후 Main의 `eva check`는 Remote 타겟을
+점검한다. Online의 `eva check`와 `preflight gpu`는 실행 서버 기준이다.
 
 Bastion의 설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록한다.
 별도 SSH 접속 준비는 필요 없으며 이미 등록된 키가 변경되면 중단한다.
@@ -262,14 +264,15 @@ Redis는 `port: 32079`, `db: 0`, `password: eva-redis-pass`를 실제 IAM과 맞
 빈 URL은 App 런타임이 SSO baseUrl의 host/TLS와 Redis 필드로 조합한다.
 `--address shared|separate --protocol https`로 질문을 생략할 수 있고 `--non-interactive` 또는
 비TTY 입력의 기본값은 `install`/`separate`/`https`이다. `--output FILE`은 기존 파일을 덮어쓰지 않는다.
-샘플은 v3.3 대상 로컬 App/IAM 소스 기준이다. HTTP도 입력 검증은 가능하지만 실제 설치에는
-Release Chart 전환과 Deployer TLS SAN/TLSStore 실행 연동이 별도로 필요하다. 기존 Release는 HTTPS를 쓴다.
+HTTP는 격리된 검증 환경에서 사용하며 운영 환경에서는 HTTPS와 유효한 인증서를 준비한다.
 `<...>` 필수 입력 옆에는 예시 주석이 있으며 모두 실제 값으로 교체해야 한다.
 미입력은 Secret 값 대신 필드 경로로 안내한다.
 `--config`는 install/plan, `preflight argocd`, Workspace 명령에 적용되고 `--workspace`와
 동시에 사용하지 않는다. `workspace validate --config`는 입력만 검사한다. 그 외 명령은
 private 관리 Workspace를 생성할 수 있으며 `plan --config`도 예외가 아니다.
 설정 수정 후에는 새 install을 시작하고 retry는 이전 snapshot을 사용한다.
+Remote Main 설치의 Chart Values는 `targets.<name>.values`에 작성한다. 이 실행 방식에서는
+CLI `--chart`·`--values`·`--set`을 사용하지 않는다.
 전체 schema와 수명 규칙은 [단일 설치 설정](../installation/single-file-configuration.md)을 참고한다.
 
 `--workspace` 생략 시 `--site ID`는 `/etc/eva/sites/<ID>`를 선택한다.
@@ -356,7 +359,7 @@ Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation
 실행 예시·안전한 최초 반입·cache 배치와 별도 Harbor 준비는
 [Local Repository 준비·설치](../installation/local-repository-runbook.md)를 따른다.
 
-### Remote 준비·게시 — Main에서 실행
+### Remote 준비·설치 — Main에서 실행
 
 | 명령 | 역할 |
 | --- | --- |
@@ -364,16 +367,27 @@ Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation
 | `eva remote bootstrap --registry HOST:PORT --replace-registry --yes` | 승인된 registry 교체 |
 | `eva remote prepare [RELEASE_PATH] [--registry HOST:PORT]` | Runtime/payload/image 등 준비 |
 | `eva remote verify [RELEASE_PATH] [--registry HOST:PORT]` | 준비 결과 계약 검증 |
+| `eva install configure` | Remote와 SSH 설치를 선택해 타겟별 설정 작성 |
+| `eva install --config FILE --yes` | 자산 전달·Tool 설치·타겟별 EVA 설치 |
+| `eva check [--verbose]` | 최근 Remote 설치 작업의 타겟별 서비스 점검 |
+
+첫 bootstrap 이후 registry는 receipt에서 해석한다. 준비·검증이 끝나면 Main에서
+설정 파일을 작성하고 `install`을 실행한다. 별도 Target 등록이나 수동 전달 명령은 필요하지 않다.
+`remote verify`는 준비 자산을 검증하며 실제 타겟 서비스는 설치 후 `eva check`로 확인한다.
+`status`·`retry`·`apply`는 Main의 설치 작업을 대상으로 한다. 타겟별 Values·Config·Helm 백업은 타겟에서 조회한다.
+
+개별 Target 관리와 전달만 필요할 때 다음 명령을 사용할 수 있다.
+
+| 명령 | 역할 |
+| --- | --- |
 | `eva remote target add NAME` | SSH/sudo 입력을 받아 관리 Target 등록 |
 | `eva remote target list` | 등록 Target 목록, credential은 표시하지 않음 |
 | `eva remote target verify NAME` | SSH, sudo, 플랫폼, storage, inbox 사전 검증 |
 | `eva remote target remove NAME [--yes]` | 지정 Target 등록·credential 삭제 |
 | `eva remote publish [RELEASE_PATH] --target NAME [--registry HOST:PORT]` | 검증된 Release와 delivery를 Target으로 게시 |
 
-첫 bootstrap 이후 registry는 receipt에서 해석한다. 일반 운영은 Managed Target 이름을 사용한다.
-기존 `--target USER@HOST` 직접 전달도 호환되지만 SSH key/passwordless 경로를 전제로 한다.
-`remote verify` 성공만으로 실제 Harbor/Target live E2E가 검증된 것은 아니다.
-**publish는 설치가 아니다.** Target에서 Workspace를 준비하고 `eva install`을 수행해야 Values가 생성된다.
+`remote publish`는 파일 전달만 수행한다. 이 명령으로 별도 전달한 경우에는 타겟에서 Tool을 설치하고
+현재 서버 설치 설정으로 `eva install`을 실행한다. `--target USER@HOST`는 SSH key/passwordless 경로를 전제로 한다.
 
 ### Runtime·사전 점검·고급 실행
 

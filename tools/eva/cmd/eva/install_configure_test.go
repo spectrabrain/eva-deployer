@@ -63,7 +63,7 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 		for _, scope := range []string{"1", "2"} {
 			t.Run(mode+"/scope-"+scope, func(t *testing.T) {
 				answers := choice + "\n"
-				if mode == "online" {
+				if mode == "online" || mode == "remote" {
 					answers += "1\n"
 				}
 				answers += scope + "\n"
@@ -133,8 +133,29 @@ func TestInstallConfigureOnlineHTTP(t *testing.T) {
 	if app["backendSecure"] != false || app["backendPublicPort"] != 80 {
 		t.Fatal("HTTP frontend protocol/port mismatch")
 	}
-	if !strings.Contains(messages, "3.3.0-beta.9") || !strings.Contains(messages, "3.3.0-beta.1") || !strings.Contains(messages, "E2E") {
-		t.Fatal("completion must state published baseline and outstanding live verification")
+	if strings.Contains(messages, "3.3.0-beta") || strings.Contains(messages, "E2E") {
+		t.Fatal("installer guidance must not contain development versions or history")
+	}
+}
+
+func TestInstallConfigureRemoteUsesSameBastionTargetPrompts(t *testing.T) {
+	answers := "2\n\nnode-a\n192.0.2.10\neva\n1\n1\nnode-b\n192.0.2.11\neva\n1\n2\n"
+	input, messages, _ := configureTest(t, answers, "first-secret", "second-secret")
+	if input.Repository.Mode != "remote" || len(input.Targets) != 2 || input.Credentials.AWS != nil {
+		t.Fatal("Remote wizard did not generate an independent SSH target configuration")
+	}
+	for _, name := range []string{"node-a", "node-b"} {
+		if input.Targets[name].Ansible["ansible_connection"] != "ssh" {
+			t.Fatal("Remote target was configured as the current server")
+		}
+	}
+	for _, unwanted := range []string{"remote target add", "first-secret", "second-secret", "각 Target의 외부 저장소 직접 접근"} {
+		if strings.Contains(messages, unwanted) {
+			t.Fatalf("unexpected Remote wizard guidance: %s", unwanted)
+		}
+	}
+	if !strings.Contains(messages, "sudo eva install --config") || !strings.Contains(messages, "타겟 검증·Release 전달·타겟 설치") {
+		t.Fatal("Remote wizard must finish with the common install command")
 	}
 }
 

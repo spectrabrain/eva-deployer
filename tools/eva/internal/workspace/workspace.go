@@ -60,11 +60,12 @@ type Config struct {
 }
 
 type Resolved struct {
-	SiteID      string
-	Root        string
-	ConfigPath  string
-	Config      Config
-	AnsibleMode string
+	SiteID        string
+	Root          string
+	ConfigPath    string
+	Config        Config
+	AnsibleMode   string
+	RemoteTargets bool
 }
 
 func Resolve(options Options) (Resolved, error) {
@@ -97,13 +98,21 @@ func Resolve(options Options) (Resolved, error) {
 	}
 
 	mode := NormalizeRepositoryMode(config.Repository.Mode)
-	return Resolved{
+	resolved := Resolved{
 		SiteID:      config.Site.ID,
 		Root:        root,
 		ConfigPath:  configPath,
 		Config:      config,
 		AnsibleMode: ansibleRepositoryModes[mode],
-	}, nil
+	}
+	if mode == "remote" {
+		input, err := InstallerFromWorkspace(resolved)
+		if err != nil {
+			return Resolved{}, err
+		}
+		resolved.RemoteTargets = input.HasSSHTargets()
+	}
+	return resolved, nil
 }
 
 func (resolved Resolved) AnsibleExtraVars() []string {

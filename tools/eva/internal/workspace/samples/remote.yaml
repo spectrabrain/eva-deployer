@@ -1,4 +1,5 @@
-# Remote Target 기본 틀. <...>는 필수 입력입니다. AWS credential을 넣지 않습니다.
+# Remote 현재 서버 설치 틀. <...>는 필수 입력입니다. AWS credential을 넣지 않습니다.
+# Main에서 SSH 타겟을 입력하려면 eva install configure에서 remote와 SSH 설치를 선택합니다.
 schema_version: v1
 site:
   id: "<SITE_ID>"  # 필수: 설치 환경 식별자. ex) customer-a

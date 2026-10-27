@@ -24,8 +24,8 @@ symlink는 덮어쓰지 않으며, 다른 위치가 필요하면 `--output FILE`
 질문 순서는 다음과 같다. 번호를 선택하고 Enter를 누르며 `[번호]`가 기본값이다.
 
 1. **설치환경**: `online` / `remote` / `local`.
-2. **Online 실행 방식**: 현재 서버 설치 / 현재 서버를 Bastion(controller)으로 사용.
-   Remote/Local은 기존 방식대로 해당 Target에서 구성한다.
+2. **Online/Remote 실행 방식**: 현재 서버 설치 / 현재 서버를 Bastion·Main(controller)으로 사용.
+   Remote는 Main에서 SSH 설치가 기본이며, Local은 해당 Target에서 구성한다.
 3. **Bastion일 때 타겟 한 대 등록**: 닉네임 → IP → SSH 계정 → 숨김 비밀번호.
    private key는 이 흐름에서 받지 않으며 SSH와 sudo에 같은 비밀번호를 쓴다.
 4. **타겟 설치 범위**: Infra만 / Infra + Solution.
@@ -56,11 +56,35 @@ IP 직접 접속은 SSH 대상 IP가 있으면 서비스 host와 함께 설치 I
   설치/preflight가 설정된 계정·비밀번호로 연결하며 최초 SSH host key를 자동 등록한다.
   이미 등록된 키가 변경되면 연결을 중단한다.
 - 공통 Online AWS credential은 기존 배포 단계에서 각 해당 타겟에 사용된다.
-  타겟별로 다른 AWS credential을 받는 기능은 아니며 Remote Main의 `remote target` 등록과도 별개이다.
+  타겟별로 다른 AWS credential을 받는 기능은 아니다.
 - 각 타겟은 독립 설치 대상이다. 여러 타겟을 입력한다고 하나의 multi-node k3s cluster를 만드는 것은 아니다.
 - 기존 `eva preflight gpu`와 `eva check`는 실행한 현재 서버 기준이다. Bastion에서 실행해
   원격 GPU/서비스 검증이 완료됐다고 판단하지 않는다. 타겟에서 별도로 확인하고 실제 설치 precondition과
   타겟별 생성 Config·로그를 함께 확인한다.
+
+### Remote Main의 의미
+
+Main에서 Harbor와 Release 자산을 `eva remote bootstrap`·`prepare`·`verify`로 준비한 뒤,
+같은 `eva install configure` 대화형에서 **remote → Bastion/Main에서 SSH 설치**를 선택한다.
+타겟 닉네임·IP·SSH 계정·비밀번호와 타겟별 설치 옵션을 입력하고 Main에서 실행한다.
+
+```bash
+sudo eva install --config /home/eva/eva-install.yaml --yes
+sudo eva check
+sudo eva status
+```
+
+별도 `remote target` 등록은 필요하지 않다. 설치 명령이 모든 선택 타겟의 연결·sudo·저장 공간을
+확인하고, 검증된 Release·Runtime·payload 전달과 타겟의 Tool·EVA 설치를 실행한다.
+타겟에는 해당 타겟의 설치 값만 전달한다. SSH/sudo 비밀번호와 Main의 AWS credential은 전달할
+설정에서 제외하며, 타겟이 필요한 Harbor pull 인증은 포함한다.
+Main→Target SSH와 Target node·Pod→Main Harbor 접근이 필요하며 타겟의 외부 인터넷 연결은 필요하지 않다.
+Remote 설치 후 Main의 `eva check`는 타겟별 서비스를 확인하고 `status`는 Main의 작업 결과를 보여준다.
+상세 Values·Config·Helm 백업은 각 타겟에 저장되므로 타겟에서 조회한다.
+
+`--component` 선택은 타겟별 구성과 함께 적용된다. Remote Main 설치의 Chart Values 변경은
+`targets.<name>.values`에 작성한다. 이 실행 방식에서는 CLI `--chart`·`--values`·`--set`을 사용하지 않는다.
+입력 수정 후에는 새 `install`을 실행하며 `retry`는 원래 입력 snapshot을 사용한다.
 
 ### 기존 샘플 명령과 자동화
 

@@ -1,7 +1,8 @@
 # EVA Remote Repository 설치 가이드
 
 이 가이드는 인터넷에 연결된 Main 서버에서 EVA 설치 자산을 준비하고, 외부 인터넷이
-차단된 Target에 Main Harbor와 게시된 Remote delivery만으로 EVA를 설치하는 절차입니다.
+차단된 Target에 Main Harbor와 검증된 Remote 자산으로 EVA를 설치하는 절차입니다.
+설정 작성·설치 실행·결과 확인은 Main에서 수행하며 Target은 대화형 설정에 입력합니다.
 Main bootstrap과 Target 설치는 Docker, k3s, NVIDIA runtime 및 호스트 영속 데이터를
 변경할 수 있으므로 먼저 작업 가능 시간과 백업 정책을 확인합니다.
 
@@ -51,7 +52,7 @@ sudo eva verify
 installer는 Tool archive와 Base Release checksum을 검증하고, 실행한 Release를
 Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에서도 이 Base Release의
 무결성을 확인합니다. 다른 Release를 확인할 때만 `sudo eva verify --release <path-or-version>`를
-명시합니다. 아래 Main preparation/verify/publish도 인자 없이 같은 Current Release를
+명시합니다. 아래 Main preparation/verify/install도 인자 없이 같은 Current Release를
 사용합니다. 다른 Release가 필요한 경우에만 해당 Remote 명령에 `RELEASE_PATH`를 명시합니다.
 
 ## 3. [Main] AWS와 Harbor 입력 확인
@@ -191,102 +192,21 @@ sudo eva remote verify
 이 검증은 준비 파일과 게시 결과를 확인합니다. 실제 Target의 다운로드와 서비스 정상 동작은
 설치 후 별도로 확인합니다. 검증 실패 시 자산이나 보고서를 임의 수정하지 말고 같은 Release로 다시 준비합니다.
 
-## 6. [Main] Managed Target 등록·검증 및 Release 게시
+## 6. [Main] 대화형 설치 설정 준비
 
-Main의 Managed Target Registry는 publish 인증에만 사용하며 Target의 EVA installation
-workspace와 별개입니다. Target password를 command line에 기록하지 않습니다. 등록 시 Main의
-root 전용 credential store에 저장하고, 등록한 SSH host key가 바뀌면 자동 수락하지 않습니다.
-
-먼저 Target을 한 번 등록합니다. 대화형 입력에서 SSH 및 sudo password를 echo 없이 받으며,
-SSH·sudo 인증도 저장 전에 검증합니다.
-
-```bash
-sudo eva remote target add target-a
-```
-
-이미 등록된 이름으로 다시 `add`하면 입력을 받기 전에 거부되며 기존 설정과 credential은
-그대로 유지됩니다. 등록된 Target과 주소는 다음 명령으로 확인합니다. credential은 출력하지
-않으며, credential 등이 손상된 Target은 `STATUS`에 `invalid`와 원인이 표시됩니다.
-
-```bash
-sudo eva remote target list
-```
-
-```text
-NAME          HOST           PORT  USER  AUTH      STATUS
-target-a      10.159.56.196  22    eva   password  ok
-```
-
-잘못 등록한 Target은 이름으로 삭제한 뒤 다시 `add`합니다. 삭제 전 host 정보를 보여주고
-확인을 받으며, 비대화형 실행에서는 `--yes`가 필요합니다. 해당 Target의 설정과 credential만
-삭제하며 다른 Target이나 Release·cache는 건드리지 않습니다.
-
-```bash
-sudo eva remote target remove target-a
-```
-
-게시 전에는 Target 연결과 권한, `linux/amd64`, storage 및 inbox parent를 다시 확인합니다.
-이 preflight가 모두 성공한 뒤에만 대용량 Release 전송이 시작됩니다.
-
-```bash
-sudo eva remote target verify target-a
-```
-
-검증한 Base Release와 생성된 delivery artifact를 등록한 Target으로 게시합니다.
-
-```bash
-sudo eva remote publish \
-  --target target-a
-```
-
-Base Release, Remote Runtime 및 Target payload는 하나의 Target staging area로 전달되고,
-Target에서 checksum과 identity를 재검증한 뒤 atomic publish됩니다. Workspace,
-inventory와 AWS credential은 전송하지 않습니다. 동일 identity의 재게시는 허용하지만,
-같은 version에 다른 identity를 덮어쓰지는 않습니다.
-
-bootstrap receipt와 같은 registry를 명시적으로 확인하려면 모든 Remote 명령에
-`--registry 10.159.57.172:32080`를 붙일 수 있습니다. 다른 registry는 조용히
-override되지 않습니다. 변경이 필요한 경우 새 endpoint가 정상인지 확인한 후 다음처럼
-receipt를 교체합니다. 기존 Harbor data, preparation 결과와 Target Release는 삭제하지
-않습니다.
-
-```bash
-sudo eva remote bootstrap \
-  --registry 10.159.57.173:32080 \
-  --replace-registry \
-  --yes
-```
-
-## 7. [Target] EVA Tool 설치 및 게시된 Release 확인
-
-Target에는 Tool이 없으므로 최초 한 번만 게시된 installer의 절대 경로를 실행합니다.
-
-```bash
-release_version=<version>
-release_root="/var/lib/eva/inbox/releases/$release_version"
-
-sudo bash "$release_root/eva-tool-installer.sh"
-sudo eva verify
-```
-
-installer는 checksum과 Tool version을 검증한 뒤 이 게시 Release를 Current Release로
-등록합니다. `sudo eva verify`는 Base Release 무결성을 확인합니다. Remote Runtime, payload
-및 delivery marker의 전체 검증은 다음 `eva install`의 선행 검증에서 수행됩니다. 게시된
-파일을 수정하거나 일반 사용자가 inbox Release directory로 이동할 필요가 없습니다. 검증에
-실패하면 Main에서 다시 준비·게시합니다.
-
-## 8. [Target] 단일 설치 설정 준비
-
-Target의 원하는 위치에 설치 설정 YAML 하나만 둡니다. Tool에 내장된 Remote 샘플을 꺼내고
-site, Main Harbor, 접속·TLS·license·IAM 값을 수정합니다. 기존 파일은 덮어쓰지 않습니다.
+Main에서 설치 설정 YAML 하나를 작성합니다. Online Bastion 설치와 같은 대화형 절차로
+타겟 닉네임·IP·SSH 계정·비밀번호를 입력하고 타겟별 설치 구성을 선택합니다.
+설치 설정 파일은 Main에 보관하며 기존 파일은 덮어쓰지 않습니다.
 
 ```bash
 eva install configure
 ```
 
-sudo 없이 Target에서 실행하고 설치환경 **remote**를 고릅니다. 현재 Target의 Infra-only/Solution,
-HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM을 차례로 선택합니다. 결과는 사용자 홈의
-`eva-install.yaml`입니다. 자동화용 설정 샘플은 `eva config sample --mode remote`의 옵션으로 생성할 수 있습니다.
+sudo 없이 Main에서 실행하고 설치환경 **remote** → **Bastion/Main에서 SSH 설치**를 고릅니다.
+타겟을 한 대씩 등록하고 Infra-only/Solution, HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM,
+Agent/Vision 구성을 선택합니다. 이전 타겟의 설치 옵션을 재사용하거나 타겟을 더 추가할 수 있습니다.
+SSH 비밀번호는 sudo에도 사용하며, passwordless sudo라면 생성 파일에서 `ansible_become_password`를 제거합니다.
+결과는 사용자 홈의 `eva-install.yaml`입니다. 자동화용 설정 샘플은 `eva config sample --mode remote`의 옵션으로 생성할 수 있습니다.
 외부 IAM에 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
 App의 외부 SSO·Redis 연결값을 입력합니다. Target에서 IAM/Redis로의 내부망 접근이 필요합니다.
 검증한 Release에 포함된 Tool·자산을 함께 사용합니다.
@@ -315,8 +235,10 @@ components:
 targets:
   server-a:
     ansible:
-      ansible_connection: local
+      ansible_connection: ssh
+      ansible_host: "<TARGET_IP>"
       ansible_user: eva
+      ansible_password: "<SSH_PASSWORD>"
       ansible_become: true
       ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호
       repository_username: "<HARBOR_PULL_USERNAME>"
@@ -381,7 +303,7 @@ Secret이며 커밋하지 않습니다. Deployer가 내부 Workspace를
 ### 기존 k3s에 n8n만 설치
 
 단일 노드 Target에 정상인 k3s와 `local-path` StorageClass가 있으면 `infra: false`로
-n8n만 설치할 수 있습니다. Main에서 Remote 자산 준비·검증·게시를 먼저 완료합니다.
+n8n만 설치할 수 있습니다. Main에서 Remote 자산 준비·검증을 먼저 완료합니다.
 Target에서 외부 인터넷용 `eva runtime bootstrap`을 실행하지 않습니다.
 
 ```yaml
@@ -402,8 +324,10 @@ components:
 targets:
   server-a:
     ansible:
-      ansible_connection: local
+      ansible_connection: ssh
+      ansible_host: "<TARGET_IP>"
       ansible_user: eva
+      ansible_password: "<SSH_PASSWORD>"
       ansible_become: true
       ansible_become_password: "<SUDO_PASSWORD>"
       n8n_public_host: "<TARGET_IP>"
@@ -426,7 +350,7 @@ n8n 설정은 `targets.server-a.ansible`에 둡니다. 기존 Target `registries
 
 ```bash
 sudo eva install --config /home/eva/eva-install.yaml --yes
-sudo eva exec kubectl -n n8n get pods,svc,pvc
+sudo eva check
 ```
 
 Pod `1/1 Running`, PVC `Bound`를 확인하고 `http://<TARGET_IP>:30678/`에 접속합니다.
@@ -434,71 +358,54 @@ Pod `1/1 Running`, PVC `Bound`를 확인하고 `http://<TARGET_IP>:30678/`에 �
 수동 manifest로 설치한 n8n은 배포 이름·namespace·PVC를 맞추고 기존 owner 계정 입력도
 확인한 뒤 Tool 설치로 전환합니다. EVA Alert Workflow는 Tool의 n8n 설치 단계에서 구성합니다.
 
-## 9. [Target] GPU 사전 조건 확인
+## 7. 설치 전 타겟 확인
 
-GPU를 사용하는 Agent/Vision 또는 GPU Infra를 설치할 때 NVIDIA driver와 감지된 GPU/MIG 상태를 확인합니다.
-n8n 단독 설치에는 GPU 점검이 필요하지 않습니다.
+Agent/Vision 또는 GPU Infra를 설치할 타겟에는 NVIDIA driver가 준비되어 있어야 합니다.
+타겟에서 `nvidia-smi`로 GPU 상태를 확인하고 MIG를 사용할 경우 의도한 구성을 적용합니다.
+n8n 단독 설치에는 GPU 점검이 필요하지 않습니다. TLS certificate/key도 설정한 타겟의
+`hostPath`에 준비합니다. `infra`와 Config 단계가 타겟의 GPU/MIG 자원과 Device Plugin을 확인합니다.
 
-```bash
-sudo eva preflight gpu
-```
+기존 Argo CD가 EVA 리소스를 관리하고 있다면 설치 전에 해당 관리 연결을 정리하거나
+승인된 handoff 절차를 수행합니다. 설치는 확인되지 않은 관리 리소스를 임의로 덮어쓰지 않습니다.
 
-MIG를 사용할 site는 설치 전에 의도한 MIG 구성을 적용합니다. `infra`가 Docker, CDI,
-k3s와 NVIDIA Device Plugin을 구성하며 이후 Config가 사용 가능한 GPU 또는 MIG resource를
-선택합니다.
+## 8. [Main] EVA 설치
 
-## 10. [Target] Argo CD 관리 연결 확인
-
-기존 Argo CD가 같은 site의 EVA resource를 관리했을 수 있으면 설치 전에 handoff를
-확인합니다.
+Main Harbor의 준비가 끝난 Release와 설치 설정을 검증한 뒤 Main에서 실행합니다.
+설정 검증은 타겟 접속이나 설치를 수행하지 않습니다.
 
 ```bash
-sudo eva preflight argocd \
-  --config /home/eva/eva-install.yaml
+sudo eva workspace validate --config /home/eva/eva-install.yaml
+sudo eva install --config /home/eva/eva-install.yaml --yes
 ```
 
-발견된 관리 연결을 해제할지 묻는 경우 현재 상태와 승인 내용을 확인합니다. 거절하거나
-검증에 실패하면 설치를 시작하지 않습니다.
+`install`은 설정에 포함된 타겟의 SSH·sudo·플랫폼·저장 공간을 확인한 뒤,
+검증된 Release와 Remote Runtime/payload를 전달하고 타겟의 Tool 설치와 EVA 설치를 실행합니다.
+타겟을 위한 별도의 등록 명령이나 타겟에서 설정 파일을 다시 작성하는 과정은 필요하지 않습니다.
+각 타겟에는 해당 타겟의 설치 값만 전달하며 Main AWS credential과 다른 타겟의 연결 정보는 전달하지 않습니다.
+여러 타겟은 각각 독립된 설치이며 하나의 Kubernetes cluster로 묶지 않습니다.
+일부 component만 설치할 때는 `--component n8n`처럼 지정합니다. Chart Values 변경은
+`targets.<name>.values`에 작성하며, Remote Main 설치에서는 CLI `--chart`·`--values`·`--set`을 사용하지 않습니다.
 
-이 명령은 `eva install`과 같이 Current Release(7단계에서 등록한 게시 Release)를 사용하므로
-실행 위치와 무관합니다. Target에 Managed Runtime이 아직 없으면 게시된 Remote Runtime
-artifact로 먼저 설치합니다.
+타겟의 Managed Runtime과 package/model cache는 검증된 delivery에서 준비합니다.
+image·Qdrant snapshot·Vision 모델은 Main Harbor를 사용하며 타겟에서 외부 저장소로 fallback하지 않습니다.
+기존 PVC와 영속 데이터는 재사용합니다. 설치 중 기존 서비스가 재시작될 수 있습니다.
 
-## 11. [Target] EVA 설치
-
-단일 설정과 게시된 Release를 검증한 뒤 설치를 실행합니다. 설정 검증은 Workspace를 생성하지
-않으며 설치 시 검증된 snapshot을 생성·재사용합니다.
+다른 준비된 Release를 사용할 때만 Main의 원본 Release 경로를 명시합니다.
 
 ```bash
-sudo eva workspace validate \
-  --config /home/eva/eva-install.yaml
-
-sudo eva install \
-  --config /home/eva/eva-install.yaml \
-  --yes
+sudo eva install --release /path/to/eva-base-release \
+  --config /home/eva/eva-install.yaml --yes
 ```
 
-다른 Release를 사용해야 할 때만 `--release`로 명시적으로 override합니다. 이 override는
-Current Release를 변경하지 않습니다.
+현재 타겟에서 직접 설치해야 하는 경우에는 대화형에서 **현재 서버에 설치**를 선택하고,
+Main에서 게시한 Release의 Tool을 설치한 뒤 타겟에서 같은 `eva install --config` 명령을 사용합니다.
 
-```bash
-sudo eva verify --release /var/lib/eva/inbox/releases/<another-version>
-sudo eva install --release /var/lib/eva/inbox/releases/<another-version> \
-  --config /home/eva/eva-install.yaml \
-  --yes
-```
-
-Target에 유효한 Managed Runtime이 없으면 설치는 게시된 Remote Runtime artifact로만
-bootstrap합니다. online Runtime 또는 original `eva-offline` fallback은 사용하지 않습니다.
-Target payload는 managed cache로 materialize되고 image·Qdrant snapshot·Vision 모델은 Main Harbor를
-사용합니다.
-
-## 12. 설치 결과 확인
+## 9. [Main] 설치 결과 확인
 
 설치 성공 시와 `eva check`의 `Access URLs`에서 설치한 App/IAM과 Main Harbor 접속 주소를 확인합니다.
 n8n을 설치했다면 n8n 주소도 표시됩니다. 여러 타겟에 설치한 경우 서비스 주소에 타겟 이름이 함께 표시됩니다.
 
-설치 상태와 작업 결과를 확인합니다.
+Main에서 타겟별 설치 상태와 작업 결과를 확인합니다.
 
 ```bash
 sudo eva check --verbose
@@ -510,7 +417,7 @@ Plugin readiness 및 workload의 할당 상태도 확인합니다. workload imag
 사용하는지, Target에 AWS credential이나 public source 설정이 남지 않았는지도 확인합니다.
 Vision은 모델 다운로드·준비 완료와 모델 PVC 재사용, 실제 분석 요청도 확인합니다.
 
-## 13. 재실행 및 문제 해결
+## 10. [Main] 재실행 및 문제 해결
 
 입력 수정 후에는 동일 Release와 단일 설정으로 `install`을 다시 실행합니다. 설정이 바뀌면
 새 Workspace snapshot을 사용합니다. 입력 변경이 없는 실패는 `retry`로 재시도합니다.
@@ -527,6 +434,8 @@ sudo eva retry --yes
 동일 Runtime/payload identity와 기존 영속 데이터는 재사용합니다. Release checksum,
 delivery marker 또는 Runtime/payload 검증 오류는 Target에서 임의로 고치지 말고 Main의
 준비·검증·게시 절차를 다시 수행합니다.
+여러 타겟 중 일부가 실패하면 Main 작업도 실패로 기록됩니다. `retry`는 선택한 모든 타겟에
+원래 설치 구성을 다시 적용하므로 재실행 전 각 타겟의 서비스 상태를 확인합니다.
 
 Vision 모델 준비 실패는 Main의 모델 게시 결과와 Target의 Harbor 접근·기존 EVA Infra 인증 설정을
 확인합니다. Target에서 S3 fallback을 켜거나 실패를 우회해 workload를 중단하지 않습니다.

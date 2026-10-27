@@ -44,6 +44,7 @@ var (
 		return string(output), err
 	}
 	newRemoteService                  = remote.NewService
+	newRemoteInstallerService         = remote.NewInstallerService
 	newRemotePrepareService           = remote.NewPrepareService
 	newRemoteVerifyService            = remote.NewVerifyService
 	newRemoteBootstrapService         = remote.NewBootstrapService
@@ -1185,11 +1186,24 @@ func runInstall(args []string) error {
 		printSelectedRelease(releaseResolved, releaseSource)
 	}
 	draft := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, time.Now())
+	if draft.ExecutionMode == remote.InstallerExecutionMode && !overrides.Empty() {
+		return errors.New("Remote controller installation uses targets.<name>.values in the installer config; CLI chart/values/set overrides are not supported for this execution mode")
+	}
 	printInstallSummary(draft)
 	if !*yes {
 		if err := confirmInstall(draft); err != nil {
 			return err
 		}
+	}
+	if draft.ExecutionMode == remote.InstallerExecutionMode {
+		draft.TargetInstallArgs = []string{"--install-root", *installRoot, "--artifact-root", *artifactRoot, "--runtime-root", *runtimeRoot}
+		record, err := operation.Create(*stateRoot, draft, time.Now())
+		if err != nil {
+			return err
+		}
+		completed, err := executeRemoteOperation(record, draft, *stateRoot, *logRoot)
+		printOperation(completed)
+		return err
 	}
 	if err := ensureInstallRuntimeForRepository(*runtimeRoot, releaseResolved, workspaceResolved.Config.Repository.Mode, workspaceResolved.Config.Repository.Registry, workspaceResolved.Config.Repository.Project); err != nil {
 		return err
@@ -1419,6 +1433,9 @@ func runPlan(args []string) error {
 	}
 	now := time.Now()
 	document := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, now)
+	if document.ExecutionMode == remote.InstallerExecutionMode && !overrides.Empty() {
+		return errors.New("Remote controller installation uses targets.<name>.values in the installer config; CLI chart/values/set overrides are not supported for this execution mode")
+	}
 	if len(document.Overrides) > 0 && !*save {
 		for _, message := range overrideMessages(document) {
 			fmt.Fprintln(os.Stderr, message)
@@ -1504,6 +1521,14 @@ func runCheck(args []string) error {
 		if err != nil {
 			input.OperationError = err
 		} else {
+			if document.ExecutionMode == remote.InstallerExecutionMode {
+				checkErr := checkRemoteOperation(document, *verbose)
+				fmt.Printf("[INFO] Operation %s\n", record.Status)
+				if checkErr == nil && record.Status != operation.Succeeded {
+					return errors.New("latest Remote installation operation did not succeed")
+				}
+				return checkErr
+			}
 			input.Components = checkComponents(document)
 			installedPlan = document
 		}
@@ -1946,6 +1971,15 @@ func runApply(args []string) error {
 			return err
 		}
 	}
+	document, err := operation.LoadPlan(*stateRoot, record)
+	if err != nil {
+		return err
+	}
+	if document.ExecutionMode == remote.InstallerExecutionMode {
+		completed, err := executeRemoteOperation(record, document, *stateRoot, *logRoot)
+		printOperation(completed)
+		return err
+	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
 		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
@@ -1994,6 +2028,15 @@ func runRetry(args []string) error {
 		return err
 	}
 	fmt.Printf("retry source: %s\n", source.ID)
+	document, err := operation.LoadPlan(*stateRoot, retry)
+	if err != nil {
+		return err
+	}
+	if document.ExecutionMode == remote.InstallerExecutionMode {
+		completed, err := executeRemoteOperation(retry, document, *stateRoot, *logRoot)
+		printOperation(completed)
+		return err
+	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
 		Prerequisite: aptPrerequisite, AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,

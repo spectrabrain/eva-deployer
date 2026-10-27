@@ -17,6 +17,7 @@ const DefaultTargetRegistryRoot = "/var/lib/eva/remote-targets"
 const DefaultTargetCredentialRoot = "/var/lib/eva/credentials/remote-targets"
 
 var targetNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var targetUserPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*[$]?$`)
 
 type TargetAuthentication struct {
 	Method        string `yaml:"method"`
@@ -71,7 +72,7 @@ func ValidateTargetName(name string) error {
 }
 
 func ValidateTargetConfiguration(config TargetConfiguration) error {
-	if config.SchemaVersion != "v1" || ValidateTargetName(config.Name) != nil || config.Host == "" || strings.ContainsAny(config.Host, " \t\r\n@/\\") || config.Port < 1 || config.Port > 65535 || !targetNamePattern.MatchString(config.User) {
+	if config.SchemaVersion != "v1" || ValidateTargetName(config.Name) != nil || config.Host == "" || strings.ContainsAny(config.Host, " \t\r\n@/\\") || config.Port < 1 || config.Port > 65535 || !targetUserPattern.MatchString(config.User) {
 		return errors.New("Remote Target configuration is invalid")
 	}
 	if (config.Authentication.Method != "password" && config.Authentication.Method != "public_key") || config.Authentication.CredentialRef != config.Name {

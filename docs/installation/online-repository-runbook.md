@@ -55,6 +55,8 @@ Bastion 설치는 여기까지를 **현재 Bastion/controller**에서 수행합�
 upstream/인터넷 Repository·ECR·S3 접근이 필요하며 Bastion만 인터넷에 연결된 폐쇄망 구성은 Online이 아닙니다.
 Main Harbor와 설치 자산을 사용하는 환경은 [Remote Repository Runbook](remote-repository-runbook.md),
 저장매체로 반입한 Bundle과 Local Harbor를 사용하는 완전 폐쇄망은 [Local Repository Runbook](local-repository-runbook.md)을 사용합니다.
+Remote도 Main에서 같은 `eva install configure`로 SSH 타겟을 입력하고 `eva install --config`로 설치합니다.
+Main의 Harbor·자산 준비를 먼저 완료하며 별도 타겟 등록 명령은 필요하지 않습니다.
 
 ## 4. GPU 사전 조건 확인
 

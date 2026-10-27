@@ -131,18 +131,26 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	}
 	mode := map[string]string{"1": "online", "2": "remote", "3": "local"}[choice]
 	bastion := false
-	if mode == "online" {
-		choice, err = prompt.choice("Online 실행 방식\n  1) 현재 서버에 설치 (local connection)\n  2) 현재 서버는 Bastion/controller, 별도 타겟에 SSH 설치", "1", "1", "2")
+	if mode == "online" || mode == "remote" {
+		fallback := "1"
+		if mode == "remote" {
+			fallback = "2"
+		}
+		choice, err = prompt.choice("설치 실행 방식\n  1) 현재 서버에 설치 (local connection)\n  2) 현재 서버는 Bastion/Main, 별도 타겟에 SSH 설치", fallback, "1", "2")
 		if err != nil {
 			return err
 		}
 		bastion = choice == "2"
 	} else {
-		fmt.Fprintln(output, "Remote/Local은 현재 Target 서버에 설치합니다. Harbor 주소와 사전 공급된 Release/자산을 설정 파일에서 확인하세요.")
+		fmt.Fprintln(output, "Local은 현재 서버에 설치합니다. Local Harbor 주소와 반입한 Release/자산을 설정 파일에서 확인하세요.")
 	}
 	if bastion {
 		fmt.Fprintln(output, "타겟을 한 대씩 등록합니다. 현재 Bastion은 설치 대상이 아닙니다. SSH 비밀번호를 sudo에도 사용합니다.")
-		fmt.Fprintln(output, "Bastion→Target SSH 연결과 각 Target의 외부 저장소 직접 접근이 필요합니다. Bastion만 인터넷에 연결된 환경은 online이 아닙니다. 이 과정에서는 연결을 시험하지 않습니다.")
+		if mode == "online" {
+			fmt.Fprintln(output, "Bastion→Target SSH 연결과 각 Target의 외부 저장소 직접 접근이 필요합니다. Bastion만 인터넷에 연결된 환경은 online이 아닙니다. 이 과정에서는 연결을 시험하지 않습니다.")
+		} else {
+			fmt.Fprintln(output, "Main→Target SSH 연결과 Target→Main Harbor 접근이 필요합니다. Target의 인터넷 접속은 필요하지 않습니다. 이 과정에서는 연결을 시험하지 않습니다.")
+		}
 	}
 	var targets []workspace.ConfigureTarget
 	names, hosts := make(map[string]bool), make(map[string]bool)
@@ -198,18 +206,15 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	fmt.Fprintf(output, "\n설정 샘플 생성: %s (0600)\n", *path)
 	fmt.Fprintln(output, "파일의 <UPPER_CASE> 항목과 주석을 따라 site ID, credential, license, 주소·인증서를 채우세요.")
 	fmt.Fprintln(output, "타겟별 components와 SSO/Redis 값을 확인하고, 기본 Redis 비밀번호는 IAM과 동일하게 변경하세요. 파일에는 비밀번호가 있으므로 공유/커밋하지 마세요.")
-	for _, target := range targets {
-		if target.Solution {
-			fmt.Fprintln(output, "[v3.3] 게시 App 3.3.0-beta.9 / IAM 3.3.0-beta.1 기준 틀입니다. HTTP는 인증서 검사·TLS 리소스 생성을 생략하고 HTTPS는 유지합니다. 실제 설치 E2E는 별도 검증하세요.")
-			break
-		}
-	}
 	fmt.Fprintf(output, "입력 확인: sudo eva workspace validate --config %s\n", shellQuoteConfigurePath(*path))
 	if bastion {
 		fmt.Fprintln(output, "설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록합니다. 이미 등록된 키가 변경되면 중단합니다.")
+		if mode == "remote" {
+			fmt.Fprintln(output, "Main에서 Harbor와 Release 자산 준비를 완료한 뒤 설치하세요. install이 타겟 검증·Release 전달·타겟 설치를 처리합니다.")
+		}
 	}
 	fmt.Fprintf(output, "검토 후 설치: sudo eva install --config %s\n", shellQuoteConfigurePath(*path))
-	if bastion {
+	if bastion && mode == "online" {
 		fmt.Fprintln(output, "Bastion의 eva check/preflight gpu는 현재 서버 기준입니다. 타겟 상태는 타겟별로 확인하세요.")
 	}
 	return nil

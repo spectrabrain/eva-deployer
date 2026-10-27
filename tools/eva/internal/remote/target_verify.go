@@ -120,6 +120,16 @@ func (verifier TargetVerifier) Verify(ctx context.Context, name string, required
 // VerifyConfiguration is also used by target add before either file becomes
 // visible in the managed registry.
 func (verifier TargetVerifier) VerifyConfiguration(ctx context.Context, config TargetConfiguration, credential TargetCredential, requiredBytes int64) (TargetConnection, error) {
+	return verifier.connectConfiguration(ctx, config, credential, requiredBytes, true)
+}
+
+// AuthenticateConfiguration opens a pinned SSH connection and checks sudo
+// without probing storage or creating target inbox directories.
+func (verifier TargetVerifier) AuthenticateConfiguration(ctx context.Context, config TargetConfiguration, credential TargetCredential) (TargetConnection, error) {
+	return verifier.connectConfiguration(ctx, config, credential, 0, false)
+}
+
+func (verifier TargetVerifier) connectConfiguration(ctx context.Context, config TargetConfiguration, credential TargetCredential, requiredBytes int64, preflight bool) (TargetConnection, error) {
 	if err := ValidateTargetConfiguration(config); err != nil {
 		return TargetConnection{}, err
 	}
@@ -170,17 +180,19 @@ func (verifier TargetVerifier) VerifyConfiguration(ctx context.Context, config T
 		_ = connection.Cleanup()
 		return TargetConnection{}, err
 	}
-	if err := verifier.verifyPlatform(ctx, config, knownHosts, controlPath, connection.Target); err != nil {
-		_ = connection.Cleanup()
-		return TargetConnection{}, err
-	}
-	if err := verifier.verifyStorage(ctx, config, knownHosts, controlPath, connection.Target, requiredBytes); err != nil {
-		_ = connection.Cleanup()
-		return TargetConnection{}, err
-	}
-	if err := verifier.probeInbox(ctx, config, credential, knownHosts, controlPath, connection.Target); err != nil {
-		_ = connection.Cleanup()
-		return TargetConnection{}, err
+	if preflight {
+		if err := verifier.verifyPlatform(ctx, config, knownHosts, controlPath, connection.Target); err != nil {
+			_ = connection.Cleanup()
+			return TargetConnection{}, err
+		}
+		if err := verifier.verifyStorage(ctx, config, knownHosts, controlPath, connection.Target, requiredBytes); err != nil {
+			_ = connection.Cleanup()
+			return TargetConnection{}, err
+		}
+		if err := verifier.probeInbox(ctx, config, credential, knownHosts, controlPath, connection.Target); err != nil {
+			_ = connection.Cleanup()
+			return TargetConnection{}, err
+		}
 	}
 	return connection, nil
 }

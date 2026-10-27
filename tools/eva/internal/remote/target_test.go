@@ -263,6 +263,29 @@ func TestTargetVerifierRejectsChangedHostKeyBeforeAuthentication(t *testing.T) {
 	}
 }
 
+func TestTargetAuthenticationDoesNotProbeStorageOrInbox(t *testing.T) {
+	_, privateKey, _ := ed25519.GenerateKey(rand.Reader)
+	publicKey, _ := ssh.NewPublicKey(privateKey.Public())
+	config := testTargetConfiguration()
+	config.HostKey = TargetHostKey{Algorithm: publicKey.Type(), Fingerprint: ssh.FingerprintSHA256(publicKey)}
+	verifier := TargetVerifier{RuntimeRoot: t.TempDir(), StartSSH: func(context.Context, []string, string) error { return nil },
+		Run: func(_ context.Context, path string, args []string, _ []byte) ([]byte, error) {
+			if path == "ssh-keyscan" {
+				return []byte("target " + string(ssh.MarshalAuthorizedKey(publicKey))), nil
+			}
+			command := strings.Join(args, " ")
+			if strings.Contains(command, "df -Pk") || strings.Contains(command, ".eva-preflight-") || strings.Contains(command, "mkdir") {
+				t.Fatal("health check authentication probed or changed target storage")
+			}
+			return nil, nil
+		}}
+	connection, err := verifier.AuthenticateConfiguration(context.Background(), config, TargetCredential{SchemaVersion: "v1", SSHPassword: "private-ssh", SudoPassword: "private-sudo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = connection.Cleanup()
+}
+
 func TestTargetStoreRejectsUnknownFieldsAndSymlinks(t *testing.T) {
 	store := NewTargetStore(filepath.Join(t.TempDir(), "targets"), filepath.Join(t.TempDir(), "credentials"))
 	config := testTargetConfiguration()

@@ -613,6 +613,14 @@ REMOTE_PREPARE
 
 remote_staging_prepared=true
 
+# rsync needs brackets around an IPv6 host to distinguish its address from
+# the separator before the target path. SSH keeps the original destination.
+rsync_target="$target"
+rsync_host="${target#*@}"
+if [[ "$rsync_host" == *:* && "$rsync_host" != \[*\] ]]; then
+  rsync_target="${target%@*}@[$rsync_host]"
+fi
+
 "$RSYNC_CMD" \
   --archive \
   --delete \
@@ -620,14 +628,14 @@ remote_staging_prepared=true
   --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
   --rsh="$remote_shell_text" \
   "$release_dir/" \
-  "$target:$target_staging/"
+  "$rsync_target:$target_staging/"
 
 "$RSYNC_CMD" \
   --archive --delete --delay-updates \
   --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
   --rsh="$remote_shell_text" \
   "$runtime_dir/" \
-  "$target:$target_staging/remote-runtime/"
+  "$rsync_target:$target_staging/remote-runtime/"
 
 "$RSYNC_CMD" \
   --archive \
@@ -636,7 +644,7 @@ remote_staging_prepared=true
   --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
   --rsh="$remote_shell_text" \
   "$payload_dir/" \
-  "$target:$target_staging/remote-payload/"
+  "$rsync_target:$target_staging/remote-payload/"
 
 run_remote_root_script \
     "$target_staging" \

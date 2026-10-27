@@ -178,4 +178,17 @@ for sudo_mode in password passwordless none; do
 done
 echo '[OK] transport remote root command survives ssh argument joining'
 
+for destination in 'eva@192.0.2.10' 'eva@target.example.com' 'eva@2001:db8::10'; do
+  target="$destination"
+  rsync_target=''
+  # Exercise the backend's destination construction without starting a transfer.
+  # shellcheck source=/dev/null disable=SC2016
+  source <(sed -n '/^rsync_target="\$target"$/,/^fi$/p' "$transport")
+  expected="$destination"
+  if [[ "$destination" == *2001:* ]]; then expected='eva@[2001:db8::10]'; fi
+  [[ "$rsync_target" == "$expected" ]] || fail 'rsync destination is invalid'
+  [[ "$target" == "$destination" ]] || fail 'SSH destination was changed'
+done
+echo '[OK] transport supports IPv4, hostname and IPv6 rsync destinations'
+
 echo '[OK] Remote Release transport contract tests passed'

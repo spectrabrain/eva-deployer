@@ -1275,8 +1275,8 @@ class PublishedChartTests(unittest.TestCase):
 
     def test_exact_offline_charts_and_installed_helm_postrenderer(self):
         charts = {
-            "app": Path(os.environ.get("EVA_TEST_APP_CHART", ROOT / "out/cache/eva-app/eva-app-3.3.0-beta.9.tgz")),
-            "iam": Path(os.environ.get("EVA_TEST_IAM_CHART", "/mnt/storage/home/sunghyuns.park/eva-app-iam-3.3.0-beta.1-airgap/charts/eva-iam-3.3.0-beta.1.tgz")),
+            "app": Path(os.environ.get("EVA_TEST_APP_CHART", ROOT / "out/cache/eva-app/eva-app-3.3.0.tgz")),
+            "iam": Path(os.environ.get("EVA_TEST_IAM_CHART", ROOT / "out/cache/eva-iam/eva-iam-3.3.0.tgz")),
         }
         if not all(path.is_file() for path in charts.values()) or not shutil.which("helm"):
             self.skipTest("Provide EVA_TEST_APP_CHART/EVA_TEST_IAM_CHART and helm for real chart proof")

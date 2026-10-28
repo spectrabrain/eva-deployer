@@ -328,10 +328,10 @@ func (service PrepareService) steps(
 		command("download-models", awsEnv(nil), []string{"reports/cache-models.yaml"}, func() error { return ValidateModels(cacheRoot) }),
 		command("download-qdrant-snapshots", awsEnv(nil), []string{"reports/cache-qdrant-snapshots.yaml"}, func() error { return ValidateQdrantSnapshots(cacheRoot) }),
 		command("download-vision-models", awsEnv(nil), []string{"reports/cache-vision-models.yaml"}, func() error { return ValidateVisionModels(cacheRoot) }),
-		command("publish-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(cacheRoot, "images/images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-product.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-product.txt"}, func() error {
+		command("publish-product-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "REPOSITORY_RECOVER_MISSING_CONTENT": "true", "IMAGE_LIST": filepath.Join(cacheRoot, "images/images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-product.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-product.txt"}, func() error {
 			return ValidateRepositoryMapping(cacheRoot, root, "images/images-pulled.txt", "reports/repository-mapping-product.txt", identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
-		command("publish-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "IMAGE_LIST": filepath.Join(cacheRoot, "images/infra-images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-infra.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-infra.txt"}, func() error {
+		command("publish-infra-images", env(map[string]string{"PULL_SOURCE_IMAGES": "false", "REPOSITORY_RECOVER_MISSING_CONTENT": "true", "IMAGE_LIST": filepath.Join(cacheRoot, "images/infra-images-pulled.txt"), "REPOSITORY_MAPPING_FILE": filepath.Join(root, "reports/repository-mapping-infra.txt"), "REPOSITORY_MIRROR_PATH_IMAGES": "false"}), []string{"reports/repository-mapping-infra.txt"}, func() error {
 			return ValidateRepositoryMapping(cacheRoot, root, "images/infra-images-pulled.txt", "reports/repository-mapping-infra.txt", identity.RepositoryRegistry, identity.RepositoryProject)
 		}),
 		command("publish-qdrant-snapshots", env(map[string]string{

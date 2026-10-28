@@ -1,4 +1,4 @@
-# v3.3 게시 App 3.3.0-beta.9 / IAM 3.3.0-beta.1 기준.
+# v3.3 App/IAM 설치 설정. 차트와 이미지 버전은 선택한 Release catalog를 사용합니다.
 # 동일 도메인/IP + HTTPS: App /, IAM /iam. ex) https://eva.example.com/, https://eva.example.com/iam
 # 같은 placeholder는 모두 같은 값으로 교체합니다. host에는 scheme, port, path를 넣지 않습니다.
 iam:

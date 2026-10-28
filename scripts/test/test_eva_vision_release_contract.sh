@@ -6,7 +6,7 @@ source "$REPO_ROOT/scripts/lib/load_versions.sh"
 VERSIONS_QUIET=1 load_deploy_versions
 [[ "$EVA_VISION_DEPLOY_VERSION" == 3.3.0 ]]
 [[ "$EVA_VISION_CHART_VERSION" == 3.3.0 ]]
-[[ "$EVA_VISION_IMAGE_TAG" == 3.3.0rc3 ]]
+[[ "$EVA_VISION_IMAGE_TAG" == 3.3.0 ]]
 [[ "$(eva_vision_source chart 3.2.0)" == https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum ]]
 for version in 3.3.0 3.3.0-beta.1 4.0.0; do
   [[ "$(eva_vision_source chart "$version")" == https://raw.githubusercontent.com/spectrabrain/eva-vision-chart/chartmuseum ]]
@@ -45,12 +45,12 @@ chmod 0755 "$work/bin/aws" "$work/bin/docker"
 PATH="$work/bin:$PATH" EVA_CACHE_ROOT="$work/cache" COMPONENTS=eva-vision \
   EVA_VISION_DEPLOY_VERSION=3.2.0 DOCKER_CMD="$work/bin/docker" FIXTURE_PULL_LOG="$work/pulls" \
   bash "$REPO_ROOT/scripts/download/download_eva_images.sh" > "$work/output"
-expected='211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-vision:3.3.0rc3'
+expected='211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-vision:3.3.0'
 [[ "$(cat "$work/pulls")" == "$expected" ]]
 [[ "$(cat "$work/cache/images/images-all.txt")" == "$expected" ]]
 cmp "$work/cache/images/images-all.txt" "$work/cache/images/images-pulled.txt"
 [[ ! -s "$work/cache/images/images-missing.txt" ]]
-echo '[OK] Vision chart stays at 3.3.0 and image discovery uses Spectrabrain 3.3.0rc3'
+echo '[OK] Vision chart and image discovery use the stable 3.3.0 release'
 
 rm "$work/pulls"
 PATH="$work/bin:$PATH" EVA_CACHE_ROOT="$work/cache" COMPONENTS=eva-vision \

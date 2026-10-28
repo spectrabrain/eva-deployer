@@ -11,6 +11,8 @@ REPOSITORY_PROJECT="${REPOSITORY_PROJECT:-eva}"
 DOCKER_CMD="${DOCKER_CMD:-docker}"
 PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
 PULL_PLATFORM="${PULL_PLATFORM:-linux/amd64}"
+REPOSITORY_RECOVER_MISSING_CONTENT="${REPOSITORY_RECOVER_MISSING_CONTENT:-false}"
+ORAS_CMD="${ORAS_CMD:-$EVA_CACHE_ROOT/tools/oras}"
 REPOSITORY_AUTO_LOGIN="${REPOSITORY_AUTO_LOGIN:-true}"
 REPOSITORY_USERNAME="${REPOSITORY_USERNAME:-${HARBOR_ADMIN_USER:-admin}}"
 REPOSITORY_PASSWORD="${REPOSITORY_PASSWORD:-${HARBOR_ADMIN_PASSWORD:-}}"
@@ -126,11 +128,102 @@ mkdir -p "$IMAGE_DIR"
 
 login_repository
 
-# A platform-specific pull can still retain a multi-platform index in Docker's
-# containerd image store. Select the same platform when publishing so Docker
-# does not try to push manifests/layers that were never downloaded.
+# A platform-specific pull can retain an index with unavailable child manifests.
+# Keep platform selection for indices. A standalone manifest already identifies
+# one image; validate its config platform and publish it directly. Docker can
+# reject --platform even for that platform when cached layer content is missing.
 push_image() {
-  "$DOCKER_CMD" push --platform "$PULL_PLATFORM" "$1"
+  local image="$1" source="$2" metadata push_mode digest push_log status
+  metadata="$("$DOCKER_CMD" image inspect "$image" | python3 -c '
+import json
+import sys
+
+images = json.load(sys.stdin)
+if not isinstance(images, list) or len(images) != 1:
+    raise SystemExit("[ERROR] Expected exactly one cached image")
+image = images[0]
+descriptor = image.get("Descriptor") or {}
+single_manifest = descriptor.get("mediaType") in (
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+)
+if single_manifest:
+    requested = sys.argv[1].split("/")
+    actual = [image.get("Os"), image.get("Architecture")]
+    if (len(requested) not in (2, 3) or actual != requested[:2]
+            or (len(requested) == 3 and image.get("Variant") != requested[2])):
+        raise SystemExit("[ERROR] Cached single manifest platform %s/%s does not match %s"
+                         % (*actual, sys.argv[1]))
+    mode = "single"
+else:
+    mode = "platform"
+print(mode, descriptor.get("digest") or "-")
+' "$PULL_PLATFORM")" || return $?
+  read -r push_mode digest <<< "$metadata"
+  local push_args=()
+  if [[ "$push_mode" == "single" ]]; then
+    echo "[push] verified single manifest platform=$PULL_PLATFORM"
+  else
+    push_args+=(--platform "$PULL_PLATFORM")
+  fi
+  push_log="$(mktemp "${TMPDIR:-/tmp}/eva-image-push.XXXXXX")" || return $?
+  if "$DOCKER_CMD" push "${push_args[@]}" "$image" 2>&1 | tee "$push_log"; then
+    rm -f "$push_log"
+    return 0
+  else
+    status=$?
+  fi
+  # Only Remote preparation may fetch from the source again. Preserve genuine
+  # registry/auth failures; Docker uses the platform error for missing blobs too.
+  if [[ "$REPOSITORY_RECOVER_MISSING_CONTENT" == "true" ]] && python3 - "$push_log" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1]).read_text(errors="replace")
+missing = re.search(r"content digest sha256:[0-9a-f]+[^\n]*not found", output)
+platform = re.search(r"was found but does not provide the specified platform", output)
+raise SystemExit(0 if missing or platform else 1)
+PY
+  then
+    rm -f "$push_log"
+    copy_source_manifest "$source" "$image" "$digest"
+    return $?
+  fi
+  rm -f "$push_log"
+  return "$status"
+}
+
+# Copy the same immutable source manifest, selecting just the target platform
+# for an index. ORAS fetches registry blobs independently of Docker snapshots.
+# No local images, containers, or services are removed to repair the cache.
+copy_source_manifest() {
+  local source="$1" target="$2" digest="$3" registry_config
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    echo "[ERROR] Cannot recover an image without its cached manifest digest" >&2
+    return 1
+  }
+  if [[ "$ORAS_CMD" == */* ]]; then
+    [[ -x "$ORAS_CMD" ]] || { echo "[ERROR] ORAS command not found: $ORAS_CMD" >&2; return 1; }
+  else
+    command -v "$ORAS_CMD" >/dev/null 2>&1 || { echo "[ERROR] ORAS command not found: $ORAS_CMD" >&2; return 1; }
+  fi
+  source="${source%@*}"
+  if [[ "${source##*/}" == *:* ]]; then
+    source="${source%:*}"
+  fi
+  source="$source@$digest"
+  registry_config="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+  local transport=()
+  case "${REPOSITORY_PLAIN_HTTP:-false}" in
+    true) transport+=(--to-plain-http) ;;
+    false) ;;
+    *) echo "[ERROR] REPOSITORY_PLAIN_HTTP must be true or false" >&2; return 1 ;;
+  esac
+  echo "[recover] copying cached manifest platform=$PULL_PLATFORM: $source -> $target"
+  "$ORAS_CMD" cp --platform "$PULL_PLATFORM" "${transport[@]}" \
+    --from-registry-config "$registry_config" --to-registry-config "$registry_config" \
+    "$source" "$target"
 }
 
 short_name() {
@@ -168,7 +261,7 @@ while IFS= read -r source_image; do
   "$DOCKER_CMD" tag "$source_image" "$target_image"
 
   echo "[push] $target_image"
-  push_image "$target_image"
+  push_image "$target_image" "$source_image"
 
   echo "$source_image $target_image" >> "$MAPPING_FILE"
 done < "$IMAGE_LIST"
@@ -251,10 +344,7 @@ for source_image in $MIRROR_PATH_IMAGES; do
   fi
 
   "$DOCKER_CMD" tag "$source_image" "$target_image"
-  if ! push_image "$target_image"; then
-    echo "[warn] push 실패: $target_image"
-    echo "       Harbor 에 '${mirror_repo%%/*}' project 가 없거나 권한이 없을 수 있습니다."
-  fi
+  push_image "$target_image" "$source_image"
 
   echo "$source_image $target_image" >> "$MAPPING_FILE"
 done

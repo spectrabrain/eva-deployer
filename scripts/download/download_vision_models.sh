@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download only the selected Vision 3.3 model directories; never write to S3.
-# EVA_VISION_MODELS is a comma-separated, case-sensitive list (seven by default).
+# EVA_VISION_MODELS overrides the case-sensitive default model selection.
 set +x
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -432,7 +432,8 @@ sys.exit(1 if args[0] == 'manifest' else 0)
             binary = root / 'bin'
             binary.mkdir()
             tool = binary / 'docker'
-            tool.write_text('#!/bin/sh\ncase "$1" in\nimage) echo amd64/linux ;;\nlogin) cat >/dev/null ;;\nesac\n')
+            tool.write_text('#!/bin/sh\ncase "$1" in\nimage) if [ "$#" -gt 3 ]; then echo amd64/linux; '
+                            'else echo \'[{"Os":"linux","Architecture":"amd64"}]\'; fi ;;\nlogin) cat >/dev/null ;;\nesac\n')
             tool.chmod(0o755)
             helm = binary / 'helm'
             helm.write_text('#!/bin/sh\necho "n8n should not render a Helm chart" >&2\nexit 1\n')

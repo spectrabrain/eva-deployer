@@ -313,7 +313,8 @@ class AgentPublishedChartsTests(unittest.TestCase):
                               'login) cat >/dev/null;;\n'
                               'pull) printf "%s\\n" "${@: -1}" >> "$PULL_LOG";;\n'
                               'tag|push) printf "%s\\n" "$*" >> "$PUBLISH_LOG";;\n'
-                              'image) printf "amd64/linux\\n";;\n'
+                              'image) if [[ "$#" -gt 3 ]]; then printf "amd64/linux\\n"; '
+                              'else printf \'[{"Os":"linux","Architecture":"amd64"}]\\n\'; fi;;\n'
                               '*) exit 1;;\nesac\n')
             docker.chmod(0o755)
             aws = work / 'bin/aws'

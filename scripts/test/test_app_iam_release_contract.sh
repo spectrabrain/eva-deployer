@@ -7,8 +7,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 HELM="${HELM:-helm}"
 PYTHON="${PYTHON:-python3}"
-EVA_APP_CHART_ARCHIVE="${EVA_APP_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-app/eva-app-3.3.0-beta.9.tgz}"
-EVA_IAM_CHART_ARCHIVE="${EVA_IAM_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-iam/eva-iam-3.3.0-beta.1.tgz}"
+EVA_APP_CHART_ARCHIVE="${EVA_APP_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-app/eva-app-3.3.0.tgz}"
+EVA_IAM_CHART_ARCHIVE="${EVA_IAM_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-iam/eva-iam-3.3.0.tgz}"
 
 for archive in "$EVA_APP_CHART_ARCHIVE" "$EVA_IAM_CHART_ARCHIVE"; do
   if [[ ! -f "$archive" || ! -r "$archive" ]]; then
@@ -51,7 +51,7 @@ import yaml
 repo, tmp = map(Path, sys.argv[1:3])
 ansible, helm = (shutil.which(value) for value in sys.argv[3:5])
 archives = dict(zip(("app", "iam"), (str(Path(p).resolve()) for p in sys.argv[5:7])))
-versions = {"app": "3.3.0-beta.9", "iam": "3.3.0-beta.1"}
+versions = {"app": "3.3.0", "iam": "3.3.0"}
 catalog = yaml.safe_load((repo / "src/solution/version.yaml").read_text())
 for key, expected in (("eva_app_deploy_version", versions["app"]),
                       ("eva_app_chart_version", versions["app"]),

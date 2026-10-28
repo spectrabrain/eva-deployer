@@ -237,6 +237,7 @@
       loop:
         - {path: publish/push_vision_models_to_harbor.sh, mode: '0755'}
         - {path: lib/vision_models.py, mode: '0644'}
+        - {path: lib/docker_registry_auth.py, mode: '0644'}
 
     - name: Run copied Vision model publisher on target
       no_log: true

@@ -1,4 +1,4 @@
-# v3.3 게시 App 3.3.0-beta.9 / IAM 3.3.0-beta.1 기준. 실제 설치 E2E는 별도 검증합니다.
+# v3.3 App/IAM 설치 설정. 차트와 이미지 버전은 선택한 Release catalog를 사용합니다.
 # 다른 도메인 + HTTP: App /, IAM /. ex) http://app.eva.com/, http://iam.eva.com/
 # host에는 scheme, port, path를 넣지 않습니다. HTTP는 암호화되지 않으므로 격리된 검증 환경에만 사용합니다.
 iam:

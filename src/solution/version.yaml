@@ -1,10 +1,10 @@
 schemaVersion: v1alpha1
 kind: solutionVersionCatalog
-eva_app_deploy_version: 3.3.0-beta.9
-eva_app_chart_version: 3.3.0-beta.9
+eva_app_deploy_version: 3.3.0
+eva_app_chart_version: 3.3.0
 eva_vision_deploy_version: 3.3.0
 eva_vision_chart_version: 3.3.0
-eva_vision_image_tag: 3.3.0rc3
+eva_vision_image_tag: 3.3.0
 eva_agent_deploy_version: 3.3.0
 eva_agent_chart_version: 3.3.0-rc.2
 eva_agent_image_tag: 3.3.0-rc.2
@@ -13,4 +13,4 @@ eva_agent_values_revision: a292a51542ba3981919b8e0a880c1e3d1794d4a6
 eva_agent_init_chart_version: 1.0.0
 qdrant_chart_version: 1.18.2
 n8n_image: docker.n8n.io/n8nio/n8n:2.32.7
-eva_iam_chart_version: 3.3.0-beta.1
+eva_iam_chart_version: 3.3.0

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "scripts/lib/vision_models.py"
 DOWNLOAD = ROOT / "scripts/download/download_vision_models.sh"
 PUBLISH = ROOT / "scripts/publish/push_vision_models_to_harbor.sh"
-DEFAULTS = ["Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF", "DARTF-light",
+DEFAULTS = ["Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF-light",
             "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"]
 SOURCE = "s3://spectrabrain-eva-vision/model_dir"
 SECRET = "private-password-DO-NOT-PRINT"
@@ -133,7 +133,7 @@ class VisionModelsTests(unittest.TestCase):
             "FAKE_EXPECTED_PASSWORD": SECRET, "LOCAL_HARBOR_YML": str(self.root / "absent.yml"),
             "TMPDIR": str(self.cache_root),
         })
-        for name in DEFAULTS:
+        for name in DEFAULTS + ["DARTF"]:
             folder = self.models / name
             (folder / "nested").mkdir(parents=True)
             (folder / "config.json").write_text('{"model":"test"}\n')
@@ -232,6 +232,15 @@ class VisionModelsTests(unittest.TestCase):
             self.assertEqual(args[args.index("sync") + 1], f"{SOURCE}/{name}/")
         self.call("validate", args=("--models", "OmDet,DARTF"))
         self.call("validate", ok=False)  # Stale/default selection cannot be blessed.
+
+    def test_stable_default_download_replaces_previous_full_dartf_cache(self):
+        self.call("download", args=("--models", ",".join(DEFAULTS + ["DARTF"])))
+        self.assertTrue((self.cache / "model_dir/DARTF").is_dir())
+        self.call("download")
+        self.call("validate")
+        self.assertEqual({p.name for p in (self.cache / "model_dir").iterdir()}, set(DEFAULTS))
+        self.assertTrue((self.models / "DARTF/nested/weights.bin").is_file())
+        self.assert_clean_credentials()
 
     def test_invalid_selections_are_rejected_before_aws(self):
         for value in ("", " ", "../Owl-v2", "Owl/v2", "--help", "Owl-v2,owl-v2",

@@ -36,7 +36,7 @@ renderer_template = environment.from_string((role / "templates/post-renderer/pos
 
 defaults = dict(eva_vision_image_repository="registry.example/eva/eva-vision",
                 eva_vision_deploy_version="3.3.0",
-                eva_vision_image_tag="3.3.0rc3",
+                eva_vision_image_tag="3.3.0",
                 eva_vision_chart_version="3.3.0", repository_registry="harbor.example:32080",
                 repository_project="eva", eva_vision_gpu_count=1,
                 eva_vision_gpu_resource_name="nvidia.com/gpu",
@@ -45,7 +45,7 @@ defaults = dict(eva_vision_image_repository="registry.example/eva/eva-vision",
 # Image tags are independent of Chart and deployment workdir versions.
 for mode in ("online_repository", "cloud_repository", "remote_repository", "local_repository"):
     variables = {**defaults, "eva_vision_deploy_version": "3.2.0", "repository_mode": mode}
-    assert yaml.safe_load(values_template.render(**variables))["image"]["tag"] == "3.3.0rc3"
+    assert yaml.safe_load(values_template.render(**variables))["image"]["tag"] == "3.3.0"
     variables["eva_vision_image_tag"] = "3.3.0rc-test"
     assert yaml.safe_load(values_template.render(**variables))["image"]["tag"] == "3.3.0rc-test"
     del variables["eva_vision_image_tag"]
@@ -232,6 +232,8 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                  registry_config="managed", registry_key=None, registry_auth=None,
                  existing_data=None, create_race=False):
         global cases
+        if not name.startswith(os.environ.get("EVA_VISION_TEST_CASE_PREFIX", "")):
+            return
         case = temporary / name
         work = case / "target work"
         work.mkdir(parents=True)
@@ -247,7 +249,7 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                 selected_source = setting.split("=", 1)[1]
         local_publish = mode == "local_repository" and selected_source == "harbor"
         values = yaml.safe_load(values_template.render(**defaults, repository_mode=mode))
-        assert values["image"]["tag"] == "3.3.0rc3"
+        assert values["image"]["tag"] == "3.3.0"
         assert values["imagePullSecrets"]["ExistingSecret"] == "ecr-registry"
         assert "name" not in values["imagePullSecrets"]
         assert values["harbor"]["existingSecret"] == "eva-vision-harbor"
@@ -327,7 +329,7 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         env["EXPECTED_PUBLISH_PASSWORD"] = "fixture-publish-secret"
         names = []
         if local_publish:
-            for relative in ("publish/push_vision_models_to_harbor.sh", "lib/vision_models.py"):
+            for relative in ("publish/push_vision_models_to_harbor.sh", "lib/vision_models.py", "lib/docker_registry_auth.py"):
                 if missing_helper and relative.startswith("lib/"):
                     continue
                 helper = helper_root / "scripts" / relative
@@ -466,7 +468,8 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
             if local_publish:
                 staged = work / "model-publisher/scripts"
                 for relative, mode_bits in [("publish/push_vision_models_to_harbor.sh", 0o755),
-                                            ("lib/vision_models.py", 0o644)]:
+                                            ("lib/vision_models.py", 0o644),
+                                            ("lib/docker_registry_auth.py", 0o644)]:
                     target = staged / relative
                     assert target.read_bytes() == (helper_root / "scripts" / relative).read_bytes()
                     assert stat.S_IMODE(target.stat().st_mode) == mode_bits
@@ -654,5 +657,6 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
     inventory.append({"kind": "Secret", "metadata": {"name": "foreign"}})
     assert "Secret\tforeign" in subprocess.check_output(["jq", "-r", query], input=json.dumps(inventory), text=True)
     assert "persistentvolumeclaim" not in reconciliation.split("kubectl delete", 1)[-1].lower()
+    assert cases > 0, "No Vision runtime fixtures matched the requested prefix"
     print(f"EVA Vision model runtime contracts passed ({cases} Ansible cases; published chart renders: {bool(chart)}).")
 PY

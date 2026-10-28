@@ -61,7 +61,7 @@ from urllib.parse import urlsplit
 SOURCE = "s3://spectrabrain-eva-vision/model_dir"
 ARTIFACT_TYPE = "application/vnd.eva-vision.model.v1"
 DEFAULT_MODELS = (
-    "Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF", "DARTF-light", "DINOv2Small",
+    "Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF-light", "DINOv2Small",
     "E5EmbeddingSmall", "Qwen3VLEmbed2B",
 )
 MODEL_NAME = re.compile(r"[A-Za-z0-9]+(?:(?:__?|-+)[A-Za-z0-9]+)*\Z")

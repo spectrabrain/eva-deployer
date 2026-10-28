@@ -67,13 +67,13 @@ func mutateVisionManifest(t *testing.T, root string, mutate func(map[string]any)
 	mustWrite(t, path, string(data))
 }
 
-func TestVisionDefaultModelsIncludeDARTFWeights(t *testing.T) {
+func TestVisionDefaultModelsMatchStableChart(t *testing.T) {
 	t.Setenv("EVA_VISION_MODELS", defaultVisionModels)
 	names, err := visionModelSelection()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF", "DARTF-light", "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"}
+	want := []string{"Owl-v2", "OmDet", "LLMDet", "RT-DETRV2", "DARTF-light", "DINOv2Small", "E5EmbeddingSmall", "Qwen3VLEmbed2B"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("default Vision weights = %v, want %v", names, want)
 	}
@@ -249,6 +249,14 @@ func TestValidateVisionModelsSelectionAndAncestors(t *testing.T) {
 			t.Fatal("selection mismatch accepted")
 		}
 	})
+	t.Run("optional full DARTF", func(t *testing.T) {
+		t.Setenv("EVA_VISION_MODELS", "DARTF,DARTF-light")
+		root := t.TempDir()
+		writeVisionFixture(t, root, []string{"DARTF", "DARTF-light"})
+		if err := ValidateVisionModels(root); err != nil {
+			t.Fatal(err)
+		}
+	})
 	root := t.TempDir()
 	writeVisionFixture(t, root, nil)
 	link := filepath.Join(t.TempDir(), "ancestor")
@@ -399,6 +407,13 @@ func TestPrepareVisionStepsUseAWSEnvValidateAndPublishEvidence(t *testing.T) {
 			if strings.HasPrefix(step, "publish-") {
 				if options.Env["AWS_SECRET_ACCESS_KEY"] != "" || options.Env["REPOSITORY_REGISTRY"] != identity.RepositoryRegistry || options.Env["REPOSITORY_PROJECT"] != identity.RepositoryProject {
 					t.Fatal("invalid publish environment")
+				}
+				if step == "publish-product-images" || step == "publish-infra-images" {
+					if options.Env["REPOSITORY_RECOVER_MISSING_CONTENT"] != "true" || options.Env["PULL_SOURCE_IMAGES"] != "false" || options.Env["PULL_PLATFORM"] != "linux/amd64" {
+						t.Fatal("cached image publication must enable digest-scoped recovery for the target platform")
+					}
+				} else if options.Env["REPOSITORY_RECOVER_MISSING_CONTENT"] != "" {
+					t.Fatal("image recovery must be scoped to image publication steps")
 				}
 				if step == "publish-vision-models" {
 					root := filepath.Join(preparation, identity.ReleaseVersion)

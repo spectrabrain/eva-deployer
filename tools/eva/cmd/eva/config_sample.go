@@ -114,7 +114,7 @@ func runConfigSample(args []string, input io.Reader, output, messages io.Writer,
 	if options.IAM == "external" {
 		fmt.Fprintln(messages, "[외부 IAM] IAM은 설치하지 않습니다. --protocol은 App 접속 방식이며 IAM baseUrl/client 연결값과 Redis port/db/password를 확인합니다. Redis url은 선택 override입니다.")
 	}
-	fmt.Fprintln(messages, "[v3.3] 게시 App 3.3.0-beta.9 / IAM 3.3.0-beta.1 기준 샘플입니다. 실제 버전은 사용하는 Release catalog를 확인하세요.")
+	fmt.Fprintln(messages, "[v3.3] App/IAM 설치 설정입니다. 차트와 이미지 버전은 선택한 Release catalog를 사용합니다.")
 	if options.Protocol == "http" {
 		fmt.Fprintln(messages, "[HTTP] 격리된 검증 환경용입니다. 인증서 SAN 검사·TLS Secret Job·Traefik TLSStore 생성을 생략합니다. 실제 설치 E2E는 별도 검증하세요.")
 	}

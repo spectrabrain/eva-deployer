@@ -74,7 +74,7 @@
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/'
            ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
-              | ternary('spectrabrain/eva-agent-chart/' ~ (eva_agent_values_revision | default('chartmuseum')),
+              | ternary('spectrabrain/eva-agent-chart/develop',
                         'mellerikat/eva-agent/chartmuseum'))
            ~ '/release/' ~ eva_agent_deploy_version) }}
     eva_agent_offline_release_dir: "{{ eva_agent_offline_release_dir | default(eva_agent_offline_dir ~ '/release/' ~ eva_agent_deploy_version) }}"

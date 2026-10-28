@@ -122,7 +122,7 @@ jobs:
         env:
           EVA_TEST_HELM_DOWNLOAD: "1"
         run: |
-          python3 scripts/test/test_eva_agent_rc2.py
+          python3 scripts/test/test_eva_agent_release.py
           python3 scripts/test/test_n8n_remote.py
           scripts/test/test_eva_component_values.sh
           scripts/test/test_eva_agent_dependency_defaults.sh
@@ -135,6 +135,7 @@ jobs:
           scripts/test/test_eva_vision_reconciliation.sh
           scripts/test/test_eva_vision_postrenderer.sh
           python3 scripts/test/test_eva_vision_ecr_auth.py
+          python3 scripts/test/test_eva_vision_rollout.py
           scripts/test/test_k3s_gpu_validation.sh
           scripts/test/test_tls_san_validation.sh
           scripts/test/test_precondition_argocd_tracking.sh

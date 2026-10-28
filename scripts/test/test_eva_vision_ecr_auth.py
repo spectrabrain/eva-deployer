@@ -254,7 +254,7 @@ class ECRTests(unittest.TestCase):
                    or str(Path(sys.executable).with_name("ansible-playbook")))
         # pip --user installs belong to the controller HOME; the role sets the target AWS HOME.
         env = {**self.env, "HOME": os.environ.get("HOME", str(Path.home())),
-               "ANSIBLE_ROLES_PATH": str(ROLE.parent)}
+               "ANSIBLE_ROLES_PATH": str(ROLE.parent), "ANSIBLE_INJECT_FACT_VARS": "False"}
         result = subprocess.run([ansible, "-i", "localhost,", str(playbook)], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
         self.assertNotIn(TOKEN, result.stdout + result.stderr)

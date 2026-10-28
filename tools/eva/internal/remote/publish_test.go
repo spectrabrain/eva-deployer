@@ -484,7 +484,7 @@ func writeOriginalRelease(t *testing.T, includeOffline bool) release.Resolved {
 			"src/infra/playbooks/site_precondition.yaml": "[]\n", "src/infra/playbooks/site_infra.yaml": "[]\n",
 			"src/infra/version.yaml": "k3s_default_version: v1.35.2+k3s1\n",
 		},
-		"eva-solution.tar.gz": {"src/solution/version.yaml": "eva_agent_deploy_version: 3.3.0\neva_agent_chart_version: 3.3.0-rc.2\n"},
+		"eva-solution.tar.gz": {"src/solution/version.yaml": "eva_agent_deploy_version: 3.3.0\neva_agent_chart_version: 3.3.0\n"},
 	} {
 		var contents bytes.Buffer
 		compressed := gzip.NewWriter(&contents)

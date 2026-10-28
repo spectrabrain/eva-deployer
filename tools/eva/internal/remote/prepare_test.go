@@ -26,7 +26,7 @@ func TestPrepareUsesOrderedBackendsAndStopsAfterFailure(t *testing.T) {
 		Run: func(_ context.Context, options ProcessOptions) error {
 			called = append(called, filepath.Base(options.Path))
 			contents, err := os.ReadFile(options.Env["EVA_SOLUTION_VERSION_FILE"])
-			if err != nil || !strings.Contains(string(contents), "eva_agent_chart_version: 3.3.0-rc.2") {
+			if err != nil || !strings.Contains(string(contents), "eva_agent_chart_version: 3.3.0\n") {
 				t.Fatalf("selected Release catalog was not passed to backend: %v", err)
 			}
 			if _, err := os.Stat(options.Env["EVA_INFRA_VERSION_FILE"]); err != nil {

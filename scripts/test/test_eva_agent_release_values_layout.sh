@@ -19,7 +19,7 @@ fail() {
 # shellcheck source=scripts/lib/load_versions.sh
 source "$REPO_ROOT/scripts/lib/load_versions.sh"
 
-for case in 3.1.0:legacy 3.0.4:legacy 3.2.0:source-split 3.2.1:source-split v3.2.0:source-split 4.0.0:source-split; do
+for case in 3.1.0:legacy 3.0.4:legacy 3.2.0:source-split 3.2.1:source-split 3.3.0:source-split v3.2.0:source-split 4.0.0:source-split; do
   version="${case%%:*}"
   expected="${case#*:}"
   [[ "$(eva_agent_values_layout "$version")" == "$expected" ]] || fail "layout for $version is not $expected"
@@ -81,7 +81,8 @@ STUB
 chmod +x "$stub_bin/curl" "$stub_bin/sudo"
 
 run_required_check() {
-  local release="$1" missing="$2" log="$TMP_ROOT/required-$1.log"
+  local release="$1" missing="$2" log="$TMP_ROOT/required-$1.log" release_base
+  release_base="$(eva_agent_source release "$release")"
   : >"$log"
   if PATH="$stub_bin:$PATH" STUB_LOG="$log" STUB_MISSING="$missing" \
     EVA_AGENT_RELEASE="$release" EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
@@ -91,7 +92,7 @@ run_required_check() {
   fi
   grep -Fq 'no preparation downloads were started.' "$log.out" || fail "prepare-offline-assets did not stop at validation for $release"
   [[ ! -e "$log.downloads" ]] || fail "prepare-offline-assets downloaded before validation for $release"
-  sed "s#^https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/$release/##" "$log"
+  sed "s#^${release_base}/##" "$log"
 }
 
 required_values() {
@@ -100,6 +101,12 @@ required_values() {
 
 split_required="$(run_required_check 3.2.0 install_eva_agent_dependencies.sh)"
 [[ "$(required_values <<<"$split_required")" == "$expected_split" ]] || fail "3.2.0 required Agent values differ"
+stable_required="$(run_required_check 3.3.0 install_eva_agent_dependencies.sh)"
+[[ "$(required_values <<<"$stable_required")" == "$expected_split" ]] || fail "3.3.0 required Agent values differ"
+for chart in eva-agent eva-agent-vllm; do
+  grep -Fxq "https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/$chart-3.3.0.tgz" \
+    "$TMP_ROOT/required-3.3.0.log" || fail "stable $chart chart is missing from preparation"
+done
 legacy_required="$(run_required_check 3.1.0 install_eva_agent_dependencies.sh)"
 [[ "$(required_values <<<"$legacy_required")" == "$expected_legacy" ]] || fail "3.1.0 required Agent values differ"
 for expected in eva-agent/values-secret.yaml eva-agent-init/values-k3s.yaml eva-agent-qdrant/values-k3s.harbor.yaml plugins/eva-agent-qdrant/post-renderer.sh plugins/eva-agent-qdrant/plugin.yaml; do

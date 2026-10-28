@@ -28,8 +28,9 @@
     eva_vision_gpu_resource_name: "{{ eva_vision_gpu_resource_name | default('') }}"
     eva_vision_pvc_size: "{{ eva_vision_pvc_size | default('20Gi') }}"
     eva_vision_storage_class: "{{ eva_vision_storage_class | default('local-path') }}"
-    eva_vision_rollout_timeout: "{{ eva_vision_rollout_timeout | default('1800s') }}"
-    eva_vision_progress_deadline_seconds: "{{ eva_vision_progress_deadline_seconds | default(3600) }}"
+    # Include the first large image pull and external model preparation in the wait budget.
+    eva_vision_rollout_timeout: "{{ eva_vision_rollout_timeout | default('7200s') }}"
+    eva_vision_progress_deadline_seconds: "{{ eva_vision_progress_deadline_seconds | default(7200) }}"
     eva_vision_skip_startup_warmup: "{{ eva_vision_skip_startup_warmup | default(true) }}"
     eva_vision_chart_repo_url: >-
       {{ eva_vision_chart_repo_url | default(
@@ -209,7 +210,7 @@
   become: false
   when: not ansible_check_mode
 
-- name: Copy EVA Vision k3s override values to remote workspace
+- name: Copy EVA Vision k3s override values to target workspace
   no_log: true
   ansible.builtin.copy:
     src: "{{ eva_vision_deploy_values_dir }}/vision-k3s-override.yaml"
@@ -517,6 +518,24 @@
       environment:
         KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
+    - name: Collect EVA Vision container states on rollout failure
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - pod
+          - -n
+          - "{{ eva_vision_namespace }}"
+          - -l
+          - "app.kubernetes.io/name={{ eva_vision_name }}"
+          - -o
+          - "custom-columns=NAME:.metadata.name,PHASE:.status.phase,READY:.status.containerStatuses[*].ready,WAITING:.status.containerStatuses[*].state.waiting.reason,TERMINATED:.status.containerStatuses[*].state.terminated.reason,IMAGE:.spec.containers[*].image,IMAGE_ID:.status.containerStatuses[*].imageID"
+      register: eva_vision_container_states_on_fail
+      changed_when: false
+      failed_when: false
+      environment:
+        KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+
     - name: Collect EVA Vision pod describe on rollout failure
       ansible.builtin.shell: >-
         kubectl describe pod -n {{ eva_vision_namespace }} -l app.kubernetes.io/name={{ eva_vision_name }}
@@ -543,6 +562,8 @@
           - "rollout failed for deployment/{{ eva_vision_name }} in namespace {{ eva_vision_namespace }}"
           - "pods:"
           - "{{ eva_vision_pods_on_fail.stdout_lines | default([]) }}"
+          - "container states:"
+          - "{{ eva_vision_container_states_on_fail.stdout_lines | default([]) }}"
           - "events:"
           - "{{ eva_vision_events_on_fail.stdout_lines | default([]) }}"
           - "describe:"
@@ -551,9 +572,16 @@
     - name: Fail with actionable EVA Vision rollout message
       ansible.builtin.fail:
         msg: >-
-          EVA Vision rollout failed. 위 diagnostics를 확인하세요.
-          remote_repository/local_repository 모드에서는 Harbor에 이미지가 준비되어 있어야 합니다:
-          {{ eva_vision_runtime_values.image.repository | default(eva_vision_image_repository) }}:{{ eva_vision_runtime_values.image.tag | default(eva_vision_image_tag) }}
+          EVA Vision rollout did not complete within {{ eva_vision_rollout_timeout }}
+          (repository_mode={{ repository_mode }}).
+          {% if repository_mode in ['online_repository', 'cloud_repository'] %}
+          Online 이미지 다운로드 상태와 registry 연결·인증, 노드 디스크 여유 공간을 확인하세요.
+          {% else %}
+          Harbor의 이미지 게시 상태와 Target의 registry 연결·인증, 노드 디스크 여유 공간을 확인하세요.
+          {% endif %}
+          image={{ eva_vision_runtime_values.image.repository | default(eva_vision_image_repository) }}:{{ eva_vision_runtime_values.image.tag | default(eva_vision_image_tag) }}.
+          위 container states와 events에서 이미지 준비 단계인지 서비스 시작 단계인지 확인하세요.
+          이미지 다운로드·모델 준비는 명령 종료 후에도 계속될 수 있으므로 재시도 전에 Pod 상태를 확인하세요.
 
 - name: Check EVA Vision pods
   ansible.builtin.command: kubectl get pod -n {{ eva_vision_namespace }}

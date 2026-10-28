@@ -110,7 +110,6 @@ load_deploy_versions() {
     EVA_AGENT_DEPLOY_VERSION
     EVA_AGENT_CHART_VERSION
     EVA_AGENT_IMAGE_TAG
-    EVA_AGENT_VALUES_REVISION
     EVA_AGENT_VLLM_CHART_VERSION
     EVA_AGENT_INIT_CHART_VERSION
     EVA_IAM_CHART_VERSION
@@ -131,7 +130,6 @@ load_deploy_versions() {
     [EVA_AGENT_DEPLOY_VERSION]="eva_agent_deploy_version"
     [EVA_AGENT_CHART_VERSION]="eva_agent_chart_version"
     [EVA_AGENT_IMAGE_TAG]="eva_agent_image_tag"
-    [EVA_AGENT_VALUES_REVISION]="eva_agent_values_revision"
     [EVA_AGENT_VLLM_CHART_VERSION]="eva_agent_vllm_chart_version"
     [EVA_AGENT_INIT_CHART_VERSION]="eva_agent_init_chart_version"
     [EVA_IAM_CHART_VERSION]="eva_iam_chart_version"
@@ -248,7 +246,7 @@ eva_product_chart_base() {
 EVA_AGENT_VLLM_PROFILES=(A6000x1 L40sx1 PRO5000x3 PRO6000-MIGx4)
 
 eva_agent_source() {
-  local kind="$1" version="$2" owner=mellerikat repo=eva-agent revision=chartmuseum
+  local kind="$1" version="$2" owner=mellerikat repo=eva-agent values_branch=chartmuseum
   if [[ ! "$version" =~ ^v?([0-9]+)\.([0-9]+)\.[0-9]+([-+][A-Za-z0-9.]+)?$ ]]; then
     echo "[ERROR] invalid EVA Agent release version: ${version}" >&2
     return 1
@@ -256,11 +254,12 @@ eva_agent_source() {
   if (( BASH_REMATCH[1] > 3 || (BASH_REMATCH[1] == 3 && BASH_REMATCH[2] >= 3) )); then
     owner=spectrabrain
     repo=eva-agent-chart
-    revision="${EVA_AGENT_VALUES_REVISION:-chartmuseum}"
+    # The new repository publishes release profiles on develop and charts on chartmuseum.
+    values_branch=develop
   fi
   case "$kind" in
     chart) printf 'https://raw.githubusercontent.com/%s/%s/chartmuseum\n' "$owner" "$repo" ;;
-    release) printf 'https://raw.githubusercontent.com/%s/%s/%s/release/%s\n' "$owner" "$repo" "$revision" "$version" ;;
+    release) printf 'https://raw.githubusercontent.com/%s/%s/%s/release/%s\n' "$owner" "$repo" "$values_branch" "$version" ;;
     scripts) printf 'https://raw.githubusercontent.com/%s/%s/chartmuseum\n' "$owner" "$repo" ;;
     image)
       if [[ "$owner" == spectrabrain ]]; then

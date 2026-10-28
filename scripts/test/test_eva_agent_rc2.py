@@ -350,7 +350,7 @@ class AgentPublishedChartsTests(unittest.TestCase):
                         target_image = REGISTRY + '/custom/eva-harbor-oras:0.1.0'
                         self.assertIn(ORAS_IMAGE + ' ' + target_image, (cache / 'images/repository-mapping.txt').read_text())
                         self.assertIn('tag ' + ORAS_IMAGE + ' ' + target_image, (work / 'publish.log').read_text())
-                        self.assertIn('push ' + target_image, (work / 'publish.log').read_text())
+                        self.assertIn('push --platform linux/amd64 ' + target_image, (work / 'publish.log').read_text())
                     output = run(['bash', str(ROOT / 'scripts/download/download_qdrant_snapshots.sh')], env=environment)
                     self.assertEqual(output.returncode, 0, output.stdout + output.stderr)
                     self.assertIn('s3://spectrabrain-eva-agent/agent/qdrant/eva_manual_qwen3vl_collections/eva_manual_qwen3vl_test_20260824.snapshot',

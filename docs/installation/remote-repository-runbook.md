@@ -105,6 +105,13 @@ Target의 k3s, GPU, NFS 또는 EVA component는 이후 Target 설치 단계에�
 
 ## 5. [Main] Remote 자산 준비
 
+`remote prepare`에는 Main에서 사용할 AWS 인증이 필요합니다. 명령 시작 시 저장된 인증을
+검증하고, 인증이 없거나 검증에 실패하면 대화형으로 AWS Access Key ID, AWS Secret Access Key와
+Region을 입력받습니다. Region의 기본값은 `ap-northeast-2`입니다.
+검증된 인증은 자동 저장하여 다음 준비 작업에서 재사용하므로 인증 파일을 직접 작성할 필요가 없습니다.
+Main의 AWS 계정에는 이미지 ECR pull과 모델 S3 list/read 권한이 필요합니다.
+AWS 인증은 Main에서만 사용하며 Target에 전달하지 않습니다.
+
 검증한 Base Release를 준비합니다. registry/project는 bootstrap receipt에서 자동으로
 해석됩니다.
 

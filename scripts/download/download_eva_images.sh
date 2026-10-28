@@ -181,11 +181,8 @@ fi
 : > "$IMAGE_DIR/images-pulled.txt"
 : > "$IMAGE_DIR/images-missing.txt"
 
-# 멀티플랫폼 이미지를 그냥 pull 하면, containerd 이미지 스토어를 쓰는 docker 에서는
-# 플랫폼이 정해지지 않은 index 만 로컬에 남을 수 있습니다. 그 상태로 docker save 하면
-# config blob 이 빠진 tar 가 만들어지고, 대상 서버에서 docker load 는 성공한 것처럼 보이지만
-# docker tag / push 가 "failed to read config content" 로 실패합니다.
-# 대상 노드의 아키텍처를 지정해 단일 플랫폼으로 받으면 그 문제가 생기지 않습니다.
+# 대상 노드에서 사용할 플랫폼의 레이어를 받습니다. Docker의 containerd 이미지 스토어에는
+# 다른 플랫폼을 참조하는 index가 남을 수 있으므로 게시 단계에서도 같은 플랫폼을 지정합니다.
 PULL_PLATFORM="${PULL_PLATFORM:-linux/amd64}"
 pull_args=()
 if [[ -n "$PULL_PLATFORM" ]]; then

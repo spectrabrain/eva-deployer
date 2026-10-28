@@ -10,6 +10,7 @@ REPOSITORY_REGISTRY="${REPOSITORY_REGISTRY:-${HARBOR_REGISTRY:-}}"
 REPOSITORY_PROJECT="${REPOSITORY_PROJECT:-eva}"
 DOCKER_CMD="${DOCKER_CMD:-docker}"
 PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
+PULL_PLATFORM="${PULL_PLATFORM:-linux/amd64}"
 REPOSITORY_AUTO_LOGIN="${REPOSITORY_AUTO_LOGIN:-true}"
 REPOSITORY_USERNAME="${REPOSITORY_USERNAME:-${HARBOR_ADMIN_USER:-admin}}"
 REPOSITORY_PASSWORD="${REPOSITORY_PASSWORD:-${HARBOR_ADMIN_PASSWORD:-}}"
@@ -125,6 +126,13 @@ mkdir -p "$IMAGE_DIR"
 
 login_repository
 
+# A platform-specific pull can still retain a multi-platform index in Docker's
+# containerd image store. Select the same platform when publishing so Docker
+# does not try to push manifests/layers that were never downloaded.
+push_image() {
+  "$DOCKER_CMD" push --platform "$PULL_PLATFORM" "$1"
+}
+
 short_name() {
   local image_without_tag path name
   image_without_tag="${1%@*}"
@@ -153,14 +161,14 @@ while IFS= read -r source_image; do
 
   if [[ "$PULL_SOURCE_IMAGES" == "true" ]]; then
     echo "[pull] $source_image"
-    "$DOCKER_CMD" pull "$source_image"
+    "$DOCKER_CMD" pull --platform "$PULL_PLATFORM" "$source_image"
   fi
 
   echo "[tag] $target_image"
   "$DOCKER_CMD" tag "$source_image" "$target_image"
 
   echo "[push] $target_image"
-  "$DOCKER_CMD" push "$target_image"
+  push_image "$target_image"
 
   echo "$source_image $target_image" >> "$MAPPING_FILE"
 done < "$IMAGE_LIST"
@@ -239,11 +247,11 @@ for source_image in $MIRROR_PATH_IMAGES; do
   ensure_harbor_project "${mirror_repo%%/*}"
 
   if [[ "$PULL_SOURCE_IMAGES" == "true" ]]; then
-    "$DOCKER_CMD" pull "$source_image"
+    "$DOCKER_CMD" pull --platform "$PULL_PLATFORM" "$source_image"
   fi
 
   "$DOCKER_CMD" tag "$source_image" "$target_image"
-  if ! "$DOCKER_CMD" push "$target_image"; then
+  if ! push_image "$target_image"; then
     echo "[warn] push 실패: $target_image"
     echo "       Harbor 에 '${mirror_repo%%/*}' project 가 없거나 권한이 없을 수 있습니다."
   fi

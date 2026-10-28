@@ -165,6 +165,9 @@ jobs:
       - name: Test Docker credential store contract
         run: scripts/test/test_docker_credential_store_contract.sh
 
+      - name: Test repository image publication platform
+        run: python3 scripts/test/test_repository_image_publish.py
+
       - name: Test EVA Tool archive layout and installer contract
         run: |
           set -euo pipefail

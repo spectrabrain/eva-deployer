@@ -111,6 +111,14 @@
       EVA Agent vLLM profile cannot be determined from the detected GPU model,
       physical GPU count, MIG state, and Kubernetes NVIDIA allocatable resources.
       Supported profiles are A6000x1, L40sx1, PRO5000x3, and PRO6000-MIGx4.
+      Detected GPU models={{ config_vllm_gpu_model_names | to_json }},
+      physical GPU count={{ config_detected_gpu_count | int }},
+      MIG enabled={{ config_mig_enabled | bool }},
+      MIG instances={{ config_mig_instance_count | int }},
+      GPU resources={{ config_vllm_gpu_resource_items | to_json }},
+      MIG resources={{ config_vllm_mig_resource_items | to_json }},
+      matched profiles={{ config_vllm_profile_candidates | to_json }},
+      Kubernetes query rc={{ config_vllm_nodes.rc }}.
   when: config_agent_enabled | bool
 
 - name: Publish resolved EVA Agent vLLM profile

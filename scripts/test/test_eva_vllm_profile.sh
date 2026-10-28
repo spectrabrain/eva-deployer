@@ -53,6 +53,8 @@ EOF
       exit 1
     fi
     grep -Fq 'vLLM profile cannot be determined' "$root/ansible.log"
+    grep -Fq 'Detected GPU models=' "$root/ansible.log"
+    grep -Fq 'MIG resources=' "$root/ansible.log"
   fi
 }
 
@@ -60,6 +62,11 @@ run_case a6000 'NVIDIA RTX A6000' 1 false 0 '{"items":[{"status":{"allocatable":
 run_case l40s 'NVIDIA L40S' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}' L40sx1
 run_case pro5000 'NVIDIA RTX PRO 5000 Blackwell' 3 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"3"}}}]}' PRO5000x3
 run_case pro6000-mig 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1","nvidia.com/mig-1g.24gb":"4"}}}]}' PRO6000-MIGx4
+run_case pro6000-workstation-mig 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"4"}}}]}' PRO6000-MIGx4
+run_case pro6000-maxq-mig 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"4"}}}]}' PRO6000-MIGx4
+run_case pro6000-maxq-no-mig 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}'
+run_case pro6000-maxq-incomplete-mig 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 true 3 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"3"}}}]}'
+run_case pro6000-maxq-zero-resources 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"0"}}}]}'
 run_case unsupported 'NVIDIA H100' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}'
 run_case wrong-count 'NVIDIA RTX A6000' 2 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"2"}}}]}'
 run_case multiple-mig 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/mig-1g.24gb":"2","nvidia.com/mig-2g.24gb":"2"}}}]}'

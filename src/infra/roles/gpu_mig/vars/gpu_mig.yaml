@@ -13,3 +13,11 @@ PRO 6000 Blackwell:
 NVIDIA RTX PRO 6000 Blackwell Server Edition:
   gpu_mig_mig_profile_id: "67"
   gpu_mig_mig_instance_count: 4
+
+NVIDIA RTX PRO 6000 Blackwell Workstation Edition:
+  gpu_mig_mig_profile_id: "67"
+  gpu_mig_mig_instance_count: 4
+
+NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition:
+  gpu_mig_mig_profile_id: "67"
+  gpu_mig_mig_instance_count: 4

@@ -1,8 +1,22 @@
 - name: Load target-specific EVA Agent Workspace values
   ansible.builtin.import_tasks: workspace_values.yaml
 
-- name: Install Agent Dependencies
-  ansible.builtin.import_tasks: dependencies.yaml
+- name: Initialize Agent ECR schedules suspended by this installation
+  ansible.builtin.set_fact:
+    eva_agent_ecr_suspended: []
 
-- name: Install Agent
-  ansible.builtin.import_tasks: agent.yaml
+- name: Install Agent and dependencies
+  block:
+    - name: Install Agent Dependencies
+      ansible.builtin.import_tasks: dependencies.yaml
+
+    - name: Install Agent
+      ansible.builtin.import_tasks: agent.yaml
+  always:
+    # Restore only schedules paused by this run, even if a later dependency
+    # fails. A deliberately suspended or replaced CronJob keeps its setting.
+    - name: Restore Agent ECR schedules after installation
+      ansible.builtin.include_tasks: resume_ecr.yaml
+      when:
+        - not ansible_check_mode
+        - eva_agent_ecr_suspended | length > 0

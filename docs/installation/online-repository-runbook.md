@@ -222,7 +222,9 @@ vLLM 모델과 Qdrant snapshot은 S3에서 자동으로 받습니다.
 
 - 대상 서버의 AWS 계정에 이미지 ECR pull 및 모델 S3 list/read 권한이 필요합니다.
   입력한 AWS credential로 필요한 인증을 자동 구성하므로 수동 Secret 생성은 필요하지 않습니다.
-  기존 AWS Secret을 사용한다면 해당 저장소에 접근 가능한 유효한 인증인지 확인합니다.
+  재설치에서는 서비스 중지 전에 ECR 인증을 검증하고, 기존 Agent ECR 갱신 작업을 정리한 뒤
+  관리되는 AWS Secret을 현재 설치 설정과 동기화합니다. 갱신 스케줄은 설치 후 복구합니다.
+  직접 지정한 외부 AWS Secret은 유지하며, 해당 Secret의 인증이 유효해야 설치를 진행합니다.
 - Agent의 Vision 기능을 사용하려면 Vision도 설치합니다.
   기본 연결 주소는 `http://eva-vision.eva-vision:8000`입니다.
 - 첫 설치에는 모델 다운로드 시간이 필요합니다. 캐시를 위한 충분한 디스크 공간을 확보합니다.

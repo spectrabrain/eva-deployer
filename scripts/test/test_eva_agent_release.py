@@ -63,16 +63,56 @@ elif args[:3] == ['create', '-f', '-']:
     name = document['metadata']['name']
     target = root / (name + '.json')
     assert not target.exists(), 'attempted credential replacement'
-    document['data'] = {key: base64.b64encode(value.encode()).decode()
-                        for key, value in document.pop('stringData').items()}
+    document['metadata'].update(uid='secret-' + name, resourceVersion='1')
+    if 'stringData' in document:
+        document['data'] = {key: base64.b64encode(value.encode()).decode()
+                            for key, value in document.pop('stringData').items()}
     target.write_text(json.dumps(document))
     print(json.dumps(document) if '-o' in args else 'secret/' + name + ' created')
-elif 'get' in args and 'secret' in args:
-    target = root / (args[args.index('secret') + 1] + '.json')
+elif 'get' in args and 'jobs' in args:
+    print(json.dumps({'items': [json.loads(p.read_text()) for p in root.glob('job-*.json')]}))
+elif 'get' in args and ('secret' in args or 'cronjob' in args):
+    kind = 'secret' if 'secret' in args else 'cronjob'
+    name = args[args.index(kind) + 1]
+    target = root / (('' if kind == 'secret' else kind + '-') + name + '.json')
     if target.exists():
         print('secret/' + target.stem if args[-1] == 'name' else target.read_text())
     elif '--ignore-not-found' not in args:
         sys.exit(1)
+elif 'patch' in args:
+    kind, name = args[args.index('patch') + 1:args.index('patch') + 3]
+    target = root / (('' if kind == 'secret' else kind + '-') + name + '.json')
+    current = json.loads(target.read_text())
+    update = json.load(sys.stdin)
+    assert update['metadata']['uid'] == current['metadata']['uid']
+    assert update['metadata']['resourceVersion'] == current['metadata']['resourceVersion']
+    if os.environ.get('FAIL_AGENT_PATCH') == kind:
+        print('private-agent-fixture-DO-NOT-PRINT', file=sys.stderr)
+        sys.exit(1)
+    def merge(left, right):
+        for key, value in right.items():
+            if value is None:
+                left.pop(key, None)
+            elif isinstance(value, dict):
+                merge(left.setdefault(key, {}), value)
+            else:
+                left[key] = value
+    merge(current, update)
+    current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+    target.write_text(json.dumps(current))
+    print(kind + '/' + name + ' patched')
+elif args[:2] == ['delete', '--raw']:
+    name = args[2].rsplit('/', 1)[1]
+    target = root / ('job-' + name + '.json')
+    current = json.loads(target.read_text())
+    options = json.load(sys.stdin)
+    assert options['preconditions']['uid'] == current['metadata']['uid']
+    assert options['preconditions']['resourceVersion'] == current['metadata']['resourceVersion']
+    assert options['propagationPolicy'] == 'Foreground'
+    target.unlink()
+    print('job/' + name + ' deleted')
+elif 'wait' in args:
+    pass
 else:
     raise AssertionError(args)
 '''
@@ -87,6 +127,21 @@ class AgentCredentialsTests(unittest.TestCase):
         kubectl = self.work / 'bin/kubectl'
         kubectl.write_text('#!' + sys.executable + '\n' + FAKE_KUBECTL)
         kubectl.chmod(0o755)
+        aws = self.work / 'bin/aws'
+        aws.write_text('#!' + sys.executable + '\n' + r'''
+import json, os, pathlib, sys
+root = pathlib.Path(os.environ['AGENT_FIXTURE'])
+with (root / 'argv.jsonl').open('a') as stream:
+    stream.write(json.dumps(['aws'] + sys.argv[1:]) + '\n')
+environment = {key: value for key, value in os.environ.items() if key.startswith('AWS_')}
+(root / 'aws-environment.json').write_text(json.dumps(environment))
+if environment.get('AWS_ACCESS_KEY_ID') == 'invalid-access':
+    print('UnrecognizedClientException private-agent-fixture-DO-NOT-PRINT', file=sys.stderr)
+    sys.exit(1)
+assert environment.get('AWS_SECRET_ACCESS_KEY')
+print('private-agent-fixture-DO-NOT-PRINT')
+''')
+        aws.chmod(0o755)
         (self.work / 'aws_key.ini').write_text('[default]\naws_access_key_id = fixture-access\n'
                                               'aws_secret_access_key = ' + PRIVATE + '\nregion = ap-northeast-2\n')
         self.variables = {
@@ -94,29 +149,39 @@ class AgentCredentialsTests(unittest.TestCase):
             'eva_agent_workspace_chart_values': {}, 'repository_mode': 'online_repository',
             'eva_agent_sync_aws_credentials': 1, 'eva_agent_qdrant_snapshot_source': 'local_pv',
             'aws_key_file': str(self.work / 'aws_key.ini'),
+            'eva_agent_credentials_helper_dir': str(self.work / 'helper'),
         }
 
-    def execute(self, valid=True):
+    def execute(self, valid=True, fail_workload=False):
         marker = self.work / 'workload-stage'
         marker.unlink(missing_ok=True)
-        result = ansible(self.work, [
-            {'ansible.builtin.include_tasks': str(ROLE / 'tasks/credentials.yaml')},
+        preparation = [
+            {'ansible.builtin.include_role': {'name': 'eva_agent', 'tasks_from': 'credentials'}},
             {'name': 'Enter subsequent storage and workload preparation',
              'ansible.builtin.copy': {'dest': str(marker), 'content': 'ready'}},
-        ], self.variables)
+        ]
+        if fail_workload:
+            preparation.append({'ansible.builtin.fail': {'msg': 'Fixture workload failure'}})
+        result = ansible(self.work, [{
+            'block': preparation,
+            'always': [{'ansible.builtin.include_tasks': str(ROLE / 'tasks/resume_ecr.yaml'),
+                        'when': '(eva_agent_ecr_suspended | default([])) | length > 0'}],
+        }], self.variables)
         self.assertEqual(result.returncode == 0, valid, result.stdout + result.stderr)
-        self.assertEqual(marker.exists(), valid, 'Invalid credentials reached storage/workload preparation')
+        self.assertEqual(marker.exists(), valid or fail_workload,
+                         'Invalid credentials reached storage/workload preparation')
         self.assertNotIn(PRIVATE, result.stdout + result.stderr)
         self.assertNotIn(PRIVATE, (self.work / 'argv.jsonl').read_text())
         return result
 
     def secret(self, name, data, kind='Opaque'):
         target = self.work / (name + '.json')
-        target.write_text(json.dumps({'type': kind, 'data': {
+        target.write_text(json.dumps({'type': kind, 'metadata': {
+            'name': name, 'namespace': 'eva-agent', 'uid': 'secret-' + name, 'resourceVersion': '1'}, 'data': {
             key: base64.b64encode(value.encode()).decode() for key, value in data.items()}}))
         return target
 
-    def test_online_creates_custom_aws_secret_once(self):
+    def test_online_rotates_managed_custom_aws_secret(self):
         self.variables['eva_agent_workspace_chart_values'] = {'awsCredentialsSecretName': 'custom-aws'}
         self.execute()
         target = self.work / 'custom-aws.json'
@@ -124,15 +189,202 @@ class AgentCredentialsTests(unittest.TestCase):
         self.assertEqual(document['metadata']['namespace'], 'eva-agent')
         self.assertEqual(base64.b64decode(document['data']['AWS_SECRET_ACCESS_KEY']).decode(), PRIVATE)
         before = target.read_bytes()
+        self.execute()
+        self.assertEqual(target.read_bytes(), before)
+        (self.work / 'aws_key.ini').write_text('aws_access_key_id = rotated-access\n'
+                                              'aws_secret_access_key = ' + PRIVATE + '\n')
+        self.execute()
+        self.assertEqual(base64.b64decode(json.loads(target.read_text())['data']['AWS_ACCESS_KEY_ID']).decode(),
+                         'rotated-access')
+
+    def test_external_custom_secret_is_validated_and_preserved(self):
+        self.variables['eva_agent_workspace_chart_values'] = {'awsCredentialsSecretName': 'custom-aws'}
+        target = self.secret('custom-aws', {'AWS_ACCESS_KEY_ID': 'external-access', 'AWS_SECRET_ACCESS_KEY': PRIVATE})
+        before = target.read_bytes()
         (self.work / 'aws_key.ini').unlink()
         self.execute()
         self.assertEqual(target.read_bytes(), before)
+        self.assertEqual(json.loads((self.work / 'aws-environment.json').read_text())['AWS_ACCESS_KEY_ID'], 'external-access')
 
     def test_invalid_existing_aws_secret_is_preserved(self):
-        target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old'})
+        target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old'}, 'kubernetes.io/dockerconfigjson')
         before = target.read_bytes()
         self.execute(valid=False)
         self.assertEqual(target.read_bytes(), before)
+
+    def resource(self, kind, name, **spec):
+        target = self.work / (kind.lower() + '-' + name + '.json')
+        target.write_text(json.dumps({'kind': kind, 'metadata': {
+            'name': name, 'namespace': 'eva-agent', 'uid': kind + '-' + name, 'resourceVersion': '1',
+            'annotations': {'meta.helm.sh/release-name': 'eva-agent', 'meta.helm.sh/release-namespace': 'eva-agent'}},
+            'spec': spec}))
+        return target
+
+    def cronjob_and_jobs(self, suspended=False):
+        cronjob = self.resource('CronJob', 'eva-agent-ecr-refresh', suspend=suspended)
+        job = self.resource('Job', 'eva-agent-ecr-refresh-123')
+        value = json.loads(job.read_text())
+        value['metadata']['ownerReferences'] = [{'kind': 'CronJob', 'name': 'eva-agent-ecr-refresh',
+                                                 'uid': 'CronJob-eva-agent-ecr-refresh'}]
+        job.write_text(json.dumps(value))
+        hook = self.resource('Job', 'eva-agent-ecr-refresh-hook')
+        unrelated = self.resource('Job', 'eva-agent-qdrant-retention-123')
+        return cronjob, job, hook, unrelated
+
+    def test_default_secret_rotates_and_removes_old_tokens_without_touching_other_fields(self):
+        target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old', 'AWS_SECRET_ACCESS_KEY': 'old',
+                                                 'AWS_SESSION_TOKEN': 'old', 'AWS_SECURITY_TOKEN': 'old',
+                                                 'other': 'preserve'})
+        value = json.loads(target.read_text())
+        value['metadata']['annotations'] = {'external-annotation': 'preserve'}
+        target.write_text(json.dumps(value))
+        self.execute()
+        value = json.loads(target.read_text())
+        self.assertEqual(base64.b64decode(value['data']['AWS_SECRET_ACCESS_KEY']).decode(), PRIVATE)
+        self.assertNotIn('AWS_SESSION_TOKEN', value['data'])
+        self.assertNotIn('AWS_SECURITY_TOKEN', value['data'])
+        self.assertEqual(base64.b64decode(value['data']['other']).decode(), 'preserve')
+        self.assertEqual(value['metadata']['annotations']['external-annotation'], 'preserve')
+
+    def test_scoped_jobs_retired_before_secret_patch_and_cronjob_resumed(self):
+        self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old', 'AWS_SECRET_ACCESS_KEY': 'old'})
+        cronjob, job, hook, unrelated = self.cronjob_and_jobs()
+        self.execute()
+        self.assertFalse(job.exists())
+        self.assertFalse(hook.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+        commands = [json.loads(line) for line in (self.work / 'argv.jsonl').read_text().splitlines()]
+        aws = next(i for i, command in enumerate(commands) if command[0] == 'aws')
+        suspension = next(i for i, command in enumerate(commands) if 'patch' in command and 'cronjob' in command)
+        deletes = [i for i, command in enumerate(commands) if command[:2] == ['delete', '--raw']]
+        update = next(i for i, command in enumerate(commands) if 'patch' in command and 'secret' in command)
+        self.assertLess(aws, suspension)
+        self.assertLess(suspension, min(deletes))
+        self.assertLess(max(deletes), update)
+
+    def test_bad_incoming_key_stops_before_mutating_jobs_secret_or_workloads(self):
+        target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old', 'AWS_SECRET_ACCESS_KEY': 'old'})
+        resources = [target, *self.cronjob_and_jobs()]
+        before = [p.read_bytes() for p in resources]
+        (self.work / 'aws_key.ini').write_text('aws_access_key_id = invalid-access\naws_secret_access_key = ' + PRIVATE + '\n')
+        result = self.execute(valid=False)
+        self.assertIn('Agent ECR authentication failed', result.stdout)
+        self.assertEqual([p.read_bytes() for p in resources], before)
+
+    def test_external_invalid_key_is_not_replaced_with_valid_workspace_key(self):
+        self.variables['eva_agent_workspace_chart_values'] = {'awsCredentialsSecretName': 'custom-aws'}
+        target = self.secret('custom-aws', {'AWS_ACCESS_KEY_ID': 'invalid-access', 'AWS_SECRET_ACCESS_KEY': PRIVATE})
+        before = target.read_bytes()
+        self.execute(valid=False)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_deliberately_suspended_cronjob_stays_suspended(self):
+        cronjob, _, _, _ = self.cronjob_and_jobs(suspended=True)
+        self.execute()
+        self.assertTrue(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_schedule_restored_after_later_workload_failure(self):
+        cronjob, _, _, _ = self.cronjob_and_jobs()
+        self.execute(valid=False, fail_workload=True)
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_concurrent_secret_update_failure_restores_schedule_and_preserves_secret(self):
+        target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old', 'AWS_SECRET_ACCESS_KEY': 'old'})
+        before = target.read_bytes()
+        cronjob, _, _, _ = self.cronjob_and_jobs()
+        with patch.dict(os.environ, FAIL_AGENT_PATCH='secret'):
+            self.execute(valid=False)
+        self.assertEqual(target.read_bytes(), before)
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_host_profile_and_stale_environment_tokens_do_not_override_selected_key(self):
+        with patch.dict(os.environ, AWS_ACCESS_KEY_ID='host-access', AWS_SECRET_ACCESS_KEY='host-secret',
+                        AWS_PROFILE='unrelated', AWS_SESSION_TOKEN='stale', AWS_SECURITY_TOKEN='stale'):
+            self.execute()
+        environment = json.loads((self.work / 'aws-environment.json').read_text())
+        self.assertEqual(environment['AWS_ACCESS_KEY_ID'], 'fixture-access')
+        self.assertNotIn('AWS_PROFILE', environment)
+        self.assertNotIn('AWS_SESSION_TOKEN', environment)
+        self.assertNotIn('AWS_SECURITY_TOKEN', environment)
+
+    def test_temporary_key_and_selected_ecr_region_are_synchronized(self):
+        self.variables['eva_agent_workspace_chart_values'] = {'ecrRefresh': {'region': 'us-west-2'}}
+        with (self.work / 'aws_key.ini').open('a') as stream:
+            stream.write('aws_session_token = temporary-token\n')
+        self.execute()
+        data = json.loads((self.work / 'aws-credentials.json').read_text())['data']
+        self.assertEqual(base64.b64decode(data['AWS_SESSION_TOKEN']).decode(), 'temporary-token')
+        self.assertEqual(base64.b64decode(data['AWS_DEFAULT_REGION']).decode(), 'us-west-2')
+
+    def test_helm_hook_without_release_annotations_is_retired(self):
+        hook = self.resource('Job', 'eva-agent-ecr-refresh-hook')
+        value = json.loads(hook.read_text())
+        value['metadata']['annotations'] = {'helm.sh/hook': 'pre-install,pre-upgrade',
+                                           'helm.sh/hook-delete-policy': 'before-hook-creation,hook-succeeded'}
+        value['metadata']['labels'] = {'app.kubernetes.io/instance': 'eva-agent',
+                                      'app.kubernetes.io/managed-by': 'Helm', 'helm.sh/chart': 'eva-agent-3.3.0'}
+        hook.write_text(json.dumps(value))
+        self.execute()
+        self.assertFalse(hook.exists())
+
+    def test_unknown_hook_is_preserved_and_schedule_restored(self):
+        cronjob, job, hook, unrelated = self.cronjob_and_jobs()
+        value = json.loads(hook.read_text())
+        value['metadata']['annotations'] = {}
+        hook.write_text(json.dumps(value))
+        self.execute(valid=False)
+        self.assertTrue(hook.exists())
+        self.assertTrue(job.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_legacy_argocd_cronjob_is_verified_and_resumed(self):
+        cronjob, job, _, _ = self.cronjob_and_jobs()
+        value = json.loads(cronjob.read_text())
+        value['metadata']['annotations'] = {
+            'argocd.argoproj.io/tracking-id': 'site-eva-agent:batch/CronJob:eva-agent/eva-agent-ecr-refresh'}
+        cronjob.write_text(json.dumps(value))
+        self.execute()
+        self.assertFalse(job.exists())
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_same_job_name_prefix_with_different_owner_uid_is_preserved(self):
+        _, job, _, _ = self.cronjob_and_jobs()
+        value = json.loads(job.read_text())
+        value['metadata']['ownerReferences'][0]['uid'] = 'unrelated-cronjob-uid'
+        job.write_text(json.dumps(value))
+        self.execute()
+        self.assertTrue(job.exists())
+
+    def test_immutable_secret_fails_before_stopping_schedule_or_jobs(self):
+        target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old', 'AWS_SECRET_ACCESS_KEY': 'old'})
+        value = json.loads(target.read_text())
+        value['immutable'] = True
+        target.write_text(json.dumps(value))
+        resources = [target, *self.cronjob_and_jobs()]
+        before = [p.read_bytes() for p in resources]
+        self.execute(valid=False)
+        self.assertEqual([p.read_bytes() for p in resources], before)
+
+    def test_cloud_alias_repairs_managed_secret_with_missing_credential_field(self):
+        self.variables['repository_mode'] = 'cloud_repository'
+        target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old'})
+        self.execute()
+        data = json.loads(target.read_text())['data']
+        self.assertEqual(base64.b64decode(data['AWS_SECRET_ACCESS_KEY']).decode(), PRIVATE)
+
+    def test_resuming_does_not_modify_operator_replacement_cronjob(self):
+        cronjob = self.resource('CronJob', 'eva-agent-ecr-refresh', suspend=True)
+        before = cronjob.read_bytes()
+        environment = dict(os.environ, AGENT_FIXTURE=str(self.work),
+                           PATH=str(self.work / 'bin') + ':' + os.environ['PATH'])
+        result = run([sys.executable, str(ROLE / 'files/manage_online_credentials.py'), 'resume',
+                      '--namespace', 'eva-agent'], input=json.dumps([
+                          {'name': 'eva-agent-ecr-refresh', 'uid': 'previous-cronjob-uid'}]), env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)['changed'])
+        self.assertEqual(cronjob.read_bytes(), before)
 
     def test_remote_prepares_http_and_snapshot_credentials(self):
         for representation in ['auth', 'pair']:
@@ -207,6 +459,13 @@ class AgentPreparationTests(unittest.TestCase):
             'Install/Upgrade Qdrant (online)', 'Install/Upgrade eva-agent-vllm (online)',
         ]:
             self.assertLess(credential, names.index(operation), operation)
+
+    def test_role_restores_ecr_schedule_after_dependency_and_agent_installation(self):
+        tasks = yaml.safe_load((ROLE / 'tasks/main.yaml').read_text())
+        install = next(task for task in tasks if 'block' in task)
+        self.assertEqual([task['ansible.builtin.import_tasks'] for task in install['block']],
+                         ['dependencies.yaml', 'agent.yaml'])
+        self.assertEqual(install['always'][0]['ansible.builtin.include_tasks'], 'resume_ecr.yaml')
 
     def test_source_catalog_and_model_downloads(self):
         with tempfile.TemporaryDirectory(prefix='eva-agent-models-') as temporary:

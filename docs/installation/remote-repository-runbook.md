@@ -150,15 +150,6 @@ Target은 S3에 접근하지 않으며 AWS credential이나 별도 weights 파�
 **재시도·upgrade 시 모델 PVC를 삭제하지 않습니다.**
 기본 모델을 사용하며, 승인된 custom 모델이 필요할 때만 준비와 설치의 모델 선택·설정을 일치시킵니다.
 
-Target에 Release를 전달하기 전에 준비 결과를 검증합니다.
-
-```bash
-sudo eva remote verify
-```
-
-이 검증은 준비 파일과 게시 결과를 확인합니다. 실제 Target의 다운로드와 서비스 정상 동작은
-설치 후 별도로 확인합니다. 검증 실패 시 자산이나 보고서를 임의 수정하지 말고 같은 Release로 다시 준비합니다.
-
 ## 6. [Main] 대화형 설치 설정 준비
 
 Main에서 설치 설정 YAML 하나를 작성합니다. Online Bastion 설치와 같은 대화형 절차로
@@ -173,13 +164,8 @@ sudo 없이 Main에서 실행하고 설치환경 **remote** → **Bastion/Main�
 타겟을 한 대씩 등록하고 Infra-only/Solution, HTTP/HTTPS, 도메인/IP, IAM 함께 설치/외부 IAM,
 Agent/Vision 구성을 선택합니다. 이전 타겟의 설치 옵션을 재사용하거나 타겟을 더 추가할 수 있습니다.
 SSH 비밀번호는 sudo에도 사용하며, passwordless sudo라면 생성 파일에서 `ansible_become_password`를 제거합니다.
-결과는 사용자 홈의 `eva-install.yaml`입니다. 자동화용 설정 샘플은 `eva config sample --mode remote`의 옵션으로 생성할 수 있습니다.
-외부 IAM에 연결하려면 `--iam external --protocol https`로 생성합니다. IAM 설치와 Values는 빠지고
-App의 외부 SSO·Redis 연결값을 입력합니다. Target에서 IAM/Redis로의 내부망 접근이 필요합니다.
-검증한 Release에 포함된 Tool·자산을 함께 사용합니다.
-HTTP는 격리 테스트용이며, 운영 환경에서는 HTTPS를 사용합니다.
-`config sample`의 메뉴를 생략하려면 `--address shared|separate --protocol https`를
-명시합니다. `--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
+결과는 사용자 홈의 `eva-install.yaml`입니다.
+`--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
 제거하기 전에는 검증에 실패합니다.
 
 다음은 다른 도메인 + HTTPS 예시입니다. 동일 주소 틀은 IAM `/iam`, App `/`를 사용합니다.

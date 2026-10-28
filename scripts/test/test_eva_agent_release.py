@@ -86,7 +86,8 @@ elif 'patch' in args:
     update = json.load(sys.stdin)
     assert update['metadata']['uid'] == current['metadata']['uid']
     assert update['metadata']['resourceVersion'] == current['metadata']['resourceVersion']
-    if os.environ.get('FAIL_AGENT_PATCH') == kind:
+    if (os.environ.get('FAIL_AGENT_PATCH') == kind or
+            (os.environ.get('FAIL_AGENT_RESUME') and update.get('spec', {}).get('suspend') is False)):
         print('private-agent-fixture-DO-NOT-PRINT', file=sys.stderr)
         sys.exit(1)
     def merge(left, right):
@@ -149,22 +150,27 @@ print('private-agent-fixture-DO-NOT-PRINT')
             'eva_agent_workspace_chart_values': {}, 'repository_mode': 'online_repository',
             'eva_agent_sync_aws_credentials': 1, 'eva_agent_qdrant_snapshot_source': 'local_pv',
             'aws_key_file': str(self.work / 'aws_key.ini'),
-            'eva_agent_credentials_helper_dir': str(self.work / 'helper'),
+            'eva_agent_workdir': str(self.work / 'agent-workspace'),
+            'eva_agent_credentials_root': str(self.work / 'persistent-credentials'),
         }
 
-    def execute(self, valid=True, fail_workload=False):
+    def execute(self, valid=True, fail_workload=False, cleanup_workdir=False):
         marker = self.work / 'workload-stage'
         marker.unlink(missing_ok=True)
         preparation = [
             {'ansible.builtin.include_role': {'name': 'eva_agent', 'tasks_from': 'credentials'}},
-            {'name': 'Enter subsequent storage and workload preparation',
-             'ansible.builtin.copy': {'dest': str(marker), 'content': 'ready'}},
         ]
+        if cleanup_workdir:
+            dependencies = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+            preparation.append(next(task for task in dependencies
+                                    if task['name'] == 'Remove EVA dependency workspace if it exists'))
+        preparation.append({'name': 'Enter subsequent storage and workload preparation',
+                            'ansible.builtin.copy': {'dest': str(marker), 'content': 'ready'}})
         if fail_workload:
             preparation.append({'ansible.builtin.fail': {'msg': 'Fixture workload failure'}})
         result = ansible(self.work, [{
             'block': preparation,
-            'always': [{'ansible.builtin.include_tasks': str(ROLE / 'tasks/resume_ecr.yaml'),
+            'always': [{'ansible.builtin.include_role': {'name': 'eva_agent', 'tasks_from': 'resume_ecr'},
                         'when': '(eva_agent_ecr_suspended | default([])) | length > 0'}],
         }], self.variables)
         self.assertEqual(result.returncode == 0, valid, result.stdout + result.stderr)
@@ -288,6 +294,38 @@ print('private-agent-fixture-DO-NOT-PRINT')
         cronjob, _, _, _ = self.cronjob_and_jobs()
         self.execute(valid=False, fail_workload=True)
         self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_helper_survives_actual_dependency_workspace_cleanup(self):
+        cronjob, _, _, _ = self.cronjob_and_jobs()
+        workspace = Path(self.variables['eva_agent_workdir'])
+        workspace.mkdir()
+        (workspace / 'old-chart.yaml').write_text('old workspace')
+        self.execute(cleanup_workdir=True)
+        self.assertFalse(workspace.exists())
+        self.assertTrue((self.work / 'persistent-credentials/eva-agent/manage_online_credentials.py').is_file())
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_custom_helper_inside_cleaned_workspace_is_restored_before_resume(self):
+        cronjob, _, _, _ = self.cronjob_and_jobs()
+        helper_dir = Path(self.variables['eva_agent_workdir']) / 'credentials'
+        self.variables['eva_agent_credentials_helper_dir'] = str(helper_dir)
+        self.execute(cleanup_workdir=True)
+        self.assertTrue((helper_dir / 'manage_online_credentials.py').is_file())
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_schedule_restored_after_workspace_cleanup_and_workload_failure(self):
+        cronjob, _, _, _ = self.cronjob_and_jobs()
+        helper_dir = Path(self.variables['eva_agent_workdir']) / 'credentials'
+        self.variables['eva_agent_credentials_helper_dir'] = str(helper_dir)
+        self.execute(valid=False, fail_workload=True, cleanup_workdir=True)
+        self.assertFalse(json.loads(cronjob.read_text())['spec']['suspend'])
+
+    def test_resume_failure_reports_command_error_without_parsing_empty_stdout(self):
+        self.cronjob_and_jobs()
+        with patch.dict(os.environ, FAIL_AGENT_RESUME='1'):
+            result = self.execute(valid=False, fail_workload=True)
+        self.assertIn('Cannot update Agent resource', result.stdout)
+        self.assertNotIn("The filter plugin 'ansible.builtin.from_json' failed", result.stdout)
 
     def test_concurrent_secret_update_failure_restores_schedule_and_preserves_secret(self):
         target = self.secret('aws-credentials', {'AWS_ACCESS_KEY_ID': 'old', 'AWS_SECRET_ACCESS_KEY': 'old'})

@@ -95,9 +95,8 @@ eva install configure
 타겟마다 선택은 독립적이며 Infra-only 타겟에는 Solution Values를 넣지 않습니다.
 타겟별 `components`에 따라 실제 Ansible 단계의 대상도 제한합니다. 같은 설치 옵션을 재사용해도
 연결 비밀번호와 서비스 주소·Secret은 복사하지 않습니다. 여러 타겟은 하나의 cluster를 만드는 기능이 아닙니다.
-자동화용 설정 샘플은 `eva config sample --mode online`의 옵션으로 생성할 수 있습니다.
 
-두 명령 모두 `--output FILE`로 위치를 바꿀 수 있고 새 파일만 `0600`으로 만들며 덮어쓰지 않습니다.
+`eva install configure`는 `--output FILE`로 위치를 바꿀 수 있고 새 파일만 `0600`으로 만들며 덮어쓰지 않습니다.
 
 - **HTTP:** 격리된 테스트에만 사용합니다. 생성된 App/IAM `ingress.tls.enabled/create: false`,
   App `backendSecure: false`를 유지합니다. host 인증서 SAN 검사·TLS Secret Job·Traefik 기본

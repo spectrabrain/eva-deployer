@@ -1,0 +1,28 @@
+---
+# Recreate the helper if an explicitly configured path was inside the cleaned
+# dependency workspace. Recovery must also work after a later install failure.
+- name: Ensure Agent ECR recovery helper directory exists
+  ansible.builtin.file:
+    path: "{{ eva_agent_credentials_helper_dir }}"
+    state: directory
+    mode: '0700'
+
+- name: Restore Agent ECR recovery helper before resuming schedules
+  ansible.builtin.copy:
+    src: manage_online_credentials.py
+    dest: "{{ eva_agent_credentials_helper_dir }}/manage_online_credentials.py"
+    mode: '0700'
+
+- name: Resume Agent ECR schedules suspended during credential synchronization
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ eva_agent_credentials_helper_dir }}/manage_online_credentials.py"
+      - resume
+      - --namespace
+      - "{{ eva_agent_namespace }}"
+    stdin: "{{ eva_agent_ecr_suspended | to_json }}"
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+  register: eva_agent_ecr_resume_result
+  changed_when: eva_agent_ecr_resume_result.rc == 0 and (eva_agent_ecr_resume_result.stdout | from_json).changed

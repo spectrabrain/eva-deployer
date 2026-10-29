@@ -1,0 +1,17 @@
+[Unit]
+Description=Renew EVA Vision namespace-local ECR credentials
+After=network-online.target k3s.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+TimeoutStartSec=180
+Restart=on-failure
+RestartSec=5min
+{% for key, value in eva_vision_ecr_environment.items() %}
+Environment={{ (key ~ '=' ~ value) | replace('%', '%%') | to_json }}
+{% endfor %}
+ExecStart=/usr/bin/python3 {{ (eva_vision_ecr_refresh_dir ~ '/ecr_pull_secret.py') | replace('%', '%%') | to_json }} --namespace {{ eva_vision_namespace | to_json }} --secret {{ eva_vision_runtime_values.imagePullSecrets.ExistingSecret | to_json }} --repository {{ eva_vision_runtime_values.image.repository | to_json }} --kubectl {{ (eva_vision_ecr_auth_result.stdout | from_json).kubectl | replace('%', '%%') | to_json }} --aws {{ (eva_vision_ecr_auth_result.stdout | from_json).aws | replace('%', '%%') | to_json }} --renew-only

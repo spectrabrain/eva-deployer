@@ -1,0 +1,18 @@
+# 외부 IAM 연동 + App HTTPS. IAM 자체는 설치하지 않으며 IAM/Redis 프로토콜은 별도로 입력합니다.
+app:
+  ingress:
+    path: /
+    tls:
+      enabled: true
+      create: true
+      hostPath: "<APP_TLS_CERT_DIRECTORY>"  # 필수: 대상 서버의 App SAN 인증서 tls.crt + tls.key. ex) /etc/eva/app-certs
+  app:
+    backendHost: "<APP_HOST>"  # 필수: App 도메인 또는 IP, scheme/port/path 제외. ex) app.eva.com 또는 192.0.2.10
+    backendSecure: true
+    backendSecurePort: 443  # App HTTPS 외부 포트. 외부 IAM의 App client redirect URI에도 반영합니다.
+    browserTitleName: EVA
+    license:
+      activation_mode: offline  # Online 기본 online, Remote/Local 기본 offline. repository.mode와 별개로 사전 결정한 라이선스에 맞게 변경하며 online은 라이선스 서버 연결이 필요합니다.
+      product_code: "<LICENSE_PRODUCT_CODE>"  # 필수: 발급된 license와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
+      api_key: "<LICENSE_API_KEY>"  # 필수: 발급된 license API key. ex) demo-license-api-key (예시 전용)
+      shared_key: "<LICENSE_SHARED_KEY>"  # 필수: 발급된 license shared key. ex) demo-license-shared-key (예시 전용)

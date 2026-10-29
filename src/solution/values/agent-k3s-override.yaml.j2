@@ -1,0 +1,23 @@
+image:
+  repository: "{{ eva_agent_image_repository }}"
+  tag: "{{ eva_agent_image_tag }}"
+  pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
+
+{% if eva_agent_models_required | default(true) | bool %}
+sharedPvcStorage:
+  nfs:
+    path: "{{ eva_agent_nfs_share_path }}/agent-cache"
+{% endif %}
+
+{% if airgap_mode | default(false) | bool %}
+{% if eva_agent_models_required | default(true) | bool %}
+persistence:
+  s3Sync:
+    enabled: false
+{% endif %}
+
+ecrRefresh:
+  enabled: false
+
+imagePullSecrets: {{ eva_agent_repository_pull_secrets | default([]) | to_json }}
+{% endif %}

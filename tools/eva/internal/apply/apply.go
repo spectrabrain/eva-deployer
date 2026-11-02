@@ -25,6 +25,7 @@ const DefaultLogRoot = "/var/log/eva/operations"
 var expectedPlaybooks = map[string]string{
 	"precondition": "src/infra/playbooks/site_precondition.yaml",
 	"infra":        "src/infra/playbooks/site_infra.yaml",
+	"gpu":          "src/infra/playbooks/site_gpu_prepare.yaml",
 	"config":       "src/solution/playbooks/site_eva_config.yaml",
 	"iam":          "src/solution/playbooks/site_eva_iam.yaml",
 	"agent":        "src/solution/playbooks/site_eva_agent.yaml",

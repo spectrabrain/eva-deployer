@@ -22,23 +22,25 @@ type Step struct {
 }
 
 type Document struct {
-	SchemaVersion     string                             `yaml:"schema_version"`
-	ExecutionMode     string                             `yaml:"execution_mode,omitempty"`
-	TargetInstallArgs []string                           `yaml:"target_install_args,omitempty"`
-	OperationID       string                             `yaml:"operation_id,omitempty"`
-	GeneratedAt       time.Time                          `yaml:"generated_at"`
-	SiteID            string                             `yaml:"site_id"`
-	Workspace         string                             `yaml:"workspace"`
-	ReleaseVersion    string                             `yaml:"release_version"`
-	ReleaseRoot       string                             `yaml:"release_root"`
-	RepositoryMode    string                             `yaml:"repository_mode"`
-	Repository        string                             `yaml:"repository_registry,omitempty"`
-	RepositoryProject string                             `yaml:"repository_project"`
-	Steps             []Step                             `yaml:"steps"`
-	AnsibleExtraVars  []string                           `yaml:"ansible_extra_vars"`
-	Environment       map[string]string                  `yaml:"environment"`
-	Overrides         map[string]fieldoverride.Component `yaml:"overrides,omitempty"`
-	OverrideInputs    fieldoverride.Request              `yaml:"-"`
+	SchemaVersion          string                             `yaml:"schema_version"`
+	GPUPreflightOnly       bool                               `yaml:"gpu_preflight_only,omitempty"`
+	GPUPreflightComponents []string                           `yaml:"gpu_preflight_components,omitempty"`
+	ExecutionMode          string                             `yaml:"execution_mode,omitempty"`
+	TargetInstallArgs      []string                           `yaml:"target_install_args,omitempty"`
+	OperationID            string                             `yaml:"operation_id,omitempty"`
+	GeneratedAt            time.Time                          `yaml:"generated_at"`
+	SiteID                 string                             `yaml:"site_id"`
+	Workspace              string                             `yaml:"workspace"`
+	ReleaseVersion         string                             `yaml:"release_version"`
+	ReleaseRoot            string                             `yaml:"release_root"`
+	RepositoryMode         string                             `yaml:"repository_mode"`
+	Repository             string                             `yaml:"repository_registry,omitempty"`
+	RepositoryProject      string                             `yaml:"repository_project"`
+	Steps                  []Step                             `yaml:"steps"`
+	AnsibleExtraVars       []string                           `yaml:"ansible_extra_vars"`
+	Environment            map[string]string                  `yaml:"environment"`
+	Overrides              map[string]fieldoverride.Component `yaml:"overrides,omitempty"`
+	OverrideInputs         fieldoverride.Request              `yaml:"-"`
 }
 
 func Build(workspaceResolved workspace.Resolved, releaseResolved release.Resolved, now time.Time) Document {
@@ -78,9 +80,9 @@ func scopedSteps(config workspace.Config) []Step {
 	for _, step := range result {
 		for name, components := range config.TargetComponents {
 			include := components[step.Component] && config.Components[step.Component]
-			if step.Component == "precondition" || step.Component == "config" {
+			if step.Component == "precondition" || step.Component == "config" || step.Component == "gpu" {
 				for component, enabled := range components {
-					if enabled && config.Components[component] && (step.Component == "precondition" || component == "agent" || component == "vision" || component == "app") {
+					if enabled && config.Components[component] && (step.Component == "precondition" || component == "agent" || component == "vision" || (step.Component == "config" && component == "app")) {
 						include = true
 					}
 				}
@@ -142,6 +144,9 @@ func steps(components map[string]bool) []Step {
 	if components["infra"] {
 		steps = append(steps, Step{Component: "infra", Playbook: "src/infra/playbooks/site_infra.yaml"})
 	}
+	if components["agent"] || components["vision"] {
+		steps = append(steps, Step{Component: "gpu", Playbook: "src/infra/playbooks/site_gpu_prepare.yaml"})
+	}
 	if components["agent"] || components["vision"] || components["app"] {
 		steps = append(steps, Step{Component: "config", Playbook: "src/solution/playbooks/site_eva_config.yaml"})
 	}
@@ -161,4 +166,28 @@ func steps(components map[string]bool) []Step {
 		steps = append(steps, Step{Component: "n8n", Playbook: "src/solution/playbooks/site_n8n.yaml"})
 	}
 	return steps
+}
+
+// GPUPreflight retains the GPU targets selected by the installer config.
+// It deliberately excludes Infra and solution deployment from the explicit CLI.
+func GPUPreflight(document Document) (Document, error) {
+	var gpu Step
+	for _, step := range document.Steps {
+		if step.Component == "gpu" {
+			gpu = step
+		}
+		if step.Component == "agent" || step.Component == "vision" {
+			document.GPUPreflightComponents = append(document.GPUPreflightComponents, step.Component)
+		}
+	}
+	if gpu.Component == "" {
+		return Document{}, fmt.Errorf("eva preflight gpu requires Agent or Vision enabled on at least one selected target")
+	}
+	document.Steps = []Step{
+		{Component: "precondition", Playbook: "src/infra/playbooks/site_precondition.yaml", Targets: gpu.Targets},
+		gpu,
+	}
+	document.GPUPreflightOnly = true
+	document.AnsibleExtraVars = append(document.AnsibleExtraVars, "eva_gpu_preflight_only=true")
+	return document, nil
 }

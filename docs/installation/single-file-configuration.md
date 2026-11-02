@@ -58,8 +58,11 @@ IP 직접 접속은 SSH 대상 IP가 있으면 서비스 host와 함께 설치 I
 - 공통 Online AWS credential은 기존 배포 단계에서 각 해당 타겟에 사용된다.
   타겟별로 다른 AWS credential을 받는 기능은 아니다.
 - 각 타겟은 독립 설치 대상이다. 여러 타겟을 입력한다고 하나의 multi-node k3s cluster를 만드는 것은 아니다.
-- 기존 `eva preflight gpu`와 `eva check`는 실행한 현재 서버 기준이다. Bastion에서 실행해
-  원격 GPU/서비스 검증이 완료됐다고 판단하지 않는다. 타겟에서 별도로 확인하고 실제 설치 precondition과
+- `eva preflight gpu`는 설정된 Agent/Vision 타겟의 GPU를 확인하고 필요한
+  드라이버·MIG 구성을 적용한다. 사용자 홈의 `eva-install.yaml`을 자동으로 읽고 `sudo`도 원래 사용자 홈을 사용한다.
+  다른 파일을 사용할 때만 `--config FILE`을 지정하며 추가 실행 확인은 필요하지 않다.
+  일반 설치에도 Infra 다음, Config 전에 같은 처리가 포함된다.
+  Bastion의 `eva check`는 실행한 현재 서버 기준이므로 서비스 상태는 타겟에서 확인하고
   타겟별 생성 Config·로그를 함께 확인한다.
 
 ### Remote Main의 의미

@@ -1,0 +1,26 @@
+- name: Detect target NVIDIA GPU
+  ansible.builtin.import_tasks: "{{ eva_infra_root }}/roles/gpu/tasks/detect.yaml"
+
+- name: Require a GPU on selected Agent or Vision targets
+  ansible.builtin.assert:
+    that:
+      - gpu_has_nvidia | bool
+    fail_msg: "Agent/Vision 대상에서 NVIDIA GPU를 감지하지 못했습니다. 설치 설정의 대상 서버와 GPU 장착 상태를 확인하세요."
+
+- name: Check target driver availability
+  ansible.builtin.command: nvidia-smi
+  register: eva_gpu_driver_check
+  changed_when: false
+  failed_when: false
+  when: gpu_has_nvidia | bool
+
+- name: Prepare missing NVIDIA driver
+  ansible.builtin.import_tasks: "{{ eva_infra_root }}/roles/gpu/tasks/driver.yaml"
+  when:
+    - gpu_has_nvidia | bool
+    - eva_gpu_driver_check.rc != 0
+
+- name: Prepare GPU layout on NVIDIA hosts
+  ansible.builtin.include_tasks: prepare.yaml
+  when: gpu_has_nvidia | bool
+

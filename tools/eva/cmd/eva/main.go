@@ -35,15 +35,11 @@ import (
 )
 
 var (
-	version       = "0.1.0-migration"
-	commit        = "unknown"
-	buildDate     = "unknown"
-	newAPTService = apt.NewService
-	stdinStat     = func() (os.FileInfo, error) { return os.Stdin.Stat() }
-	runGPUCommand = func(args ...string) (string, error) {
-		output, err := exec.Command("nvidia-smi", args...).CombinedOutput()
-		return string(output), err
-	}
+	version                           = "0.1.0-migration"
+	commit                            = "unknown"
+	buildDate                         = "unknown"
+	newAPTService                     = apt.NewService
+	stdinStat                         = func() (os.FileInfo, error) { return os.Stdin.Stat() }
 	newRemoteService                  = remote.NewService
 	newRemoteInstallerService         = remote.NewInstallerService
 	newRemotePrepareService           = remote.NewPrepareService
@@ -100,7 +96,8 @@ func usage() {
 	fmt.Println("  inspect [paths|operations|files|values|config|plan|result|logs] [options]")
 	fmt.Println("  backup [list|show|values] [--root PATH] [--site ID] [--component NAME] [--namespace NS] [--version VERSION] [--release NAME] [--latest | --path DIR]")
 	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
-	fmt.Println("  preflight <gpu|argocd>")
+	fmt.Println("  preflight gpu [--config FILE] [--release PATH]  (defaults to invoking user's ~/eva-install.yaml; checks and configures target GPU/MIG)")
+	fmt.Println("  preflight argocd --config FILE|--site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
@@ -1168,29 +1165,54 @@ func runInstall(args []string) error {
 	if len(args) != 0 && args[0] == "configure" {
 		return runInstallConfigureCommand(args[1:])
 	}
+	return runInstallMode(args, false)
+}
+
+func runInstallMode(args []string, gpuOnly bool) error {
 	normalizedArgs, err := normalizeInstallArgs(args)
 	if err != nil {
 		return err
 	}
-	flags := flag.NewFlagSet("install", flag.ContinueOnError)
+	commandName := "install"
+	if gpuOnly {
+		commandName = "preflight gpu"
+	}
+	flags := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	siteID := flags.String("site", "", "site identifier")
 	workspaceRoot := flags.String("workspace", "", "workspace path")
-	configFile := flags.String("config", "", "single installer YAML file (0600)")
+	configHelp := "single installer YAML file (0600)"
+	if gpuOnly {
+		configHelp += "; defaults to invoking user's ~/eva-install.yaml"
+	}
+	configFile := flags.String("config", "", configHelp)
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	installRoot := flags.String("install-root", release.DefaultInstallRoot, "prepared Release installation directory")
 	artifactRoot := flags.String("artifact-root", release.DefaultArtifactRoot, "Airgap artifact cache directory")
 	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
 	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
-	yes := flags.Bool("yes", false, "confirm target changes without a prompt")
+	yesHelp := "confirm target changes without a prompt"
+	if gpuOnly {
+		yesHelp = "optional; GPU preflight applies required changes without an extra confirmation"
+	}
+	yes := flags.Bool("yes", false, yesHelp)
 	var components stringList
-	flags.Var(&components, "component", "enabled component to install (repeatable; use all for every enabled component)")
+	componentHelp := "enabled component to install (repeatable; use all for every enabled component)"
+	if gpuOnly {
+		componentHelp = "enabled Agent or Vision component whose targets to preflight (repeatable)"
+	}
+	flags.Var(&components, "component", componentHelp)
 	var charts, values, sets stringList
-	flags.Var(&charts, "chart", "IAM, App, Agent, or Vision chart override in COMPONENT=PATH form")
-	flags.Var(&values, "values", "IAM, App, Agent, or Vision values override in COMPONENT=PATH form")
-	flags.Var(&sets, "set", "IAM, App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
+	if !gpuOnly {
+		flags.Var(&charts, "chart", "IAM, App, Agent, or Vision chart override in COMPONENT=PATH form")
+		flags.Var(&values, "values", "IAM, App, Agent, or Vision values override in COMPONENT=PATH form")
+		flags.Var(&sets, "set", "IAM, App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
+	}
 	if err := flags.Parse(normalizedArgs); err != nil {
+		if gpuOnly && errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if flags.NArg() > 1 {
@@ -1203,7 +1225,14 @@ func runInstall(args []string) error {
 		*releaseInput = flags.Arg(0)
 	}
 
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	workspaceInput := workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot}
+	if gpuOnly {
+		workspaceInput, err = gpuPreflightWorkspaceInput(workspaceInput)
+		if err != nil {
+			return err
+		}
+	}
+	workspaceResolved, err := workspace.Resolve(workspaceInput)
 	if err != nil {
 		return err
 	}
@@ -1214,6 +1243,9 @@ func runInstall(args []string) error {
 	overrides, err := fieldoverride.Parse(charts, values, sets, workspaceResolved.Config.Components)
 	if err != nil {
 		return err
+	}
+	if gpuOnly && !overrides.Empty() {
+		return errors.New("eva preflight gpu does not accept Helm overrides")
 	}
 	var releaseResolved release.Resolved
 	var releaseSource release.SelectionSource
@@ -1233,11 +1265,17 @@ func runInstall(args []string) error {
 		printSelectedRelease(releaseResolved, releaseSource)
 	}
 	draft := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, time.Now())
+	if gpuOnly {
+		draft, err = plan.GPUPreflight(draft)
+		if err != nil {
+			return err
+		}
+	}
 	if draft.ExecutionMode == remote.InstallerExecutionMode && !overrides.Empty() {
 		return errors.New("Remote controller installation uses targets.<name>.values in the installer config; CLI chart/values/set overrides are not supported for this execution mode")
 	}
 	printInstallSummary(draft)
-	if !*yes {
+	if !gpuOnly && !*yes {
 		if err := confirmInstall(draft); err != nil {
 			return err
 		}
@@ -1272,6 +1310,12 @@ func runInstall(args []string) error {
 	}
 	now := time.Now()
 	document := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, now)
+	if gpuOnly {
+		document, err = plan.GPUPreflight(document)
+		if err != nil {
+			return err
+		}
+	}
 	if remoteCacheRoot != "" {
 		document.AnsibleExtraVars = append(document.AnsibleExtraVars,
 			"eva_cache_root="+remoteCacheRoot,
@@ -1288,7 +1332,9 @@ func runInstall(args []string) error {
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
-	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
+	if !gpuOnly {
+		printCompletedAccess(completed, *stateRoot, *runtimeRoot)
+	}
 	return err
 }
 
@@ -1402,7 +1448,11 @@ func printInstallSummary(document plan.Document) {
 	for _, step := range document.Steps {
 		components = append(components, step.Component)
 	}
-	fmt.Printf("install plan: site=%s release=%s components=%s\n", document.SiteID, document.ReleaseVersion, strings.Join(components, ","))
+	label := "install plan"
+	if document.GPUPreflightOnly {
+		label = "GPU preflight plan"
+	}
+	fmt.Printf("%s: site=%s release=%s components=%s\n", label, document.SiteID, document.ReleaseVersion, strings.Join(components, ","))
 	for _, message := range overrideMessages(document) {
 		fmt.Println(message)
 	}
@@ -1416,7 +1466,11 @@ func confirmInstall(document plan.Document) error {
 	if info.Mode()&os.ModeCharDevice == 0 {
 		return errors.New("eva install requires --yes when standard input is not a terminal")
 	}
-	fmt.Fprintf(os.Stderr, "Install release %s for site %s? [y/N]: ", document.ReleaseVersion, document.SiteID)
+	action := "Install release"
+	if document.GPUPreflightOnly {
+		action = "Run GPU preflight using release"
+	}
+	fmt.Fprintf(os.Stderr, "%s %s for site %s? [y/N]: ", action, document.ReleaseVersion, document.SiteID)
 	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(answer) == 0 {
 		return fmt.Errorf("read install confirmation: %w", err)
@@ -1672,44 +1726,21 @@ func printCheckDetail(label string, entries []string) {
 	}
 }
 
-type gpuPreflight struct {
-	GPUs         []string
-	MIGInstances int
-}
-
 func runPreflight(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("Usage: eva preflight gpu")
+		fmt.Println("Usage: eva preflight gpu [--config FILE|--site ID|--workspace PATH] [--release PATH]")
+		fmt.Println("       Defaults to the invoking user's ~/eva-install.yaml, including with sudo; no extra confirmation.")
+		fmt.Println("       Checks target GPUs and applies missing driver/MIG configuration; records an Operation.")
 		fmt.Println("       eva preflight argocd --config FILE|--site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 		return nil
+	}
+	if args[0] == "gpu" {
+		return runInstallMode(args[1:], true)
 	}
 	if args[0] == "argocd" {
 		return runArgoCDPreflight(args[1:])
 	}
-	if len(args) != 1 || args[0] != "gpu" {
-		return fmt.Errorf("unknown preflight command %q", args[0])
-	}
-
-	result, err := inspectGPUPreflight(runGPUCommand)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "[ERROR] NVIDIA Driver unavailable")
-		fmt.Fprintln(os.Stderr, "Install a supported NVIDIA driver, confirm nvidia-smi succeeds, then rerun:")
-		fmt.Fprintln(os.Stderr, "  sudo eva preflight gpu")
-		return &displayedError{message: "GPU prerequisite check failed."}
-	}
-
-	fmt.Println("EVA GPU prerequisite check")
-	fmt.Printf("[OK] NVIDIA Driver GPUs=%d\n", len(result.GPUs))
-	for _, gpu := range result.GPUs {
-		fmt.Printf("     %s\n", gpu)
-	}
-	if result.MIGInstances > 0 {
-		fmt.Printf("[OK] MIG            instances=%d\n", result.MIGInstances)
-	} else {
-		fmt.Println("[OK] MIG            not configured")
-	}
-	fmt.Println("[OK] Ready          eva install will configure Docker, CDI, k3s, and the NVIDIA Device Plugin")
-	return nil
+	return fmt.Errorf("unknown preflight command %q", args[0])
 }
 
 func runArgoCDPreflight(args []string) error {
@@ -1791,33 +1822,6 @@ func runArgoCDPreflight(args []string) error {
 		"[OK] Argo CD handoff preflight passed.",
 	)
 	return nil
-}
-
-func inspectGPUPreflight(run func(...string) (string, error)) (gpuPreflight, error) {
-	info, err := run("--query-gpu=name,driver_version", "--format=csv,noheader")
-	if err != nil {
-		return gpuPreflight{}, err
-	}
-	result := gpuPreflight{}
-	for _, line := range strings.Split(info, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			result.GPUs = append(result.GPUs, line)
-		}
-	}
-	if len(result.GPUs) == 0 {
-		return gpuPreflight{}, errors.New("nvidia-smi reported no GPUs")
-	}
-
-	devices, err := run("-L")
-	if err != nil {
-		return gpuPreflight{}, err
-	}
-	for _, line := range strings.Split(devices, "\n") {
-		if strings.Contains(line, "MIG ") {
-			result.MIGInstances++
-		}
-	}
-	return result, nil
 }
 
 func runTroubleshoot(args []string) error {

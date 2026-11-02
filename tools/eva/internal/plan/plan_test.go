@@ -34,7 +34,7 @@ func TestBuildOrdersSelectedComponentsAndConfig(t *testing.T) {
 	for _, step := range document.Steps {
 		got = append(got, step.Component)
 	}
-	want := []string{"precondition", "infra", "config", "iam", "agent", "vision", "app"}
+	want := []string{"precondition", "infra", "gpu", "config", "iam", "agent", "vision", "app"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("step order = %v, want %v", got, want)
 	}
@@ -50,8 +50,8 @@ func TestBuildOrdersScopedComponentPlans(t *testing.T) {
 		want       []string
 	}{
 		{name: "IAM only", components: map[string]bool{"iam": true}, want: []string{"precondition", "iam"}},
-		{name: "Agent only", components: map[string]bool{"agent": true}, want: []string{"precondition", "config", "agent"}},
-		{name: "Vision only", components: map[string]bool{"vision": true}, want: []string{"precondition", "config", "vision"}},
+		{name: "Agent only", components: map[string]bool{"agent": true}, want: []string{"precondition", "gpu", "config", "agent"}},
+		{name: "Vision only", components: map[string]bool{"vision": true}, want: []string{"precondition", "gpu", "config", "vision"}},
 		{name: "App only", components: map[string]bool{"app": true}, want: []string{"precondition", "config", "app"}},
 	}
 
@@ -118,5 +118,44 @@ func TestScopedStepsIntersectCLISelection(t *testing.T) {
 		if !resolved.Config.Components["app"] || !resolved.Config.Components["infra"] {
 			t.Fatal("component selection mutated source config")
 		}
+	}
+}
+
+func TestGPUPreflightIsOrderedAndScopedInEveryRepositoryMode(t *testing.T) {
+	for _, mode := range []string{"online_repository", "remote_repository", "local_repository"} {
+		t.Run(mode, func(t *testing.T) {
+			resolved := workspace.Resolved{AnsibleMode: mode, Config: workspace.Config{
+				Components: map[string]bool{"infra": true, "agent": true, "vision": true, "app": true},
+				TargetComponents: map[string]map[string]bool{
+					"gpu-a": {"infra": true, "agent": true},
+					"gpu-b": {"vision": true},
+					"app":   {"app": true},
+					"infra": {"infra": true},
+				},
+			}}
+			document := Build(resolved, release.Resolved{}, time.Now())
+			if document.Steps[1].Component != "infra" || document.Steps[2].Component != "gpu" || document.Steps[3].Component != "config" {
+				t.Fatal("GPU preparation must run after Infra and before Config")
+			}
+			if !reflect.DeepEqual(document.Steps[2].Targets, []string{"gpu-a", "gpu-b"}) {
+				t.Fatalf("GPU target selection includes unrelated hosts: %v", document.Steps[2].Targets)
+			}
+			gpu, err := GPUPreflight(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !gpu.GPUPreflightOnly || len(gpu.Steps) != 2 || gpu.Steps[1].Component != "gpu" || !reflect.DeepEqual(gpu.Steps[0].Targets, gpu.Steps[1].Targets) {
+				t.Fatalf("explicit GPU preparation must only check and prepare GPU hosts: %#v", gpu)
+			}
+			if !reflect.DeepEqual(gpu.GPUPreflightComponents, []string{"agent", "vision"}) {
+				t.Fatal("GPU preparation lost its source component selection")
+			}
+			if !reflect.DeepEqual(document.Steps[0].Targets, []string{"app", "gpu-a", "gpu-b", "infra"}) {
+				t.Fatal("GPU-only plan mutated the source installation plan")
+			}
+		})
+	}
+	if _, err := GPUPreflight(Build(workspace.Resolved{Config: workspace.Config{Components: map[string]bool{"app": true}}}, release.Resolved{}, time.Now())); err == nil {
+		t.Fatal("GPU preparation accepted a config without GPU components")
 	}
 }

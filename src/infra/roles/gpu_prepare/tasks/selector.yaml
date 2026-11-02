@@ -1,0 +1,63 @@
+- name: Check prepared Display Mode Selector on the controller
+  ansible.builtin.stat:
+    path: "{{ eva_gpu_selector_source }}"
+  delegate_to: localhost
+  become: false
+  register: eva_gpu_selector_asset
+
+- name: Download Online Display Mode Selector using installer credentials
+  when:
+    - not eva_gpu_selector_asset.stat.exists
+    - repository_mode in ['online_repository', 'cloud_repository']
+  block:
+    - name: Read Online AWS credentials privately
+      ansible.builtin.set_fact:
+        eva_gpu_aws_raw: "{{ lookup('ansible.builtin.file', aws_key_file | default(eva_workspace_credentials_root ~ '/aws_key.ini', true)) }}"
+      no_log: true
+    - name: Fetch the Release's Display Mode Selector cache
+      ansible.builtin.command:
+        argv:
+          - bash
+          - "{{ lookup('ansible.builtin.env', 'EVA_REMOTE_LIBEXEC_ROOT') }}/scripts/download/download_display_mode_selector.sh"
+      environment:
+        EVA_CACHE_ROOT: "{{ eva_cache_root }}"
+        AWS_ACCESS_KEY_ID: "{{ (eva_gpu_aws_raw | regex_findall('(?m)^aws_access_key_id\\s*=\\s*(.+)$') | first) | trim }}"
+        AWS_SECRET_ACCESS_KEY: "{{ (eva_gpu_aws_raw | regex_findall('(?m)^aws_secret_access_key\\s*=\\s*(.+)$') | first) | trim }}"
+        AWS_REGION: "{{ ((eva_gpu_aws_raw | regex_findall('(?m)^region\\s*=\\s*(.+)$') | first) | default('ap-northeast-2')) | trim }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+  rescue:
+    - name: Explain Online Display Mode Selector download failure
+      ansible.builtin.fail:
+        msg: "Online GPU 준비에서 Display Mode Selector를 받지 못했습니다. 설치 설정의 AWS S3 read 권한과 준비 서버의 AWS CLI·네트워크를 확인하고 같은 명령을 다시 실행하세요."
+  always:
+    - name: Clear transient Online AWS credentials
+      ansible.builtin.set_fact:
+        eva_gpu_aws_raw: ''
+      no_log: true
+
+- name: Verify Display Mode Selector was supplied
+  ansible.builtin.stat:
+    path: "{{ eva_gpu_selector_source }}"
+  delegate_to: localhost
+  become: false
+  register: eva_gpu_selector_verified
+
+- name: Require Display Mode Selector for this target
+  ansible.builtin.assert:
+    that:
+      - eva_gpu_selector_verified.stat.exists
+      - eva_gpu_selector_verified.stat.isreg
+    fail_msg: >-
+      대상 GPU의 Compute Mode 전환에 Display Mode Selector가 필요합니다.
+      Local이면 eva airgap prepare --display-mode-selector ZIP으로 Bundle을 다시 준비하고,
+      Remote이면 Main에서 eva remote prepare로 자산을 준비한 뒤 같은 명령을 다시 실행하세요.
+
+- name: Install the prepared Display Mode Selector on this target
+  ansible.builtin.copy:
+    src: "{{ eva_gpu_selector_source }}"
+    dest: /usr/local/libexec/eva-displaymodeselector
+    owner: root
+    group: root
+    mode: '0755'

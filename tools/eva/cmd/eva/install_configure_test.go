@@ -230,7 +230,7 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 		switch step.Component {
 		case "config", "app":
 			want = []string{"external-app", "iam-app"}
-		case "iam", "agent", "vision":
+		case "iam", "agent", "vision", "gpu":
 			want = []string{"iam-app"}
 		}
 		if !reflect.DeepEqual(step.Targets, want) {

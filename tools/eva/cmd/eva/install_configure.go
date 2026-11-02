@@ -215,7 +215,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	}
 	fmt.Fprintf(output, "검토 후 설치: sudo eva install --config %s\n", shellQuoteConfigurePath(*path))
 	if bastion && mode == "online" {
-		fmt.Fprintln(output, "Bastion의 eva check/preflight gpu는 현재 서버 기준입니다. 타겟 상태는 타겟별로 확인하세요.")
+		fmt.Fprintln(output, "eva preflight gpu는 사용자 홈의 eva-install.yaml로 GPU 타겟을 확인하고 준비합니다. 다른 위치에 저장했다면 --config FILE을 지정하세요. Bastion의 eva check는 현재 서버 기준이므로 서비스 상태는 타겟별로 확인하세요.")
 	}
 	return nil
 }

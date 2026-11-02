@@ -25,6 +25,27 @@ func remoteInstallerInput(document plan.Document) (workspace.Installer, error) {
 		return workspace.Installer{}, err
 	}
 	selected := map[string]bool{}
+	if document.GPUPreflightOnly {
+		// Keep the GPU component selection for target-side planning, and do
+		// not send unrelated App/IAM/Infra-only targets to GPU preparation.
+		for _, name := range document.GPUPreflightComponents {
+			selected[name] = input.Components[name]
+		}
+		for _, step := range document.Steps {
+			if step.Component != "gpu" || len(step.Targets) == 0 {
+				continue
+			}
+			allowed := make(map[string]bool)
+			for _, name := range step.Targets {
+				allowed[name] = true
+			}
+			for name := range input.Targets {
+				if !allowed[name] {
+					delete(input.Targets, name)
+				}
+			}
+		}
+	}
 	for _, step := range document.Steps {
 		if _, exists := input.Components[step.Component]; exists {
 			selected[step.Component] = true
@@ -85,7 +106,11 @@ func executeRemoteOperation(record operation.Record, document plan.Document, sta
 			return remote.LoadInstallerHandoffReceipt(defaultArgoCDReceiptRoot, site, name, target)
 		}
 	}
-	results, installErr := service.Install(context.Background(), input, selected.Resolved, document.TargetInstallArgs,
+	run := service.Install
+	if document.GPUPreflightOnly {
+		run = service.PreflightGPU
+	}
+	results, installErr := run(context.Background(), input, selected.Resolved, document.TargetInstallArgs,
 		remote.Streams{Stdin: os.Stdin, Stdout: io.MultiWriter(os.Stdout, log), Stderr: io.MultiWriter(os.Stderr, log)})
 	record.Status = operation.Succeeded
 	if installErr != nil {

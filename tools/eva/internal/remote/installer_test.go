@@ -231,19 +231,22 @@ exec(` + string(script) + `)
 assert temporaries and all(not os.path.exists(path) for path in temporaries)
 assert len(calls) == (6 if os.environ["TEST_RECEIPT"] else 4)
 assert calls[2] == ["bash", "/var/lib/eva/inbox/releases/3.3.0/eva-tool-installer.sh"]
-assert calls[-1][:5] == ["eva", "install", "--release", "/var/lib/eva/inbox/releases/3.3.0", "--config"]
-assert "--yes" in calls[-1]
+expected = ["eva"] + (["preflight", "gpu"] if os.environ["TEST_ACTION"] == "gpu-preflight" else ["install"]) + ["--release", "/var/lib/eva/inbox/releases/3.3.0", "--config"]
+assert calls[-1][:len(expected)] == expected
+assert ("--yes" in calls[-1]) == (os.environ["TEST_ACTION"] == "install")
 `
 	for _, password := range []string{"private-sudo", ""} {
 		for _, receipt := range []string{"", "site_id: customer-a\ncluster_name: legacy-a\n"} {
-			action := TargetAction{Action: "install", Site: "customer-a", Name: "node-a", ReleaseRoot: "/var/lib/eva/inbox/releases/3.3.0", Config: []byte("license: private-license\n"), SudoPassword: password}
-			action.HandoffReceipt = []byte(receipt)
-			contents, _ := json.Marshal(action)
-			command := exec.Command("python3", "-c", harness)
-			command.Stdin = bytes.NewReader(contents)
-			command.Env = append(os.Environ(), "TEST_SUDO="+password, "TEST_RECEIPT="+receipt)
-			if output, err := command.CombinedOutput(); err != nil {
-				t.Fatalf("target action failed (password configured=%t): %v %s", password != "", err, output)
+			for _, actionName := range []string{"install", "gpu-preflight"} {
+				action := TargetAction{Action: actionName, Site: "customer-a", Name: "node-a", ReleaseRoot: "/var/lib/eva/inbox/releases/3.3.0", Config: []byte("license: private-license\n"), SudoPassword: password}
+				action.HandoffReceipt = []byte(receipt)
+				contents, _ := json.Marshal(action)
+				command := exec.Command("python3", "-c", harness)
+				command.Stdin = bytes.NewReader(contents)
+				command.Env = append(os.Environ(), "TEST_SUDO="+password, "TEST_RECEIPT="+receipt, "TEST_ACTION="+actionName)
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf("target action failed (password configured=%t): %v %s", password != "", err, output)
+				}
 			}
 		}
 	}

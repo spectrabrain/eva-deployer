@@ -4,7 +4,7 @@
 EVA를 설치하는 절차입니다. 현재 서버에 설치하거나 별도 Bastion에서 여러 타겟에 각각 설치할 수 있습니다.
 `online`은 설치 대상이 upstream/인터넷 Registry·Repository에 직접 접근하는 모드이며,
 온프레미스/클라우드 제공자와 무관합니다. Ansible 모드는 `online_repository`입니다.
-일반 전체 설치는 Infra, Config, IAM, Agent, Vision, App을
+일반 전체 설치는 Infra, GPU preflight, Config, IAM, Agent, Vision, App을
 하나의 `eva install` 작업으로 설치합니다. Docker, k3s, NVIDIA runtime, 호스트 영속
 데이터를 변경하므로 먼저 작업 가능 시간과 백업 정책을 확인합니다.
 
@@ -13,7 +13,7 @@ EVA를 설치하는 절차입니다. 현재 서버에 설치하거나 별도 Bas
 | 항목 | 필수 운영 기준 |
 | --- | --- |
 | OS 및 플랫폼 | Ubuntu 24.04, `linux/amd64` |
-| 가속기 | 지원되는 NVIDIA GPU, 설치된 NVIDIA driver, `nvidia-smi` |
+| 가속기 | 지원되는 NVIDIA GPU; 드라이버가 없으면 설치 중 준비하며 재부팅 후 재실행 |
 | 컨테이너 플랫폼 | Docker, k3s, NVIDIA Container Toolkit/CDI, NVIDIA Device Plugin |
 | 네트워크 | upstream/인터넷 Repository, GitHub, Docker Hub, AWS/ECR/S3 및 필요한 HTTPS endpoint |
 | 사이트 입력 | 대상 호스트의 AWS credential 및 TLS certificate/key |
@@ -58,20 +58,22 @@ Main Harbor와 설치 자산을 사용하는 환경은 [Remote Repository Runboo
 Remote도 Main에서 같은 `eva install configure`로 SSH 타겟을 입력하고 `eva install --config`로 설치합니다.
 Main의 Harbor·자산 준비를 먼저 완료하며 별도 타겟 등록 명령은 필요하지 않습니다.
 
-## 4. GPU 사전 조건 확인
+## 4. GPU 구성 선택
 
-설치 전 EVA GPU 사전 조건 검사를 실행합니다. 이 명령은 NVIDIA driver를 확인하고 감지된
-GPU 및 MIG 상태를 표시하며 driver가 없을 때 필요한 조치를 안내합니다.
-Bastion에서는 이 명령이 원격 타겟을 검사하지 않으므로 각 타겟에서 따로 확인합니다.
+Agent를 설치할 서버의 GPU를 다음 표와 맞춥니다. `eva install`은 Agent/Vision 대상의 GPU 상태를
+확인하고 필요한 구성을 자동 적용합니다. RTX PRO 6000의 MIG를 수동으로 분할할 필요가 없습니다.
 
-```bash
-sudo eva preflight gpu
-```
+| Agent profile | 물리 GPU | MIG |
+| --- | --- | --- |
+| `A6000x1` | RTX A6000 1장 | 사용 안 함 |
+| `L40sx1` | L40S 1장 | 사용 안 함 |
+| `PRO5000x3` | RTX PRO 5000 Blackwell 3장 | 사용 안 함 |
+| `PRO6000-MIGx4` | RTX PRO 6000 Blackwell 1장 | 4개 자동 구성 |
 
-사이트에서 MIG를 사용할 경우 설치 전에 의도한 MIG 구성을 적용합니다. `infra`가 Docker,
-CDI, k3s, NVIDIA Device Plugin, allocatable resource를 구성합니다. 이후 Config가
-`nvidia.com/gpu` 또는 양수 `nvidia.com/mig-*` resource를 자동 선택합니다. 양수인 MIG
-resource type이 여러 개면 임의로 선택하지 않고 설치를 중단합니다.
+이미 맞는 GPU/MIG 구성은 재사용합니다. 다른 MIG 분할이 있거나 변경할 GPU에 workload가
+실행 중이면 중단하므로 해당 구성을 정리한 뒤 다시 실행합니다.
+Display Mode 전환이 필요한 경우 설치 설정의 AWS 권한으로 전환 도구를 준비합니다.
+드라이버 설치·GPU Mode 변경 후 재부팅 안내가 나오면 **해당 타겟을 재부팅하고 같은 명령을 다시 실행**합니다.
 
 ## 5. 단일 설치 설정 준비
 
@@ -274,6 +276,20 @@ sudo eva preflight argocd --config /home/eva/eva-install.yaml
 
 ## 8. 설치
 
+5절에서 작성한 설정으로 GPU preflight만 먼저 실행할 수도 있습니다. 설치를 실행할 서버 또는
+Bastion에서 실행하며, Bastion에서는 YAML의 Agent/Vision SSH 타겟을 준비합니다.
+
+```bash
+sudo eva preflight gpu
+```
+
+사용자 홈의 `eva-install.yaml`을 자동으로 읽으며, `sudo`로 실행해도 원래 사용자의 홈을 사용합니다.
+다른 설정 파일을 사용할 때만 `--config FILE`을 지정합니다. 추가 실행 확인은 필요하지 않습니다.
+
+필요한 드라이버·GPU/MIG를 준비하고 제품은 설치하지 않습니다. k3s가 아직 없으면 GPU preflight를
+마친 뒤 일반 설치에서 Kubernetes 자원 노출을 확인합니다. 일반 설치에도 같은 단계가 포함되므로
+별도 실행은 선택 사항입니다.
+
 installer가 등록한 Current Release로 명령 하나를 실행합니다.
 
 ```bash
@@ -291,9 +307,10 @@ sudo eva install --release /path/to/another/release --config /home/eva/eva-insta
 Plan 순서는 항상 다음과 같습니다.
 
 ```text
-precondition -> infra and GPU/MIG -> config -> iam -> agent -> vision -> app
+precondition -> infra -> GPU preflight -> config -> iam -> agent -> vision -> app
 ```
 
+Agent/Vision을 선택한 타겟에는 GPU preflight가 자동 포함됩니다.
 Agent, Vision, App 중 하나를 선택하면 Config가 자동으로 포함됩니다. Config를 별도로 실행하지
 않습니다. Component-only 작업은 선택하지 않은 제품 component를 실행하지 않습니다. Agent는
 Release 관리 values로 `eva-agent`, `eva-agent-vllm`, `eva-agent-qdrant`를 함께 설치합니다.

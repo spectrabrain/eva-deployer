@@ -102,6 +102,27 @@ func TestExecuteStopsAfterFailedStep(t *testing.T) {
 	}
 }
 
+func TestGPUPreparationFailureBlocksSolutionConfiguration(t *testing.T) {
+	stateRoot := t.TempDir()
+	record := createOperation(t, stateRoot, createWorkspace(t), createReleaseSource(t, "fail"), []plan.Step{
+		{Component: "gpu", Playbook: expectedPlaybooks["gpu"], Targets: []string{"gpu-a"}},
+		{Component: "config", Playbook: expectedPlaybooks["config"]},
+		{Component: "agent", Playbook: expectedPlaybooks["agent"]},
+	})
+	var output bytes.Buffer
+	completed, err := Execute(Options{StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: createRuntime(t), Stdout: &output, Stderr: &output}, record)
+	if err == nil || completed.Status != operation.Failed || !strings.Contains(err.Error(), "gpu") {
+		t.Fatalf("GPU preparation failure must stop installation: %v", err)
+	}
+	contents, err := os.ReadFile(completed.ResultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(contents), "component:") != 1 || !strings.Contains(output.String(), "--limit gpu-a") {
+		t.Fatal("Config/deployment ran after a failed or reboot-pending GPU preparation")
+	}
+}
+
 func TestExecuteAndRetryPreserveTargetLimits(t *testing.T) {
 	stateRoot := t.TempDir()
 	record := createOperation(t, stateRoot, createWorkspace(t), createReleaseSource(t, ""), []plan.Step{

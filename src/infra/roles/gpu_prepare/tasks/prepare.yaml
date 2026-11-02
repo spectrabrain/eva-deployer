@@ -1,0 +1,99 @@
+- name: Load the Release GPU model map
+  ansible.builtin.include_vars:
+    file: "{{ eva_infra_root }}/roles/gpu_mig/vars/gpu_mig.yaml"
+    name: eva_gpu_model_map
+
+- name: Ensure GPU preparation helper directory
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    mode: '0755'
+
+- name: Install target GPU preparation helper
+  ansible.builtin.copy:
+    src: prepare_gpu.py
+    dest: /usr/local/libexec/eva-gpu-prepare.py
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Ensure GPU configuration directory
+  ansible.builtin.file:
+    path: /etc/eva
+    state: directory
+    mode: '0755'
+
+- name: Save the Release GPU model map
+  ansible.builtin.copy:
+    dest: /etc/eva/gpu-mig-models.json
+    content: "{{ eva_gpu_model_map | to_json }}"
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Inspect GPU layout before any device changes
+  ansible.builtin.command:
+    argv: "{{ ['python3', '/usr/local/libexec/eva-gpu-prepare.py', '--model-map', '/etc/eva/gpu-mig-models.json'] + (['--agent'] if 'agent' in (eva_enabled_components | default('')).split(',') else []) }}"
+  register: eva_gpu_inspection
+  changed_when: false
+
+- name: Resolve GPU preparation state
+  ansible.builtin.set_fact:
+    eva_gpu_state: "{{ eva_gpu_inspection.stdout | from_json }}"
+    eva_gpu_selector_source: "{{ eva_cache_root }}/display_mode_selector/mode_selector_1.72.0/linux/x64/displaymodeselector"
+
+- name: Supply Display Mode Selector only when the GPU needs it
+  ansible.builtin.include_tasks: selector.yaml
+  when: eva_gpu_state.needs_selector | default(false) | bool
+
+- name: Apply missing GPU mode and MIG instances
+  ansible.builtin.command:
+    argv: "{{ ['python3', '/usr/local/libexec/eva-gpu-prepare.py', '--model-map', '/etc/eva/gpu-mig-models.json', '--apply', '--selector', '/usr/local/libexec/eva-displaymodeselector'] + (['--agent'] if 'agent' in (eva_enabled_components | default('')).split(',') else []) }}"
+  register: eva_gpu_application
+  changed_when: eva_gpu_application.rc == 0 and ((eva_gpu_application.stdout | from_json).changed | bool)
+  when: not (eva_gpu_state.ready | bool)
+
+- name: Refresh prepared GPU state
+  ansible.builtin.set_fact:
+    eva_gpu_state: "{{ (eva_gpu_application.stdout | from_json) if not (eva_gpu_application.skipped | default(false)) else eva_gpu_state }}"
+
+- name: Ensure MIG survives target reboot
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/gpu-mig-auto-enable.service
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Restore EVA PRO6000 MIG configuration on boot
+      Wants=nvidia-persistenced.service
+      After=nvidia-persistenced.service
+      Before=k3s.service k3s-agent.service nvidia-cdi-refresh.service display-manager.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/bin/python3 /usr/local/libexec/eva-gpu-prepare.py --model-map /etc/eva/gpu-mig-models.json --apply --gpu-uuid {{ eva_gpu_state.gpu.uuid }}
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+  register: eva_gpu_restore_unit
+  when: eva_gpu_state.needs_mig | bool
+
+- name: Enable MIG restoration without restarting GPU workloads
+  ansible.builtin.systemd:
+    name: gpu-mig-auto-enable.service
+    enabled: true
+    daemon_reload: "{{ eva_gpu_restore_unit.changed }}"
+  when: eva_gpu_state.needs_mig | bool
+
+- name: Verify this target's Kubernetes MIG resources
+  ansible.builtin.command:
+    argv: "{{ ['python3', '/usr/local/libexec/eva-gpu-prepare.py', '--model-map', '/etc/eva/gpu-mig-models.json', '--reconcile-k3s'] + ([] if eva_gpu_preflight_only | default(false) | bool else ['--require-k3s']) }}"
+  register: eva_gpu_k3s
+  changed_when: eva_gpu_k3s.rc == 0 and ((eva_gpu_k3s.stdout | from_json).changed | bool)
+  when: eva_gpu_state.needs_mig | bool
+
+- name: Show GPU preparation result
+  ansible.builtin.debug:
+    msg:
+      - "GPU/MIG: {{ eva_gpu_state.status }}"
+      - "k3s: {{ (eva_gpu_k3s.stdout | from_json).status if not (eva_gpu_k3s.skipped | default(false)) else 'whole GPU; verified by the following Infra/Config stages' }}"

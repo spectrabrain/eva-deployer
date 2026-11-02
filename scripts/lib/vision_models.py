@@ -33,6 +33,7 @@ to admin (HARBOR_ADMIN_USER/PASSWORD also accepted). PLAIN_HTTP defaults to true
 (false for an explicit https:// endpoint); INSECURE defaults to false. Both accept
 only true/false. LOCAL_HARBOR_YML defaults to ~/.local/share/eva-harbor/harbor/harbor.yml.
 Its admin password is used only for admin and its matching hostname/transport/port.
+Without a password, matching Docker credentials saved by eva local prepare are reused.
 PyYAML is needed only for that local fallback; all cache operations use stdlib.
 ORAS_CMD defaults to $EVA_CACHE_ROOT/tools/oras (offline ORAS 1.3.3).
 AWS_REGION defaults to ap-northeast-2; AWS env key pairs take precedence over
@@ -340,7 +341,13 @@ def publish(cache: Path, names: list[str], cache_root: Path) -> dict:
     password = env("REPOSITORY_PASSWORD", "HARBOR_PASSWORD", "HARBOR_ADMIN_PASSWORD")
     use_docker_auth = boolean(env("REPOSITORY_USE_DOCKER_AUTH", default="false"))
     if not password and not use_docker_auth:
-        password = local_password(endpoint, plain_http, username)
+        # eva local prepare saves the validated account in Docker. Reuse only
+        # the exact selected endpoint when a password was not supplied again.
+        try:
+            registry_auth(endpoint)
+            use_docker_auth = True
+        except ValueError:
+            password = local_password(endpoint, plain_http, username)
     if not password and not use_docker_auth:
         raise ModelError("Explicit repository credentials are required for this registry")
     oras = env("ORAS_CMD", default=str(cache_root / "tools/oras"))

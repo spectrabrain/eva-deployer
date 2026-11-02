@@ -6,7 +6,7 @@
 [Local](../installation/local-repository-runbook.md) Runbook을 따른다.
 이 문서는 현재 소스에 구현된 명령을 기준으로 하며, 기존 설치 binary에는 새 명령이 없을 수 있다.
 `eva version`과 `eva help`로 설치된 Tool의 버전과 지원 명령을 먼저 확인한다.
-`airgap prepare`, `backup`, `inspect`, `install configure`, `config sample`, `--config`를 현장에서 사용하려면 해당 명령이 포함된 Tool·Release를 배포해야 한다.
+`airgap prepare`, `local prepare`, `backup`, `inspect`, `install configure`, `config sample`, `--config`를 현장에서 사용하려면 해당 명령이 포함된 Tool·Release를 배포해야 한다.
 
 ## 1. 가장 자주 쓰는 조회
 
@@ -296,7 +296,7 @@ IAM/App/Agent/Vision에 적용한다. 한 component의 Chart/Values 파일은 �
 `--set`보다 승인된 private Values 파일을 사용한다. 조회 시에는 Secret을 가리지 않는다.
 
 install/plan의 `--release`와 positional Release는 동시에 사용하지 않는다.
-`install`, `verify`, `airgap prepare`, Remote preparation 명령은 Current Release를 사용할 수 있다.
+`install`, `verify`, `airgap prepare`, `local prepare`, Remote preparation 명령은 Current Release를 사용할 수 있다.
 현재 `plan`과 `release` 하위 명령은 기본적으로 현재 디렉터리 또는 명시적 경로를 해석하므로
 원하는 Release를 `--release PATH`로 명시하는 편이 안전하다.
 저장 Plan을 apply할 때는 실행 가능한 준비된 Release 소스를 사용한다.
@@ -320,22 +320,32 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 현재 Git tag나 S3 위치로 Release를 자동 다운로드하는 일반 명령은 제공하지 않는다.
 `--release-root`는 inspect 전용 진단 입력이고 install의 `--release`와 의미가 다르다.
 `release prepare`는 Infra·Solution 실행 소스만 추출하며 `eva-offline`의 `out/cache`는 배치하지 않는다.
-Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation/local-repository-runbook.md)을 따른다.
+Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 이미지·snapshot을 준비한다.
+최초 반입과 Tool 설치는 [Local Runbook](../installation/local-repository-runbook.md)을 따른다.
 
 ### Airgap 준비 — 인터넷 준비 서버에서 실행
 
 | 명령 | 역할·변경 범위 |
 | --- | --- |
-| `sudo eva airgap prepare [--release ORIGINAL_DIR] --output FILE.tar.gz --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes` | 원본 Release에 맞는 오프라인 자산·Runtime을 받아 검증된 새 Local Bundle 생성; Docker pull/export 및 누락 Runtime 온라인 bootstrap |
+| `sudo eva airgap prepare [--release ORIGINAL_DIR] [--output FILE.tar.gz] --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes` | 원본 Release에 맞는 오프라인 자산·Runtime을 받아 검증된 새 Local Bundle 생성; Docker pull/export 및 누락 Runtime 온라인 bootstrap |
 | `eva airgap prepare --help` | 지원 옵션·실행 범위 조회 |
 
 - `--release` 생략 시 Current Release를 사용한다. installer artifact를 포함한 **검증된 완전한 원본
 	Release 디렉터리**만 허용하며 prepared/imported Release와 Bundle archive는 입력으로 쓰지 않는다.
-- `--output FILE.tar.gz`, `--vllm-profile`, `--yes`는 필수다. profile은 `A6000x1`, `L40sx1`,
+- `--output`을 생략하면 실행한 사용자 홈에 `eva-airgap-bundle_<version>_<os>_<arch>.tar.gz`를
+	저장한다. 버전·플랫폼은 선택한 Release에서 가져온다. `sudo` 실행 시 원래 사용자의 홈과
+	소유권을 사용하며 완료 후 전체 경로·디렉터리·파일명·반입용 SHA-256을 표시한다. 다른 위치나 이름은
+	`--output FILE.tar.gz`로 지정한다. 기존 파일은 덮어쓰지 않으며 같은 Release의 다른 GPU
+	profile을 준비할 때는 파일명을 따로 지정한다.
+- `--vllm-profile`, `--yes`는 필수다. profile은 `A6000x1`, `L40sx1`,
 	`PRO5000x3`, `PRO6000-MIGx4` 중 하나이며 선택한 vLLM 이미지만 받는다. 모든 profile Values가
 	포함되어도 실제 대상 GPU/MIG·설치 profile과 다르면 사용할 수 없다.
-- driver 기본값은 `nvidia-driver-580`; `nvidia-driver-NNN` 또는 `nvidia-driver-NNN-open`을 지원한다.
-	전체 의존성 repo를 준비하고 누락을 허용하지 않는다. Display Mode Selector 옵션은 특정 GPU
+- `--driver-package`는 선택 옵션이며 모든 profile의 기본 반입 패키지는 `nvidia-driver-580`이다.
+	GPU profile과 드라이버 패키지는 별도 선택이다. `nvidia-driver-NNN` 또는
+	`nvidia-driver-NNN-open`을 지원하며 전체 의존성 repo를 준비하고 누락을 허용하지 않는다.
+	이 옵션은 Bundle 내용만 변경하며 대상의 `gpu_driver_package` 설정을 변경하지 않는다.
+	대상의 기존 드라이버가 정상 동작하면 유지하고, 신규 오프라인 설치의 기본값도
+	`nvidia-driver-580`이다. Display Mode Selector 옵션은 특정 GPU
 	전환에 필요한 승인된 독점 배포 ZIP 입력이며 GPU/MIG 구성을 실행하지 않는다.
 - **온라인 Ubuntu 24.04 amd64에서 root(`sudo`)**로 실행한다. 동작하는 amd64 Docker daemon,
 	AWS CLI, sudo, Ubuntu·Docker·NVIDIA APT 인덱스와 package candidate가 선행 조건이다.
@@ -348,7 +358,8 @@ Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation
 - Docker/AWS 설치, Harbor 배포·이미지/snapshot 게시, GPU driver 설치·MIG 전환, Docker daemon
 	설정 변경은 하지 않는다. 대상의 cache 배치와 Repository 준비는 별도 작업이다.
 - 출력 옆의 격리 임시 작업은 성공·실패 시 정리하고 resume하지 않는다. 기존 출력은 거부하며
-	검증된 Bundle만 최종 경로에 게시한다. 다운로드 backend 출력은 숨기고 단계명·최종 결과를 표시한다.
+	검증된 Bundle만 최종 경로에 게시한다. 선택한 profile·드라이버 패키지·출력 경로를 표시하며,
+	다운로드 backend 출력은 숨기고 단계명·최종 결과를 표시한다.
 	누락 Runtime bootstrap 시 기존 설치기의 APT/pip 진행 출력은 추가될 수 있다.
 	다운로드·staging 복사본·검증 압축 해제까지 고려한 상당한 디스크 공간이 필요하다.
 - 결과는 installer와 Tool archive가 root에 나란히 있는 flat Release Bundle이다. 새 metadata와
@@ -356,8 +367,23 @@ Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation
 	`runtime/`과 `out/cache/`가 있다. `eva verify --release BUNDLE.tar.gz`로 검증할 수 있으며,
 	credential은 반입하지 않는다. 최초 대상 검증은 Tool 설치 전에 OS checksum 검증부터 시작한다.
 
-실행 예시·안전한 최초 반입·cache 배치와 별도 Harbor 준비는
+실행 예시·최초 반입·대상 서버의 Local 준비는
 [Local Repository 준비·설치](../installation/local-repository-runbook.md)를 따른다.
+
+### Local 준비 — 폐쇄망 대상 서버에서 실행
+
+| 명령 | 역할 |
+| --- | --- |
+| `sudo eva local prepare --config FILE [--release PATH] --yes` | Current Release의 캐시·Runtime을 배치하고 필요한 Docker·Harbor 설치, Bundle 이미지 적재·게시, Agent 선택 시 Qdrant snapshot 게시 |
+| `eva local prepare --help` | 실행 옵션 확인 |
+
+반입한 Bundle에서 Tool을 설치한 뒤 대상 서버에서 실행한다. `--config`는 이후 `eva install`에
+사용할 Local 설정이며 `ansible_connection: local`인 대상 하나를 지정한다. 준비 중에는
+인터넷 다운로드와 AWS credential을 사용하지 않는다. 별도 서버의 Harbor는 미리 준비한다.
+기존 Harbor 설정·데이터와 다른 Registry 설정을 보존하며, 게시 인증은 기존 인증 또는
+설정 파일·대화형 숨김 입력으로 준비한다. 같은 Bundle의 캐시는 checksum 검증 후 재사용한다.
+기존 캐시에 EVA 준비 기록이 없거나 checksum이 다르면 덮어쓰지 않고 중단한다.
+준비 완료 후 같은 설정 파일로 `sudo eva install --config FILE --yes`를 실행한다.
 
 ### Remote 준비·설치 — Main에서 실행
 

@@ -224,8 +224,12 @@ func TestBuildAirgapBundleFlatVerifyAndImport(t *testing.T) {
 	}
 	outputRoot := t.TempDir()
 	destination := filepath.Join(outputRoot, "new-output", "bundle.tar.gz")
-	if err := BuildAirgapBundle(source, offlinePath, destination); err != nil {
-		t.Fatalf("BuildAirgapBundle() error = %v", err)
+	digest, err := BuildAirgapBundleWithDigest(source, offlinePath, destination)
+	if err != nil {
+		t.Fatalf("BuildAirgapBundleWithDigest() error = %v", err)
+	}
+	if want, err := fileChecksum(destination); err != nil || digest != want {
+		t.Fatalf("Bundle SHA-256 = %q, want %q, error = %v", digest, want, err)
 	}
 	metadata, err := VerifyAirgapBundle(destination)
 	if err != nil {

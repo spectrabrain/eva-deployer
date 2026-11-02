@@ -84,7 +84,8 @@ func usage() {
 	fmt.Println("  config sample [--mode online|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE]")
 	fmt.Println("  workspace <validate|show|ansible-vars|env> [--config FILE | --site ID | --workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
-	fmt.Println("  airgap prepare [--release PATH] --output FILE.tar.gz --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes")
+	fmt.Println("  airgap prepare [--release PATH] [--output FILE.tar.gz] --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes")
+	fmt.Println("  local prepare --config FILE [--release PATH] --yes")
 	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
 	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET")
 	fmt.Println("  remote target list | <add|verify> NAME | remove NAME [--yes]")
@@ -153,6 +154,8 @@ func run(args []string) error {
 		return runRelease(args[1:])
 	case "airgap":
 		return runAirgap(args[1:])
+	case "local":
+		return runLocal(args[1:])
 	case "internal":
 		return runInternal(args[1:])
 	case "remote":

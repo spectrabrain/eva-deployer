@@ -276,15 +276,20 @@ sudo eva preflight argocd --config /home/eva/eva-install.yaml
 
 ## 8. 설치
 
-5절에서 작성한 설정으로 GPU preflight만 먼저 실행할 수도 있습니다. 설치를 실행할 서버 또는
-Bastion에서 실행하며, Bastion에서는 YAML의 Agent/Vision SSH 타겟을 준비합니다.
+GPU preflight만 먼저 실행하려면 **설치 대상 서버에서** 실행합니다.
 
 ```bash
 sudo eva preflight gpu
 ```
 
-사용자 홈의 `eva-install.yaml`을 자동으로 읽으며, `sudo`로 실행해도 원래 사용자의 홈을 사용합니다.
-다른 설정 파일을 사용할 때만 `--config FILE`을 지정합니다. 추가 실행 확인은 필요하지 않습니다.
+현재 서버의 GPU를 확인·준비하며 설치 설정 파일은 읽지 않습니다.
+**Bastion에서** 5절의 Agent/Vision SSH 타겟을 준비하려면 설정 파일을 명시합니다.
+
+```bash
+sudo eva preflight gpu --config "$HOME/eva-install.yaml"
+```
+
+추가 실행 확인은 필요하지 않습니다.
 
 필요한 드라이버·GPU/MIG를 준비하고 제품은 설치하지 않습니다. k3s가 아직 없으면 GPU preflight를
 마친 뒤 일반 설치에서 Kubernetes 자원 노출을 확인합니다. 일반 설치에도 같은 단계가 포함되므로

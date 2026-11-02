@@ -96,7 +96,7 @@ func usage() {
 	fmt.Println("  inspect [paths|operations|files|values|config|plan|result|logs] [options]")
 	fmt.Println("  backup [list|show|values] [--root PATH] [--site ID] [--component NAME] [--namespace NS] [--version VERSION] [--release NAME] [--latest | --path DIR]")
 	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
-	fmt.Println("  preflight gpu [--config FILE] [--release PATH]  (defaults to invoking user's ~/eva-install.yaml; checks and configures target GPU/MIG)")
+	fmt.Println("  preflight gpu [--config FILE] [--release PATH]  (defaults to current server; --config selects configured GPU targets)")
 	fmt.Println("  preflight argocd --config FILE|--site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
@@ -1179,11 +1179,14 @@ func runInstallMode(args []string, gpuOnly bool) error {
 	}
 	flags := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	siteID := flags.String("site", "", "site identifier")
-	workspaceRoot := flags.String("workspace", "", "workspace path")
+	siteID, workspaceRoot := new(string), new(string)
+	if !gpuOnly {
+		siteID = flags.String("site", "", "site identifier")
+		workspaceRoot = flags.String("workspace", "", "workspace path")
+	}
 	configHelp := "single installer YAML file (0600)"
 	if gpuOnly {
-		configHelp += "; defaults to invoking user's ~/eva-install.yaml"
+		configHelp += "; explicitly selects configured hosts instead of the current server"
 	}
 	configFile := flags.String("config", "", configHelp)
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
@@ -1225,13 +1228,16 @@ func runInstallMode(args []string, gpuOnly bool) error {
 		*releaseInput = flags.Arg(0)
 	}
 
-	workspaceInput := workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot}
-	if gpuOnly {
-		workspaceInput, err = gpuPreflightWorkspaceInput(workspaceInput)
-		if err != nil {
-			return err
+	if gpuOnly && *configFile == "" {
+		if len(components) != 0 {
+			return errors.New("--component for GPU preflight requires --config FILE; a bare preflight checks the current server's GPU layout")
 		}
+		return runCurrentHostGPUPreflight(currentHostGPUOptions{
+			Release: *releaseInput, InstallRoot: *installRoot, ArtifactRoot: *artifactRoot,
+			RuntimeRoot: *runtimeRoot, StateRoot: *stateRoot, LogRoot: *logRoot,
+		})
 	}
+	workspaceInput := workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot}
 	workspaceResolved, err := workspace.Resolve(workspaceInput)
 	if err != nil {
 		return err
@@ -1728,8 +1734,8 @@ func printCheckDetail(label string, entries []string) {
 
 func runPreflight(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("Usage: eva preflight gpu [--config FILE|--site ID|--workspace PATH] [--release PATH]")
-		fmt.Println("       Defaults to the invoking user's ~/eva-install.yaml, including with sudo; no extra confirmation.")
+		fmt.Println("Usage: eva preflight gpu [--config FILE] [--release PATH]")
+		fmt.Println("       Defaults to the current server. Only --config selects configured hosts; no extra confirmation.")
 		fmt.Println("       Checks target GPUs and applies missing driver/MIG configuration; records an Operation.")
 		fmt.Println("       eva preflight argocd --config FILE|--site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 		return nil

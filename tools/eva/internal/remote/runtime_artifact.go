@@ -54,6 +54,36 @@ type remoteDeliveryMarker struct {
 	Project               string `yaml:"project"`
 }
 
+// PublishedTargetRepository discovers asset supply metadata without reading
+// installer settings or selecting hosts. A present delivery must be valid.
+func PublishedTargetRepository(resolved release.Resolved) (*RepositoryIdentity, error) {
+	markerPath := filepath.Join(resolved.Root, ".eva-remote-release")
+	info, err := os.Lstat(markerPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 64*1024 {
+		return nil, errors.New("Remote delivery marker must be a bounded regular non-symlink file")
+	}
+	contents, err := os.ReadFile(markerPath)
+	if err != nil {
+		return nil, err
+	}
+	var marker remoteDeliveryMarker
+	decoder := yaml.NewDecoder(strings.NewReader(string(contents)))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&marker); err != nil {
+		return nil, fmt.Errorf("parse Remote delivery marker: %w", err)
+	}
+	if _, _, err := checkPublishedRemoteDelivery(resolved, marker.Registry, marker.Project, false); err != nil {
+		return nil, err
+	}
+	return &RepositoryIdentity{Registry: marker.Registry, Project: marker.Project}, nil
+}
+
 func RuntimeArtifactPath(root string, identity PreparationIdentity) string {
 	return filepath.Join(root, runtimeArtifactDirectory, payloadIdentityKey(identity))
 }

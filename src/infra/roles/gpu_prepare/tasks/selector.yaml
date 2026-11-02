@@ -9,6 +9,7 @@
   when:
     - not eva_gpu_selector_asset.stat.exists
     - repository_mode in ['online_repository', 'cloud_repository']
+    - not (eva_gpu_current_host | default(false) | bool)
   block:
     - name: Read Online AWS credentials privately
       ansible.builtin.set_fact:
@@ -36,6 +37,27 @@
       ansible.builtin.set_fact:
         eva_gpu_aws_raw: ''
       no_log: true
+
+- name: Fetch current server Display Mode Selector using existing AWS credentials
+  when:
+    - not eva_gpu_selector_asset.stat.exists
+    - repository_mode in ['online_repository', 'cloud_repository']
+    - eva_gpu_current_host | default(false) | bool
+  block:
+    - name: Fetch selector into the selected Release cache
+      ansible.builtin.command:
+        argv:
+          - bash
+          - "{{ lookup('ansible.builtin.env', 'EVA_REMOTE_LIBEXEC_ROOT') }}/scripts/download/download_display_mode_selector.sh"
+      environment:
+        EVA_CACHE_ROOT: "{{ eva_cache_root }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+  rescue:
+    - name: Explain current server selector download failure
+      ansible.builtin.fail:
+        msg: "Display Mode Selector를 받지 못했습니다. 현재 실행 계정의 AWS CLI·S3 read 권한을 확인하거나, selector가 포함된 Release를 선택한 뒤 다시 실행하세요."
 
 - name: Verify Display Mode Selector was supplied
   ansible.builtin.stat:

@@ -1089,6 +1089,7 @@ func writePreparableRelease(t *testing.T) string {
 			"src/playbook-vars.yaml":                     "---\n",
 			"src/infra/playbooks/site_precondition.yaml": "---\n",
 			"src/infra/playbooks/site_infra.yaml":        "---\n",
+			"src/infra/playbooks/site_gpu_prepare.yaml":  "---\n",
 		}),
 		"eva-solution.tar.gz": archive(map[string]string{"src/solution/playbooks/site_eva_app.yaml": "---\n"}),
 	}

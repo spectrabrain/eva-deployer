@@ -272,14 +272,14 @@ RTX PRO 6000 1장은 `PRO6000-MIGx4`에 맞춰 MIG 4개를 생성하며, 이미 
 `A6000x1`, `L40sx1`, `PRO5000x3`에는 MIG를 적용하지 않습니다.
 Agent는 1절에서 준비한 Bundle profile과 대상 구성이 같아야 합니다.
 
-설치 전에 GPU preflight만 실행하려면 `eva local prepare`를 완료한 뒤 같은 설정으로 실행합니다.
+설치 전에 GPU preflight만 실행하려면 `eva local prepare`를 완료한 뒤 **Local 설치 서버에서** 실행합니다.
 
 ```bash
 sudo eva preflight gpu
 ```
 
-사용자 홈의 `eva-install.yaml`을 자동으로 읽으며, `sudo`로 실행해도 원래 사용자의 홈을 사용합니다.
-다른 설정 파일을 사용할 때만 `--config FILE`을 지정합니다. 추가 실행 확인은 필요하지 않습니다.
+현재 서버의 GPU를 확인·준비하며 설치 설정 파일은 읽지 않습니다.
+설정 파일에 지정된 Agent/Vision 타겟을 준비할 때는 `--config FILE`을 명시합니다. 추가 실행 확인은 필요하지 않습니다.
 
 필요한 드라이버와 GPU/MIG를 준비하며 제품은 설치하지 않습니다. k3s가 아직 없으면 GPU preflight를
 마친 뒤 일반 설치에서 Kubernetes 자원 노출을 확인합니다. 다른 MIG 분할이 있거나 변경할 GPU에

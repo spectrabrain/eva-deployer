@@ -95,7 +95,7 @@ func TestRemoteGPUPreflightUsesTargetCLIAndPreservesComponentSelection(t *testin
 	}
 }
 
-func TestRemoteGPUPreflightUsesDefaultConfigWithoutConfirmation(t *testing.T) {
+func TestRemoteGPUPreflightUsesExplicitConfigWithoutConfirmation(t *testing.T) {
 	config := remoteControllerConfig(t)
 	contents, err := os.ReadFile(config)
 	if err != nil {
@@ -107,9 +107,8 @@ func TestRemoteGPUPreflightUsesDefaultConfigWithoutConfirmation(t *testing.T) {
 	if err := os.WriteFile(defaultConfig, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previousHome, previousStat := gpuPreflightHome, stdinStat
-	t.Cleanup(func() { gpuPreflightHome, stdinStat = previousHome, previousStat })
-	gpuPreflightHome = func() (string, error) { return home, nil }
+	previousStat := stdinStat
+	t.Cleanup(func() { stdinStat = previousStat })
 	stdinStat = func() (os.FileInfo, error) {
 		t.Fatal("GPU preflight must not request an extra confirmation")
 		return nil, errors.New("unexpected stdin inspection")
@@ -123,10 +122,10 @@ func TestRemoteGPUPreflightUsesDefaultConfigWithoutConfirmation(t *testing.T) {
 		return nil
 	})
 	output := captureRemoteTargetStdout(t, func() error {
-		return run([]string{"preflight", "gpu", "--release", writeRemotePublishRelease(t), "--state-root", t.TempDir(), "--log-root", t.TempDir()})
+		return run([]string{"preflight", "gpu", "--release", writeRemotePublishRelease(t), "--config", defaultConfig, "--state-root", t.TempDir(), "--log-root", t.TempDir()})
 	})
-	if len(targets) != 2 || targets[0] != "node-a" || targets[1] != "node-b" || !strings.Contains(output, defaultConfig) {
-		t.Fatalf("default GPU preflight did not use the configured targets: %v %s", targets, output)
+	if len(targets) != 2 || targets[0] != "node-a" || targets[1] != "node-b" || !strings.Contains(output, "status: succeeded") {
+		t.Fatalf("explicit GPU preflight did not use the configured targets: %v %s", targets, output)
 	}
 }
 

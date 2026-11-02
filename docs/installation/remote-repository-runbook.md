@@ -325,18 +325,23 @@ RTX PRO 6000 Blackwell 1장은 MIG 4개를 생성하며, 이미 맞는 구성은
 다른 MIG 분할이 있거나 변경할 GPU에 workload가 실행 중이면 중단하므로 해당 구성을 정리한 뒤 다시 실행합니다.
 재부팅 안내가 나오면 **해당 타겟을 재부팅하고 Main에서 같은 명령을 다시 실행**합니다.
 
-GPU preflight만 먼저 실행하려면 Main의 Harbor 자산 준비를 마친 뒤 Main에서 실행합니다.
+GPU preflight만 먼저 실행하려면 Harbor 자산 준비를 마친 뒤 **Main에서 설정 파일을 명시**합니다.
+
+```bash
+sudo eva preflight gpu --config "$HOME/eva-install.yaml"
+```
+
+설정된 Agent/Vision 타겟으로 Tool과 준비 자산을 전달해 필요한 드라이버·GPU/MIG를 준비합니다.
+추가 실행 확인은 필요하지 않습니다. k3s가 아직 없으면 일반 설치에서 Kubernetes 자원 노출을 확인합니다.
+
+Tool·Release가 전달된 **Target에서 현재 서버만** 준비하려면 다음을 실행합니다.
 
 ```bash
 sudo eva preflight gpu
 ```
 
-Main 사용자 홈의 `eva-install.yaml`을 자동으로 읽으며, `sudo`로 실행해도 원래 사용자의 홈을 사용합니다.
-다른 설정 파일을 사용할 때만 `--config FILE`을 지정합니다. 추가 실행 확인은 필요하지 않습니다.
-
-설정된 Agent/Vision 타겟으로 Tool과 준비 자산을 전달해 필요한 드라이버·GPU/MIG를 준비하며,
-제품은 설치하지 않습니다. k3s가 아직 없으면 일반 설치에서 Kubernetes 자원 노출을 확인합니다.
-현재 서버 설치 설정을 사용한다면 같은 명령을 해당 타겟에서 실행합니다.
+`--config`를 생략하면 설치 설정 파일을 읽지 않고 현재 서버만 대상으로 합니다.
+Main에서 생략하면 Main 자신의 GPU를 확인합니다.
 n8n 단독 설치에는 GPU preflight가 포함되지 않습니다. TLS certificate/key는 설정한 타겟의 `hostPath`에 준비합니다.
 
 ### Argo CD 관리 연결 확인

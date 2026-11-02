@@ -226,7 +226,7 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva config sample --mode online` | mode별 단일 설치 설정 샘플 출력 | 조회 |
 | `eva config sample --mode remote --output FILE` | 주소/프로토콜 선택 후 private 샘플 저장 | 로컬 파일 생성 |
 | `eva install --config FILE` | private YAML을 내부 Workspace로 변환해 설치 | 변경 |
-| `eva preflight gpu` | 선택한 Agent/Vision 대상의 드라이버·GPU/MIG 상태 확인 후 필요한 구성 적용; 제품 설치 제외 | 변경 |
+| `eva preflight gpu [--config FILE]` | 기본은 현재 서버의 드라이버·GPU/MIG 확인·준비; `--config`를 명시하면 설정된 Agent/Vision 타겟 사용 | 변경 |
 | `eva install [RELEASE_PATH] --site ID` | Workspace와 Release로 설치 | 변경 |
 | `eva install --workspace PATH` | 명시적 Workspace로 설치 | 변경 |
 | `eva plan --release PATH --workspace PATH` | Plan YAML 출력, 설치하지 않음 | 조회 |
@@ -427,7 +427,8 @@ Harbor 설치 방식과 HTTP/HTTPS는 bootstrap이 자동 확인한다. 기존 H
 | `eva runtime validate [--runtime-root PATH]` | Runtime 유효성 검사 |
 | `eva runtime bootstrap [--offline PATH] [--runtime-root PATH]` | pin된 online Runtime 또는 offline archive로 구성 |
 | `eva runtime install --source PATH [--runtime-root PATH]` | 추출된 Runtime payload 설치 |
-| `eva preflight gpu` | 설정된 Agent/Vision 대상의 GPU 확인·준비; Online Bastion·Remote Main의 SSH 타겟도 지원 |
+| `eva preflight gpu` | 현재 서버의 GPU 확인·준비; 설치 설정 파일을 읽지 않음 |
+| `eva preflight gpu --config FILE` | 설정된 Agent/Vision 타겟의 GPU 확인·준비; Online Bastion·Remote Main의 SSH 타겟 지원 |
 | `eva preflight argocd --workspace PATH` | 기존 관리 연결 검증 및 승인 기반 handoff |
 | `eva troubleshoot apt` | 지원 APT 문제 진단 |
 | `eva troubleshoot apt --fix-known --yes` | 명시적으로 지원되는 APT 복구 |
@@ -439,8 +440,8 @@ Harbor 설치 방식과 HTTP/HTTPS는 bootstrap이 자동 확인한다. 기존 H
 Online·Remote·Local의 `eva install`은 Agent/Vision 대상에서 Infra 다음, Config 전에 GPU preflight를 자동 실행한다.
 `eva preflight gpu`는 같은 준비만 별도로 실행하고 Operation에 결과를 기록한다. RTX PRO 6000 1장은 MIG 4개를
 구성하고 기존의 올바른 분할은 재사용한다. A6000/L40S/PRO5000의 지원 profile에는 MIG를 적용하지 않는다.
-입력 선택을 생략하면 사용자 홈의 `eva-install.yaml`을 자동으로 읽으며 `sudo`도 원래 사용자의 홈을 사용한다.
-다른 설정 파일을 사용할 때만 `--config FILE`을 지정한다. GPU preflight에 `--yes`나 추가 실행 확인은 필요하지 않다.
+`--config`를 생략하면 설치 설정 파일을 읽지 않고 현재 서버만 대상으로 한다.
+설정된 Agent/Vision 타겟을 준비하려면 `--config FILE`을 명시한다. GPU preflight에 `--yes`나 추가 실행 확인은 필요하지 않다.
 기존의 다른 분할과 실행 중인 GPU workload는 보존하며 변경이 필요하면 중단한다.
 드라이버 설치·GPU Mode 변경 후 재부팅이 필요하면 해당 타겟을 재부팅하고 같은 명령을 다시 실행한다.
 `exec --runtime-root PATH`로 다른 관리 Runtime을 지정할 수 있다.

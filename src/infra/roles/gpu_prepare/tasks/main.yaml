@@ -1,11 +1,36 @@
 - name: Detect target NVIDIA GPU
   ansible.builtin.import_tasks: "{{ eva_infra_root }}/roles/gpu/tasks/detect.yaml"
+  when: not (eva_gpu_current_host | default(false) | bool)
+
+- name: Inspect current server NVIDIA driver without installing prerequisites
+  ansible.builtin.command: nvidia-smi -L
+  register: eva_gpu_local_smi
+  changed_when: false
+  failed_when: false
+  when: eva_gpu_current_host | default(false) | bool
+
+- name: Inspect current server PCI devices when driver is unavailable
+  ansible.builtin.command: lspci -nn
+  register: eva_gpu_local_pci
+  changed_when: false
+  failed_when: false
+  when:
+    - eva_gpu_current_host | default(false) | bool
+    - eva_gpu_local_smi.rc != 0
+
+- name: Resolve current server NVIDIA GPU presence
+  ansible.builtin.set_fact:
+    gpu_has_nvidia: >-
+      {{ eva_gpu_local_smi.rc == 0 or
+         (eva_gpu_local_pci.rc | default(1) == 0 and
+          'nvidia' in (eva_gpu_local_pci.stdout | default('') | lower)) }}
+  when: eva_gpu_current_host | default(false) | bool
 
 - name: Require a GPU on selected Agent or Vision targets
   ansible.builtin.assert:
     that:
       - gpu_has_nvidia | bool
-    fail_msg: "Agent/Vision 대상에서 NVIDIA GPU를 감지하지 못했습니다. 설치 설정의 대상 서버와 GPU 장착 상태를 확인하세요."
+    fail_msg: "대상 서버에서 NVIDIA GPU를 감지하지 못했습니다. GPU 장착 상태와 lspci(pciutils)를 확인하세요. --config를 생략하면 현재 서버만 확인합니다."
 
 - name: Check target driver availability
   ansible.builtin.command: nvidia-smi
@@ -23,4 +48,3 @@
 - name: Prepare GPU layout on NVIDIA hosts
   ansible.builtin.include_tasks: prepare.yaml
   when: gpu_has_nvidia | bool
-

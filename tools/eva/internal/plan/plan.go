@@ -73,6 +73,15 @@ func BuildWithOverrides(workspaceResolved workspace.Resolved, releaseResolved re
 
 func scopedSteps(config workspace.Config) []Step {
 	result := steps(config.Components)
+	if config.ManagedCluster() {
+		filtered := make([]Step, 0, len(result))
+		for _, step := range result {
+			if step.Component != "infra" && step.Component != "gpu" {
+				filtered = append(filtered, step)
+			}
+		}
+		result = filtered
+	}
 	if len(config.TargetComponents) == 0 {
 		return result
 	}

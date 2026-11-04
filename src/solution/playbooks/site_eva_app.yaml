@@ -36,6 +36,12 @@
       changed_when: false
 
   tasks:
-    - name: STEP 1 - eva-app
-      ansible.builtin.import_role:
-        name: eva_app
+    - name: Install EVA app with credential schedule recovery
+      block:
+        - name: STEP 1 - eva-app
+          ansible.builtin.import_role:
+            name: eva_app
+      always:
+        - name: Restore ECR schedules after product installation
+          ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/online_resume.yaml"
+          when: eva_managed_cluster | default(false) | bool

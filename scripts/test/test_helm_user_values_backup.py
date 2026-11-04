@@ -333,7 +333,7 @@ CALLERS = [
     ("eva_iam/tasks/main.yaml", "Ensure EVA IAM workspace exists on target", ["iam"]),
     ("eva_vision/tasks/main.yaml", "Remove EVA Vision workspace if it exists", ["vision"]),
     ("eva_agent/tasks/agent.yaml", "Ensure EVA Agent workspace exists", ["agent"]),
-    ("eva_agent/tasks/dependencies.yaml", "Detect local disk mount candidates from facts",
+    ("eva_agent/tasks/dependencies.yaml", "Prepare server NFS and local model cache",
      ["agent-init", "qdrant", "vllm"]),
 ]
 
@@ -346,7 +346,16 @@ def backup_callers():
                    == "eva_helm_values_backup"]
         assert len(matches) == 1, relative
         caller = matches[0]
-        assert tasks.index(caller) < next(i for i, task in enumerate(tasks) if task.get("name") == mutation)
+        anchors = [mutation]
+        if relative == "eva_agent/tasks/dependencies.yaml":
+            anchors.extend([
+                "Resolve NKS dependency Values without configuring worker Infra",
+                "Remove EVA dependency workspace if it exists",
+            ])
+        for anchor in anchors:
+            positions = [i for i, task in enumerate(tasks) if task.get("name") == anchor]
+            assert len(positions) == 1, f"{relative}: missing or duplicate ordering anchor: {anchor}"
+            assert tasks.index(caller) < positions[0], f"{relative}: backup must precede {anchor}"
         callers.append(caller)
     return callers
 

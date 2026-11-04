@@ -290,6 +290,85 @@
     - not ansible_check_mode
     - eva_vision_chart_version is version('3.3.0', '>=')
 
+- name: Ensure EVA Vision Helm post-renderer plugin directory exists
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer"
+    state: directory
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Render EVA Vision Helm post-renderer plugin metadata
+  ansible.builtin.template:
+    src: post-renderer/plugin.yaml.j2
+    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/plugin.yaml"
+    mode: "0644"
+  when: not ansible_check_mode
+
+- name: Render EVA Vision Helm post-renderer
+  ansible.builtin.template:
+    src: post-renderer/post-renderer.py.j2
+    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Ensure EVA Vision Helm post-renderer is executable
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Verify Helm recognizes the EVA Vision post-renderer plugin
+  ansible.builtin.command: helm plugin list
+  register: eva_vision_helm_plugins
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+
+- name: Assert Helm recognizes the EVA Vision post-renderer plugin
+  ansible.builtin.assert:
+    that:
+      - eva_vision_helm_plugins.stdout is search('(^|\\n)eva-vision-postrenderer\\s')
+    fail_msg: EVA Vision Helm post-renderer plugin was not recognized.
+  when: not ansible_check_mode
+
+- name: Render and verify final EVA Vision Helm manifest before deployment
+  no_log: >-
+    {{
+      (eva_cli_values_path | default('') | length > 0)
+      or
+      (eva_cli_helm_set | default([]) | length > 0)
+    }}
+  ansible.builtin.shell: >-
+    helm template {{ eva_vision_name }} {{ eva_vision_chart_source }}
+    -n {{ eva_vision_namespace }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
+    -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    --post-renderer eva-vision-postrenderer
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    > /dev/null
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+
+- name: Validate shared EVA vision inputs against the existing cluster
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  vars:
+    eva_cluster_guard_component: vision
+    eva_cluster_guard_workdir: "{{ eva_vision_workdir }}"
+    eva_cluster_guard_chart: "{{ eva_vision_chart_source }}"
+    eva_cluster_guard_version: "{{ eva_vision_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_cluster_guard_values: "{{ [eva_vision_workdir ~ '/effective-input-values.yaml'] }}"
+    eva_cluster_guard_post_renderer: eva-vision-postrenderer
+    eva_cluster_guard_environment:
+      HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+  when: eva_managed_cluster | default(false) | bool
+
 - name: Check existing EVA Vision deployment
   no_log: true
   ansible.builtin.command: kubectl get deployment {{ eva_vision_name }} -n {{ eva_vision_namespace }} -o json
@@ -359,71 +438,6 @@
     - eva_vision_deployment_exists.rc == 0
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
-
-- name: Ensure EVA Vision Helm post-renderer plugin directory exists
-  ansible.builtin.file:
-    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer"
-    state: directory
-    mode: "0755"
-  when: not ansible_check_mode
-
-- name: Render EVA Vision Helm post-renderer plugin metadata
-  ansible.builtin.template:
-    src: post-renderer/plugin.yaml.j2
-    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/plugin.yaml"
-    mode: "0644"
-  when: not ansible_check_mode
-
-- name: Render EVA Vision Helm post-renderer
-  ansible.builtin.template:
-    src: post-renderer/post-renderer.py.j2
-    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
-    mode: "0755"
-  when: not ansible_check_mode
-
-- name: Ensure EVA Vision Helm post-renderer is executable
-  ansible.builtin.file:
-    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
-    mode: "0755"
-  when: not ansible_check_mode
-
-- name: Verify Helm recognizes the EVA Vision post-renderer plugin
-  ansible.builtin.command: helm plugin list
-  register: eva_vision_helm_plugins
-  changed_when: false
-  when: not ansible_check_mode
-  environment:
-    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
-
-- name: Assert Helm recognizes the EVA Vision post-renderer plugin
-  ansible.builtin.assert:
-    that:
-      - eva_vision_helm_plugins.stdout is search('(^|\\n)eva-vision-postrenderer\\s')
-    fail_msg: EVA Vision Helm post-renderer plugin was not recognized.
-  when: not ansible_check_mode
-
-- name: Render and verify final EVA Vision Helm manifest before deployment
-  no_log: >-
-    {{
-      (eva_cli_values_path | default('') | length > 0)
-      or
-      (eva_cli_helm_set | default([]) | length > 0)
-    }}
-  ansible.builtin.shell: >-
-    helm template {{ eva_vision_name }} {{ eva_vision_chart_source }}
-    -n {{ eva_vision_namespace }}
-    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
-    -f {{ eva_vision_workdir }}/effective-input-values.yaml
-    --post-renderer eva-vision-postrenderer
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
-    > /dev/null
-  args:
-    executable: /bin/bash
-  changed_when: false
-  when: not ansible_check_mode
-  environment:
-    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
-    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
 
 - name: Reconcile exact legacy Argo CD-managed EVA Vision resources
   ansible.builtin.include_tasks: reconcile_vision.yaml

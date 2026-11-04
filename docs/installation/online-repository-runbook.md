@@ -8,6 +8,9 @@ EVA를 설치하는 절차입니다. 현재 서버에 설치하거나 별도 Bas
 하나의 `eva install` 작업으로 설치합니다. Docker, k3s, NVIDIA runtime, 호스트 영속
 데이터를 변경하므로 먼저 작업 가능 시간과 백업 정책을 확인합니다.
 
+Bastion에서 NCP NKS에 Solution만 설치할 때도 같은 configure/install을 사용합니다.
+NKS의 서버 Infra는 Cloud에서 관리하며 설치자가 생성된 Values를 채웁니다.
+
 ## 1. 대상 환경
 
 | 항목 | 필수 운영 기준 |
@@ -58,7 +61,7 @@ Main Harbor와 설치 자산을 사용하는 환경은 [Remote Repository Runboo
 Remote도 Main에서 같은 `eva install configure`로 SSH 타겟을 입력하고 `eva install --config`로 설치합니다.
 Main의 Harbor·자산 준비를 먼저 완료하며 별도 타겟 등록 명령은 필요하지 않습니다.
 
-## 4. GPU 구성 선택
+## 4. GPU 구성 선택 (서버 설치)
 
 Agent를 설치할 서버의 GPU를 다음 표와 맞춥니다. `eva install`은 Agent/Vision 대상의 GPU 상태를
 확인하고 필요한 구성을 자동 적용합니다. RTX PRO 6000의 MIG를 수동으로 분할할 필요가 없습니다.
@@ -86,13 +89,13 @@ eva install configure
 
 1. 설치환경에서 **online**을 선택합니다.
 2. **현재 서버 설치** 또는 **Bastion/controller**를 선택합니다.
-3. Bastion이면 닉네임·IP·SSH 계정·숨김 비밀번호로 타겟 한 대를 등록합니다.
-  sudo도 같은 비밀번호를 사용하며 private key는 이 wizard에서 받지 않습니다.
-4. 해당 타겟의 **Infra-only / Infra + Solution**을 선택합니다.
-5. Solution이면 HTTP/HTTPS → 동일/별도 도메인/IP 직접 접속 → IAM+APP/APP만(외부 IAM) →
-  추가 Agent/Vision 구성을 선택합니다.
-6. Bastion이면 다음 타겟을 추가하고 설치 옵션 재사용 여부를 고르거나 등록을 마칩니다.
-7. 생성 파일을 열어 남은 site·AWS·license·인증서·주소·SSO 입력을 채웁니다.
+3. Online Bastion이면 **On-premise / 서버** 또는 **Cloud (NCP NKS)**를 선택합니다.
+4. 서버는 닉네임·IP·SSH 계정·숨김 비밀번호로 타겟을 등록합니다. NKS는 Bastion 계정의
+   kubeconfig·context·Base Release 경로를 지정하며 worker SSH 정보는 입력하지 않습니다.
+5. **Infra만 / Infra + Solution / Solution만**을 선택합니다. NKS는 **Solution만**을 사용합니다.
+6. 기존과 같이 HTTP/HTTPS → 동일/별도 도메인/IP → IAM+App/외부 IAM → Agent/Vision을 선택합니다.
+7. SSH 서버는 다음 타겟을 추가하거나 등록을 마칩니다. NKS는 로컬 controller 하나를 사용합니다.
+8. 생성 파일을 열어 site·AWS·license·주소·SSO·스토리지 등 Values를 실제 환경에 맞게 채웁니다.
 
 타겟마다 선택은 독립적이며 Infra-only 타겟에는 Solution Values를 넣지 않습니다.
 타겟별 `components`에 따라 실제 Ansible 단계의 대상도 제한합니다. 같은 설치 옵션을 재사용해도
@@ -215,6 +218,30 @@ sudo eva workspace validate --config /home/eva/eva-install.yaml
 위 명령은 설치 설정의 필수 입력과 형식을 검증합니다. 설정 파일에는 credential이 포함되므로
 Git, 채팅, Release artifact에 넣지 않습니다.
 
+### NKS + Solution만의 설정
+
+동일한 site·AWS·라이선스·접속 주소 틀을 사용하고 `deployment.environment: nks`와
+kubeconfig 연결만 추가합니다. `components.infra`는 `false`입니다.
+신규 설치와 업데이트 모두 `targets.controller.values.<component>`를 직접 채웁니다.
+기존 Helm Values는 자동 병합하지 않으며 기존 역할의 백업·보정·SSO·복구 처리는 유지합니다.
+
+- App/IAM 이미지 인증은 Kubernetes Secret을 사용합니다. AWS 키는 공통 `credentials.aws`에 입력합니다.
+  ECR 변경 시 App/IAM의 `imagePullSecrets.account`·`region`, Agent의 `ecrRefresh.registry`도
+  새 이미지 저장소와 맞춥니다. 어긋나면 workload 변경 전에 중단합니다.
+- 기본 틀은 Cloud LB의 직접 연결(`ingress.enabled: false`)입니다. Chart Ingress를 사용할 때는
+  실제 IngressClass와 TLS Secret 설정을 채웁니다. 공개 URL 변경과 DNS·LB 설정을 함께 맞춥니다.
+- 새 App/IAM은 PVC·StorageClass를 채웁니다. 업데이트는 기존 PVC·hostPath 경로를 유지합니다.
+  기존 IAM hostPath는 데이터가 있는 worker에 고정하며 새 hostPath 생성·경로 이동은 하지 않습니다.
+- Vision은 실제 GPU resource와 모델 캐시 StorageClass를 채웁니다. NKS에 RuntimeClass가 없으면
+  `runtimeClassName: ""`를 유지합니다. GPU 교체는 `Recreate` 또는 `maxSurge: 0`을 사용합니다.
+  기본 `imagePullSecrets.ExistingSecret: ecr-registry`는 Deployer가 갱신합니다. 외부 관리 Secret을
+  지정하면 설치자가 새 Registry의 인증 정보와 갱신을 준비해야 합니다.
+- Agent 선택 시 vLLM·Qdrant도 같은 역할로 설치합니다. `values.agent.eva_agent_deploy`의
+  `vllm_profile`과 `vllm_values`·`qdrant_values`에 NAS/블록 StorageClass, 용량, 모델·GPU 설정을 채웁니다.
+  업데이트는 기존 PVC 이름·용량과 필요한 NodePort를 유지합니다. 서버용 NFS·StorageClass는 만들지 않습니다.
+- Infra·드라이버·GPU/MIG·NFS·k3s 설정은 실행하지 않습니다. NCP 인증 프로그램과 ECR 검증용
+  AWS CLI는 Bastion의 kubeconfig 소유 계정에서 사용할 수 있어야 합니다.
+
 ### Agent 이미지·모델 공급
 
 Agent 설치에 필요한 차트·이미지·기본 Values는 선택한 Release에서 정합니다.
@@ -242,7 +269,7 @@ Vision 모델은 컨테이너 이미지와 별도로 S3에서 공급됩니다. `
 - 모델 캐시는 기본 `20Gi`이며 필요하면 `values.vision.modelCache.size`로 조정합니다.
   **업그레이드·재시도에서 모델 PVC를 삭제하지 않습니다.**
 
-## 6. 인증서 파일 준비
+## 6. 인증서 파일 준비 (서버 설치)
 
 **HTTPS 설치 시** 각 대상 서버에 인증서와 개인 키를 준비합니다. HTTP 또는 기존 TLS Secret을
 사용하는 경우에는 이 단계를 건너뜁니다.
@@ -275,6 +302,8 @@ sudo eva preflight argocd --config /home/eva/eva-install.yaml
 - 연결 해제 완료가 확인되지 않으면 Solution 설치를 중단합니다. `--yes`로 우회할 수 없습니다.
 
 ## 8. 설치
+
+### On-premise / 서버
 
 GPU preflight만 먼저 실행하려면 **설치 대상 서버에서** 실행합니다.
 
@@ -309,7 +338,7 @@ sudo eva verify --release /path/to/another/release
 sudo eva install --release /path/to/another/release --config /home/eva/eva-install.yaml --yes
 ```
 
-Plan 순서는 항상 다음과 같습니다.
+서버의 전체 설치 Plan 순서는 다음과 같습니다.
 
 ```text
 precondition -> infra -> GPU preflight -> config -> iam -> agent -> vision -> app
@@ -331,6 +360,22 @@ Runtime bootstrap과 Online Infra 설치는 APT 저장소를 자동 확인합니
 ```bash
 sudo eva retry --yes
 ```
+
+### NKS + Solution만
+
+Bastion의 kubeconfig 소유 계정으로 sudo 없이 같은 명령을 실행합니다.
+
+```bash
+eva install --config "$HOME/eva-install.yaml"
+```
+
+기존 Workspace → Plan → Apply → Solution Ansible 역할에서 서버 Infra 의존 작업만 제외합니다.
+설치 시작 시 API·인증·이미지 접근을 확인하고, 각 역할이 workload 변경 전에 스토리지·리소스 참조·GPU 배치를 확인합니다.
+이전에 비활성화된 AWS 키는 Registry 주소만 바꿔도 사용할 수 없으므로 유효한 키를 입력합니다.
+
+NKS의 결과 확인·재시도도 기존 `eva check --verbose`, `eva status`, `eva retry`를 sudo 없이 사용합니다.
+작업 기록·로그는 계정의 `~/.local/state/eva`, private 백업은 그 아래에 저장합니다.
+설정이나 Values를 바꿨다면 새 `eva install --config`를 실행합니다.
 
 ## 9. 설치 결과 확인
 

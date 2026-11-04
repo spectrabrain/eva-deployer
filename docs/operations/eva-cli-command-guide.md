@@ -242,16 +242,20 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva backup values --path DIR` | SHA-256 확인 후 선택한 백업 Values 원문 출력 | 민감정보 조회 |
 
 일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Online/Remote/Local → Online/Remote 현재 서버/SSH 설치 →
-타겟별 Infra-only/Solution·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
-Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입력하며 sudo도 같은 비밀번호를 쓴다.
+타겟별 Infra만/Infra + Solution/Solution만·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
+Online에서 Bastion을 선택하면 On-premise / Cloud(NKS)를 추가로 선택한다. NKS는 같은 Values 틀을 채우고
+Solution만으로 설치하며 worker SSH 대신 kubeconfig를 사용한다. 기존 Helm Values는 자동 병합하지 않는다.
+서버용 Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입력하며 sudo도 같은 비밀번호를 쓴다.
 다음 타겟은 이전 설치 옵션을 재사용하거나 별도로 고른다. 서비스 주소/Secret은 복사하지 않는다.
 기본 결과는 사용자 홈의 `eva-install.yaml`(`0600`)이며, 필수 입력을 채우라는 안내만 하고 설치하지 않는다.
 기존 파일은 덮어쓰지 않으며 `--output FILE`로 다른 위치를 고른다. 타겟별 컴포넌트 선택은 Plan의
 설치 범위에 보존된다. Bastion·Main은 설치 대상이 아니다. Online 타겟은 외부 저장소에 직접 접근하며
 Remote 타겟은 준비된 Main Harbor를 사용한다. Remote에서는 별도 `remote target` 등록 없이
 Main의 `eva install --config FILE`이 전달과 타겟 설치를 실행한다. 설치 후 Main의 `eva check`는 Remote 타겟을
-점검한다. GPU preflight는 모든 모드에서 설치 설정의 Agent/Vision 타겟을 확인하고 준비한다.
-Online의 `eva check`는 실행 서버 기준이다.
+점검한다. 서버의 GPU preflight는 설치 설정의 Agent/Vision 타겟을 확인하고 준비한다.
+Online 서버의 `eva check`는 실행 서버 기준이다. NKS는 작업에 고정된 kubeconfig의 클러스터를 점검한다.
+NKS install/check/status/retry는 kubeconfig 소유 계정으로 sudo 없이 실행한다. 서버 Infra·GPU/MIG·NFS 작업만 제외하며
+공통 Solution 역할의 인증·백업·보정·SSO·복구는 유지한다. NKS 작업은 `~/.local/state/eva`에 보관한다.
 
 Bastion의 설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록한다.
 별도 SSH 접속 준비는 필요 없으며 이미 등록된 키가 변경되면 중단한다.

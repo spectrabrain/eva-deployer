@@ -28,6 +28,25 @@ func TestCheckReportsHealthySelectedComponents(t *testing.T) {
 	}
 }
 
+func TestManagedClusterHealthUsesKubernetesWithoutBastionHostServices(t *testing.T) {
+	runner := fakeRunner(map[string]CommandResult{
+		"kubectl get nodes -o json": {Output: `{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`},
+		"kubectl get pods,deployments,statefulsets,daemonsets,services,ingresses -n eva-app -o json": {Output: healthyResources("eva-app", false)},
+	})
+	report := Check(Input{
+		ManagedCluster: true, RuntimeVersion: "1.0.1", OperationState: "succeeded",
+		Components: []Component{{Name: "app", Namespace: "eva-app"}},
+	}, func(name string, args ...string) CommandResult {
+		if name == "systemctl" {
+			t.Fatal("managed-cluster check must not inspect Docker/k3s on the Bastion")
+		}
+		return runner(name, args...)
+	})
+	if !report.Healthy {
+		t.Fatalf("report = %#v, want healthy managed cluster", report)
+	}
+}
+
 func TestCheckReportsUnhealthyPodsAndVerboseDetails(t *testing.T) {
 	report := Check(Input{
 		RuntimeVersion: "1.0.1", OperationState: "failed",

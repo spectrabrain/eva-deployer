@@ -119,6 +119,17 @@ else:
 '''
 
 
+def dependency_tasks():
+    tasks = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+    result = []
+    for task in tasks:
+        if task.get('ansible.builtin.include_tasks') == 'dependencies_host.yaml':
+            result.extend(yaml.safe_load((ROLE / 'tasks/dependencies_host.yaml').read_text()))
+        else:
+            result.append(task)
+    return result
+
+
 class AgentCredentialsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='eva-agent-credentials-')
@@ -161,7 +172,7 @@ print('private-agent-fixture-DO-NOT-PRINT')
             {'ansible.builtin.include_role': {'name': 'eva_agent', 'tasks_from': 'credentials'}},
         ]
         if cleanup_workdir:
-            dependencies = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+            dependencies = dependency_tasks()
             preparation.append(next(task for task in dependencies
                                     if task['name'] == 'Remove EVA dependency workspace if it exists'))
         preparation.append({'name': 'Enter subsequent storage and workload preparation',
@@ -484,7 +495,7 @@ class AgentPreparationTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, filename + '\n' + result.stdout + result.stderr)
 
     def test_credentials_precede_storage_migrations_and_workload_changes(self):
-        tasks = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+        tasks = dependency_tasks()
         names = [task.get('name') for task in tasks]
         credential = names.index('Prepare namespace registry and model credentials before deploying Agent workloads')
         self.assertEqual(sum(task.get('ansible.builtin.include_tasks') == 'credentials.yaml' for task in tasks), 1)
@@ -682,7 +693,7 @@ class AgentPublishedChartsTests(unittest.TestCase):
                                   (work / 'aws.log').read_text())
 
     def test_all_profiles_render_with_mode_specific_credentials_and_storage(self):
-        dependencies = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+        dependencies = dependency_tasks()
         selected = [task for task in dependencies if task['name'] in ['Resolve vLLM modelSpec override', 'Build vLLM k3s override values']]
         tasks = selected + [{'ansible.builtin.copy': {'dest': str(self.work / 'vllm.yaml'),
                                                      'content': '{{ eva_agent_vllm_k3s_override_values | to_nice_yaml }}'}},
@@ -752,8 +763,53 @@ class AgentPublishedChartsTests(unittest.TestCase):
                         self.assertIn('custom-aws', output.stdout)
 
 
+    def test_nks_dependencies_render_with_csi_storage_and_shared_release_repairs(self):
+        tasks=dependency_tasks()
+        names={'Resolve vLLM modelSpec override','Build vLLM k3s override values',
+               'Initialize NKS model scheduling defaults','Remove server-only model selectors from the NKS release profile',
+               'Apply NKS platform and installer Values to the shared vLLM input'}
+        selected=[t for t in tasks if t['name'] in names]
+        self.assertEqual(len(selected),5)
+        selected.append({'ansible.builtin.copy': {'dest':str(self.work/'nks-vllm.yaml'),
+                         'content':'{{ eva_agent_vllm_k3s_override_values | to_nice_yaml }}'}})
+        for profile in PROFILES:
+            with self.subTest(profile=profile):
+                base=copy.deepcopy(self.profiles['eva-agent-vllm',f'values-k3s.{profile}.docker.yaml'])
+                variables={'eva_managed_cluster':True,'airgap_mode':False,'eva_agent_vllm_profile_values':base,
+                    'eva_agent_vllm_image_repository':'vllm/vllm-openai','eva_agent_vllm_image_tag':'v0.21.0',
+                    'eva_agent_vllm_router_image_repository':'lmcache/lmstack-router','eva_agent_vllm_router_image_tag':'v0.1.10',
+                    'eva_agent_aws_credentials_secret_name':'custom-aws',
+                    'eva_agent_cluster_vllm_values':{'routerSpec':{'nodeSelectorTerms':[]},
+                        'servingEngineSpec':{'runtimeClassName':''},
+                        'sharedPvcStorage':{'mode':'dynamic','storageClass':'nks-nas'}}}
+                result=ansible(self.work,selected,variables)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                rendered=run([self.helm,'template','eva-agent-vllm',str(self.charts['eva-agent-vllm-3.3.0.tgz']),
+                              '-n','eva-agent','-f',str(self.work/'nks-vllm.yaml')])
+                self.assertEqual(rendered.returncode,0,rendered.stderr)
+                docs=list(yaml.safe_load_all(rendered.stdout))
+                self.assertFalse(any(d['kind']=='PersistentVolume' for d in docs))
+                claim=next(d for d in docs if d['kind']=='PersistentVolumeClaim')
+                self.assertEqual(claim['spec']['storageClassName'],'nks-nas')
+                self.assertNotIn('k3s',rendered.stdout)
+                for d in docs:
+                    if d['kind']=='Deployment':
+                        self.assertNotIn('runtimeClassName',d['spec']['template']['spec'])
+                self.assertIn('custom-aws',rendered.stdout)
+        qdrant=copy.deepcopy(self.profiles['eva-agent-qdrant','values-k3s.s3.yaml'])
+        qdrant['nodeSelector'].pop('node.kubernetes.io/instance-type')
+        qdrant['persistence']['storageClassName']='nks-block'
+        qdrant['snapshotPersistence']['storageClassName']='nks-block'
+        (self.work/'nks-qdrant.yaml').write_text(yaml.safe_dump(qdrant))
+        rendered=run([self.helm,'template','eva-agent-qdrant',str(self.charts['qdrant-1.18.2.tgz']),
+                      '-n','eva-agent','-f',str(self.work/'nks-qdrant.yaml')])
+        self.assertEqual(rendered.returncode,0,rendered.stderr)
+        stateful=next(d for d in yaml.safe_load_all(rendered.stdout) if d['kind']=='StatefulSet')
+        self.assertEqual({c['spec']['storageClassName'] for c in stateful['spec']['volumeClaimTemplates']},{'nks-block'})
+        self.assertIn('preserving existing collection',rendered.stdout)
+
     def test_qdrant_snapshot_sources_and_secret_shapes(self):
-        dependencies = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+        dependencies = dependency_tasks()
         names = ['Point Harbor Qdrant values at the selected registry',
                  'Resolve Harbor registry placeholders in Qdrant values',
                  'Resolve Harbor project placeholder in Qdrant values',

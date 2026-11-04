@@ -122,12 +122,32 @@
       block:
         - name: Read Online AWS credentials from the existing workspace credential file
           ansible.builtin.set_fact:
-            eva_vision_aws_key_raw: "{{ lookup('ansible.builtin.file', aws_key_file | default(eva_workspace_credentials_root ~ '/aws_key.ini', true)) }}"
+            eva_vision_aws_key_raw: "{{ lookup('ansible.builtin.file', aws_key_file | default(eva_workspace_credentials_root ~ '/aws_key.ini', true), errors=('ignore' if (eva_managed_cluster | default(false) | bool) else 'strict')) | default('', true) }}"
 
         - name: Extract Online Vision S3 credentials
           ansible.builtin.set_fact:
             eva_vision_s3_access_key: "{{ (eva_vision_aws_key_raw | regex_findall('(?m)^\\s*aws_access_key_id\\s*=\\s*(.+)\\s*$') | first | default('')) | trim }}"
             eva_vision_s3_secret_key: "{{ (eva_vision_aws_key_raw | regex_findall('(?m)^\\s*aws_secret_access_key\\s*=\\s*(.+)\\s*$') | first | default('')) | trim }}"
+
+        - name: Read previously verified cluster AWS credentials when no Workspace key is supplied
+          ansible.builtin.command:
+            argv: [kubectl, -n, "{{ eva_vision_namespace }}", get, secret,
+                   "{{ eva_vision_runtime_values.imagePullSecrets.secretName | default('aws-credentials') }}", -o, json]
+          environment:
+            KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+          register: eva_vision_cluster_aws_secret
+          changed_when: false
+          when:
+            - eva_managed_cluster | default(false) | bool
+            - eva_vision_aws_key_raw | trim | length == 0
+
+        - name: Use the selected cluster credential pair for the new S3 Secret
+          ansible.builtin.set_fact:
+            eva_vision_s3_access_key: "{{ (eva_vision_cluster_aws_secret.stdout | from_json).data.AWS_ACCESS_KEY_ID | b64decode }}"
+            eva_vision_s3_secret_key: "{{ (eva_vision_cluster_aws_secret.stdout | from_json).data.AWS_SECRET_ACCESS_KEY | b64decode }}"
+          when:
+            - eva_managed_cluster | default(false) | bool
+            - eva_vision_aws_key_raw | trim | length == 0
 
         - name: Validate Online Vision S3 credential pair
           ansible.builtin.assert:
@@ -166,6 +186,7 @@
             eva_vision_aws_key_raw: ''
             eva_vision_s3_access_key: ''
             eva_vision_s3_secret_key: ''
+            eva_vision_cluster_aws_secret: {}
   always:
     - name: Clear transient Vision model Secret response
       ansible.builtin.set_fact:

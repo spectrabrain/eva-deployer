@@ -3,7 +3,7 @@ image:
   tag: "{{ eva_agent_image_tag }}"
   pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
 
-{% if eva_agent_models_required | default(true) | bool %}
+{% if (eva_agent_models_required | default(true) | bool) and not (eva_managed_cluster | default(false) | bool) %}
 sharedPvcStorage:
   nfs:
     path: "{{ eva_agent_nfs_share_path }}/agent-cache"

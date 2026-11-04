@@ -394,6 +394,10 @@ func commandEnvironment(
 		resolvedRuntime.CollectionPath(),
 		values["ANSIBLE_COLLECTIONS_PATH"],
 	)
+	if document.Environment["KUBECONFIG"] != "" {
+		// Local cluster modules need the same Python/PyYAML as controller helpers.
+		values["ANSIBLE_PYTHON_INTERPRETER"] = filepath.Join(resolvedRuntime.Root, "venv", "bin", "python")
+	}
 	pathEntries := resolvedRuntime.ToolDirectories()
 	if values["PATH"] != "" {
 		pathEntries = append(pathEntries, values["PATH"])

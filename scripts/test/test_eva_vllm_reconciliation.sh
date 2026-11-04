@@ -421,6 +421,9 @@ if "kubectl delete" in verification_shell:
         "[ERROR] VLLM verification deletes Kubernetes resources"
     )
 
+# Keep the server contract checks scoped to the original static-NFS branch.
+# NKS CSI binding is exercised with Kubernetes fixtures in test_existing_cluster_flow.py.
+host_verification_shell = verification_shell[verification_shell.index("\nbinding_verified=0"):]
 for marker in (
     "binding_verified=0",
     "for attempt in $(seq 1 25)",
@@ -431,7 +434,7 @@ for marker in (
     ),
     "migrated VLLM cache content was preserved",
 ):
-    if verification_shell.count(marker) != 1:
+    if host_verification_shell.count(marker) != 1:
         raise SystemExit(
             "[ERROR] VLLM verifier state marker count mismatch: "
             + marker

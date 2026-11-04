@@ -3,7 +3,7 @@ image:
   tag: "{{ eva_vision_image_tag | default(eva_vision_chart_version) }}"
   pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
 
-runtimeClassName: "nvidia"
+runtimeClassName: {{ ('' if (eva_managed_cluster | default(false) | bool) else 'nvidia') | to_json }}
 
 imagePullSecrets:
   enabled: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}

@@ -9,7 +9,7 @@ EVA Deployer는 Ansible 기반으로 EVA 설치 환경과 서비스를 구성하
 | 설치 위치 | 인프라 준비와 설치 방향 |
 | --- | --- |
 | **On-Premises** | 고객사 서버·네트워크를 준비하고, Deployer로 권장 구성의 k3s·GPU 실행 환경·영구 저장소 연결과 EVA 서비스를 설치합니다. |
-| **Cloud** | Cloud 콘솔에서 네트워크·Kubernetes·저장소·DB·서비스 접속 환경을 먼저 구성한 뒤, Bastion에서 Deployer로 EVA를 설치하는 방향입니다. Repository는 Online을 사용합니다. |
+| **Cloud** | Cloud 콘솔에서 네트워크·Kubernetes·저장소·DB·서비스 접속 환경을 먼저 구성한 뒤, Bastion의 기존 Online configure/install에서 NKS + Solution만을 선택해 EVA를 설치합니다. |
 
 현재 Runbook의 기본 설치 기준은 **Ubuntu 24.04, `linux/amd64`, k3s**입니다.
 Cloud의 사전 구성 Kubernetes에 배포할 때는 사용하는 Release의 지원 범위를 먼저 확인합니다.

@@ -1,0 +1,27 @@
+---
+- name: Validate all selected cluster credentials before changing workloads
+  ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/credentials_check.yaml"
+
+- name: Detect existing Argo CD management using the selected kubeconfig
+  ansible.builtin.import_tasks: argocd_tracking.yaml
+
+- name: Require no remaining Argo CD ownership for the selected EVA cluster
+  ansible.builtin.assert:
+    that:
+      - precondition_argocd_tracking_status == 'ok'
+      - precondition_argocd_applications | length == 0
+    fail_msg: "Resolve Argo CD ownership before installing Solution on the existing cluster."
+
+- name: Ensure controller precondition report directory exists
+  ansible.builtin.file:
+    path: "{{ eva_site_config_root }}/{{ inventory_hostname }}"
+    state: directory
+    mode: "0700"
+
+- name: Write the shared precondition report for Operation and handoff checks
+  ansible.builtin.copy:
+    dest: "{{ eva_site_config_root }}/{{ inventory_hostname }}/precondition.yaml"
+    mode: "0600"
+    content: >-
+      {{ {'argocd_tracking': {'status': precondition_argocd_tracking_status,
+           'detected': false, 'applications': [], 'metadata_entries': 0}} | to_nice_yaml }}

@@ -1,0 +1,68 @@
+# Online + Bastion + NKS + Solution only에서 공통 접속/라이선스 틀에 추가합니다.
+# 신규 설치와 업데이트 모두 실제 클러스터의 주소·스토리지·인증 Values를 채웁니다.
+# 기존 Helm Values를 자동으로 병합하지 않습니다. 업데이트는 기존 PVC/경로를 유지합니다.
+iam:
+  ingress:
+    enabled: false # Cloud LB가 직접 연결하는 기본 틀. Chart Ingress 사용 시 true와 ingressClassName: alb를 설정합니다.
+    tls:
+      create: false # TLS 종료는 Cloud LB 또는 기존 Kubernetes TLS Secret에서 처리합니다.
+  imagePullSecrets:
+    authType: secret
+    secretName: aws-credentials
+  redis:
+    tls:
+      enabled: false # IAM 웹 HTTPS와 Redis TLS는 독립 설정입니다.
+    external:
+      enabled: false # 같은 클러스터의 App은 내부 Service로 연결합니다.
+  persistence:
+    type: pvc
+    pvc:
+      storageClassName: "<IAM_STORAGE_CLASS>" # 필수: RWX NAS StorageClass. ex) nks-nas. 업데이트는 기존 type/PVC/hostPath 유지.
+      storage: 30Gi
+app:
+  ingress:
+    enabled: false # Cloud LB가 직접 연결하는 기본 틀. Chart Ingress 사용 시 실제 IngressClass를 입력합니다.
+    tls:
+      create: false
+  imagePullSecrets:
+    authType: secret
+    secretName: aws-credentials
+  persistence:
+    type: pvc
+    pvc:
+      storageClassName: "<APP_STORAGE_CLASS>" # 필수: App StorageClass. ex) eva-agent-sc-fs. 업데이트는 기존 PVC 설정 유지.
+      storage: 30Gi
+      annotations:
+        helm.sh/resource-policy: keep
+  app:
+    infraProvider: ncp
+vision:
+  runtimeClassName: "" # NKS에 nvidia RuntimeClass가 없다면 빈 값을 유지합니다.
+  imagePullSecrets:
+    enabled: true
+    create: false
+    ExistingSecret: ecr-registry # Deployer가 AWS Secret으로 갱신합니다. 외부 관리 Secret은 새 Registry 인증·갱신을 따로 준비합니다.
+  modelCache:
+    storageClass: "<VISION_STORAGE_CLASS>" # 필수: 모델 캐시 StorageClass. ex) nks-block. 기존 캐시는 existingClaim 지정 가능.
+    size: 20Gi
+  gpu:
+    count: 1
+    mig:
+      resourceName: "<VISION_GPU_RESOURCE>" # 필수: 클러스터 GPU resource. ex) nvidia.com/gpu 또는 nvidia.com/mig-2g.24gb.
+agent:
+  awsCredentialsSecretName: aws-credentials
+  eva_agent_deploy:
+    vllm_profile: "<VLLM_PROFILE>" # 필수: Release 모델/GPU 프로필. ex) L40sx1. NKS GPU 할당 방식에 맞게 조정합니다.
+    vllm_values:
+      sharedPvcStorage:
+        mode: dynamic
+        storageClass: "<AGENT_MODEL_STORAGE_CLASS>" # 필수: RWX NAS StorageClass. ex) eva-agent-sc-fs.
+        size: 50Gi
+        accessModes: [ReadWriteMany]
+    qdrant_values:
+      persistence:
+        storageClassName: "<QDRANT_STORAGE_CLASS>" # 필수: RWO 블록 StorageClass. ex) eva-agent-sc-bs.
+        size: 10Gi
+      snapshotPersistence:
+        storageClassName: "<QDRANT_SNAPSHOT_STORAGE_CLASS>" # 필수: snapshot 블록 StorageClass. ex) eva-agent-sc-bs.
+        size: 10Gi

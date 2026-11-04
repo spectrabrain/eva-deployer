@@ -1,0 +1,12 @@
+---
+- name: Resume only ECR schedules suspended by this product installation
+  ansible.builtin.command:
+    argv: [python3, "{{ eva_online_helper_root }}/manage_online_credentials.py", resume,
+           --namespace, "{{ eva_online_release }}", --release, "{{ eva_online_release }}",
+           --cronjob, "{{ eva_online_cronjob }}"]
+    stdin: "{{ eva_online_suspended | default([]) | to_json }}"
+  environment:
+    KUBECONFIG: "{{ eva_cluster_kubeconfig }}"
+  register: eva_online_resume_result
+  changed_when: (eva_online_resume_result.stdout | from_json).changed
+  when: eva_online_suspended | default([]) | length > 0

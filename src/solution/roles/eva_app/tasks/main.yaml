@@ -871,6 +871,7 @@
     eva_traefik_tls_kubeconfig: "{{ eva_app_kubeconfig }}"
   when:
     - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
     - eva_app_tls_job_enabled | bool
     - >-
       (eva_traefik_ports_result.tls_host_path | length > 0)
@@ -896,6 +897,26 @@
          | regex_replace('^obsolete_ecr_resources=', '') | from_json }}
   changed_when: false
   when: not ansible_check_mode
+
+- name: Synchronize managed-cluster credentials before product workload changes
+  ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/online_credentials.yaml"
+  vars:
+    eva_online_component: app
+    eva_online_action: prepare
+    eva_online_input_values: "{{ eva_app_effective_values }}"
+  when: eva_managed_cluster | default(false) | bool
+
+
+- name: Validate shared EVA app inputs against the existing cluster
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  vars:
+    eva_cluster_guard_component: app
+    eva_cluster_guard_workdir: "{{ eva_app_workdir }}"
+    eva_cluster_guard_chart: "{{ eva_app_chart_source }}"
+    eva_cluster_guard_version: "{{ eva_app_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_cluster_guard_values: "{{ [eva_app_effective_values_dest] }}"
+  when: eva_managed_cluster | default(false) | bool
 
 - name: Validate EVA App Helm installation with server dry-run
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
@@ -1214,18 +1235,24 @@
   when: not ansible_check_mode
 
 - name: Ensure EVA App deployment uses ecr-registry imagePullSecret (online only)
-  ansible.builtin.shell: >-
-    kubectl patch deployment {{ eva_app_name }}
-    -n {{ eva_app_namespace }}
-    --type=merge
-    -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ecr-registry"}]}}}}'
-  args:
-    executable: /bin/bash
+  vars:
+    eva_app_selected_pull_secret: >-
+      {{ (eva_app_effective_values.imagePullSecrets.ExistingSecret | default('', true)
+         or (eva_app_effective_values.imagePullSecrets.nameOverride | default('', true))
+         or (eva_app_name ~ '-secret-regcred'))
+         if (eva_managed_cluster | default(false) | bool) else 'ecr-registry' }}
+  ansible.builtin.command:
+    argv: [kubectl, patch, deployment, "{{ eva_app_name }}", -n, "{{ eva_app_namespace }}",
+           --type=merge, --patch-file=/dev/stdin]
+    stdin: >-
+      {{ {'spec': {'template': {'spec': {'imagePullSecrets': [{'name': eva_app_selected_pull_secret}]}}}} | to_json }}
   register: eva_app_patch_pullsecret
   changed_when: "'patched' in eva_app_patch_pullsecret.stdout"
   when:
     - not ansible_check_mode
     - repository_mode in ['online_repository', 'cloud_repository']
+    - not (eva_managed_cluster | default(false) | bool) or (eva_app_effective_values.imagePullSecrets.enabled | default(true) | bool)
+    - not (eva_managed_cluster | default(false) | bool) or (eva_app_effective_values.imagePullSecrets.create | default(true) | bool) or (eva_app_effective_values.imagePullSecrets.ExistingSecret | default('', true) | length > 0)
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 

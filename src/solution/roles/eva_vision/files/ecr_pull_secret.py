@@ -20,9 +20,9 @@ class AuthError(Exception):
     pass
 
 
-def run(command, description, payload=None):
+def run(command, description, payload=None, environment=None):
     try:
-        result = subprocess.run(command, input=payload, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(command, input=payload, capture_output=True, text=True, timeout=120, env=environment)
     except (OSError, subprocess.TimeoutExpired):
         raise AuthError(description) from None
     if result.returncode:
@@ -76,7 +76,7 @@ def reconcile(args):
         raise AuthError("Invalid Kubernetes image pull Secret response") from None
     if secret is None and args.renew_only:
         return {"changed": False, "managed": False}
-    if secret is None and args.secret != "ecr-registry":
+    if secret is None and args.secret != getattr(args, "managed_default", "ecr-registry"):
         raise AuthError("Provision the custom image pull Secret in the Vision namespace before installation")
     if secret is not None:
         metadata = secret.get("metadata", {})
@@ -87,7 +87,7 @@ def reconcile(args):
         if args.renew_only and (metadata.get("annotations") or {}).get(MANAGED_REGISTRY) != registry:
             return {"changed": False, "managed": False}
         config = read_config(secret)
-        managed = args.secret == "ecr-registry" or (metadata.get("annotations") or {}).get(MANAGED_REGISTRY) == registry
+        managed = args.secret == getattr(args, "managed_default", "ecr-registry") or (metadata.get("annotations") or {}).get(MANAGED_REGISTRY) == registry
         if not managed:
             if not has_credentials(config, registry):
                 raise AuthError("The custom image pull Secret has no usable credentials for the selected ECR registry")
@@ -95,9 +95,26 @@ def reconcile(args):
     else:
         config = {"auths": {}}
 
-    token = run([aws, "ecr", "get-login-password", "--region", region,
-                 "--profile", os.environ.get("AWS_PROFILE", "default")],
-                "Cannot obtain an ECR login token; check target AWS credentials and ecr:GetAuthorizationToken permission").strip()
+    environment = None
+    token_args = [aws, "ecr", "get-login-password", "--region", region]
+    credential_secret = getattr(args, "credentials_secret", "")
+    if credential_secret:
+        raw_credentials = run(command + ["get", "secret", credential_secret, "-o", "json"],
+                              "Cannot read selected Vision AWS credential Secret")
+        data = json.loads(raw_credentials).get("data", {})
+        environment = {k: v for k, v in os.environ.items() if not k.startswith("AWS_")}
+        for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+            if data.get(key):
+                environment[key] = base64.b64decode(data[key], validate=True).decode()
+        if not environment.get("AWS_ACCESS_KEY_ID") or not environment.get("AWS_SECRET_ACCESS_KEY"):
+            raise AuthError("Selected Vision AWS Secret must contain both credential fields")
+        environment.update(AWS_CONFIG_FILE=os.devnull, AWS_SHARED_CREDENTIALS_FILE=os.devnull,
+                           AWS_EC2_METADATA_DISABLED="true", AWS_MAX_ATTEMPTS="1")
+    else:
+        token_args += ["--profile", os.environ.get("AWS_PROFILE", "default")]
+    token = run(token_args,
+                "Cannot obtain an ECR login token; check target AWS credentials and ecr:GetAuthorizationToken permission",
+                environment=environment).strip()
     if not token:
         raise AuthError("AWS returned an empty ECR login token")
     config["auths"][registry] = {"auth": base64.b64encode(("AWS:" + token).encode()).decode()}
@@ -135,6 +152,8 @@ def main():
     parser.add_argument("--kubectl", default="kubectl")
     parser.add_argument("--aws", default="aws")
     parser.add_argument("--renew-only", action="store_true")
+    parser.add_argument("--credentials-secret", default="")
+    parser.add_argument("--managed-default", default="ecr-registry")
     try:
         print(json.dumps(reconcile(parser.parse_args())))
         return 0

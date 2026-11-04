@@ -1,0 +1,257 @@
+- name: Detect local disk mount candidates from facts
+  ansible.builtin.set_fact:
+    eva_agent_supported_vllm_profiles:
+      - A6000x1
+      - L40sx1
+      - PRO5000x3
+      - PRO6000-MIGx4
+    eva_agent_local_mount_candidates: >-
+      {{
+        ansible_facts.mounts
+        | selectattr('device', 'match', '^/dev/')
+        | rejectattr('fstype', 'in', ['tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'nfs', 'nfs4', 'cifs'])
+        | rejectattr('fstype', 'in', ['fuse', 'fuse.sshfs'])
+        | rejectattr('fstype', 'match', '^fuse\\.')
+        | list
+      }}
+
+- name: Validate selected EVA Agent vLLM profile
+  ansible.builtin.assert:
+    that:
+      - eva_agent_vllm_profile in eva_agent_supported_vllm_profiles
+    fail_msg: >-
+      지원하지 않는 eva_agent_vllm_profile={{ eva_agent_vllm_profile }} 입니다.
+      사용 가능 값: {{ eva_agent_supported_vllm_profiles | join(', ') }}
+
+- name: Ensure local disk mount candidate exists
+  ansible.builtin.assert:
+    that:
+      - eva_agent_local_mount_candidates | length > 0
+    fail_msg: "로컬 디스크 마운트 후보를 찾지 못했습니다."
+
+- name: Detect largest local disk mount from facts
+  ansible.builtin.set_fact:
+    eva_agent_largest_local_mount: >-
+      {{ (eva_agent_local_mount_candidates | sort(attribute='size_total', reverse=true) | first).mount }}
+
+- name: Set NFS share path from largest local disk mount
+  ansible.builtin.set_fact:
+    eva_agent_nfs_share_path: >-
+      {{ eva_agent_nfs_share_path
+         | default((eva_agent_largest_local_mount | regex_replace('/+$', '')) ~ '/share/eva-agent') }}
+
+- name: Detect existing vLLM shared PV NFS path
+  ansible.builtin.command: >-
+    kubectl get pv eva-agent-vllm-shared-pvc-storage -o jsonpath='{.spec.nfs.path}'
+  register: eva_agent_vllm_pv_path
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Reuse existing vLLM PV base path when present
+  ansible.builtin.set_fact:
+    eva_agent_nfs_share_path: "{{ eva_agent_vllm_pv_path.stdout | regex_replace('/vllm-cache$', '') }}"
+  when:
+    - not ansible_check_mode
+    - eva_agent_vllm_pv_path.rc == 0
+    - eva_agent_vllm_pv_path.stdout | length > 0
+
+- name: Ensure NFS share and cache directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0775'
+  loop:
+    - "{{ eva_agent_nfs_share_path }}"
+    - "{{ eva_agent_nfs_share_path }}/vllm-cache"
+  when: not ansible_check_mode
+
+- name: Ensure legacy Agent model cache directory exists when required
+  ansible.builtin.file:
+    path: "{{ eva_agent_nfs_share_path }}/agent-cache/hf"
+    state: directory
+    mode: '0775'
+  when:
+    - not ansible_check_mode
+    - eva_agent_models_required | bool
+
+- name: Check offline EVA model directories for airgap
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ ([eva_agent_offline_agent_model_dir] if eva_agent_models_required else []) + [eva_agent_offline_vllm_model_dir] }}"
+  register: eva_agent_offline_model_dir_stats
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Assert offline EVA model directories exist for airgap
+  ansible.builtin.assert:
+    that:
+      - (eva_agent_offline_model_dir_stats.results | selectattr('stat.exists', 'equalto', true) | list | length) == ((eva_agent_models_required | bool) | ternary(2, 1))
+    fail_msg: >-
+      airgap_mode=true 인 경우 모델 캐시가 필요합니다.
+      먼저 ./scripts/download/download_eva_models.sh 실행 후
+      {{ eva_agent_offline_vllm_model_dir }} 경로를 준비하세요.
+      Agent 3.2 이하에서는 {{ eva_agent_offline_agent_model_dir }}도 필요합니다.
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Check EVA agent model cache sync marker
+  ansible.builtin.stat:
+    path: "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.offline_sync_done"
+  register: eva_agent_agent_cache_sync_marker
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
+    - not ansible_check_mode
+
+- name: Copy offline EVA agent model cache into NFS share
+  ansible.builtin.shell: >-
+    set -euo pipefail &&
+    cp -a "{{ eva_agent_offline_agent_model_dir }}/." "{{ eva_agent_nfs_share_path }}/agent-cache/hf/"
+  args:
+    executable: /bin/bash
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
+    - not ansible_check_mode
+    - not eva_agent_agent_cache_sync_marker.stat.exists
+
+- name: Mark EVA agent model cache sync complete
+  ansible.builtin.file:
+    path: "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.offline_sync_done"
+    state: touch
+    mode: '0644'
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
+    - not ansible_check_mode
+    - not eva_agent_agent_cache_sync_marker.stat.exists
+
+- name: Restore Hugging Face symlinks for EVA agent cache when script exists
+  ansible.builtin.shell: >-
+    if [ -f "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.restore_hf_symlinks.sh" ]; then
+      sh "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.restore_hf_symlinks.sh" "{{ eva_agent_nfs_share_path }}/agent-cache/hf";
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_agent_models_required | bool
+    - not ansible_check_mode
+
+- name: Check EVA vLLM model cache sync marker
+  ansible.builtin.stat:
+    path: "{{ eva_agent_nfs_share_path }}/vllm-cache/.offline_sync_done"
+  register: eva_agent_vllm_cache_sync_marker
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Copy offline EVA vLLM model cache into NFS share
+  ansible.builtin.shell: >-
+    set -euo pipefail &&
+    cp -a "{{ eva_agent_offline_vllm_model_dir }}/." "{{ eva_agent_nfs_share_path }}/vllm-cache/"
+  args:
+    executable: /bin/bash
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+    - not eva_agent_vllm_cache_sync_marker.stat.exists
+
+- name: Mark EVA vLLM model cache sync complete
+  ansible.builtin.file:
+    path: "{{ eva_agent_nfs_share_path }}/vllm-cache/.offline_sync_done"
+    state: touch
+    mode: '0644'
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+    - not eva_agent_vllm_cache_sync_marker.stat.exists
+
+- name: Restore Hugging Face symlinks for vLLM cache when script exists
+  ansible.builtin.shell: >-
+    if [ -f "{{ eva_agent_nfs_share_path }}/vllm-cache/.restore_hf_symlinks.sh" ]; then
+      sh "{{ eva_agent_nfs_share_path }}/vllm-cache/.restore_hf_symlinks.sh" "{{ eva_agent_nfs_share_path }}/vllm-cache";
+    fi
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when:
+    - airgap_mode | default(false) | bool
+    - not ansible_check_mode
+
+- name: Set ownership and permissions for NFS share path
+  ansible.builtin.file:
+    path: "{{ eva_agent_nfs_share_path }}"
+    owner: "10001"
+    group: "10001"
+    mode: '0775'
+    recurse: true
+  when: not ansible_check_mode
+
+- name: Allow localhost-only NFS export for EVA Agent share (cleanup old entry)
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    regexp: '^.*/share/eva-agent 127\.0\.0\.1\(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001\)$'
+    state: absent
+  when: not ansible_check_mode
+
+- name: Configure localhost-only NFS export for EVA Agent share
+  ansible.builtin.lineinfile:
+    path: /etc/exports
+    line: "{{ eva_agent_nfs_share_path }} 127.0.0.1(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001)"
+    create: true
+    mode: '0644'
+  register: eva_agent_exports_line
+  when: not ansible_check_mode
+
+- name: Reload NFS exports
+  ansible.builtin.command: exportfs -ra
+  changed_when: eva_agent_exports_line.changed
+  when: not ansible_check_mode
+
+- name: Ensure NFS services are available
+  ansible.builtin.shell: |
+    set -euo pipefail
+    systemctl start rpcbind nfs-mountd nfs-idmapd
+    if [ ! -r /proc/fs/nfsd/threads ] || [ "$(cat /proc/fs/nfsd/threads)" = "0" ]; then
+      rpc.nfsd 1
+    fi
+    exportfs -ra
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Show NFS exports on localhost
+  ansible.builtin.command: showmount -e localhost
+  register: eva_agent_showmount
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Ensure temporary NFS test mount directory exists
+  ansible.builtin.file:
+    path: /mnt/tmp
+    state: directory
+    mode: '0755'
+  when: not ansible_check_mode
+
+- name: Mount NFS share for validation
+  ansible.posix.mount:
+    path: /mnt/tmp
+    src: "localhost:{{ eva_agent_nfs_share_path }}"
+    fstype: nfs
+    opts: rw,nfsvers=4
+    state: mounted
+  when: not ansible_check_mode
+
+- name: Unmount NFS validation mount
+  ansible.posix.mount:
+    path: /mnt/tmp
+    state: unmounted
+  when: not ansible_check_mode

@@ -53,6 +53,12 @@
       changed_when: false
 
   tasks:
-    - name: STEP 1 - eva-vision
-      ansible.builtin.import_role:
-        name: eva_vision
+    - name: Install Vision with ECR schedule recovery
+      block:
+        - name: STEP 1 - eva-vision
+          ansible.builtin.import_role:
+            name: eva_vision
+      always:
+        - name: Restore cluster ECR schedules after Vision installation
+          ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/online_resume.yaml"
+          when: eva_managed_cluster | default(false) | bool

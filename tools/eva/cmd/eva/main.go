@@ -107,7 +107,7 @@ func usage() {
 	fmt.Println("  help")
 	fmt.Println("")
 	fmt.Println("Without --workspace, --site resolves /etc/eva/sites/<site-id>.")
-	fmt.Println("--config accepts one private installer YAML and generates a managed Workspace.")
+	fmt.Println("--config accepts one private installer YAML; all environments use Workspace/Plan/Ansible.")
 	fmt.Println("Install orchestration and Runtime bootstrap are added incrementally.")
 }
 
@@ -1028,7 +1028,7 @@ func runWorkspace(args []string) error {
 		fmt.Printf("installer config is valid (site=%s, mode=%s); no Workspace was written\n", input.Site.ID, input.Repository.Mode)
 		return nil
 	}
-	resolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	resolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()})
 	if err != nil {
 		return err
 	}
@@ -1192,8 +1192,8 @@ func runInstallMode(args []string, gpuOnly bool) error {
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	installRoot := flags.String("install-root", release.DefaultInstallRoot, "prepared Release installation directory")
 	artifactRoot := flags.String("artifact-root", release.DefaultArtifactRoot, "Airgap artifact cache directory")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
-	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
+	logRoot := flags.String("log-root", userLogRoot(), "operation log directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	yesHelp := "confirm target changes without a prompt"
 	if gpuOnly {
@@ -1237,10 +1237,27 @@ func runInstallMode(args []string, gpuOnly bool) error {
 			RuntimeRoot: *runtimeRoot, StateRoot: *stateRoot, LogRoot: *logRoot,
 		})
 	}
-	workspaceInput := workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot}
+	workspaceInput := workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()}
 	workspaceResolved, err := workspace.Resolve(workspaceInput)
 	if err != nil {
 		return err
+	}
+	if workspaceResolved.Config.ManagedCluster() {
+		if gpuOnly {
+			return errors.New("Cloud worker GPU/MIG configuration is managed by the provider; eva install validates Kubernetes GPU resources")
+		}
+		if os.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
+			return errors.New("run Cloud installation without sudo as the kubeconfig owner")
+		}
+		if *releaseInput == "" {
+			*releaseInput = workspaceResolved.Config.Deployment.Release
+		}
+		flags.VisitAll(func(f *flag.Flag) {
+			if f.Name == "install-root" && f.Value.String() == release.DefaultInstallRoot {
+				home, _ := os.UserHomeDir()
+				*installRoot = filepath.Join(home, ".local/share/eva/releases")
+			}
+		})
 	}
 	workspaceResolved, err = workspaceResolved.SelectComponents(components)
 	if err != nil {
@@ -1500,7 +1517,7 @@ func runPlan(args []string) error {
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	output := flags.String("output", "", "write the plan to this path")
 	save := flags.Bool("save", false, "save the plan as an operation")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
 	var components stringList
 	flags.Var(&components, "component", "enabled component to plan (repeatable; use all for every enabled component)")
 	var charts, values, sets stringList
@@ -1523,7 +1540,7 @@ func runPlan(args []string) error {
 		*releaseInput = flags.Arg(0)
 	}
 
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()})
 	if err != nil {
 		return err
 	}
@@ -1577,7 +1594,7 @@ func runPlan(args []string) error {
 func runStatus(args []string) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -1605,7 +1622,7 @@ func runCheck(args []string) error {
 	flags := flag.NewFlagSet("check", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	verbose := flags.Bool("verbose", false, "show details for unhealthy EVA components")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -1638,14 +1655,15 @@ func runCheck(args []string) error {
 				return checkErr
 			}
 			input.Components = checkComponents(document)
+			input.ManagedCluster = document.Environment["KUBECONFIG"] != ""
 			installedPlan = document
 		}
 	}
 
-	report := health.Check(input, checkRunner(resolvedRuntime, runtimeErr == nil))
+	report := health.Check(input, checkPlanRunner(resolvedRuntime, runtimeErr == nil, installedPlan))
 	printCheck(report, *verbose)
 	access.Print(os.Stdout, access.Discover(installedPlan, access.Options{
-		Run: checkRunner(resolvedRuntime, runtimeErr == nil), PreferLive: true,
+		Run: checkPlanRunner(resolvedRuntime, runtimeErr == nil, installedPlan), PreferLive: true,
 		HarborReceiptPath: defaultRemoteBootstrapReceiptPath,
 	}))
 	if !report.Healthy {
@@ -1676,9 +1694,22 @@ func checkComponents(document plan.Document) []health.Component {
 }
 
 func checkRunner(resolved runtime.Resolved, hasRuntime bool) health.Runner {
+	return checkPlanRunner(resolved, hasRuntime, plan.Document{})
+}
+
+func checkPlanRunner(resolved runtime.Resolved, hasRuntime bool, document plan.Document) health.Runner {
 	return func(name string, args ...string) health.CommandResult {
 		path := name
 		environment := os.Environ()
+		if kubeconfig := document.Environment["KUBECONFIG"]; kubeconfig != "" {
+			filtered := make([]string, 0, len(environment)+1)
+			for _, entry := range environment {
+				if !strings.HasPrefix(entry, "KUBECONFIG=") {
+					filtered = append(filtered, entry)
+				}
+			}
+			environment = append(filtered, "KUBECONFIG="+kubeconfig)
+		}
 		if name == "kubectl" {
 			if !hasRuntime {
 				return health.CommandResult{Err: errors.New("managed Runtime is unavailable")}
@@ -1767,7 +1798,7 @@ func runArgoCDPreflight(args []string) error {
 			strings.Join(flags.Args(), " "),
 		)
 	}
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()})
 	if err != nil {
 		return err
 	}
@@ -1972,8 +2003,8 @@ func runApply(args []string) error {
 	flags := flag.NewFlagSet("apply", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	yes := flags.Bool("yes", false, "confirm target changes without a prompt")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
-	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
+	logRoot := flags.String("log-root", userLogRoot(), "operation log directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -2022,8 +2053,8 @@ func runRetry(args []string) error {
 	flags := flag.NewFlagSet("retry", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	yes := flags.Bool("yes", false, "confirm retry without a prompt")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
-	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
+	logRoot := flags.String("log-root", userLogRoot(), "operation log directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -2086,7 +2117,7 @@ func printCompletedAccess(record operation.Record, stateRoot, runtimeRoot string
 	}
 	resolvedRuntime, runtimeErr := runtime.Resolve(runtimeRoot)
 	access.Print(os.Stdout, access.Discover(document, access.Options{
-		Run:               checkRunner(resolvedRuntime, runtimeErr == nil),
+		Run:               checkPlanRunner(resolvedRuntime, runtimeErr == nil, document),
 		HarborReceiptPath: defaultRemoteBootstrapReceiptPath,
 	}))
 }

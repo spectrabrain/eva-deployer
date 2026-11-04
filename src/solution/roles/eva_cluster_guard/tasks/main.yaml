@@ -1,0 +1,26 @@
+---
+- name: Check the exact Solution role Helm inputs before stopping existing workloads
+  when: eva_managed_cluster | default(false) | bool
+  block:
+    - name: Write private managed-cluster render request
+      ansible.builtin.copy:
+        dest: "{{ eva_cluster_guard_workdir }}/cluster-request.json"
+        mode: "0600"
+        content: >-
+          {{ {'component': eva_cluster_guard_component, 'chart': eva_cluster_guard_chart,
+              'version': eva_cluster_guard_version, 'values': eva_cluster_guard_values,
+              'namespace': eva_cluster_guard_namespace | default('eva-' ~ eva_cluster_guard_component),
+              'release': eva_cluster_guard_release | default('eva-' ~ eva_cluster_guard_component),
+              'set': eva_cluster_guard_set | default(eva_cli_helm_set | default([])),
+              'post_renderer': eva_cluster_guard_post_renderer | default(''),
+              'previous': eva_site_config_root ~ '/controller/' ~ eva_cluster_guard_component ~ '-previous.yaml'} | to_json }}
+      no_log: true
+
+    - name: Validate rendered Kubernetes storage, routing, references and GPU scheduling
+      ansible.builtin.script:
+        cmd: guard_cluster.py --request {{ (eva_cluster_guard_workdir ~ '/cluster-request.json') | quote }}
+        executable: "{{ ansible_facts.python.executable }}"
+      environment: >-
+        {{ {'KUBECONFIG': eva_cluster_kubeconfig}
+           | combine(eva_cluster_guard_environment | default({})) }}
+      changed_when: false

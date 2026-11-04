@@ -13,6 +13,7 @@ type Component struct {
 }
 
 type Input struct {
+	ManagedCluster bool
 	RuntimeVersion string
 	RuntimeError   error
 	OperationState string
@@ -59,8 +60,10 @@ func Check(input Input, run Runner) Report {
 		report.CanCheck = true
 	}
 
-	checkService(&report, run, "Docker", "docker")
-	checkService(&report, run, "k3s", "k3s")
+	if !input.ManagedCluster {
+		checkService(&report, run, "Docker", "docker")
+		checkService(&report, run, "k3s", "k3s")
+	}
 	if report.CanCheck {
 		checkNodes(&report, run)
 		if requiresAccelerator(input.Components) {

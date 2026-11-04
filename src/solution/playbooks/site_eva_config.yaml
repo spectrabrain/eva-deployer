@@ -21,7 +21,7 @@
     - name: STEP 1 - awscli
       ansible.builtin.import_role:
         name: awscli
-      when: not (airgap_mode | default(false) | bool)
+      when: not (airgap_mode | default(false) | bool) and not (eva_managed_cluster | default(false) | bool)
 
     - name: STEP 1.1 - skip awscli in airgap mode
       ansible.builtin.debug:

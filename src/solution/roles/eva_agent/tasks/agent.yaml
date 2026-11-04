@@ -364,6 +364,17 @@
       {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }}{% endfor %}
   when: not ansible_check_mode
 
+- name: Validate shared EVA agent inputs against the existing cluster
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  vars:
+    eva_cluster_guard_component: agent
+    eva_cluster_guard_workdir: "{{ eva_agent_workdir }}"
+    eva_cluster_guard_chart: "{{ eva_agent_chart_source }}"
+    eva_cluster_guard_version: "{{ eva_agent_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_cluster_guard_values: "{{ [eva_agent_workdir ~ '/eva-agent/effective-input-values.yaml'] }}"
+  when: eva_managed_cluster | default(false) | bool
+
 - name: Check existing EVA Agent deployment
   ansible.builtin.command: kubectl get deployment eva-agent -n {{ eva_agent_namespace }}
   register: eva_agent_deployment_exists

@@ -36,6 +36,9 @@ app:
         helm.sh/resource-policy: keep
   app:
     infraProvider: ncp
+    sso:
+      redis:
+        url: "<IAM_REDIS_URL>"  # 필수: App이 접근할 IAM Redis URL. ex) redis://:PASSWORD@eva-iam-redis-internal.eva-iam:6379/0 (같은 NKS의 내부 Service). 비밀번호·DB를 실제 값과 맞춥니다.
 vision:
   runtimeClassName: ""  # NKS에 nvidia RuntimeClass가 없다면 빈 값을 유지합니다.
   imagePullSecrets:

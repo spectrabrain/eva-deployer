@@ -1025,7 +1025,7 @@ func runWorkspace(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("installer config is valid (site=%s, mode=%s); no Workspace was written\n", input.Site.ID, input.Repository.Mode)
+		fmt.Printf("installer config is valid (site=%s, mode=%s)\n", input.Site.ID, input.Repository.Mode)
 		return nil
 	}
 	resolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()})

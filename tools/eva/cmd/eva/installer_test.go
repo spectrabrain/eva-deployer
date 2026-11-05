@@ -65,8 +65,8 @@ func TestConfigSamplesAndValidationDoNotWriteWorkspace(t *testing.T) {
 			t.Fatal("offline sample contains AWS inputs")
 		}
 		output = captureRemoteTargetStdout(t, func() error { return run([]string{"workspace", "validate", "--config", input}) })
-		if !strings.Contains(output, "no Workspace was written") {
-			t.Fatal("validation did not explain read-only behavior")
+		if strings.TrimSpace(output) != "installer config is valid (site=customer-a, mode="+wantMode+")" {
+			t.Fatal("validation did not report success")
 		}
 		if _, err := os.Stat(defaultWorkspaceCacheRoot); !os.IsNotExist(err) {
 			t.Fatal("validation wrote a workspace")

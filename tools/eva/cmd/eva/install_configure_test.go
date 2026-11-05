@@ -155,6 +155,9 @@ func TestInstallConfigureNKSUsesTheSameSolutionScaffold(t *testing.T) {
 	if app["backendHost"] != "<APP_HOST>" || app["license"] == nil {
 		t.Fatal("NKS must generate the normal address/license Values, not an empty map")
 	}
+	if app["sso"].(map[string]any)["redis"].(map[string]any)["url"] != "<IAM_REDIS_URL>" {
+		t.Fatal("NKS must require the reachable Redis URL when its external service is disabled")
+	}
 	for _, c := range []string{"iam", "app"} {
 		values := target.Values[c]
 		if values["persistence"].(map[string]any)["type"] != "pvc" || values["imagePullSecrets"].(map[string]any)["authType"] != "secret" {

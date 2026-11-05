@@ -374,6 +374,24 @@ class GuardTests(unittest.TestCase):
         query=lambda kind:[node] if kind=="nodes" else []
         return deployment,query
 
+    def test_null_environment_lists_preserve_required_secret_checks(self):
+        # The IAM Dispatcher renders env: null when it has no extra env vars.
+        # Empty fields must not prevent validation of the other references.
+        secret={"kind":"Secret","metadata":{"name":"dispatcher-auth"}}
+        for empty_field in ["env", "envFrom"]:
+            with self.subTest(empty_field=empty_field):
+                deployment,query=self.fixtures()
+                container=deployment["spec"]["template"]["spec"]["containers"][0]
+                container[empty_field]=None
+                if empty_field=="env":
+                    container["envFrom"]=[{"secretRef":{"name":"dispatcher-auth"}}]
+                else:
+                    container["env"]=[{"name":"PASSWORD","valueFrom":{
+                        "secretKeyRef":{"name":"dispatcher-auth","key":"password"}}}]
+                guard.validate({"component":"iam"},[deployment,secret],[],query)
+                with self.assertRaisesRegex(RuntimeError,"Missing required Kubernetes resource"):
+                    guard.validate({"component":"iam"},[deployment],[],query)
+
     def test_nks_gpu_replacement_without_runtimeclass_and_unselected_ingress(self):
         deployment,query=self.fixtures()
         guard.validate({"component":"vision"},[deployment],[deployment],query)

@@ -165,11 +165,11 @@ def validate(request, docs, old, query=items):
                 if field in v and not v[field].get("optional"):
                     refs.append((kind, v[field][name_key]))
         for c in pod.get("containers", []) + pod.get("initContainers", []):
-            for e in c.get("envFrom", []):
+            for e in (c.get("envFrom") or []):
                 for field, kind in [("secretRef", "Secret"), ("configMapRef", "ConfigMap")]:
                     if field in e and not e[field].get("optional"):
                         refs.append((kind, e[field]["name"]))
-            for e in c.get("env", []):
+            for e in (c.get("env") or []):
                 for field, kind in [("secretKeyRef", "Secret"), ("configMapKeyRef", "ConfigMap")]:
                     ref = e.get("valueFrom", {}).get(field)
                     if ref and not ref.get("optional"):

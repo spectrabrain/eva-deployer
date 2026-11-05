@@ -231,7 +231,8 @@ kubeconfig 연결만 추가합니다. `components.infra`는 `false`입니다.
 - 기본 틀은 Cloud LB의 직접 연결(`ingress.enabled: false`)입니다. Chart Ingress를 사용할 때는
   실제 IngressClass와 TLS Secret 설정을 채웁니다. 공개 URL 변경과 DNS·LB 설정을 함께 맞춥니다.
 - 새 App/IAM은 PVC·StorageClass를 채웁니다. 업데이트는 기존 PVC·hostPath 경로를 유지합니다.
-  기존 IAM hostPath는 데이터가 있는 worker에 고정하며 새 hostPath 생성·경로 이동은 하지 않습니다.
+  기존 IAM hostPath는 데이터가 있는 worker에 고정합니다. 새 설치에서 hostPath를 명시하면
+  worker 경로를 사용하며 Bastion에서 해당 디렉터리를 준비하지는 않습니다.
 - Vision은 실제 GPU resource와 모델 캐시 StorageClass를 채웁니다. NKS에 RuntimeClass가 없으면
   `runtimeClassName: ""`를 유지합니다. GPU 교체는 `Recreate` 또는 `maxSurge: 0`을 사용합니다.
   기본 `imagePullSecrets.ExistingSecret: ecr-registry`는 Deployer가 갱신합니다. 외부 관리 Secret을
@@ -376,6 +377,33 @@ eva install --config "$HOME/eva-install.yaml"
 NKS의 결과 확인·재시도도 기존 `eva check --verbose`, `eva status`, `eva retry`를 sudo 없이 사용합니다.
 작업 기록·로그는 계정의 `~/.local/state/eva`, private 백업은 그 아래에 저장합니다.
 설정이나 Values를 바꿨다면 새 `eva install --config`를 실행합니다.
+
+새 Release로 업데이트하기 전에는 같은 Guard로 기존 6개 Helm manifest를 점검할 수 있습니다.
+아래 명령은 Release를 Bastion에 풀고 Kubernetes 자원을 조회하며, 제품을 설치하거나 변경하지 않습니다.
+
+```bash
+eva workspace validate --config "$HOME/eva-install.yaml"
+eva_base_release="/실제/새/eva-base-release/경로"
+eva verify --release "$eva_base_release"
+eva release prepare --release "$eva_base_release" --install-root "$HOME/.local/share/eva/releases"
+eva_review_version=$(python3 -c 'import sys,yaml; from pathlib import Path; print(yaml.safe_load((Path(sys.argv[1]) / "release.yaml").read_text())["version"])' "$eva_base_release")
+eva_guard="$HOME/.local/share/eva/releases/$eva_review_version/src/solution/roles/eva_cluster_guard/files/guard_cluster.py"
+KUBECONFIG="$HOME/.kube/config" python3 "$eva_guard" --installed iam app agent vision vllm qdrant
+```
+
+`eva verify` 출력의 버전·경로가 이번 수정이 포함된 새 Release인지 먼저 확인합니다.
+NKS configure에서 Release 경로를 비우면 기존 공통 선택 규칙을 사용합니다. 이미 작성한
+`deployment.release`는 그대로 적용되므로, 이전 경로가 남아 있다면 고치거나 설치 시
+`--release "$eva_base_release"`로 명시합니다. `--installed`를 지원하지 않는 오류는 구버전 Guard를 실행한 것입니다.
+
+이 결과는 기존 manifest의 참조·스토리지·GPU 배치를 검증합니다. 변경할 Values의 최종 렌더링이나
+새 이미지·모델 접근 성공을 보장하지는 않습니다. 미설치 Release는 `[SKIP]`하며,
+Pending PVC·일시적인 GPU 배치·선택적 전역 조회 권한 부족은 경고로 안내합니다.
+설치 전 Guard는 기존 데이터 경로 변경·PVC 축소·필수 참조 누락·확인 가능한 NodePort 충돌을 중단합니다.
+차트는 서버 조회를 허용해 렌더링하므로 `lookup`으로 재사용하는 기존 PVC도 반영합니다.
+역할이 이미 준비한 `cluster-request.json`은
+`python3 "$eva_guard" --request <파일 경로>`로 다시 점검할 수 있습니다. `--request`는 여러 번 지정할 수 있고,
+요청 파일에 기록된 kubeconfig·post-renderer 환경을 사용합니다. 요청 파일에는 민감값이 있을 수 있으므로 공유하지 않습니다.
 
 ## 9. 설치 결과 확인
 

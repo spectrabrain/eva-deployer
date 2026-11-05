@@ -53,14 +53,14 @@ def main():
                 dep_release = "eva-agent-" + dependency
                 status = next((r.get("status") for r in installed if r["name"] == dep_release), None)
                 dep_path = output / (dependency + "-previous.yaml")
-                if status is None:
+                if status in {None, "uninstalled"}:
                     dep_path.unlink(missing_ok=True)
                 elif status not in {"deployed", "failed"}:
                     raise RuntimeError("Resolve the pending Helm operation before installing " + dep_release)
                 else:
                     dep_path.write_text(run(["helm", "get", "manifest", dep_release, "-n", ns]))
                     dep_path.chmod(0o600)
-        installed = [r for r in installed if r["name"] == release]
+        installed = [r for r in installed if r["name"] == release and r.get("status") != "uninstalled"]
         source = Path(args.workspace) / "site-values" / (component + ".yaml")
         explicit = (yaml.safe_load(source.read_text()) or {}).get(args.host, {}) if source.exists() else {}
         if not isinstance(explicit, dict) or not explicit:

@@ -145,6 +145,9 @@ func TestInstallConfigureNKSUsesTheSameSolutionScaffold(t *testing.T) {
 	if input.Deployment == nil || input.Deployment.Environment != "nks" || input.Components["infra"] || !input.Components["iam"] || !input.Components["app"] || input.Components["agent"] {
 		t.Fatal("NKS must use one controller with the selected Solution components")
 	}
+	if input.Deployment.Release != "" {
+		t.Fatal("NKS must not pin an assumed home Release path when the installer leaves it blank")
+	}
 	if input.Credentials.AWS == nil || !strings.Contains(input.Site.ID, "<SITE_ID>") {
 		t.Fatal("NKS must retain the shared site/AWS required-input scaffold")
 	}
@@ -177,6 +180,13 @@ func TestInstallConfigureNKSUsesTheSameSolutionScaffold(t *testing.T) {
 	}
 	if _, err := workspace.LoadInstaller(path, ""); err == nil {
 		t.Fatal("NKS placeholders must be filled before installation")
+	}
+}
+
+func TestInstallConfigureNKSExplicitReleaseIsPreserved(t *testing.T) {
+	input, _, _ := configureTest(t, "1\n2\n2\n\n\n/actual/nks-release\n3\n2\n2\n1\n4\n")
+	if input.Deployment.Release != "/actual/nks-release" {
+		t.Fatal("NKS must preserve the installer's explicit Release selection")
 	}
 }
 

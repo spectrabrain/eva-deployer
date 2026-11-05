@@ -158,7 +158,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 			if deployment.Context, err = prompt.line("Kubernetes context (비우면 현재 context)", ""); err != nil {
 				return err
 			}
-			if deployment.Release, err = prompt.line("Base Release 경로", filepath.Join(home, "eva-base-release")); err != nil {
+			if deployment.Release, err = prompt.line("Base Release 경로 (비우면 기존 Release 선택 규칙 사용)", ""); err != nil {
 				return err
 			}
 			fmt.Fprintln(output, "NKS는 Bastion 계정의 kubeconfig로 설치합니다. worker SSH 정보는 입력하지 않습니다.")

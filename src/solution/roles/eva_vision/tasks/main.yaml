@@ -115,6 +115,7 @@
   check_mode: false
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+  when: not (eva_managed_cluster | default(false) | bool)
 
 - name: Validate NVIDIA device plugin prerequisite
   ansible.builtin.assert:
@@ -122,6 +123,9 @@
       - "'nvidia-device-plugin' in daemonsets_result.stdout"
     fail_msg: "NVIDIA Device Plugin daemonset is not installed. Install it before EVA Vision deployment."
     success_msg: "NVIDIA Device Plugin daemonset detected."
+  # NKS GPU prerequisites are checked from node allocatable resources by the
+  # cluster context and manifest guard, without assuming the provider's DaemonSet name.
+  when: not (eva_managed_cluster | default(false) | bool)
 
 - name: Add Helm repository for EVA Vision
   ansible.builtin.command: >-

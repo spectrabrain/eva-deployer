@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -319,6 +320,20 @@ class SharedFlowTests(unittest.TestCase):
         self.assertEqual(pod["initContainers"][0]["envFrom"][0]["secretRef"]["name"],"aws-credentials")
         self.assertFalse(any(c["tool"]=="systemctl" and any(a in c["args"] for a in ["stop","start","enable"]) for c in self.calls()))
 
+    def test_nks_gpu_support_does_not_require_a_provider_daemonset_name(self):
+        names={"Check NVIDIA device plugin daemonset exists","Validate NVIDIA device plugin prerequisite"}
+        tasks=[t for t in yaml.safe_load((ROOT/"src/solution/roles/eva_vision/tasks/main.yaml").read_text()) if t.get("name") in names]
+        self.assertEqual(len(tasks),2)
+        p=self.root/"vision-gpu-prerequisite.yaml"
+        p.write_text(yaml.safe_dump([{"hosts":"all","connection":"local","tasks":tasks}]))
+        result=self.execute(p)
+        self.assertIn("skipped=2",result.stdout)
+        self.assertFalse(any("daemonset" in call["args"] for call in self.calls()))
+        self.variables["eva_managed_cluster"]=False
+        self.variables["eva_vision_kubeconfig"]=self.env["KUBECONFIG"]
+        self.execute(p,success=False)
+        self.assertTrue(any("daemonset" in call["args"] for call in self.calls()))
+
     def test_app_seeds_chart_selected_pull_secret_and_checks_selected_image_tag(self):
         self.incoming()
         self.variables.update(eva_enabled_components="app", eva_online_component="app", eva_online_action="prepare",
@@ -366,12 +381,45 @@ guard=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 
 
+class InspectorTests(unittest.TestCase):
+    def test_uninstalled_helm_history_is_a_fresh_install_but_pending_still_blocks(self):
+        spec=importlib.util.spec_from_file_location("cluster_inspector",ROOT/"src/solution/roles/eva_cluster_context/files/inspect_cluster.py")
+        inspector=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inspector)
+        for status in ["uninstalled","pending-upgrade"]:
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory)
+                (root/"site-values").mkdir()
+                (root/"site-values/agent.yaml").write_text(yaml.safe_dump({"controller":{"image":{"tag":"3.3.0"}}}))
+                output=root/"context";output.mkdir()
+                for component in ["agent","vllm","qdrant"]:
+                    (output/(component+"-previous.yaml")).write_text("stale manifest")
+                def read(command):
+                    if command[:2]==["helm","list"]:
+                        return json.dumps([{"name":name,"status":status} for name in ["eva-agent","eva-agent-vllm","eva-agent-qdrant"]])
+                    if command[-3:]==["nodes","-o","json"]:
+                        return json.dumps({"items":[{"metadata":{"name":"worker"},"status":{"conditions":[{"type":"Ready","status":"True"}],"allocatable":{}}}]})
+                    if command==["kubectl","config","current-context"]:
+                        return "fixture-context"
+                    raise AssertionError("Unexpected cluster read: "+str(command))
+                with patch.object(sys,"argv",["inspect_cluster.py","--workspace",str(root),"--host","controller","--output",str(output)]), \
+                     patch.dict(os.environ,{"EVA_CLUSTER_COMPONENTS":"agent"}), \
+                     patch.object(inspector,"run",side_effect=read),patch("builtins.print"):
+                    if status=="uninstalled":
+                        inspector.main()
+                        self.assertFalse(list(output.glob("*-previous.yaml")))
+                        self.assertEqual(yaml.safe_load((output/"context.yaml").read_text())["eva_cluster_values"]["agent"],{"image":{"tag":"3.3.0"}})
+                    else:
+                        with self.assertRaisesRegex(RuntimeError,"pending Helm operation"):
+                            inspector.main()
+
+
 class GuardTests(unittest.TestCase):
     def fixtures(self):
         deployment={"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"eva-vision"},
                     "spec":{"replicas":1,"strategy":{"type":"Recreate"},"template":{"spec":{"containers":[{"name":"eva-vision","resources":{"limits":{"nvidia.com/gpu":1}}}]}}}}
         node={"metadata":{"name":"nks-worker","labels":{}},"spec":{},"status":{"allocatable":{"nvidia.com/gpu":"1"},"conditions":[{"type":"Ready","status":"True"}]}}
-        query=lambda kind:[node] if kind=="nodes" else []
+        query=lambda kind,namespace=None,name=None:[node] if kind=="nodes" else []
         return deployment,query
 
     def test_null_environment_lists_preserve_required_secret_checks(self):
@@ -392,19 +440,171 @@ class GuardTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,"Missing required Kubernetes resource"):
                     guard.validate({"component":"iam"},[deployment],[],query)
 
+    def test_nullable_pod_lists_and_resource_maps_validate(self):
+        deployment,query=self.fixtures()
+        pod=deployment["spec"]["template"]["spec"]
+        pod.update(initContainers=None,volumes=None,imagePullSecrets=None,
+                   nodeSelector=None,tolerations=None,affinity=None)
+        container=pod["containers"][0]
+        container.update(env=None,envFrom=None,volumeMounts=None)
+        guard.validate({"component":"vision"},[deployment],[deployment],query)
+        for resources in [None, {"limits":None}]:
+            with self.subTest(resources=resources):
+                container["resources"]=resources
+                container["env"]=[{"name":"EMPTY","valueFrom":None}]
+                guard.validate({"component":"vision"},[deployment],[deployment],query)
+
+    def test_nullable_affinity_does_not_ignore_required_placement(self):
+        deployment,query=self.fixtures()
+        pod=deployment["spec"]["template"]["spec"]
+        for affinity in [None, {"nodeAffinity":None},
+                         {"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":None}}]:
+            with self.subTest(affinity=affinity):
+                pod["affinity"]=affinity
+                guard.validate({"component":"vision"},[deployment],[],query)
+        pod["affinity"]={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{
+            "nodeSelectorTerms":[{"matchExpressions":None,"matchFields":[{
+                "key":"metadata.name","operator":"In","values":["other-node"]}]}]}}}
+        self.assertTrue(any("GPU placement" in warning for warning in guard.validate({"component":"vision"},[deployment],[],query)))
+
+    def test_nullable_node_metadata_does_not_hide_missing_gpu_capacity(self):
+        deployment,query=self.fixtures()
+        node=query("nodes")[0]
+        node["metadata"]["labels"]=None
+        node["spec"]=None
+        actual=lambda kind,namespace=None,name=None:[node] if kind=="nodes" else []
+        guard.validate({"component":"vision"},[deployment],[],actual)
+        node["status"]["allocatable"]=None
+        with self.assertRaisesRegex(RuntimeError,"Unknown cluster GPU resource"):
+            guard.validate({"component":"vision"},[deployment],[],actual)
+
+    def test_empty_statefulset_claim_templates_do_not_require_migration(self):
+        before={"kind":"StatefulSet","metadata":{"name":"stateless"},
+                "spec":{"volumeClaimTemplates":None,"template":{"spec":{"containers":[]}}}}
+        after=copy.deepcopy(before)
+        after["spec"]["volumeClaimTemplates"]=[]
+        guard.validate({"component":"qdrant"},[after],[before],lambda kind,namespace=None,name=None:[])
+
+    def test_null_mounts_do_not_allow_removing_persistent_mount(self):
+        before,query=self.fixtures()
+        pod=before["spec"]["template"]["spec"]
+        pod["volumes"]=[{"name":"data","hostPath":{"path":"//eva-iam/postgres"}}]
+        pod["containers"][0]["volumeMounts"]=[{"name":"data","mountPath":"/data"}]
+        after=copy.deepcopy(before)
+        after["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]=None
+        with self.assertRaisesRegex(RuntimeError,"persistent mountPath"):
+            guard.validate({"component":"iam"},[after],[before],query)
+
+    def test_invalid_optional_field_and_parser_errors_do_not_expose_values(self):
+        deployment,query=self.fixtures()
+        deployment["spec"]["template"]["spec"]["containers"][0]["env"]="fixture-private-value"
+        with self.assertRaisesRegex(RuntimeError,"Invalid Kubernetes field env") as caught:
+            guard.validate({"component":"iam"},[deployment],[],query)
+        self.assertNotIn("fixture-private-value",str(caught.exception))
+        try:
+            yaml.safe_load("secret: [fixture-private-value")
+        except yaml.YAMLError as error:
+            message=guard.error_message(error)
+            self.assertIn(type(error).__name__,message)
+            self.assertNotIn("fixture-private-value",message)
+
+    def test_missing_tool_and_timeout_have_safe_actionable_errors(self):
+        command=["helm","template","eva-iam","--set","secret=fixture-private-value"]
+        for error,expected in [(FileNotFoundError("fixture-private-value"),"tool not found: helm"),
+                               (subprocess.TimeoutExpired(command,180),"timed out: helm template eva-iam")]:
+            with self.subTest(error=type(error).__name__), patch.object(guard.subprocess,"run",side_effect=error):
+                with self.assertRaisesRegex(RuntimeError,expected) as caught:
+                    guard.run(command)
+                self.assertNotIn("fixture-private-value",str(caught.exception))
+
+    def test_installed_diagnostic_only_reads_selected_manifests_and_cluster(self):
+        deployment,query=self.fixtures()
+        queries=[]
+        def inspect(kind,namespace=None,environment=None,name=None):
+            queries.append(kind)
+            return query(kind)
+        def read(command,environment=None):
+            if command[:2]==["helm","list"]:
+                name=command[command.index("--filter")+1].strip("^$")
+                return json.dumps([{"name":name,"status":"deployed"}])
+            return yaml.safe_dump(deployment)
+        with patch.object(sys,"argv",["guard_cluster.py","--installed","iam","app","agent","vision","vllm","qdrant"]), \
+             patch.object(guard,"run",side_effect=read) as commands, \
+             patch.object(guard,"items",side_effect=inspect), patch("builtins.print") as output:
+            guard.main()
+        self.assertEqual([call.args[0] for call in commands.call_args_list if call.args[0][:3]==["helm","get","manifest"]],
+            [["helm","get","manifest",name,"-n",ns] for name,ns in [
+                ("eva-iam","eva-iam"),("eva-app","eva-app"),("eva-agent","eva-agent"),
+                ("eva-vision","eva-vision"),("eva-agent-vllm","eva-agent"),("eva-agent-qdrant","eva-agent")]])
+        self.assertEqual(output.call_count,6)
+        self.assertEqual(queries,["nodes"])
+        with patch.object(sys,"argv",["guard_cluster.py","--installed","iam"]), \
+             patch.object(guard,"run",return_value="[]"),patch("builtins.print") as output:
+            guard.main()
+            self.assertIn("[SKIP]",output.call_args.args[0])
+
+    def test_prepared_diagnostic_preserves_render_environment_and_cluster_identity(self):
+        deployment,query=self.fixtures()
+        environments=[{"KUBECONFIG":"cluster-a","HELM_PLUGINS":"plugins-a"},
+                      {"KUBECONFIG":"cluster-b","HELM_PLUGINS":"plugins-b"}]
+        queries=[]
+        def inspect(kind,namespace=None,environment=None,name=None):
+            queries.append((environment["KUBECONFIG"],kind))
+            return query(kind)
+        with tempfile.TemporaryDirectory() as directory:
+            requests=[]
+            for index,environment in enumerate(environments):
+                request={"component":"iam","chart":"fixture-chart","version":"3.3.0",
+                         "values":[],"set":[],"post_renderer":"fixture-renderer",
+                         "previous":str(Path(directory)/(str(index)+"-previous.yaml")),"environment":environment}
+                if index:
+                    Path(request["previous"]).write_text(yaml.safe_dump(deployment))
+                path=Path(directory)/(str(index)+".json")
+                path.write_text(json.dumps(request));requests += ["--request",str(path)]
+            with patch.object(sys,"argv",["guard_cluster.py",*requests]), \
+                 patch.object(guard,"run",return_value=yaml.safe_dump(deployment)) as commands, \
+                 patch.object(guard,"items",side_effect=inspect),patch("builtins.print"):
+                guard.main()
+        self.assertEqual([call.args[1] for call in commands.call_args_list],environments)
+        self.assertEqual(set(queries),{("cluster-a","nodes"),("cluster-b","nodes")})
+        self.assertTrue(all("--dry-run=server" in call.args[0] for call in commands.call_args_list))
+        self.assertEqual(["--is-upgrade" in call.args[0] for call in commands.call_args_list],[False,True])
+
+    def test_optional_global_rbac_does_not_block_but_required_namespace_reads_do(self):
+        service={"kind":"Service","metadata":{"name":"app"},"spec":{"ports":[{"nodePort":32010}]}}
+        deployment,_=self.fixtures()
+        pod=deployment["spec"]["template"]["spec"]
+        pod["containers"][0]["resources"]={}
+        pod["imagePullSecrets"]=[{"name":"required-pull"}]
+        with tempfile.TemporaryDirectory() as directory:
+            request={"component":"app","chart":"fixture-chart","version":"3.3.0","values":[],"set":[],
+                     "post_renderer":"","previous":str(Path(directory)/"missing.yaml")}
+            path=Path(directory)/"request.json";path.write_text(json.dumps(request))
+            for docs,blocked in [([service],False),([service,deployment],True)]:
+                with self.subTest(blocked=blocked),patch.object(sys,"argv",["guard_cluster.py","--request",str(path)]), \
+                     patch.object(guard,"run",return_value=yaml.safe_dump_all(docs)), \
+                     patch.object(guard,"items",side_effect=RuntimeError("Cluster validation failed: kubectl get")), \
+                     patch("builtins.print") as output:
+                    if blocked:
+                        with self.assertRaisesRegex(RuntimeError,"Cluster validation failed"):
+                            guard.main()
+                    else:
+                        guard.main()
+                        self.assertTrue(any("[WARN]" in call.args[0] for call in output.call_args_list))
+
     def test_nks_gpu_replacement_without_runtimeclass_and_unselected_ingress(self):
         deployment,query=self.fixtures()
         guard.validate({"component":"vision"},[deployment],[deployment],query)
         other={"metadata":{"namespace":"eva-agent","name":"model"}, "spec":{"nodeName":"nks-worker","containers":[{"resources":{"limits":{"nvidia.com/gpu":1}}}]},"status":{"phase":"Running"}}
-        with self.assertRaisesRegex(RuntimeError,"Insufficient"):
-            guard.validate({"component":"vision"},[deployment],[deployment],lambda kind:[other] if kind=="pods" else query(kind))
+        guard.validate({"component":"vision"},[deployment],[deployment],lambda kind,namespace=None,name=None:[other] if kind=="pods" else query(kind))
 
     def test_storage_path_changes_fail_before_role_stops_workloads(self):
         before,query=self.fixtures()
         before["spec"]["template"]["spec"]["volumes"]=[{"name":"data","hostPath":{"path":"//eva-iam/postgres"}}]
+        before["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]=[{"name":"data","mountPath":"/data"}]
         after=copy.deepcopy(before)
         after["spec"]["template"]["spec"]["volumes"][0]["hostPath"]["path"]="/home/bastion/new-data"
-        with self.assertRaisesRegex(RuntimeError,"volume changes"):
+        with self.assertRaisesRegex(RuntimeError,"Persistent workload"):
             guard.validate({"component":"iam"},[after],[before],query)
 
     def test_gpu_node_taint_and_required_affinity_are_checked_before_replacement(self):
@@ -412,25 +612,117 @@ class GuardTests(unittest.TestCase):
         node=query("nodes")[0]
         node["metadata"]["labels"]={"pool":"gpu"}
         node["spec"]["taints"]=[{"key":"dedicated", "value":"gpu", "effect":"NoSchedule"}]
-        actual=lambda kind:[node] if kind=="nodes" else []
-        with self.assertRaisesRegex(RuntimeError,"Insufficient"):
-            guard.validate({"component":"vision"},[deployment],[deployment],actual)
+        actual=lambda kind,namespace=None,name=None:[node] if kind=="nodes" else []
+        self.assertTrue(guard.validate({"component":"vision"},[deployment],[deployment],actual))
         pod=deployment["spec"]["template"]["spec"]
         pod["tolerations"]=[{"key":"dedicated", "value":"gpu", "effect":"NoSchedule"}]
         guard.validate({"component":"vision"},[deployment],[deployment],actual)
         pod["affinity"]={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{
             "matchExpressions":[{"key":"pool","operator":"In","values":["other"]}]}]}}}
-        with self.assertRaisesRegex(RuntimeError,"Insufficient"):
-            guard.validate({"component":"vision"},[deployment],[deployment],actual)
+        self.assertTrue(guard.validate({"component":"vision"},[deployment],[deployment],actual))
 
-    def test_dependency_namespace_and_gpu_allocation_use_dependency_release(self):
+    def test_dependency_refs_are_read_by_name_in_the_dependency_namespace(self):
         deployment,query=self.fixtures()
         deployment["metadata"]["name"]="model"
-        previous={"metadata":{"namespace":"eva-agent","labels":{"app.kubernetes.io/instance":"eva-agent-vllm"}},
-                  "spec":{"nodeName":"nks-worker","containers":[{"resources":{"limits":{"nvidia.com/gpu":1}}}]},
-                  "status":{"phase":"Running"}}
+        deployment["spec"]["template"]["spec"]["containers"][0].update(resources={},envFrom=[{"secretRef":{"name":"model-auth"}}])
+        reads=[]
+        def inspect(kind,namespace=None,name=None):
+            reads.append((kind,namespace,name))
+            return [{"kind":"Secret","metadata":{"name":"model-auth","namespace":"eva-agent"}}] if namespace=="eva-agent" else []
         guard.validate({"component":"vllm","namespace":"eva-agent","release":"eva-agent-vllm"},
-                       [deployment],[],lambda kind:[previous] if kind=="pods" else query(kind))
+                       [deployment],[],inspect)
+        self.assertEqual(reads,[("secrets","eva-agent","model-auth")])
+
+    def test_new_cpu_workload_with_default_sa_and_hostpath_needs_no_extra_cluster_reads(self):
+        deployment,_=self.fixtures()
+        pod=deployment["spec"]["template"]["spec"]
+        pod["containers"][0]["resources"]={}
+        pod.update(serviceAccountName="default",volumes=[{"name":"data","hostPath":{"path":"/prepared/iam","type":"DirectoryOrCreate"}}])
+        pod["containers"][0]["volumeMounts"]=[{"name":"data","mountPath":"/data"}]
+        with patch.object(guard,"items",side_effect=AssertionError("unexpected inspection")):
+            self.assertEqual(guard.validate({"component":"iam"},[deployment],[]),[])
+
+    def test_preinstall_ecr_hook_provides_its_exact_custom_secret(self):
+        deployment,query=self.fixtures()
+        deployment["spec"]["template"]["spec"]["imagePullSecrets"]=[{"name":"custom-pull"}]
+        hook={"kind":"Job","metadata":{"name":"eva-agent-ecr-refresh-hook","annotations":{"helm.sh/hook":"pre-install,pre-upgrade"}},
+              "spec":{"template":{"spec":{"containers":[{"name":"refresh","env":[{"name":"ECR_SECRET_NAME","value":"custom-pull"}]}]}}}}
+        guard.validate({"component":"agent"},[deployment,hook],[],query)
+        deployment["spec"]["template"]["spec"]["imagePullSecrets"][0]["name"]="different-pull"
+        with self.assertRaisesRegex(RuntimeError,"Missing required Kubernetes resource"):
+            guard.validate({"component":"agent"},[deployment,hook],[],query)
+
+    def test_statefulset_claims_are_created_by_kubernetes_after_guard(self):
+        stateful={"kind":"StatefulSet","metadata":{"name":"qdrant"},"spec":{
+            "volumeClaimTemplates":[{"metadata":{"name":"data"},"spec":{"resources":{"requests":{"storage":"10Gi"}}}}],
+            "template":{"spec":{"containers":[{"name":"qdrant"}],"volumes":[{
+                "name":"data","persistentVolumeClaim":{"claimName":"data-qdrant-0"}}]}}}}
+        self.assertEqual(guard.validate({"component":"qdrant","namespace":"eva-agent"},[stateful],[],lambda kind,namespace=None,name=None:[]),[])
+
+    def test_pending_pvc_is_allowed_but_lost_pvc_still_blocks(self):
+        pvc={"kind":"PersistentVolumeClaim","metadata":{"name":"data"},"spec":{
+            "storageClassName":"nas","accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"500Gi"}}}}
+        claim=copy.deepcopy(pvc);claim["status"]={"phase":"Pending"}
+        sc={"metadata":{"name":"nas"},"volumeBindingMode":"WaitForFirstConsumer"}
+        query=lambda kind,namespace=None,name=None:[claim] if kind=="persistentvolumeclaims" else [sc] if kind=="storageclasses" else []
+        self.assertTrue(any("Pending" in item for item in guard.validate({"component":"app"},[pvc],[pvc],query)))
+        claim["status"]["phase"]="Lost"
+        with self.assertRaisesRegex(RuntimeError,"lost its volume"):
+            guard.validate({"component":"app"},[pvc],[pvc],query)
+
+    def test_pvc_resize_obeys_kubernetes_rules_and_equivalent_units(self):
+        before={"kind":"PersistentVolumeClaim","metadata":{"name":"data"},"spec":{
+            "storageClassName":"block","accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"1Gi"}}}}
+        claim=copy.deepcopy(before);claim["status"]={"phase":"Bound"}
+        for size,expansion,allowed in [("1024Mi",False,True),("2Gi",True,True),("2Gi",False,False),("512Mi",True,False)]:
+            with self.subTest(size=size,expansion=expansion):
+                after=copy.deepcopy(before);after["spec"]["resources"]["requests"]["storage"]=size
+                sc={"metadata":{"name":"block"},"allowVolumeExpansion":expansion}
+                query=lambda kind,namespace=None,name=None:[claim] if kind=="persistentvolumeclaims" else [sc] if kind=="storageclasses" else []
+                if allowed: guard.validate({"component":"app"},[after],[before],query)
+                else:
+                    with self.assertRaises(RuntimeError):guard.validate({"component":"app"},[after],[before],query)
+
+    def test_lookup_retained_pvc_can_disappear_from_new_manifest_without_deletion(self):
+        pvc={"kind":"PersistentVolumeClaim","metadata":{"name":"data","annotations":{"helm.sh/resource-policy":"keep"}},
+             "spec":{"resources":{"requests":{"storage":"500Gi"}}},"status":{"phase":"Bound"}}
+        query=lambda kind,namespace=None,name=None:[pvc] if kind=="persistentvolumeclaims" else []
+        guard.validate({"component":"app"},[],[pvc],query)
+        pvc["metadata"]["annotations"]={}
+        with self.assertRaisesRegex(RuntimeError,"remove existing storage"):
+            guard.validate({"component":"app"},[],[pvc],query)
+
+    def test_pv_capacity_increase_preserves_data_but_csi_change_still_blocks(self):
+        before={"kind":"PersistentVolume","metadata":{"name":"data"},"spec":{
+            "capacity":{"storage":"1Gi"},"csi":{"driver":"nas.csi.ncloud.com","volumeHandle":"fs-original"}}}
+        after=copy.deepcopy(before);after["spec"]["capacity"]["storage"]="2Gi"
+        guard.validate({"component":"app"},[after],[before],lambda kind,namespace=None,name=None:[])
+        after["spec"]["csi"]["volumeHandle"]="fs-different"
+        with self.assertRaisesRegex(RuntimeError,"separate migration"):
+            guard.validate({"component":"app"},[after],[before],lambda kind,namespace=None,name=None:[])
+
+    def test_static_pv_binding_does_not_require_a_storageclass_object(self):
+        pv={"kind":"PersistentVolume","metadata":{"name":"static"},"spec":{"storageClassName":"manual-class"}}
+        pvc={"kind":"PersistentVolumeClaim","metadata":{"name":"data"},"spec":{"storageClassName":"manual-class"}}
+        guard.validate({"component":"app"},[pv,pvc],[],lambda kind,namespace=None,name=None:[])
+        pvc["spec"]["volumeName"]="external-static"
+        guard.validate({"component":"app"},[pvc],[],lambda kind,namespace=None,name=None:[])
+
+    def test_mount_renaming_default_fields_and_double_slashes_preserve_data(self):
+        before,query=self.fixtures()
+        pod=before["spec"]["template"]["spec"]
+        pod["volumes"]=[{"name":"old-data","hostPath":{"path":"//eva-iam/postgres","type":"DirectoryOrCreate"}}]
+        pod["containers"][0]["volumeMounts"]=[{"name":"old-data","mountPath":"/data"}]
+        after=copy.deepcopy(before);pod=after["spec"]["template"]["spec"]
+        pod["volumes"]=[{"name":"new-data","hostPath":{"path":"/eva-iam/postgres","type":"Directory"}}]
+        pod["containers"][0]["volumeMounts"]=[{"name":"new-data","mountPath":"/data/","readOnly":False}]
+        guard.validate({"component":"iam"},[after],[before],query)
+
+    def test_fresh_gpu_deployment_allows_rollingupdate_and_retries_do_not_block(self):
+        deployment,query=self.fixtures()
+        deployment["spec"]["strategy"]={"type":"RollingUpdate"}
+        self.assertEqual(guard.validate({"component":"vision"},[deployment],[],query),[])
+        self.assertTrue(guard.validate({"component":"vision"},[deployment],[deployment],query))
 
     def test_qdrant_claim_template_change_and_unknown_class_fail(self):
         before={"kind":"StatefulSet","metadata":{"name":"eva-agent-qdrant"},"spec":{"replicas":1,
@@ -439,9 +731,9 @@ class GuardTests(unittest.TestCase):
         after=copy.deepcopy(before)
         after["spec"]["volumeClaimTemplates"][0]["spec"]["storageClassName"]="new-block"
         with self.assertRaisesRegex(RuntimeError,"claim templates"):
-            guard.validate({"component":"qdrant","namespace":"eva-agent"},[after],[before],lambda kind:[])
+            guard.validate({"component":"qdrant","namespace":"eva-agent"},[after],[before],lambda kind,namespace=None,name=None:[])
         with self.assertRaisesRegex(RuntimeError,"Unknown cluster StorageClass"):
-            guard.validate({"component":"qdrant","namespace":"eva-agent"},[after],[],lambda kind:[])
+            guard.validate({"component":"qdrant","namespace":"eva-agent"},[after],[],lambda kind,namespace=None,name=None:[])
 
 
 if __name__=="__main__":

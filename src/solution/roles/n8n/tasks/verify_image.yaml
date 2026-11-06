@@ -1,0 +1,50 @@
+---
+- name: Verify exact n8n Harbor image access
+  block:
+    - name: Create a temporary n8n image pull probe
+      ansible.builtin.command:
+        argv: [kubectl, create, -f, '-', -o, json]
+        stdin: >-
+          {{ {'apiVersion': 'v1', 'kind': 'Pod',
+              'metadata': {'generateName': 'eva-n8n-pull-', 'namespace': n8n_namespace},
+              'spec': {'restartPolicy': 'Never', 'activeDeadlineSeconds': 180,
+                       'imagePullSecrets': n8n_image_pull_secrets,
+                       'containers': [{'name': 'pull', 'image': n8n_deployment_image,
+                                       'imagePullPolicy': 'Always',
+                                       'command': ['node', '-e', 'process.exit(0)']}]}} | to_json }}
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: n8n_image_probe_create
+      changed_when: false
+
+    - name: Record temporary n8n image probe name
+      ansible.builtin.set_fact:
+        n8n_image_probe_name: "{{ (n8n_image_probe_create.stdout | from_json).metadata.name }}"
+
+    - name: Wait for successful n8n image pull and startup
+      ansible.builtin.command:
+        argv: [kubectl, -n, "{{ n8n_namespace }}", get, pod, "{{ n8n_image_probe_name }}", -o, 'jsonpath={.status.phase}']
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: n8n_image_probe_status
+      changed_when: false
+      failed_when: n8n_image_probe_status.rc != 0 or n8n_image_probe_status.stdout == 'Failed'
+      until: n8n_image_probe_status.stdout in ['Succeeded', 'Failed']
+      retries: 40
+      delay: 5
+  rescue:
+    - name: Explain n8n image access failure before deployment
+      ansible.builtin.fail:
+        msg: >-
+          n8n image {{ n8n_deployment_image }} could not be pulled and started.
+          Check target-to-Harbor connectivity, repository_protocol and pull credentials,
+          and confirm Main remote prepare published this exact image tag.
+          The n8n Deployment and PVC have not been changed.
+  always:
+    - name: Remove only this temporary n8n image pull probe
+      ansible.builtin.command:
+        argv: [kubectl, -n, "{{ n8n_namespace }}", delete, pod, "{{ n8n_image_probe_name }}", --ignore-not-found, --wait=false]
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+      when: n8n_image_probe_name | default('') | length > 0

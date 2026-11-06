@@ -1,0 +1,30 @@
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+Correcting dependencies... Done
+The following package was automatically installed and is no longer required:
+  gnupg-l10n
+Use 'sudo apt autoremove' to remove it.
+The following additional packages will be installed:
+  bzip2 gpg-wks-client libc-dev-bin libc6-dbg libc6-dev libncurses6 ncurses-base ncurses-term p11-kit-modules
+The following packages will be upgraded:
+  bzip2 gpg-wks-client libc-dev-bin libc6-dbg libc6-dev libncurses6 ncurses-base ncurses-term p11-kit-modules
+9 upgraded, 0 newly installed, 0 to remove and 421 not upgraded.
+Inst ncurses-base [6.4+20240113-1ubuntu2] (6.4+20240113-1ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf ncurses-base (6.4+20240113-1ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Inst ncurses-term [6.4+20240113-1ubuntu2] (6.4+20240113-1ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Inst libncurses6 [6.4+20240113-1ubuntu2] (6.4+20240113-1ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst bzip2 [1.0.8-5.1build0.1] (1.0.8-5.1ubuntu0.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst gpg-wks-client [2.4.4-2ubuntu17.4] (2.4.4-2ubuntu17.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst libc6-dev [2.39-0ubuntu8.7] (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst libc-dev-bin [2.39-0ubuntu8.7] (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst libc6-dbg [2.39-0ubuntu8.7] (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Inst p11-kit-modules [0.25.3-4ubuntu2.1] (0.25.3-4ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf ncurses-term (6.4+20240113-1ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [all])
+Conf libncurses6 (6.4+20240113-1ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf bzip2 (1.0.8-5.1ubuntu0.1 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf gpg-wks-client (2.4.4-2ubuntu17.6 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libc6-dev (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libc-dev-bin (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf libc6-dbg (2.39-0ubuntu8.9 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])
+Conf p11-kit-modules (0.25.3-4ubuntu2.2 Ubuntu:24.04/noble-updates, Ubuntu:24.04/noble-security [amd64])

@@ -1,0 +1,88 @@
+---
+# EVA validates this Runtime on the controller before running Ansible. A SSH
+# target does not inherit the controller's filesystem or executable search path.
+- name: Resolve controller Managed Runtime for EVA Agent kustomize
+  ansible.builtin.set_fact:
+    eva_agent_controller_runtime_root: "{{ lookup('ansible.builtin.env', 'EVA_RUNTIME_ROOT') }}"
+    eva_agent_kustomize_bin: kustomize
+  changed_when: false
+
+- name: Prepare the Managed Runtime kustomize executable on the installation target
+  when: eva_agent_controller_runtime_root | length > 0
+  block:
+    - name: Read controller Managed Runtime descriptor
+      ansible.builtin.include_vars:
+        file: "{{ eva_agent_controller_runtime_root }}/runtime.yaml"
+        name: eva_agent_controller_runtime
+
+    - name: Validate controller kustomize source path
+      ansible.builtin.assert:
+        that:
+          - eva_agent_controller_runtime.schema_version == 'v1'
+          - eva_agent_controller_runtime.tools.kustomize is defined
+          - not (eva_agent_controller_runtime.tools.kustomize is match('^/'))
+          - "'..' not in eva_agent_controller_runtime.tools.kustomize.split('/')"
+          - ansible_facts.architecture | default('x86_64') == 'x86_64'
+        fail_msg: "EVA Agent requires the controller Managed Runtime kustomize binary and a linux/amd64 target."
+
+    - name: Check controller Managed Runtime kustomize binary
+      ansible.builtin.stat:
+        path: "{{ eva_agent_controller_runtime_root }}/{{ eva_agent_controller_runtime.tools.kustomize }}"
+        checksum_algorithm: sha256
+      register: eva_agent_controller_kustomize_stat
+      delegate_to: localhost
+      become: false
+
+    - name: Require controller Managed Runtime kustomize binary
+      ansible.builtin.assert:
+        that:
+          - eva_agent_controller_kustomize_stat.stat.isreg | default(false)
+          - eva_agent_controller_kustomize_stat.stat.executable | default(false)
+          - eva_agent_controller_kustomize_stat.stat.checksum is defined
+        fail_msg: "Controller Managed Runtime kustomize is unavailable. Verify the EVA Managed Runtime before installation."
+
+    - name: Select local or SSH target kustomize path
+      ansible.builtin.set_fact:
+        eva_agent_kustomize_bin: >-
+          {{ (eva_agent_controller_runtime_root ~ '/' ~ eva_agent_controller_runtime.tools.kustomize)
+             if ((ansible_connection | default('ssh')) == 'local'
+                 and (eva_agent_controller_runtime.tools.kustomize | basename) == 'kustomize')
+             else (eva_agent_target_tools_root | default('/opt/eva/target-tools/kustomize'))
+                  ~ '/' ~ eva_agent_controller_kustomize_stat.stat.checksum ~ '/kustomize' }}
+      changed_when: false
+
+    - name: Prepare canonical target kustomize executable
+      when:
+        - eva_agent_kustomize_bin != eva_agent_controller_runtime_root ~ '/' ~ eva_agent_controller_runtime.tools.kustomize
+        - not ansible_check_mode
+      block:
+        - name: Ensure target managed kustomize directory exists
+          ansible.builtin.file:
+            path: "{{ eva_agent_kustomize_bin | dirname }}"
+            state: directory
+            mode: "0755"
+
+        - name: Copy validated Managed Runtime kustomize to the target
+          ansible.builtin.copy:
+            src: "{{ eva_agent_controller_runtime_root }}/{{ eva_agent_controller_runtime.tools.kustomize }}"
+            dest: "{{ eva_agent_kustomize_bin }}"
+            mode: "0755"
+
+        - name: Verify target kustomize checksum matches the controller
+          ansible.builtin.stat:
+            path: "{{ eva_agent_kustomize_bin }}"
+            checksum_algorithm: sha256
+          register: eva_agent_target_kustomize_stat
+
+        - name: Require the exact transferred Managed Runtime kustomize binary
+          ansible.builtin.assert:
+            that:
+              - eva_agent_target_kustomize_stat.stat.checksum == eva_agent_controller_kustomize_stat.stat.checksum
+            fail_msg: "Target kustomize checksum differs from the validated controller Managed Runtime."
+
+- name: Validate EVA managed kustomize
+  ansible.builtin.command:
+    argv: ["{{ eva_agent_kustomize_bin }}", version]
+  register: eva_agent_kustomize_version
+  changed_when: false
+  when: not ansible_check_mode

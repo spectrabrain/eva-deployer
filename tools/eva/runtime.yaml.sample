@@ -1,0 +1,10 @@
+# Installed by the runtime bootstrap at /opt/eva/runtime/runtime.yaml.
+# Every tool path is relative to the runtime directory and must resolve within it.
+schema_version: v1
+version: 3.2.0
+tools:
+  ansible-playbook: venv/bin/ansible-playbook
+  helm: bin/helm
+  kubectl: bin/kubectl
+  kustomize: bin/kustomize
+  oras: bin/oras

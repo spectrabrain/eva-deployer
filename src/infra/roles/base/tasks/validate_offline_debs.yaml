@@ -1,0 +1,7 @@
+# The validator ships in this role, so it exists in a Release install and is
+# copied to the target host rather than looked up in a repository checkout.
+- name: Validate base and NFS offline package bundle
+  ansible.builtin.script:
+    cmd: validate_offline_debs.sh {{ (eva_cache_root ~ '/apt/debs') | quote }}
+    executable: /bin/bash
+  changed_when: false

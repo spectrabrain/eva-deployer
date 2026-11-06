@@ -53,12 +53,12 @@ sys.exit(result.returncode)
             ("enable_mig.yaml", "Enable MIG only where it is currently disabled"),
             ("apply_mig.yaml", "Create only missing MIG instances and preserve prepared GPUs"),
         ]:
-            tasks = yaml.safe_load((ROOT / "roles/gpu_mig/tasks" / filename).read_text())
+            tasks = yaml.safe_load((ROOT / "src/infra/roles/gpu_mig/tasks" / filename).read_text())
             task = next(t for t in tasks if t["name"] == name)
             expression = task["ansible.builtin.command"]["argv"]
             task["ansible.builtin.command"]["argv"] = expression.replace(
                 "'/usr/local/sbin/gpu-mig-configure.py'",
-                repr(sys.executable) + ", " + repr(str(ROOT / "roles/gpu_mig/files/gpu-mig-configure.py")),
+                repr(sys.executable) + ", " + repr(str(ROOT / "src/infra/roles/gpu_mig/files/gpu-mig-configure.py")),
             )
             selected.append(task)
         return selected

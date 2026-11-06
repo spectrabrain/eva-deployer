@@ -1,0 +1,4 @@
+schemaVersion: v1alpha1
+kind: infraVersionCatalog
+k3s_default_version: v1.36.2+k3s1
+kustomize_version: 5.4.3

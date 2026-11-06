@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
-    "gpu_mig_configure", ROOT / "roles/gpu_mig/files/gpu-mig-configure.py"
+    "gpu_mig_configure", ROOT / "src/infra/roles/gpu_mig/files/gpu-mig-configure.py"
 )
 configure = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(configure)

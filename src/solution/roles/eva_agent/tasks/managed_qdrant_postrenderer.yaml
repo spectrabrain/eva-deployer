@@ -1,0 +1,24 @@
+---
+# The upstream post-renderer calls kustomize by name. Helm 3 and Helm 4 both
+# execute this wrapper, so neither depends on the SSH target's system PATH.
+- name: Bind Qdrant post-renderer to the verified Managed Runtime kustomize
+  when:
+    - not ansible_check_mode
+    - eva_agent_kustomize_bin | default('kustomize') != 'kustomize'
+  block:
+    - name: Preserve upstream Qdrant post-renderer script
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ eva_agent_workdir }}/plugin/eva-agent-qdrant/post-renderer.sh"
+          - "{{ eva_agent_workdir }}/plugin/eva-agent-qdrant/post-renderer.upstream.sh"
+        creates: "{{ eva_agent_workdir }}/plugin/eva-agent-qdrant/post-renderer.upstream.sh"
+
+    - name: Write Qdrant post-renderer wrapper with managed kustomize PATH
+      ansible.builtin.copy:
+        dest: "{{ eva_agent_workdir }}/plugin/eva-agent-qdrant/post-renderer.sh"
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          export PATH={{ (eva_agent_kustomize_bin | dirname) | quote }}:"$PATH"
+          exec /bin/bash {{ (eva_agent_workdir ~ '/plugin/eva-agent-qdrant/post-renderer.upstream.sh') | quote }} "$@"

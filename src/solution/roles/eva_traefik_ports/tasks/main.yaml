@@ -1,0 +1,65 @@
+- name: Initialize public listener result
+  ansible.builtin.set_fact:
+    eva_traefik_ports_result:
+      isolated: false
+
+- name: Reconcile k3s public listeners from the exact release manifest
+  when:
+    - not ansible_check_mode
+    - eva_traefik_ports_manage | bool
+  block:
+    - name: Copy common public listener helper
+      ansible.builtin.copy:
+        src: traefik_ports.py
+        dest: "{{ eva_traefik_ports_workdir }}/traefik_ports.py"
+        mode: "0700"
+
+    - name: Write Helm-compatible final ingress post-renderer
+      ansible.builtin.copy:
+        content: |
+          #!/bin/sh
+          exec python3 {{ (eva_traefik_ports_workdir ~ '/traefik_ports.py') | quote }} --post-render "$1"
+        dest: "{{ eva_traefik_ports_workdir }}/traefik-post-renderer"
+        mode: "0700"
+
+    - name: Write private exact Helm render request
+      no_log: true
+      ansible.builtin.copy:
+        content: >-
+          {{ {'component': eva_traefik_ports_component,
+              'namespace': eva_traefik_ports_namespace,
+              'release': eva_traefik_ports_release,
+              'chart': eva_traefik_ports_chart,
+              'version': eva_traefik_ports_version,
+              'values': eva_traefik_ports_values,
+              'set': eva_traefik_ports_set,
+              'timeout': eva_traefik_ports_timeout,
+              'backup_root': eva_traefik_ports_backup_root} | to_json }}
+        dest: "{{ eva_traefik_ports_workdir }}/traefik-ports-request.json"
+        mode: "0600"
+
+    - name: Reconcile and verify public Service and actual ServiceLB host ports
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ eva_traefik_ports_workdir }}/traefik_ports.py"
+          - --request
+          - "{{ eva_traefik_ports_workdir }}/traefik-ports-request.json"
+      environment:
+        KUBECONFIG: "{{ eva_traefik_ports_kubeconfig }}"
+      register: eva_traefik_ports_run
+      changed_when: >-
+        ((eva_traefik_ports_run.stdout | from_json).changed | bool)
+        if eva_traefik_ports_run.rc == 0 else false
+
+    - name: Record verified release router isolation
+      ansible.builtin.set_fact:
+        eva_traefik_ports_result: "{{ eva_traefik_ports_run.stdout | from_json }}"
+
+- name: Explain externally managed public listeners
+  ansible.builtin.debug:
+    msg: >-
+      eva_traefik_ports_manage=false: operator must configure the public LoadBalancer
+      listeners, release unused host ports, and isolate App/IAM Ingress entrypoints.
+      Backend service.port and NodePort are not public listener configuration.
+  when: not (eva_traefik_ports_manage | bool)

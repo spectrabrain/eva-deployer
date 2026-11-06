@@ -1,0 +1,44 @@
+# v3.3 App/IAM 설치 설정. 차트와 이미지 버전은 선택한 Release catalog를 사용합니다.
+# 다른 도메인 + HTTP: App /, IAM /. ex) http://app.eva.com/, http://iam.eva.com/
+# host에는 scheme, port, path를 넣지 않습니다. HTTP는 암호화되지 않으므로 격리된 검증 환경에만 사용합니다.
+iam:
+  config:
+    host: "<IAM_HOST>"  # 필수: IAM 도메인. ex) iam.eva.com
+    publicPort: ""  # 선택: 빈 값이면 기본 HTTP 80 / HTTPS 443. IAM 외부 포트를 명시해 변경합니다. ex) "30080"
+    # 실제 Ingress/Service/LB 노출 포트를 변경하지 않습니다. config.publicUrl을 지정하면 그 URL이 우선합니다.
+  keycloak:
+    realmPatch:
+      realmAdmin:
+        password: "<REALM_ADMIN_PASSWORD>"  # 필수: IAM realm 관리자 비밀번호. ex) Demo-Realm-Only!42 (예시 전용)
+      evaApp:
+        redirectUris:
+          - "http://<APP_HOST>/*"  # 필수: App 외부 주소. ex) http://app.eva.com/*
+  ingress:
+    path: /
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: web
+    tls:
+      enabled: false  # Ingress TLS 및 TLS Secret Job을 사용하지 않습니다.
+      create: false
+  redis:
+    tls:
+      enabled: false  # HTTP 구성에 맞춰 Redis TLS도 끕니다.
+    external:
+      enabled: true  # 고정 기본 틀: Redis 외부 접속을 사용합니다.
+app:
+  ingress:
+    path: /
+    tls:
+      enabled: false
+      create: false
+  app:
+    backendHost: "<APP_HOST>"  # 필수: IAM과 다른 App 도메인. ex) app.eva.com
+    backendSecure: false
+    backendPublicPort: 80  # HTTP 외부 포트. 비표준 포트 사용 시 IAM redirectUris에도 동일하게 반영합니다.
+    browserTitleName: EVA
+    # SSO baseUrl/adminClientSecret은 함께 설치하는 IAM에서 자동 전달됩니다.
+    license:
+      activation_mode: offline  # Online 기본 online, Remote/Local 기본 offline. repository.mode와 별개로 사전 결정한 라이선스에 맞게 변경하며 online은 라이선스 서버 연결이 필요합니다.
+      product_code: "<LICENSE_PRODUCT_CODE>"  # 필수: 발급된 license와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
+      api_key: "<LICENSE_API_KEY>"  # 필수: 발급된 license API key. ex) demo-license-api-key (예시 전용)
+      shared_key: "<LICENSE_SHARED_KEY>"  # 필수: 발급된 license shared key. ex) demo-license-shared-key (예시 전용)

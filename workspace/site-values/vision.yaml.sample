@@ -1,0 +1,8 @@
+# Optional EVA Vision chart override. Copy to <workspace>/site-values/vision.yaml
+# only when a site-specific Vision chart value is required.
+# The top-level key must be the inventory hostname (or ansible_host when set).
+# Do not commit secrets.
+#
+# GPU count and the nvidia.com/gpu or MIG resource name are selected from Config's
+# eva.yaml and Kubernetes allocatable resources. Do not repeat those values here.
+# Leave this file absent unless an approved Vision chart override is necessary.

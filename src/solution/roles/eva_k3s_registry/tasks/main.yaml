@@ -1,0 +1,69 @@
+---
+# Registry preparation also runs for a solution-only installation on existing k3s.
+- name: Read existing target registry settings privately
+  no_log: true
+  block:
+    - name: Check existing target registry configuration
+      ansible.builtin.stat:
+        path: "{{ eva_registry_config_path | default('/etc/rancher/k3s/registries.yaml') }}"
+      register: eva_registry_config_stat
+
+    - name: Read existing target registry configuration
+      ansible.builtin.slurp:
+        src: "{{ eva_registry_config_path | default('/etc/rancher/k3s/registries.yaml') }}"
+      register: eva_registry_config_raw
+      when: eva_registry_config_stat.stat.exists
+
+    - name: Resolve existing target registry configuration
+      ansible.builtin.set_fact:
+        eva_registry_config: "{{ (eva_registry_config_raw.content | b64decode | from_yaml) if eva_registry_config_stat.stat.exists else {} }}"
+
+    - name: Copy scoped k3s registry helper
+      ansible.builtin.copy:
+        src: registry.py
+        dest: "{{ eva_registry_helper_path | default('/tmp/eva-k3s-registry.py') }}"
+        mode: '0700'
+
+    - name: Prepare target registry transport and namespace pull credentials
+      ansible.builtin.command:
+        argv: [python3, "{{ eva_registry_helper_path | default('/tmp/eva-k3s-registry.py') }}"]
+        stdin: >-
+          {{ {'registry': repository_registry, 'protocol': repository_protocol | default(''),
+              'namespace': eva_registry_namespace, 'secret': eva_registry_secret | default('eva-harbor-pull'),
+              'config': eva_registry_config | default({}, true),
+              'username': repository_username | default(harbor_admin_user | default('')),
+              'password': repository_password | default(harbor_admin_password | default('')),
+              'containerd_config': eva_registry_containerd_config | default('/var/lib/rancher/k3s/agent/etc/containerd/config.toml')} | to_json }}
+      environment:
+        KUBECONFIG: "{{ eva_registry_kubeconfig | default('/etc/rancher/k3s/k3s.yaml') }}"
+      register: eva_registry_result
+      changed_when: (eva_registry_result.stdout | from_json).changed
+
+    # k3s regenerates certs.d from registries.yaml on restart. Record the new
+    # mirror too so the dynamic hosts.toml remains effective after reboot.
+    - name: Persist a missing Harbor mirror while preserving existing registries
+      ansible.builtin.copy:
+        dest: "{{ eva_registry_config_path | default('/etc/rancher/k3s/registries.yaml') }}"
+        mode: '0600'
+        content: >-
+          {{ eva_registry_config | combine({'mirrors': {repository_registry: {
+              'endpoint': [(eva_registry_result.stdout | from_json).endpoint]}}}, recursive=true) | to_nice_yaml }}
+      when: repository_registry not in eva_registry_config.get('mirrors', {})
+
+  rescue:
+    - name: Explain target Harbor pull preparation failure
+      no_log: false
+      ansible.builtin.fail:
+        msg: >-
+          Cannot prepare Harbor image pulls for {{ repository_registry }} on this target.
+          Check repository_protocol, the running containerd registry config_path,
+          and namespace pull credentials (an existing imagePullSecret, matching
+          registries.yaml auth, or repository_username/repository_password).
+          Existing registry configuration and credentials are preserved; k3s was not restarted.
+  always:
+    - name: Clear transient target registry credentials
+      ansible.builtin.set_fact:
+        eva_registry_config: {}
+        eva_registry_config_raw: {}
+        eva_registry_result: {}
+      no_log: true

@@ -1,0 +1,5 @@
+# Opt out only when the operator manages public listeners AND per-release router
+# isolation externally. No Service patch or NodePort fallback is performed.
+eva_traefik_ports_manage: true
+eva_traefik_ports_timeout: 300
+eva_traefik_ports_backup_root: /var/lib/eva/backups/traefik-ports

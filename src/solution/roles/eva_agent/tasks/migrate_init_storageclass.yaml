@@ -1,0 +1,165 @@
+---
+- name: Check existing eva-agent-init StorageClass
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - storageclass
+      - "{{ eva_agent_init_storage_class_contract.name }}"
+      - -o
+      - json
+  register: eva_agent_init_storage_class_result
+  changed_when: false
+  failed_when:
+    - eva_agent_init_storage_class_result.rc != 0
+    - >-
+      'NotFound' not in eva_agent_init_storage_class_result.stderr
+      and 'not found' not in eva_agent_init_storage_class_result.stderr
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Read existing eva-agent-init StorageClass metadata
+  ansible.builtin.set_fact:
+    eva_agent_init_storage_class: >-
+      {{ eva_agent_init_storage_class_result.stdout | from_json }}
+  changed_when: false
+  when: eva_agent_init_storage_class_result.rc == 0
+
+- name: Validate existing eva-agent-init StorageClass ownership
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          eva_agent_init_storage_class.metadata.annotations
+          | default({})
+        ).get('meta.helm.sh/release-name', '')
+        in ['', 'eva-agent-init']
+      - >-
+        (
+          eva_agent_init_storage_class.metadata.annotations
+          | default({})
+        ).get('meta.helm.sh/release-namespace', '')
+        in ['', eva_agent_namespace]
+    fail_msg: >-
+      StorageClass {{ eva_agent_init_storage_class_contract.name }}
+      is owned by another Helm release. EVA Deployer will not take
+      ownership automatically.
+  when: eva_agent_init_storage_class_result.rc == 0
+
+- name: Identify legacy Argo CD eva-agent-init StorageClass
+  ansible.builtin.set_fact:
+    eva_agent_init_storage_class_needs_migration: >-
+      {{
+        (
+          eva_agent_init_storage_class.metadata.annotations
+          | default({})
+        ).get('meta.helm.sh/release-name', '')
+        != 'eva-agent-init'
+        or
+        (
+          eva_agent_init_storage_class.metadata.annotations
+          | default({})
+        ).get('meta.helm.sh/release-namespace', '')
+        != eva_agent_namespace
+      }}
+  changed_when: false
+  when: eva_agent_init_storage_class_result.rc == 0
+
+- name: Validate legacy eva-agent-init StorageClass contract
+  ansible.builtin.assert:
+    that:
+      - >-
+        (
+          eva_agent_init_storage_class.metadata.labels
+          | default({})
+        ).get('app.kubernetes.io/managed-by', '') == 'Helm'
+      - >-
+        (
+          eva_agent_init_storage_class.metadata.labels
+          | default({})
+        ).get('app.kubernetes.io/instance', '')
+        == 'eva-agent-init'
+      - >-
+        (
+          eva_agent_init_storage_class.metadata.labels
+          | default({})
+        ).get('app.kubernetes.io/name', '')
+        == 'eva-agent-init'
+      - >-
+        (
+          eva_agent_init_storage_class.metadata.labels
+          | default({})
+        ).get('helm.sh/chart', '')
+        == 'eva-agent-init-1.0.0'
+      - >-
+        (
+          eva_agent_init_storage_class.metadata.annotations
+          | default({})
+        ).get('argocd.argoproj.io/tracking-id', '')
+        is match(
+          '^[^:]+:storage\\.k8s\\.io/StorageClass:'
+          ~ 'eva-agent-init/'
+          ~ eva_agent_init_storage_class_contract.name
+          ~ '$'
+        )
+      - >-
+        eva_agent_init_storage_class.provisioner
+        == eva_agent_init_storage_class_contract.provisioner
+      - >-
+        eva_agent_init_storage_class.parameters
+        == eva_agent_init_storage_class_contract.parameters
+      - >-
+        eva_agent_init_storage_class.reclaimPolicy
+        == eva_agent_init_storage_class_contract.reclaim_policy
+      - >-
+        eva_agent_init_storage_class.volumeBindingMode
+        == eva_agent_init_storage_class_contract.volume_binding_mode
+    fail_msg: >-
+      Existing StorageClass
+      {{ eva_agent_init_storage_class_contract.name }}
+      does not match the supported legacy Argo CD
+      eva-agent-init 1.0.0 contract. EVA Deployer will not take
+      ownership automatically.
+  when:
+    - eva_agent_init_storage_class_result.rc == 0
+    - eva_agent_init_storage_class_needs_migration | bool
+
+- name: Build eva-agent-init StorageClass ownership patch
+  ansible.builtin.set_fact:
+    eva_agent_init_storage_class_ownership_patch:
+      metadata:
+        annotations:
+          argocd.argoproj.io/tracking-id: null
+          meta.helm.sh/release-name: eva-agent-init
+          meta.helm.sh/release-namespace: "{{ eva_agent_namespace }}"
+        labels:
+          app.kubernetes.io/managed-by: Helm
+  changed_when: false
+  when:
+    - eva_agent_init_storage_class_result.rc == 0
+    - eva_agent_init_storage_class_needs_migration | bool
+
+- name: Migrate legacy StorageClass ownership to eva-agent-init
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - patch
+      - storageclass
+      - "{{ eva_agent_init_storage_class_contract.name }}"
+      - --type=merge
+      - -p
+      - >-
+        {{
+          eva_agent_init_storage_class_ownership_patch
+          | to_json
+        }}
+  register: eva_agent_init_storage_class_migration
+  changed_when: >-
+    'patched' in eva_agent_init_storage_class_migration.stdout
+    or
+    'configured' in eva_agent_init_storage_class_migration.stdout
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+  when:
+    - eva_agent_init_storage_class_result.rc == 0
+    - eva_agent_init_storage_class_needs_migration | bool

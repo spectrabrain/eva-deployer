@@ -1,0 +1,32 @@
+# EVA Agent 3.2.0+ Harbor values carry literal Jinja placeholders for the
+# registry (usually followed by the upstream project "eva") and the NFS share.
+# Resolve them for the selected repository and fail closed if any placeholder
+# survives, so a literal one can never reach an image reference or a volume.
+- name: Resolve Harbor registry and project placeholders
+  ansible.builtin.replace:
+    path: "{{ eva_agent_release_values_path }}"
+    regexp: '\{\{\s*harbor_url\s*\}\}/eva/'
+    replace: '{{ repository_registry }}/{{ repository_project }}/'
+
+- name: Resolve remaining Harbor registry placeholders
+  ansible.builtin.replace:
+    path: "{{ eva_agent_release_values_path }}"
+    regexp: '\{\{\s*harbor_url\s*\}\}'
+    replace: '{{ repository_registry }}'
+
+- name: Resolve NFS share placeholders
+  ansible.builtin.replace:
+    path: "{{ eva_agent_release_values_path }}"
+    regexp: '\{\{\s*eva_agent_nfs_share_path\s*\}\}'
+    replace: '{{ eva_agent_nfs_share_path }}'
+
+- name: Read resolved Release values
+  ansible.builtin.slurp:
+    src: "{{ eva_agent_release_values_path }}"
+  register: eva_agent_release_values_raw
+
+- name: Require resolved Release values
+  ansible.builtin.assert:
+    that:
+      - (eva_agent_release_values_raw.content | b64decode | regex_findall('[{][{]')) | length == 0
+    fail_msg: "Unresolved placeholder remains in {{ eva_agent_release_values_path }}"

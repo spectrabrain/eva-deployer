@@ -1,0 +1,1380 @@
+- name: Set EVA App install defaults (on-premise)
+  ansible.builtin.set_fact:
+    repository_mode: "{{ repository_mode | default('online_repository') }}"
+    repository_project: "{{ repository_project | default('eva') }}"
+    repository_registry: >-
+      {{
+        repository_registry
+        | default(harbor_registry | default(((repository_mode | default('online_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | regex_replace('^https?://', '')
+        | regex_replace('/+$', '')
+      }}
+    airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
+    eva_app_namespace: "{{ eva_app_namespace | default('eva-app') }}"
+    eva_app_name: "{{ eva_app_name | default('eva-app') }}"
+    eva_app_deploy_version: "{{ eva_app_deploy_version | mandatory }}"
+    eva_app_workdir: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}"
+    eva_app_deploy_values_dir: "{{ eva_app_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/app') }}"
+    eva_app_values_file: "{{ eva_app_values_file | default(eva_site_values_root ~ '/app.yaml') }}"
+    eva_app_values_host: "{{ ansible_host | default(inventory_hostname) }}"
+    eva_app_effective_values_dest: "{{ eva_app_workdir | default('/opt/eva-app/' ~ eva_app_deploy_version) }}/effective-input-values.yaml"
+    eva_app_kubeconfig: "{{ eva_app_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
+    eva_app_argocd_handoff_path: >-
+      {{ eva_app_argocd_handoff_path | default(
+          eva_argocd_handoff_paths[inventory_hostname]
+          if eva_argocd_handoff_paths is defined
+          else eva_site_state_root ~ '/argocd-handoff.yaml') }}
+    eva_app_chart_ref: "{{ eva_app_chart_ref | default('eva-app/eva-app') }}"
+    eva_app_chart_repo_url: >-
+      {{ eva_app_chart_repo_url | default(
+         'https://spectrabrain.github.io/eva-app-chart'
+         if (eva_app_chart_version is version('3.3.0', '>='))
+         else 'https://mellerikat.github.io/eva-app') }}
+    eva_app_chart_version: "{{ eva_app_chart_version | mandatory }}"
+    eva_app_offline_dir: "{{ eva_app_offline_dir | default(eva_cache_root ~ '/eva-app') }}"
+    eva_app_offline_chart_tgz: >-
+      {{ eva_app_offline_chart_tgz
+         | default((eva_app_offline_dir | default(eva_cache_root ~ '/eva-app'))
+                   ~ '/eva-app-' ~ eva_app_chart_version ~ '.tgz') }}
+    eva_app_backend_host: "{{ eva_app_backend_host | default(ansible_facts['default_ipv4']['address'] | default('127.0.0.1')) }}"
+    eva_app_backend_secure: "{{ eva_app_backend_secure | default(false) }}"
+    eva_app_tls_host_path: >-
+      {{
+        eva_app_tls_host_path
+        | default(ingress.tls.hostPath)
+        | default('/home/eva/certs')
+      }}
+    # app.backendSecurePort (차트 3.1.8+) → configmap 의 BACKEND_SECURE_PORT.
+    # 프론트가 백엔드 주소를 만들 때 쓰는 외부 포트입니다. ingress 가 443 이 아닌 포트로
+    # 노출될 때만 바꾸세요. 빈 값이면 렌더에서 생략하고 차트 기본값(443)을 씁니다.
+    eva_app_backend_secure_port: "{{ eva_app_backend_secure_port | default('') }}"
+    # External HTTP port, independent of the ClusterIP backend service.port.
+    eva_app_backend_public_port: "{{ eva_app_backend_public_port | default('') }}"
+    eva_app_jwt_secret: "{{ eva_app_jwt_secret | default('secret') }}"
+    # IAM의 기본 realm/client와 일치시킵니다. Workspace/CLI 지정값이 우선합니다.
+    eva_app_sso_realm: "{{ eva_app_sso_realm | default('eva-iam') }}"
+    eva_app_sso_client_id: "{{ eva_app_sso_client_id | default('eva-app') }}"
+    # URL/secret은 선택 입력이며, 없으면 검증된 IAM handoff에서 받습니다.
+    eva_app_sso_base_url: "{{ eva_app_sso_base_url | default('') }}"
+    eva_app_sso_admin_client_secret: "{{ eva_app_sso_admin_client_secret | default('') }}"
+    eva_app_vision_ml: "{{ eva_app_vision_ml | default('http://eva-vision.eva-vision:8000') }}"
+    eva_app_agent_llm: "{{ eva_app_agent_llm | default('http://eva-agent.eva-agent') }}"
+    eva_app_agent_vlm: "{{ eva_app_agent_vlm | default('http://eva-agent.eva-agent') }}"
+    eva_app_agent_request_timeout_seconds: "{{ eva_app_agent_request_timeout_seconds | default(600) }}"
+    eva_app_pipeline_detector_worker_num: "{{ eva_app_pipeline_detector_worker_num | default(16) }}"
+    eva_app_pipeline_perceptor_worker_num: "{{ eva_app_pipeline_perceptor_worker_num | default(2) }}"
+    # Repository 공급과 라이선스 연결은 별개입니다. 사전 결정한 라이선스가 다르면 Values에서 변경합니다.
+    eva_app_license_activation_mode: "{{ eva_app_license_activation_mode | default('online' if (repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository'] else 'offline') }}"
+    eva_app_license_product_code: "{{ eva_app_license_product_code | default('eva-dev') }}"
+    eva_app_license_api_key: "{{ eva_app_license_api_key | default('LICENSE_API_KEY') }}"
+    eva_app_license_shared_key: "{{ eva_app_license_shared_key | default('LICENSE_SHARED_KEY') }}"
+    # Empty = omit database.name from the role override and retain the selected Chart default.
+    eva_app_db_name: "{{ eva_app_db_name | default('', true) }}"
+    eva_app_db_user: "{{ eva_app_db_user | default('root') }}"
+    eva_app_db_password: "{{ eva_app_db_password | default('passwd') }}"
+    eva_app_db_nodeport: "{{ eva_app_db_nodeport | default(32060) }}"
+    eva_app_host_path: "{{ eva_app_host_path | default('/' ~ (eva_app_name | default('eva-app'))) }}"
+    eva_app_image_pull_auth_type: "{{ eva_app_image_pull_auth_type | default('hostPath') }}"
+    eva_app_image_pull_host_path: >-
+      {{ eva_app_image_pull_host_path
+         | default('/home/' ~ (ansible_user | default(ansible_ssh_user | default('eva'))) ~ '/.aws') }}
+    eva_app_image_pull_secret_name: "{{ eva_app_image_pull_secret_name | default('aws-credentials') }}"
+    eva_app_image_pull_cron_schedule: "{{ eva_app_image_pull_cron_schedule | default('0 */10 * * *') }}"
+    eva_app_image_pull_cron_run_mode: "{{ eva_app_image_pull_cron_run_mode | default('periodic') }}"
+    eva_app_image_pull_cron_run_immediately: "{{ eva_app_image_pull_cron_run_immediately | default(true) }}"
+
+- name: Validate repository mode for EVA App
+  ansible.builtin.assert:
+    that:
+      - repository_mode in ['online_repository', 'cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode in ['online_repository', 'cloud_repository'] or repository_registry | length > 0
+    fail_msg: >-
+      repository_mode은 online_repository, remote_repository, local_repository 중 하나여야 합니다 (cloud_repository는 호환 입력).
+      remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry가 필요합니다.
+
+- name: Validate EVA App chart version supports values-driven images
+  ansible.builtin.assert:
+    that:
+      - eva_app_chart_version is version('3.1.5', '>=')
+    fail_msg: >-
+      eva_app_chart_version={{ eva_app_chart_version }} 은 지원하지 않습니다.
+      values/app-k3s-override.yaml.j2 는 database.internal.image 를 repository/tag 맵으로 넘기는데,
+      3.1.4 이하 차트는 mysql 주소를 템플릿에 하드코딩하거나 문자열로 받습니다.
+      src/solution/version.yaml 의 eva_app_chart_version 을 3.1.5 이상으로 올리세요.
+
+- name: Validate EVA App chart version supports backendSecurePort
+  ansible.builtin.assert:
+    that:
+      - eva_app_chart_version is version('3.1.8', '>=')
+    fail_msg: >-
+      eva_app_backend_secure_port={{ eva_app_backend_secure_port }} 는 차트 3.1.8 이상에서만
+      동작합니다 (app.backendSecurePort → BACKEND_SECURE_PORT). 지금 차트는
+      {{ eva_app_chart_version }} 이라 이 값이 조용히 무시되고 프론트가 잘못된 포트를 씁니다.
+      src/solution/version.yaml 의 eva_app_chart_version 을 올리거나 이 값을 지우세요.
+  when: eva_app_backend_secure_port | length > 0
+
+- name: Resolve EVA App image repositories
+  ansible.builtin.set_fact:
+    eva_app_image_repository: >-
+      {{
+        eva_app_image_repository | default(
+          (repository_mode in ['online_repository', 'cloud_repository'])
+          | ternary(
+              ('211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-app'
+               if (eva_app_chart_version is version('3.3.0', '>='))
+               else '339713051385.dkr.ecr.ap-northeast-2.amazonaws.com/mellerikat/release/eva-app'),
+              repository_registry ~ '/' ~ repository_project ~ '/eva-app'
+            )
+        )
+      }}
+    eva_app_mysql_image_repository: >-
+      {{
+        eva_app_mysql_image_repository | default(
+          (repository_mode in ['online_repository', 'cloud_repository'])
+          | ternary('mysql', repository_registry ~ '/' ~ repository_project ~ '/mysql')
+        )
+      }}
+    eva_app_mysql_image_tag: "{{ eva_app_mysql_image_tag | default('8.0.42-bookworm') }}"
+    eva_app_ecr_account: >-
+      {{ eva_app_ecr_account | default(
+         '211722900905' if (eva_app_chart_version is version('3.3.0', '>=')) else '339713051385') }}
+    # TLS Secret Job 과 ECR CronJob 이 쓰는 kubectl. 차트 3.1.5 에서 values 로 노출됐습니다.
+    # Harbor 이름은 scripts/publish/push_images_to_repository.sh 의 평탄화 규칙을 따릅니다.
+    eva_app_kubectl_image_repository: >-
+      {{
+        eva_app_kubectl_image_repository | default(
+          (repository_mode in ['online_repository', 'cloud_repository'])
+          | ternary('bitnami/kubectl', repository_registry ~ '/' ~ repository_project ~ '/kubectl')
+        )
+      }}
+
+- name: Preserve existing EVA App Helm user Values
+  ansible.builtin.include_role:
+    name: eva_helm_values_backup
+  vars:
+    eva_helm_backup_namespace: "{{ eva_app_namespace }}"
+    eva_helm_backup_release: "{{ eva_app_name }}"
+    eva_helm_backup_component: app
+    eva_helm_backup_kubeconfig: "{{ eva_app_kubeconfig }}"
+
+- name: Remove EVA App workspace if it exists
+  ansible.builtin.file:
+    path: "{{ eva_app_workdir }}"
+    state: absent
+
+- name: Ensure EVA App workspace exists
+  ansible.builtin.file:
+    path: "{{ eva_app_workdir }}"
+    state: directory
+    mode: "0755"
+
+- name: Copy CLI EVA App chart override to target workspace
+  ansible.builtin.copy:
+    src: "{{ eva_cli_chart_path }}"
+    dest: "{{ eva_app_workdir }}/cli-chart.tgz"
+    mode: "0644"
+  when: eva_cli_chart_path | default('') | length > 0
+
+- name: Resolve EVA App chart source
+  ansible.builtin.set_fact:
+    eva_app_chart_source: >-
+      {{
+        (eva_cli_chart_path | default('') | length > 0)
+        | ternary(
+          eva_app_workdir ~ '/cli-chart.tgz',
+          (airgap_mode | default(false) | bool)
+          | ternary(eva_app_offline_chart_tgz, eva_app_chart_ref)
+        )
+      }}
+  changed_when: false
+
+- name: Add Helm repository for EVA App
+  ansible.builtin.command: helm repo add eva-app {{ eva_app_chart_repo_url }} --force-update
+  register: helm_repo_eva_app
+  changed_when: "'already exists' not in (helm_repo_eva_app.stdout + helm_repo_eva_app.stderr)"
+  failed_when:
+    - helm_repo_eva_app.rc != 0
+    - "'already exists' not in (helm_repo_eva_app.stdout + helm_repo_eva_app.stderr)"
+  when:
+    - not (airgap_mode | default(false) | bool)
+    - eva_cli_chart_path | default('') | length == 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Update Helm repositories
+  ansible.builtin.command: helm repo update
+  changed_when: true
+  when:
+    - not (airgap_mode | default(false) | bool)
+    - eva_cli_chart_path | default('') | length == 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Ensure offline EVA App chart exists
+  ansible.builtin.stat:
+    path: "{{ eva_app_offline_chart_tgz }}"
+  register: eva_app_offline_chart
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_cli_chart_path | default('') | length == 0
+
+- name: Assert offline EVA App chart is prepared
+  ansible.builtin.assert:
+    that:
+      - eva_app_offline_chart.stat.exists
+    fail_msg: >-
+      airgap_mode=true 인 경우 {{ eva_app_offline_chart_tgz }} 파일이 필요합니다.
+      scripts/download/download_offline_assets.sh 를 먼저 실행하세요.
+  when:
+    - airgap_mode | default(false) | bool
+    - eva_cli_chart_path | default('') | length == 0
+
+- name: Export default values.yaml from EVA App chart
+  ansible.builtin.shell: >-
+    helm show values {{ eva_app_chart_source }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+    > {{ eva_app_workdir }}/values.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Ensure EVA App deploy values directory exists on control node
+  ansible.builtin.file:
+    path: "{{ eva_app_deploy_values_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA App chart defaults on control node
+  ansible.builtin.fetch:
+    src: "{{ eva_app_workdir }}/values.yaml"
+    dest: "{{ eva_app_deploy_values_dir }}/chart-defaults.yaml"
+    flat: true
+  when: not ansible_check_mode
+
+- name: Publish EVA App chart defaults on control node
+  ansible.builtin.file:
+    path: "{{ eva_app_deploy_values_dir }}/chart-defaults.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Render EVA App k3s override values on control node
+  no_log: true
+  ansible.builtin.template:
+    src: "{{ eva_template_values_root }}/app-k3s-override.yaml.j2"
+    dest: "{{ eva_app_deploy_values_dir }}/app-k3s-override.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Initialize EVA App generated and override values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_config_values: {}
+    eva_app_iam_values: {}
+    eva_app_values_override: {}
+    eva_app_cli_values_override: {}
+    eva_app_workspace_sso_complete: false
+    eva_app_handoff_used: false
+    eva_app_generated_config_path: "{{ eva_site_config_root ~ '/' ~ eva_app_values_host ~ '/eva.yaml' }}"
+    eva_app_iam_handoff_path: "{{ eva_site_state_root ~ '/' ~ eva_app_values_host ~ '/eva-iam.yaml' }}"
+
+- name: Load EVA App role defaults for effective values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_role_values: "{{ lookup('ansible.builtin.file', eva_app_deploy_values_dir ~ '/app-k3s-override.yaml') | from_yaml }}"
+
+- name: Check generated EVA config for App values
+  ansible.builtin.stat:
+    path: "{{ eva_app_generated_config_path }}"
+  register: eva_app_generated_config_status
+  delegate_to: localhost
+  become: false
+
+- name: Load generated EVA config App values
+  no_log: true
+  ansible.builtin.set_fact:
+    # Config's app block is component configuration, not a Chart-root document.
+    # Its backendHost is summary metadata (older Config used the SSH alias).
+    # The public host comes from the App role, Workspace or CLI, never that alias.
+    eva_app_config_values:
+      app: >-
+        {{ ((lookup('ansible.builtin.file', eva_app_generated_config_path) | from_yaml)
+            | default({}, true)).app | default({}, true)
+           | dict2items | rejectattr('key', 'equalto', 'backendHost')
+           | list | items2dict }}
+  when: eva_app_generated_config_status.stat.exists
+
+- name: Check for host-specific EVA App values on control node
+  ansible.builtin.stat:
+    path: "{{ eva_app_values_file }}"
+  register: eva_app_values_file_status
+  delegate_to: localhost
+  become: false
+
+- name: Load host-specific EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_values_config: "{{ lookup('ansible.builtin.file', eva_app_values_file) | from_yaml }}"
+  when: eva_app_values_file_status.stat.exists
+
+- name: Select host-specific EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_values_override: "{{ (eva_app_values_config | default({}, true)).get(eva_app_values_host, {}) }}"
+  when: eva_app_values_file_status.stat.exists
+
+- name: Determine whether Workspace explicitly defines complete EVA App SSO
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_workspace_sso_complete: >-
+      {{
+        (((eva_app_values_override | default({}, true)).app
+          | default({}, true)).sso | default({}, true)) is mapping
+        and
+        (((((eva_app_values_override | default({}, true)).app
+             | default({}, true)).sso | default({}, true)).baseUrl
+          | default('', true) | length) > 0)
+        and
+        (((((eva_app_values_override | default({}, true)).app
+             | default({}, true)).sso | default({}, true)).adminClientSecret
+          | default('', true) | length) > 0)
+      }}
+
+- name: Check same-target IAM-to-App handoff
+  no_log: true
+  ansible.builtin.stat:
+    path: "{{ eva_app_iam_handoff_path }}"
+  register: eva_app_iam_handoff_status
+  delegate_to: localhost
+  become: true
+  when: not (eva_app_workspace_sso_complete | bool)
+
+- name: Read same-target IAM-to-App handoff
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ eva_app_iam_handoff_path }}"
+  register: eva_app_iam_handoff_raw
+  delegate_to: localhost
+  become: true
+  when:
+    - eva_app_iam_handoff_status.stat.exists | default(false)
+    - not (eva_app_workspace_sso_complete | bool)
+
+- name: Load same-target IAM-to-App handoff
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_iam_handoff: "{{ eva_app_iam_handoff_raw.content | b64decode | from_yaml }}"
+  when:
+    - eva_app_iam_handoff_status.stat.exists | default(false)
+    - not (eva_app_workspace_sso_complete | bool)
+
+- name: Validate same-target IAM-to-App handoff metadata
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_handoff_valid: >-
+      {{
+        ((eva_app_iam_handoff | default({}, true)).schema_version | default('') == 'v1')
+        and ((eva_app_iam_handoff | default({}, true)).site_id | default('') == eva_site_id)
+        and ((eva_app_iam_handoff | default({}, true)).target | default('') == eva_app_values_host)
+        and ((eva_app_iam_handoff | default({}, true)).iam_public_host | default('') | length > 0)
+        and ((eva_app_iam_handoff | default({}, true)).generated_at | default('') | length > 0)
+        and ((eva_app_iam_handoff | default({}, true)).generated_at | default('') is match('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'))
+        and ((eva_app_iam_handoff | default({}, true)).sso is mapping)
+        and (((eva_app_iam_handoff | default({}, true)).sso | default({}, true)).baseUrl | default('', true) | length > 0)
+        and (((eva_app_iam_handoff | default({}, true)).sso | default({}, true)).adminClientSecret | default('', true) | length > 0)
+      }}
+  when: eva_app_iam_handoff_status.stat.exists | default(false)
+
+- name: Require complete Workspace SSO or valid IAM handoff
+  ansible.builtin.assert:
+    that:
+      - (eva_app_workspace_sso_complete | bool) or (eva_app_handoff_valid | default(false) | bool)
+    fail_msg: >-
+      EVA App SSO 입력이 필요합니다: site={{ eva_site_id }}, target={{ eva_app_values_host }}.
+      Workspace app.yaml에 app.sso.baseUrl 및 app.sso.adminClientSecret을 모두 지정하거나,
+      {{ eva_app_iam_handoff_path }} 의 schema_version, site_id, target, iam_public_host,
+      generated_at, sso.baseUrl, sso.adminClientSecret을 포함한 유효한 IAM handoff를 준비하세요.
+
+- name: Use validated same-target IAM handoff
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_handoff_used: "{{ eva_app_handoff_valid | default(false) | bool }}"
+  when:
+    - not (eva_app_workspace_sso_complete | bool)
+    - eva_app_handoff_valid | default(false) | bool
+
+- name: Build IAM SSO values for EVA App
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_iam_values:
+      app:
+        sso: "{{ (eva_app_iam_handoff | default({}, true)).sso | default({}, true) }}"
+  when: eva_app_handoff_used | bool
+
+- name: Load CLI EVA App values override
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_cli_values_override: "{{ (lookup('ansible.builtin.file', eva_cli_values_path) | from_yaml) | default({}, true) }}"
+  when: eva_cli_values_path | default('') | length > 0
+
+- name: Merge generated and installer EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_generated_values: "{{ eva_app_role_values | combine(eva_app_config_values, recursive=true) }}"
+
+- name: Merge IAM handoff into EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_generated_values: "{{ eva_app_generated_values | combine(eva_app_iam_values, recursive=true) }}"
+
+- name: Check Argo CD handoff receipt on control node
+  no_log: true
+  ansible.builtin.stat:
+    path: "{{ eva_app_argocd_handoff_path }}"
+  register: eva_app_argocd_handoff_status
+  delegate_to: localhost
+  become: true
+  when: not ansible_check_mode
+
+- name: Read Argo CD handoff receipt on control node
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ eva_app_argocd_handoff_path }}"
+  register: eva_app_argocd_handoff_raw
+  delegate_to: localhost
+  become: true
+  when:
+    - not ansible_check_mode
+    - eva_app_argocd_handoff_status.stat.exists | default(false)
+
+- name: Assess verified legacy EVA App internal Service preservation
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="$EVA_APP_NAMESPACE"
+    service_name="$EVA_APP_INTERNAL_SERVICE"
+    site_id="$EVA_APP_SITE_ID"
+
+    service_json="$(
+      kubectl get \
+        service "$service_name" \
+        -n "$namespace" \
+        -o json \
+        2>/dev/null
+    )" || {
+      echo 'preserve_internal_service=false'
+      exit 0
+    }
+
+    if [[ -z "$service_json" ]]; then
+      echo 'preserve_internal_service=false'
+      exit 0
+    fi
+
+    python3 - \
+      "$site_id" \
+      "$namespace" \
+      "$service_name" \
+      "$service_json" \
+      "$EVA_APP_RELEASE" <<'PY_INTERNAL_SERVICE'
+    import base64
+    import json
+    import os
+    import re
+    import subprocess
+    import sys
+
+    import yaml
+
+
+    expected_site_id = sys.argv[1]
+    expected_namespace = sys.argv[2]
+    expected_service_name = sys.argv[3]
+    service = json.loads(sys.argv[4])
+    expected_release = sys.argv[5]
+
+    metadata = service.get("metadata")
+    spec = service.get("spec")
+
+    if not isinstance(metadata, dict) or not isinstance(spec, dict):
+        raise SystemExit(
+        "[ERROR] malformed EVA App internal Service"
+        )
+
+    if (
+      service.get("apiVersion") != "v1"
+      or service.get("kind") != "Service"
+      or metadata.get("name") != expected_service_name
+      or metadata.get("namespace") != expected_namespace
+    ):
+        raise SystemExit(
+        "[ERROR] EVA App internal Service identity mismatch"
+        )
+
+    annotations = metadata.get("annotations") or {}
+    labels = metadata.get("labels") or {}
+    owner_references = metadata.get("ownerReferences") or []
+    if (
+        not isinstance(annotations, dict)
+        or not isinstance(labels, dict)
+        or not isinstance(owner_references, list)
+    ):
+        raise SystemExit(
+            "[ERROR] malformed EVA App internal Service ownership"
+        )
+
+    helm_release_name = annotations.get(
+        "meta.helm.sh/release-name"
+    )
+    helm_release_namespace = annotations.get(
+        "meta.helm.sh/release-namespace"
+    )
+    managed_by = labels.get("app.kubernetes.io/managed-by")
+    helm_owned = bool(helm_release_name or helm_release_namespace)
+
+    # A prior successful install or failed Helm adoption may already own this
+    # Service. Only the exact current release may preserve that retry state.
+    if helm_owned and (
+        helm_release_name != expected_release
+        or helm_release_namespace != expected_namespace
+        or managed_by != "Helm"
+    ):
+        raise SystemExit(
+            "[ERROR] EVA App internal Service has foreign or partial Helm ownership: "
+            f"release={helm_release_name!r}, namespace={helm_release_namespace!r}, "
+            f"managed_by={managed_by!r}; expected={expected_namespace}/{expected_release}"
+        )
+
+    if managed_by not in (None, "", "Helm"):
+        raise SystemExit(
+            "[ERROR] unsupported legacy EVA App internal "
+            "Service managed-by identity"
+        )
+
+    controller_owners = [
+        owner
+        for owner in owner_references
+        if isinstance(owner, dict)
+        and owner.get("controller") is True
+    ]
+
+    if controller_owners:
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "has a controller owner"
+        )
+
+    expected_selector = {
+      "app.kubernetes.io/instance": expected_release,
+        "app.kubernetes.io/name": "eva-app",
+        "component": "eva-app",
+    }
+
+    if (
+        spec.get("type") != "ClusterIP"
+        or spec.get("selector") != expected_selector
+    ):
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "selector or type mismatch"
+        )
+
+    ports = spec.get("ports")
+
+    if not isinstance(ports, list) or len(ports) != 1:
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "must expose exactly one port"
+        )
+
+    port = ports[0]
+
+    if (
+        not isinstance(port, dict)
+        or port.get("name") != "http"
+        or port.get("protocol", "TCP") != "TCP"
+        or port.get("port") != 32010
+        or port.get("targetPort") != 32010
+    ):
+        raise SystemExit(
+            "[ERROR] legacy EVA App internal Service "
+            "port contract mismatch"
+        )
+
+    tracking = annotations.get("argocd.argoproj.io/tracking-id")
+    # Unowned legacy resources always need a receipt. Helm-owned resources
+    # need one only when residual Argo CD tracking still needs verification.
+    if not helm_owned or tracking:
+        encoded_handoff = os.environ.get("EVA_APP_ARGOCD_HANDOFF_B64", "")
+        if not encoded_handoff:
+            raise SystemExit(
+                "[ERROR] active legacy EVA App internal Service requires an Argo CD handoff receipt"
+            )
+        try:
+            handoff = yaml.safe_load(base64.b64decode(encoded_handoff, validate=True))
+        except (ValueError, yaml.YAMLError):
+            raise SystemExit("[ERROR] invalid Argo CD handoff receipt encoding")
+        if (
+            not isinstance(handoff, dict)
+            or handoff.get("schema_version") != "v1"
+            or handoff.get("site_id") != expected_site_id
+            or not handoff.get("completed_at")
+        ):
+            raise SystemExit(
+                "[ERROR] invalid Argo CD handoff receipt "
+                "for EVA App internal Service preservation"
+            )
+        cluster_name = handoff.get("cluster_name")
+        applications = handoff.get("applications")
+        if (
+            not isinstance(cluster_name, str)
+            or not cluster_name
+            or not isinstance(applications, list)
+        ):
+            raise SystemExit(
+                "[ERROR] incomplete Argo CD handoff identity "
+                "for EVA App internal Service preservation"
+            )
+        expected_application = cluster_name + "-eva-app"
+        matches = [application for application in applications if application == expected_application]
+        if matches != [expected_application]:
+            raise SystemExit(
+                "[ERROR] Argo CD handoff receipt does not "
+                "identify exactly one EVA App Application"
+            )
+        expected_tracking = (
+            f"{expected_application}:/Service:"
+            f"{expected_namespace}/{expected_service_name}"
+        )
+        if tracking != expected_tracking:
+            raise SystemExit(
+                "[ERROR] legacy EVA App internal Service tracking identity mismatch"
+            )
+        commit = handoff.get("registration_commit")
+        if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40,64}", commit) is None:
+            raise SystemExit(
+                "[ERROR] invalid Argo CD handoff registration commit"
+            )
+
+    if helm_owned:
+        # Annotations alone are not proof: require a deployed/failed current
+        # release and membership in its stored manifest. Pending or orphaned
+        # ownership remains fail-closed; downstream reconciliation validates
+        # failed release recovery before any Helm mutation.
+        def helm_output(arguments):
+            result = subprocess.run(
+                ["helm", *arguments, "-n", expected_namespace],
+                text=True, capture_output=True, check=False,
+            )
+            if result.returncode != 0:
+                raise SystemExit(
+                    "[ERROR] cannot verify current EVA App Helm release for internal Service preservation"
+                )
+            return result.stdout
+
+        status = json.loads(helm_output(["status", expected_release, "-o", "json"]))
+        if (
+            not isinstance(status, dict)
+            or status.get("name") != expected_release
+            or status.get("namespace") != expected_namespace
+            or not isinstance(status.get("version"), int)
+            or isinstance(status.get("version"), bool)
+            or status["version"] < 1
+            or not isinstance(status.get("info"), dict)
+            or status["info"].get("status") not in ("deployed", "failed")
+        ):
+            raise SystemExit(
+                "[ERROR] unsafe current EVA App Helm release identity or status"
+            )
+
+        def resources(document):
+            if not isinstance(document, dict):
+                return
+            if document.get("kind") == "List":
+                for item in document.get("items") or []:
+                    yield from resources(item)
+            else:
+                yield document
+
+        matches = []
+        for document in yaml.safe_load_all(helm_output(["get", "manifest", expected_release])):
+            for resource in resources(document):
+                resource_metadata = resource.get("metadata") or {}
+                if (
+                    resource.get("apiVersion") == "v1"
+                    and resource.get("kind") == "Service"
+                    and resource_metadata.get("name") == expected_service_name
+                    and resource_metadata.get("namespace", expected_namespace) == expected_namespace
+                ):
+                    matches.append(resource)
+        if len(matches) != 1:
+            raise SystemExit(
+                "[ERROR] current EVA App Helm manifest does not identify exactly one internal Service"
+            )
+    PY_INTERNAL_SERVICE
+
+    echo 'preserve_internal_service=true'
+    echo \
+      '[OK] verified EVA App internal Service for Helm preservation'
+  args:
+    executable: /bin/bash
+  register: eva_app_internal_service_preservation
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_RELEASE: "{{ eva_app_name }}"
+    EVA_APP_INTERNAL_SERVICE: "{{ eva_app_name }}-internal"
+    EVA_APP_ARGOCD_HANDOFF_B64: "{{ eva_app_argocd_handoff_raw.content | default('') }}"
+    EVA_APP_SITE_ID: "{{ eva_site_id }}"
+
+- name: Build verified legacy EVA App internal Service values
+  ansible.builtin.set_fact:
+    eva_app_legacy_service_values: >-
+      {{
+        (
+          eva_app_internal_service_preservation.stdout
+          is search('(?m)^preserve_internal_service=true$')
+        )
+        | ternary(
+            {
+              'service': {
+                'internal': {
+                  'enabled': true
+                }
+              }
+            },
+            {}
+          )
+      }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Preserve verified legacy EVA App internal Service
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_generated_values: >-
+      {{
+        eva_app_generated_values
+        | combine(
+            eva_app_legacy_service_values | default({}, true),
+            recursive=true
+          )
+      }}
+
+- name: Merge Workspace EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_effective_values: "{{ eva_app_generated_values | combine(eva_app_values_override, recursive=true) }}"
+
+- name: Merge CLI EVA App values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_effective_values: "{{ eva_app_effective_values | combine(eva_app_cli_values_override, recursive=true) }}"
+
+- name: Disable ECR refresh resources for repository-backed EVA App
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_effective_values: >-
+      {{ eva_app_effective_values
+         | combine({'imagePullSecrets': {'enabled': false, 'create': false}}, recursive=true) }}
+  when: repository_mode in ['remote_repository', 'local_repository']
+
+- name: Record private EVA App effective input values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_app_effective_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_app_deploy_values_dir }}/effective-input-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA App values source metadata on control node
+  ansible.builtin.copy:
+    content: |
+      config_generated_values: {{ (eva_app_config_values | length > 0) | lower }}
+      iam_handoff: {{ eva_app_handoff_used | bool | lower }}
+      legacy_internal_service: {{ ((eva_app_legacy_service_values | default({}, true)) | length > 0) | lower }}
+      workspace_override: {{ (eva_app_values_override | length > 0) | lower }}
+      cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}
+      rendered_artifacts:
+        chart_defaults: {{ eva_app_deploy_values_dir }}/chart-defaults.yaml
+        effective_input_values: {{ eva_app_deploy_values_dir }}/effective-input-values.yaml
+        resolved_values: {{ eva_app_deploy_values_dir }}/resolved-values.yaml
+    dest: "{{ eva_app_deploy_values_dir }}/values-sources.yaml"
+    mode: "0644"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy private EVA App effective input values to target workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_app_deploy_values_dir }}/effective-input-values.yaml"
+    dest: "{{ eva_app_effective_values_dest }}"
+    mode: "0600"
+  when: not ansible_check_mode
+
+- name: Reconcile EVA App public Traefik listeners
+  ansible.builtin.include_role:
+    name: eva_traefik_ports
+  vars:
+    eva_traefik_ports_component: app
+    eva_traefik_ports_namespace: "{{ eva_app_namespace }}"
+    eva_traefik_ports_release: "{{ eva_app_name }}"
+    eva_traefik_ports_workdir: "{{ eva_app_workdir }}"
+    eva_traefik_ports_chart: "{{ eva_app_chart_source }}"
+    eva_traefik_ports_version: "{{ eva_app_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_traefik_ports_values: "{{ [eva_app_workdir ~ '/values.yaml', eva_app_effective_values_dest] }}"
+    eva_traefik_ports_set: >-
+      {{ (eva_cli_helm_set | default([])) +
+         (['imagePullSecrets.enabled=false', 'imagePullSecrets.create=false']
+          if repository_mode in ['remote_repository', 'local_repository'] else []) }}
+    eva_traefik_ports_kubeconfig: "{{ eva_app_kubeconfig }}"
+  when: not ansible_check_mode
+
+- name: Use verified EVA App ingress post-renderer in every Helm operation
+  ansible.builtin.set_fact:
+    eva_app_traefik_args: >-
+      {{ ('--post-renderer ' ~ (eva_traefik_ports_result.renderer | quote)
+          ~ ' --post-renderer-args ' ~ ((eva_app_workdir ~ '/traefik-router.json') | quote))
+         if (eva_traefik_ports_result.isolated | default(false)) else '' }}
+    eva_app_traefik_env: "{{ eva_traefik_ports_result.environment | default({}) }}"
+  when: not ansible_check_mode
+
+- name: Determine whether EVA App TLS Job is enabled
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_app_tls_job_enabled: >-
+      {{ eva_traefik_ports_result.tls_job_enabled
+         if (eva_traefik_ports_result.isolated | default(false)) else (
+           (eva_app_effective_values.ingress.enabled | default(true) | bool)
+           and (eva_app_effective_values.ingress.tls.enabled | default(true) | bool)
+           and (eva_app_effective_values.ingress.tls.create | default(true) | bool)) }}
+
+- name: Configure Traefik default TLS certificate for an IP-based App host
+  ansible.builtin.import_role:
+    name: eva_traefik_tls
+  vars:
+    eva_traefik_tls_host: "{{ eva_traefik_ports_result.endpoint.host if (eva_traefik_ports_result.isolated | default(false)) else (eva_app_effective_values.app.backendHost | default(eva_app_backend_host)) }}"
+    eva_traefik_tls_host_path: "{{ eva_traefik_ports_result.tls_host_path if (eva_traefik_ports_result.isolated | default(false)) else (eva_app_effective_values.ingress.tls.hostPath | default(eva_app_tls_host_path)) }}"
+    eva_traefik_tls_kubeconfig: "{{ eva_app_kubeconfig }}"
+  when:
+    - not ansible_check_mode
+    - eva_app_tls_job_enabled | bool
+    - >-
+      (eva_traefik_ports_result.tls_host_path | length > 0)
+      if (eva_traefik_ports_result.isolated | default(false))
+      else ((eva_app_effective_values.ingress.tls.authType | default('hostPath')) == 'hostPath')
+
+- name: Reconcile verified Argo CD legacy EVA App resources
+  ansible.builtin.include_tasks: reconcile_app.yaml
+  when: not ansible_check_mode
+
+- name: Resolve EVA App Helm ownership adoption argument
+  ansible.builtin.set_fact:
+    eva_app_take_ownership_arg: >-
+      {{ (eva_app_legacy_reconciliation.stdout is search('(?m)^take_ownership=true$'))
+         | ternary('--take-ownership', '') }}
+    eva_app_server_side_conflict_args: >-
+      {{ (eva_app_legacy_reconciliation.stdout is search('(?m)^force_conflicts=true$'))
+         | ternary('--server-side=true --force-conflicts', '') }}
+    eva_app_obsolete_ecr_resources: >-
+      {{ (eva_app_legacy_reconciliation.stdout_lines
+          | select('match', '^obsolete_ecr_resources=') | list | first
+          | default('obsolete_ecr_resources=[]'))
+         | regex_replace('^obsolete_ecr_resources=', '') | from_json }}
+  changed_when: false
+  when: not ansible_check_mode
+
+- name: Validate EVA App Helm installation with server dry-run
+  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+  ansible.builtin.command: >-
+    helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
+    -n {{ eva_app_namespace }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+    --create-namespace
+    -f {{ eva_app_workdir }}/values.yaml
+    -f {{ eva_app_effective_values_dest }}
+    {{ eva_app_take_ownership_arg }}
+    {{ eva_app_server_side_conflict_args }}
+    --dry-run=server
+    --hide-secret
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    {% if repository_mode in ['remote_repository', 'local_repository'] %}--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false{% endif %}
+    {{ eva_app_traefik_args | default('') }}
+  register: eva_app_server_dry_run
+  changed_when: false
+  when: not ansible_check_mode
+  environment: "{{ {'KUBECONFIG': eva_app_kubeconfig} | combine(eva_app_traefik_env | default({})) }}"
+
+- name: Delete verified obsolete EVA App ECR resources
+  ansible.builtin.shell: |
+    set -euo pipefail
+    options_file="$(mktemp)"
+    trap 'rm -f "$options_file"' EXIT
+    while IFS= read -r encoded
+    do
+      resource="$(printf '%s' "$encoded" | base64 -d)"
+      kind="$(jq -r '.kind' <<< "$resource")"
+      name="$(jq -r '.name' <<< "$resource")"
+      uid="$(jq -r '.uid' <<< "$resource")"
+      version="$(jq -r '.resourceVersion' <<< "$resource")"
+      api_path="$(jq -r '.api_path' <<< "$resource")"
+      live="$(kubectl get "$kind/$name" -n "$EVA_APP_NAMESPACE" --ignore-not-found=true -o json)"
+      [[ -n "$live" ]] || continue
+      if [[ "$(jq -r '.metadata.uid' <<< "$live")" != "$uid" ]]; then
+        echo "[ERROR] obsolete ECR resource identity changed: $kind/$name"
+        exit 1
+      fi
+      # The API rejects deletion if identity or ownership changed after assessment.
+      jq -n --arg uid "$uid" --arg version "$version" \
+        '{apiVersion: "v1", kind: "DeleteOptions", propagationPolicy: "Foreground",
+          preconditions: {uid: $uid, resourceVersion: $version}}' > "$options_file"
+      kubectl delete --raw "$api_path" -f "$options_file" >/dev/null
+      kubectl wait --for=delete "$kind/$name" -n "$EVA_APP_NAMESPACE" --timeout=120s
+      echo "[OK] deleted verified obsolete ECR resource: $kind/$name"
+    done < <(jq -r '.[] | @base64' <<< "$EVA_APP_OBSOLETE_ECR_JSON")
+  args:
+    executable: /bin/bash
+  register: eva_app_ecr_cleanup
+  changed_when: "'deleted verified obsolete ECR resource:' in eva_app_ecr_cleanup.stdout"
+  when:
+    - not ansible_check_mode
+    - repository_mode in ['remote_repository', 'local_repository']
+    - eva_app_obsolete_ecr_resources | length > 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+    EVA_APP_NAMESPACE: "{{ eva_app_namespace }}"
+    EVA_APP_OBSOLETE_ECR_JSON: "{{ eva_app_obsolete_ecr_resources | to_json }}"
+
+- name: Check existing EVA App deployment
+  ansible.builtin.command: kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }}
+  register: eva_app_deployment_exists
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Record existing EVA App deployment identity and replicas
+  ansible.builtin.command: >-
+    kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }} -o json
+  register: eva_app_deployment_before_install
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_app_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Set existing EVA App deployment recovery facts
+  ansible.builtin.set_fact:
+    eva_app_preinstall_deployment_uid: "{{ (eva_app_deployment_before_install.stdout | from_json).metadata.uid }}"
+    eva_app_preinstall_replicas: "{{ (eva_app_deployment_before_install.stdout | from_json).spec.replicas | default(1) }}"
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_app_deployment_exists.rc == 0
+
+- name: Delete existing EVA App TLS Job before upgrade
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - delete
+      - job
+      - "{{ eva_app_name }}-tls-job"
+      - -n
+      - "{{ eva_app_namespace }}"
+      - --ignore-not-found=true
+      - --wait=true
+      - --timeout=120s
+  register: eva_app_tls_job_delete
+  changed_when: "'deleted' in eva_app_tls_job_delete.stdout"
+  when:
+    - not ansible_check_mode
+    - eva_app_tls_job_enabled | bool
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Scale down existing EVA App deployment before reinstall
+  ansible.builtin.command: >-
+    kubectl scale deployment {{ eva_app_name }} -n {{ eva_app_namespace }} --replicas=0
+  register: eva_app_scale_down
+  changed_when: "'scaled' in eva_app_scale_down.stdout"
+  when:
+    - not ansible_check_mode
+    - eva_app_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Wait until EVA App pods are terminated before reinstall
+  ansible.builtin.command: >-
+    kubectl wait --for=delete pod
+    -n {{ eva_app_namespace }}
+    -l app.kubernetes.io/instance={{ eva_app_name }},component=eva-app
+    --timeout=180s
+  register: eva_app_wait_delete
+  changed_when: false
+  failed_when:
+    - eva_app_wait_delete.rc != 0
+    - "'no matching resources found' not in eva_app_wait_delete.stderr"
+  when:
+    - not ansible_check_mode
+    - eva_app_deployment_exists.rc == 0
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Install EVA App and restore prior replicas if Helm fails
+  block:
+    - name: Prepare EVA App database transition tooling
+      ansible.builtin.include_tasks: prepare_database.yaml
+      when: not ansible_check_mode
+
+    - name: Preserve EVA App database identity and legacy local users before upgrade
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ eva_app_workdir }}/database_transition.py"
+          - --namespace
+          - "{{ eva_app_namespace }}"
+          - --release
+          - "{{ eva_app_name }}"
+          - --manifest
+          - "{{ eva_app_workdir }}/db-target-manifest.yaml"
+          - --backup-root
+          - "{{ eva_app_db_backup_root | default('/var/lib/eva/backups/app-db/' ~ eva_site_id ~ '/' ~ eva_app_name) }}"
+          - --source
+          - "{{ eva_app_db_migration_source | default('') }}"
+          - --auto-migrate
+          - "{{ eva_app_db_auto_migrate | default(true) | bool | lower }}"
+      register: eva_app_database_transition
+      changed_when: >-
+        ((eva_app_database_transition.stdout | from_json).changed | bool)
+        if eva_app_database_transition.rc == 0 else false
+      when: not ansible_check_mode
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Show private EVA App DB backup location
+      ansible.builtin.debug:
+        msg: "{{ eva_app_database_transition.stdout | from_json }}"
+      when: not ansible_check_mode
+
+    - name: Install EVA App from online Helm repo
+      no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+      ansible.builtin.command: >-
+        helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
+        -n {{ eva_app_namespace }}
+        {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+        --create-namespace
+        -f {{ eva_app_workdir }}/values.yaml
+        -f {{ eva_app_effective_values_dest }}
+        {{ eva_app_take_ownership_arg }}
+        {{ eva_app_server_side_conflict_args }}
+        {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+        {% if repository_mode in ['remote_repository', 'local_repository'] %}--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false{% endif %}
+        {{ eva_app_traefik_args | default('') }}
+      register: eva_app_install_online
+      changed_when: >-
+        'has been upgraded' in eva_app_install_online.stdout
+        or 'has been installed' in eva_app_install_online.stdout
+      when: not (airgap_mode | default(false) | bool)
+      environment: "{{ {'KUBECONFIG': eva_app_kubeconfig} | combine(eva_app_traefik_env | default({})) }}"
+
+    - name: Install EVA App from offline chart
+      no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+      ansible.builtin.command: >-
+        helm upgrade --install {{ eva_app_name }} {{ eva_app_chart_source }}
+        -n {{ eva_app_namespace }}
+        {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_app_chart_version }}{% endif %}
+        --create-namespace
+        -f {{ eva_app_workdir }}/values.yaml
+        -f {{ eva_app_effective_values_dest }}
+        {{ eva_app_take_ownership_arg }}
+        {{ eva_app_server_side_conflict_args }}
+        {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+        {% if repository_mode in ['remote_repository', 'local_repository'] %}--set imagePullSecrets.enabled=false --set imagePullSecrets.create=false{% endif %}
+        {{ eva_app_traefik_args | default('') }}
+      register: eva_app_install_offline
+      changed_when: >-
+        'has been upgraded' in eva_app_install_offline.stdout
+        or 'has been installed' in eva_app_install_offline.stdout
+      when: airgap_mode | default(false) | bool
+      environment: "{{ {'KUBECONFIG': eva_app_kubeconfig} | combine(eva_app_traefik_env | default({})) }}"
+  rescue:
+    - name: Check EVA App deployment identity before replica restoration
+      ansible.builtin.command: >-
+        kubectl get deployment {{ eva_app_name }} -n {{ eva_app_namespace }} -o jsonpath={.metadata.uid}
+      register: eva_app_restore_identity
+      changed_when: false
+      failed_when: false
+      when: eva_app_deployment_exists.rc == 0
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Restore EVA App replicas after Helm installation failure
+      ansible.builtin.command: >-
+        kubectl scale deployment {{ eva_app_name }} -n {{ eva_app_namespace }} --replicas={{ eva_app_preinstall_replicas }}
+      register: eva_app_replica_restore
+      changed_when: "'scaled' in eva_app_replica_restore.stdout"
+      failed_when: false
+      when:
+        - eva_app_deployment_exists.rc == 0
+        - eva_app_restore_identity.stdout | default('') == eva_app_preinstall_deployment_uid
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Wait for restored EVA App replicas
+      ansible.builtin.command: >-
+        kubectl rollout status deployment/{{ eva_app_name }} -n {{ eva_app_namespace }} --timeout=300s
+      register: eva_app_replica_restore_rollout
+      changed_when: false
+      failed_when: false
+      when:
+        - eva_app_deployment_exists.rc == 0
+        - eva_app_restore_identity.stdout | default('') == eva_app_preinstall_deployment_uid
+        - eva_app_preinstall_replicas | int > 0
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Fail with Helm error and EVA App restoration result
+      ansible.builtin.fail:
+        msg: >-
+          EVA App DB preparation or Helm installation failed.
+          {{ 'Private Chart rendering failed; details suppressed.'
+             if ansible_failed_task.name | default('') == 'Render exact EVA App target manifest for DB preparation'
+             else ansible_failed_result.stderr | default(ansible_failed_result.msg | default('unknown installation error')) }}.
+          expected deployment UID={{ eva_app_preinstall_deployment_uid | default('not-recorded') }},
+          observed UID={{ eva_app_restore_identity.stdout | default('not-checked') }}.
+          replica restoration rc={{ eva_app_replica_restore.rc | default('not-attempted') }},
+          rollout rc={{ eva_app_replica_restore_rollout.rc | default('not-attempted') }}.
+
+- name: Verify successful EVA App legacy Helm adoption
+  ansible.builtin.include_tasks: verify_app_ownership.yaml
+  when:
+    - not ansible_check_mode
+    - eva_app_take_ownership_arg == '--take-ownership'
+
+- name: Wait for new EVA App TLS Job to complete
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - wait
+      - --for=condition=Complete
+      - "job/{{ eva_app_name }}-tls-job"
+      - -n
+      - "{{ eva_app_namespace }}"
+      - --timeout=120s
+  register: eva_app_tls_job_complete
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_app_tls_job_enabled | bool
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Capture effective EVA App Helm values
+  no_log: true
+  ansible.builtin.shell: >-
+    helm get values {{ eva_app_name }} --namespace {{ eva_app_namespace }} --all --output yaml
+    > {{ eva_app_workdir }}/resolved-values.yaml
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Record effective EVA App Helm values on control node
+  no_log: true
+  ansible.builtin.fetch:
+    src: "{{ eva_app_workdir }}/resolved-values.yaml"
+    dest: "{{ eva_app_deploy_values_dir }}/resolved-values.yaml"
+    flat: true
+  when: not ansible_check_mode
+
+- name: Publish effective EVA App Helm values on control node
+  no_log: true
+  ansible.builtin.file:
+    path: "{{ eva_app_deploy_values_dir }}/resolved-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Ensure EVA App deployment uses ecr-registry imagePullSecret (online only)
+  ansible.builtin.shell: >-
+    kubectl patch deployment {{ eva_app_name }}
+    -n {{ eva_app_namespace }}
+    --type=merge
+    -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ecr-registry"}]}}}}'
+  args:
+    executable: /bin/bash
+  register: eva_app_patch_pullsecret
+  changed_when: "'patched' in eva_app_patch_pullsecret.stdout"
+  when:
+    - not ansible_check_mode
+    - repository_mode in ['online_repository', 'cloud_repository']
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Wait for EVA App deployment rollout
+  ansible.builtin.command: >-
+    kubectl rollout status deployment/{{ eva_app_name }}
+    -n {{ eva_app_namespace }}
+    --timeout=600s
+  register: eva_app_rollout
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Verify EVA App pod remains healthy after rollout
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    namespace="{{ eva_app_namespace }}"
+    selector='app.kubernetes.io/instance={{ eva_app_name }},component=eva-app'
+    stabilization_seconds="{{ eva_app_rollout_stabilization_seconds | default(45) | int }}"
+    (( stabilization_seconds >= 0 )) || { echo '[ERROR] invalid App stabilization duration'; exit 1; }
+    deadline="$(( $(date +%s) + 2 * stabilization_seconds ))"
+    healthy_since=''
+    baseline=''
+
+    while true
+    do
+      now="$(date +%s)"
+      pods_json="$(kubectl get pods -n "$namespace" -l "$selector" -o json --request-timeout=15s)"
+      summary="$(jq -r '
+        [.items[] | select((.metadata.deletionTimestamp // "") == "")] as $pods
+        | if ($pods | length) == 0 then
+            "missing"
+          elif any($pods[]; any(.status.containerStatuses[]?; (.state.waiting.reason // "") == "CrashLoopBackOff" or (.state.waiting.reason // "") == "Error")) then
+            "waiting-error"
+          elif any($pods[]; any(.status.containerStatuses[]?; .state.terminated != null)) then
+            "terminated"
+          elif any($pods[]; (.status.phase // "") == "Failed" or (.status.phase // "") == "Unknown") then
+            "failed-phase"
+          elif any($pods[];
+            (.status.phase // "") != "Running"
+            or ([.status.containerStatuses[]?] | length) == 0
+            or any(.status.containerStatuses[]?; .ready != true or .state.running == null)
+            or (any(.status.conditions[]?; .type == "Ready" and .status == "True") | not)
+          ) then
+            "not-ready"
+          else
+            "healthy"
+          end
+      ' <<< "$pods_json")"
+
+      if [[ "$summary" == 'healthy' ]]; then
+        # Historical restarts are not a permanent failure. Require the same
+        # live pods/containers to stay ready without a new restart in this window.
+        snapshot="$(jq -c '
+          [.items[] | select((.metadata.deletionTimestamp // "") == "")
+            | {uid: .metadata.uid, containers: [.status.containerStatuses[]
+                | {name, restartCount, containerID}] | sort_by(.name)}]
+          | sort_by(.uid)
+        ' <<< "$pods_json")"
+        if [[ -n "$baseline" && "$snapshot" != "$baseline" ]]; then
+          summary='restarted-or-replaced'
+        elif [[ -z "$healthy_since" ]]; then
+          baseline="$snapshot"
+          healthy_since="$now"
+        fi
+        if [[ "$summary" == 'healthy' ]] && (( now - healthy_since >= stabilization_seconds )); then
+          exit 0
+        fi
+      fi
+
+      if [[ "$summary" == 'healthy' || "$summary" == 'missing' || "$summary" == 'not-ready' ]]; then
+        [[ "$summary" == 'healthy' ]] || healthy_since=''
+        if (( now < deadline )); then
+          sleep 5
+          continue
+        fi
+      fi
+
+      echo "[ERROR] EVA App pod became unhealthy after rollout: $summary"
+      jq -r '
+        [.items[] | select((.metadata.deletionTimestamp // "") == "")]
+        | if length == 0 then
+            "pods: none"
+          else
+            .[]
+            | "pod=" + (.metadata.name // "")
+              + " phase=" + (.status.phase // "")
+              + " restarts=" + (([.status.containerStatuses[]? | (.restartCount // 0)] | add // 0) | tostring)
+              + " waiting=" + ([.status.containerStatuses[]? | (.state.waiting.reason // empty)] | join(","))
+              + " terminated=" + ([.status.containerStatuses[]? | (.state.terminated.reason // empty)] | join(","))
+              + " exit_code=" + ([.status.containerStatuses[]? | select(.state.terminated != null) | (.state.terminated.exitCode | tostring)] | join(","))
+          end
+      ' <<< "$pods_json"
+      echo "Inspect private App logs on the target: kubectl logs -n $namespace -l $selector -c eva-app --previous --tail=120"
+      exit 1
+    done
+  args:
+    executable: /bin/bash
+  register: eva_app_rollout_stability
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Check EVA App resources
+  ansible.builtin.command: kubectl get all -n {{ eva_app_namespace }}
+  register: eva_app_resources
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Show EVA App resources
+  ansible.builtin.debug:
+    msg: "{{ eva_app_resources.stdout_lines }}"
+
+- name: Find EVA App pod name
+  ansible.builtin.shell: >-
+    kubectl get pods -n {{ eva_app_namespace }}
+    -l app.kubernetes.io/instance={{ eva_app_name }},component=eva-app
+    -o jsonpath='{.items[0].metadata.name}'
+  args:
+    executable: /bin/bash
+  register: eva_app_pod_name
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Check Alembic current revision
+  ansible.builtin.command: >-
+    kubectl exec -n {{ eva_app_namespace }} {{ eva_app_pod_name.stdout }} -- alembic current
+  register: eva_app_alembic_current
+  changed_when: false
+  failed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Show Alembic current revision
+  ansible.builtin.debug:
+    msg: "{{ eva_app_alembic_current.stdout_lines | default(['Failed to get alembic current']) }}"
+
+- name: Assert Alembic revision matches expected
+  ansible.builtin.assert:
+    that:
+      - eva_app_alembic_version in (eva_app_alembic_current.stdout | default(''))
+    fail_msg: >-
+      EVA App Alembic revision mismatch. expected={{ eva_app_alembic_version }},
+      actual={{ eva_app_alembic_current.stdout | default('unknown') }}
+    success_msg: "EVA App Alembic revision matched: {{ eva_app_alembic_version }}"
+  when:
+    - eva_app_alembic_version is defined
+    - eva_app_alembic_version | length > 0

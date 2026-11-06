@@ -1,5 +1,0 @@
-- name: Install Agent Dependencies
-  ansible.builtin.import_tasks: dependencies.yaml
-
-- name: Install Agent
-  ansible.builtin.import_tasks: agent.yaml

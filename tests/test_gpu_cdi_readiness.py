@@ -12,7 +12,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PREFLIGHT = ROOT / "roles/config/files/verify-mig-before-cdi.sh"
+PREFLIGHT = ROOT / "src/solution/roles/config/files/verify-mig-before-cdi.sh"
 
 
 class PreflightTests(unittest.TestCase):
@@ -76,7 +76,7 @@ class AnsibleAndSystemdTests(unittest.TestCase):
         self.generator.chmod(0o755)
         self.preflight = self.directory / "verify-mig-before-cdi.sh"
         self.playbook = os.environ.get("EVA_TEST_ANSIBLE", shutil.which("ansible-playbook"))
-        self.tasks = yaml.safe_load((ROOT / "roles/config/tasks/gpu_cdi.yaml").read_text())
+        self.tasks = yaml.safe_load((ROOT / "src/solution/roles/config/tasks/gpu_cdi.yaml").read_text())
 
     def run_generation(self, preflight_exit):
         self.preflight.write_text(f"#!/bin/sh\nexit {preflight_exit}\n")

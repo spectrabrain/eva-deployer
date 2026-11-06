@@ -354,7 +354,7 @@
     path: "{{ eva_app_iam_handoff_path }}"
   register: eva_app_iam_handoff_status
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when: not (eva_app_workspace_sso_complete | bool)
 
 - name: Read same-target IAM-to-App handoff
@@ -363,7 +363,7 @@
     src: "{{ eva_app_iam_handoff_path }}"
   register: eva_app_iam_handoff_raw
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - eva_app_iam_handoff_status.stat.exists | default(false)
     - not (eva_app_workspace_sso_complete | bool)
@@ -441,7 +441,7 @@
     path: "{{ eva_app_argocd_handoff_path }}"
   register: eva_app_argocd_handoff_status
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when: not ansible_check_mode
 
 - name: Read Argo CD handoff receipt on control node
@@ -450,7 +450,7 @@
     src: "{{ eva_app_argocd_handoff_path }}"
   register: eva_app_argocd_handoff_raw
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - not ansible_check_mode
     - eva_app_argocd_handoff_status.stat.exists | default(false)

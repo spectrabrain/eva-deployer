@@ -449,7 +449,7 @@ for task, name, module, argument, register in zip(
     if (
         task.get(module, {}).get(argument) != "{{ eva_app_argocd_handoff_path }}"
         or task.get("delegate_to") != "localhost"
-        or task.get("become") is not True
+        or task.get("become") != "{{ not (eva_managed_cluster | default(false) | bool) }}"
         or task.get("no_log") is not True
         or task.get("register") != register
         or not any("not" in str(condition) and "ansible_check_mode" in str(condition)

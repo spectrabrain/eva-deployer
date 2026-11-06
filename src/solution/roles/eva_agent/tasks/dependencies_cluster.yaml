@@ -15,16 +15,6 @@
       - eva_agent_cluster_deploy.qdrant_values.snapshotPersistence.storageClassName | default('') | length > 0
     fail_msg: "Fill agent.eva_agent_deploy with a supported vllm_profile, dynamic NAS storage and Qdrant block storage Values."
 
-- name: Verify selected NKS dependency StorageClasses exist
-  ansible.builtin.command:
-    argv: [kubectl, get, storageclass, "{{ item }}", -o, name]
-  loop: "{{ [eva_agent_cluster_deploy.vllm_values.sharedPvcStorage.storageClass,
-             eva_agent_cluster_deploy.qdrant_values.persistence.storageClassName,
-             eva_agent_cluster_deploy.qdrant_values.snapshotPersistence.storageClassName] | unique }}"
-  environment:
-    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
-  changed_when: false
-
 - name: Resolve NKS vLLM platform defaults and explicit dependency Values
   no_log: true
   ansible.builtin.set_fact:

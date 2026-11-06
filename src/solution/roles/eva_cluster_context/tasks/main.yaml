@@ -11,7 +11,11 @@
     eva_iam_kubeconfig: "{{ eva_cluster_kubeconfig }}"
     precondition_argocd_kubeconfig_override: "{{ eva_cluster_kubeconfig }}"
     eva_persistent_state_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/sites"
+    eva_site_state_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/sites/{{ eva_site_id }}"
     eva_helm_values_backup_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/backups/helm-values"
+    eva_app_db_backup_root: >-
+      {{ eva_app_db_backup_root | default(ansible_facts.env.HOME ~ '/.local/state/eva/backups/app-db/'
+         ~ eva_site_id ~ '/' ~ (eva_app_name | default('eva-app'))) }}
     eva_agent_workdir: "{{ eva_site_deploy_root }}/controller/agent-work"
     eva_vision_workdir: "{{ eva_site_deploy_root }}/controller/vision-work"
     eva_app_workdir: "{{ eva_site_deploy_root }}/controller/app-work"

@@ -46,15 +46,19 @@
       {{
         eva_agent_qdrant_values_file
         | default(
-            ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
+            'values-ncp.yaml' if (eva_managed_cluster | default(false) | bool) else
+            (((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
             | ternary('values-k3s.harbor.yaml', 'values-k3s.s3.yaml')
+            )
           )
       }}
+    eva_agent_init_values_file: "{{ eva_agent_init_values_file | default('values-ncp.yaml' if (eva_managed_cluster | default(false) | bool) else 'values-k3s.yaml') }}"
     # Filters bind tighter than comparisons; ternary must receive the boolean.
     eva_agent_qdrant_snapshot_source: >-
       {{
         eva_agent_qdrant_snapshot_source
         | default(
+            's3' if (eva_managed_cluster | default(false) | bool) else
             (
               (
                 eva_agent_qdrant_values_file
@@ -74,7 +78,8 @@
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/'
            ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
-              | ternary('spectrabrain/eva-agent-chart/develop',
+              | ternary(('spectrabrain/eva-agent-chart/chartmuseum' if (eva_managed_cluster | default(false) | bool)
+                         else 'spectrabrain/eva-agent-chart/develop'),
                         'mellerikat/eva-agent/chartmuseum'))
            ~ '/release/' ~ eva_agent_deploy_version) }}
     eva_agent_offline_release_dir: "{{ eva_agent_offline_release_dir | default(eva_agent_offline_dir ~ '/release/' ~ eva_agent_deploy_version) }}"
@@ -150,6 +155,7 @@
       {{
         eva_agent_values_file
         | default(
+            'values-ncp.yaml' if (eva_managed_cluster | default(false) | bool) else
             (eva_agent_values_layout == 'legacy')
             | ternary('values-k3s.yaml', 'values-k3s.' ~ ((eva_agent_values_variant == 'harbor') | ternary('harbor', 'ecr')) ~ '.yaml')
           )
@@ -158,6 +164,8 @@
       {{
         eva_agent_vllm_values_file
         | default(
+            'values-ncp.' ~ ({'L40sx1': 'L40Sx1'}.get(eva_agent_vllm_profile, eva_agent_vllm_profile)) ~ '.yaml'
+            if (eva_managed_cluster | default(false) | bool) else
             'values-k3s.' ~ eva_agent_vllm_profile
             ~ ((eva_agent_values_layout == 'legacy') | ternary('', '.' ~ ((eva_agent_values_variant == 'harbor') | ternary('harbor', 'docker'))))
             ~ '.yaml'
@@ -180,13 +188,15 @@
 - name: Validate Qdrant snapshot source
   ansible.builtin.assert:
     that:
-      - eva_agent_qdrant_snapshot_source in ['local_pv', 'harbor']
+      - eva_agent_qdrant_snapshot_source in ['local_pv', 'harbor', 's3']
       - >-
         (eva_agent_qdrant_values_file == 'values-k3s.s3.yaml' and eva_agent_qdrant_snapshot_source == 'local_pv')
         or (eva_agent_qdrant_values_file == 'values-k3s.harbor.yaml' and eva_agent_qdrant_snapshot_source == 'harbor')
+        or ((eva_managed_cluster | default(false) | bool) and eva_agent_qdrant_values_file == 'values-ncp.yaml' and eva_agent_qdrant_snapshot_source == 's3')
     fail_msg: >-
       Online Qdrant uses values-k3s.s3.yaml with local_pv bootstrap snapshots.
       Harbor snapshots require values-k3s.harbor.yaml with snapshot source harbor.
+      NKS uses values-ncp.yaml with snapshot source s3.
       Resolved values: repository_mode={{ repository_mode }},
       eva_agent_qdrant_values_file={{ eva_agent_qdrant_values_file }},
       eva_agent_qdrant_snapshot_source={{ eva_agent_qdrant_snapshot_source }}
@@ -338,11 +348,10 @@
 
 - name: Download eva-agent-init values from chartmuseum release
   ansible.builtin.get_url:
-    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent-init/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent-init/{{ eva_agent_init_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     mode: '0644'
   when:
-    - not (eva_managed_cluster | default(false) | bool)
     - not ansible_check_mode
     - not (airgap_mode | default(false) | bool)
 
@@ -384,8 +393,8 @@
 
 - name: Copy eva-agent-init values from offline bundle
   ansible.builtin.copy:
-    src: "{{ eva_agent_offline_release_dir }}/eva-agent-init/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    src: "{{ eva_agent_offline_release_dir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     mode: '0644'
     remote_src: true
   when:
@@ -609,7 +618,7 @@
   when:
     - not ansible_check_mode
     - not (airgap_mode | bool)
-    - eva_agent_qdrant_values_file == 'values-k3s.s3.yaml'
+    - eva_agent_qdrant_values_file in ['values-k3s.s3.yaml', 'values-ncp.yaml']
 
 - name: Check offline Qdrant snapshot files for airgap
   ansible.builtin.stat:
@@ -769,7 +778,7 @@
 
 - name: Align NFS share path in eva-agent-init values
   ansible.builtin.replace:
-    path: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    path: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     regexp: '/data001/share/eva-agent'
     replace: "{{ eva_agent_nfs_share_path }}"
   when:
@@ -778,7 +787,7 @@
 
 - name: Set local-path provisioner in eva-agent-init values
   ansible.builtin.replace:
-    path: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    path: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     regexp: 'provisioner: ""'
     replace: 'provisioner: "rancher.io/local-path"'
   when:
@@ -1067,6 +1076,8 @@
 - name: Record Qdrant values source metadata on control node
   ansible.builtin.copy:
     content: |
+      release_values_source: {{ eva_agent_chartmuseum_base_url }}
+      release_values_file: {{ eva_agent_qdrant_values_file }}
       release_values: true
       rendered_artifacts:
         chart_defaults: {{ eva_agent_qdrant_deploy_values_dir }}/chart-defaults.yaml
@@ -1118,6 +1129,8 @@
 - name: Record vLLM values source metadata on control node
   ansible.builtin.copy:
     content: |
+      release_values_source: {{ eva_agent_chartmuseum_base_url }}
+      release_values_file: {{ eva_agent_vllm_values_file }}
       config_generated_values: {{ (eva_agent_vllm_values_override_from_config | default({}) | length > 0) | lower }}
       release_values: true
       rendered_artifacts:
@@ -1186,6 +1199,12 @@
   tags:
     - eva_agent_init_storageclass_migration
 
+- name: Create missing NKS CSI StorageClasses from the NCP init profile
+  ansible.builtin.include_tasks: init_cluster.yaml
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+
 - name: Reconcile legacy eva-agent-init StorageClass ownership
   ansible.builtin.include_tasks:
     file: migrate_init_storageclass.yaml
@@ -1219,7 +1238,7 @@
     --version {{ eva_agent_init_chart_version }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}
   when:
     - not (eva_managed_cluster | default(false) | bool)
     - not ansible_check_mode
@@ -1234,7 +1253,7 @@
     helm upgrade --install eva-agent-init {{ eva_agent_offline_init_chart_tgz }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}
   when:
     - not (eva_managed_cluster | default(false) | bool)
     - not ansible_check_mode

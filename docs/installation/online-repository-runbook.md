@@ -237,9 +237,18 @@ kubeconfig 연결만 추가합니다. `components.infra`는 `false`입니다.
   `runtimeClassName: ""`를 유지합니다. GPU 교체는 `Recreate` 또는 `maxSurge: 0`을 사용합니다.
   기본 `imagePullSecrets.ExistingSecret: ecr-registry`는 Deployer가 갱신합니다. 외부 관리 Secret을
   지정하면 설치자가 새 Registry의 인증 정보와 갱신을 준비해야 합니다.
+  Vision은 `eva-vision-chart/main/deploy-values/eva-vision-ncp.yaml`을 NKS 기본값으로 사용합니다.
+  공통 생성 Values에 NCP Values를 병합하고, 선택한 Release 이미지와 작성한 Values·CLI override를 적용합니다.
+  실제 NCP URL은 Vision의 `values-sources.yaml`에 기록합니다.
 - Agent 선택 시 vLLM·Qdrant도 같은 역할로 설치합니다. `values.agent.eva_agent_deploy`의
   `vllm_profile`과 `vllm_values`·`qdrant_values`에 NAS/블록 StorageClass, 용량, 모델·GPU 설정을 채웁니다.
   업데이트는 기존 PVC 이름·용량과 필요한 NodePort를 유지합니다. 서버용 NFS·StorageClass는 만들지 않습니다.
+  NKS에서는 `chartmuseum/release/<version>`의 Agent·Qdrant·init `values-ncp.yaml`을 사용하며,
+  `L40sx1`은 vLLM `values-ncp.L40Sx1.yaml`로 연결합니다. init 차트로 선택한 NAS/블록 StorageClass 중
+  없는 것만 생성하고, 기존 클래스는 그대로 재사용합니다. NCP CSI 드라이버는 클러스터에 준비되어 있어야 합니다.
+  init의 추가 설정은 `eva_agent_deploy.init_values`에 작성합니다. 예를 들어 NAS zone은
+  `storageClass.fileSystem.parameters.zoneNo`로 변경하며, 생략하면 NCP 파일의 `"2"`를 사용합니다.
+  실제 사용한 Agent·vLLM·Qdrant 파일명과 URL은 각 `values-sources.yaml`에서 확인합니다.
 - Infra·드라이버·GPU/MIG·NFS·k3s 설정은 실행하지 않습니다. NCP 인증 프로그램과 ECR 검증용
   AWS CLI는 Bastion의 kubeconfig 소유 계정에서 사용할 수 있어야 합니다.
 
@@ -375,7 +384,8 @@ eva install --config "$HOME/eva-install.yaml"
 이전에 비활성화된 AWS 키는 Registry 주소만 바꿔도 사용할 수 없으므로 유효한 키를 입력합니다.
 
 NKS의 결과 확인·재시도도 기존 `eva check --verbose`, `eva status`, `eva retry`를 sudo 없이 사용합니다.
-작업 기록·로그는 계정의 `~/.local/state/eva`, private 백업은 그 아래에 저장합니다.
+작업 기록·로그는 계정의 `~/.local/state/eva`, IAM·Argo CD handoff는 그 아래 `sites`,
+Helm Values·App DB의 private 백업은 `backups` 아래에 저장합니다.
 설정이나 Values를 바꿨다면 새 `eva install --config`를 실행합니다.
 
 새 Release로 업데이트하기 전에는 같은 Guard로 기존 6개 Helm manifest를 점검할 수 있습니다.
@@ -466,7 +476,8 @@ Helm values, source metadata를 보관합니다. effective 및 resolved 파일�
   resolved-values.yaml             # 0600
   values-sources.yaml              # 0644, Secret 값 없음
 
-/var/lib/eva/sites/<site>/<target>/eva-iam.yaml  # root:root, 0600
+/var/lib/eva/sites/<site>/<target>/eva-iam.yaml  # 온프레미스: root:root, 0600
+# NKS: ~/.local/state/eva/sites/<site>/<target>/eva-iam.yaml (설치 계정, 0600)
 ```
 
 private values 및 handoff 파일을 붙여 넣거나 커밋하지 않습니다. license, SSO, database,

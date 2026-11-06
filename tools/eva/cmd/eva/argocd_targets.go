@@ -85,7 +85,7 @@ func argoCDTargets(document plan.Document) ([]argoCDTarget, bool, error) {
 		if host == "" {
 			host = name
 		}
-		root := argocd.InstallerTargetStateRoot(defaultArgoCDReceiptRoot, name, target, len(input.Targets))
+		root := argocd.InstallerTargetStateRoot(argoCDReceiptRoot(document), name, target, len(input.Targets))
 		result = append(result, argoCDTarget{Name: name, Host: host, StateRoot: root})
 	}
 	return result, len(input.Targets) != 0, nil
@@ -131,7 +131,7 @@ func requireNoArgoCDTracking(document plan.Document, releaseRoot string) error {
 		return err
 	}
 	if !configured {
-		return argocd.RequireNoTrackingWithReceiptRoot(document, releaseRoot, defaultArgoCDReceiptRoot)
+		return argocd.RequireNoTrackingWithReceiptRoot(document, releaseRoot, argoCDReceiptRoot(document))
 	}
 	for _, target := range targets {
 		detection, err := argocd.LoadTargetDetection(releaseRoot, document.SiteID, target.Host)

@@ -1,4 +1,4 @@
-- name: Set EVA Vision install defaults (k3s/on-premise)
+- name: Set EVA Vision install defaults
   ansible.builtin.set_fact:
     repository_mode: "{{ repository_mode | default('online_repository') }}"
     repository_project: "{{ repository_project | default('eva') }}"
@@ -19,6 +19,7 @@
     eva_vision_chart_version: "{{ eva_vision_chart_version | mandatory }}"
     eva_vision_image_tag: "{{ eva_vision_image_tag | default(eva_vision_chart_version) }}"
     eva_vision_offline_dir: "{{ eva_vision_offline_dir | default(eva_cache_root ~ '/eva-vision') }}"
+    eva_vision_ncp_values: {}
 
 - name: Resolve derived EVA Vision install paths
   ansible.builtin.set_fact:
@@ -37,6 +38,8 @@
            (eva_vision_chart_version is version('3.3.0', '>='))
            | ternary('https://raw.githubusercontent.com/spectrabrain/eva-vision-chart/chartmuseum/',
                      'https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/')) }}
+    eva_vision_ncp_values_url: >-
+      {{ eva_vision_ncp_values_url | default('https://raw.githubusercontent.com/spectrabrain/eva-vision-chart/main/deploy-values/eva-vision-ncp.yaml') }}
 
 - name: Load target-specific EVA Vision Workspace values
   ansible.builtin.import_tasks: workspace_values.yaml
@@ -180,6 +183,44 @@
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
+- name: Download the published NCP Vision Values
+  ansible.builtin.get_url:
+    url: "{{ eva_vision_ncp_values_url }}"
+    dest: "{{ eva_vision_workdir }}/eva-vision-ncp.yaml"
+    mode: '0644'
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+    - not (airgap_mode | default(false) | bool)
+    - eva_vision_chart_version is version('3.3.0', '>=')
+
+- name: Read the published NCP Vision Values
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ eva_vision_workdir }}/eva-vision-ncp.yaml"
+  register: eva_vision_ncp_values_raw
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+    - not (airgap_mode | default(false) | bool)
+    - eva_vision_chart_version is version('3.3.0', '>=')
+
+- name: Parse the published NCP Vision Values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_ncp_values: "{{ eva_vision_ncp_values_raw.content | b64decode | from_yaml }}"
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+    - not (airgap_mode | default(false) | bool)
+    - eva_vision_chart_version is version('3.3.0', '>=')
+
+- name: Validate the NCP Vision Values document
+  ansible.builtin.assert:
+    that: eva_vision_ncp_values is mapping
+    fail_msg: "The published NCP Vision Values must be a YAML mapping."
+  when: not ansible_check_mode
+
 - name: Ensure EVA Vision deploy values directory exists on control node
   ansible.builtin.file:
     path: "{{ eva_vision_deploy_values_dir }}"
@@ -204,7 +245,7 @@
   become: false
   when: not ansible_check_mode
 
-- name: Render EVA Vision k3s override values on control node
+- name: Render shared EVA Vision override values on control node
   no_log: true
   ansible.builtin.template:
     src: "{{ eva_template_values_root }}/vision-k3s-override.yaml.j2"
@@ -214,7 +255,7 @@
   become: false
   when: not ansible_check_mode
 
-- name: Copy EVA Vision k3s override values to target workspace
+- name: Copy shared EVA Vision override values to target workspace
   no_log: true
   ansible.builtin.copy:
     src: "{{ eva_vision_deploy_values_dir }}/vision-k3s-override.yaml"
@@ -244,6 +285,9 @@
     eva_vision_effective_values: >-
       {{ (eva_vision_generated_values_raw.results[0].content | b64decode | from_yaml)
          | combine(eva_vision_generated_values_raw.results[1].content | b64decode | from_yaml, recursive=true)
+         | combine(eva_vision_ncp_values | default({}), recursive=true)
+         | combine(({'image': {'repository': eva_vision_image_repository, 'tag': eva_vision_image_tag | default(eva_vision_chart_version)}}
+                    if (eva_vision_ncp_values | default({}) | length > 0) else {}), recursive=true)
          | combine(eva_vision_workspace_chart_values, recursive=true)
          | combine(eva_vision_cli_values_override | default({}, true), recursive=true) }}
   when: not ansible_check_mode
@@ -269,6 +313,7 @@
 - name: Record EVA Vision values source metadata on control node
   ansible.builtin.copy:
     content: |
+      environment_values_source: {{ (eva_vision_ncp_values_url if (eva_vision_ncp_values | length > 0) else '') | to_json }}
       config_generated_values: {{ (eva_vision_mig_enabled_from_config | default(false) | bool) | lower }}
       workspace_override: {{ (eva_vision_workspace_values | length > 0) | lower }}
       cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}

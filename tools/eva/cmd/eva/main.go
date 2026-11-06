@@ -1351,7 +1351,7 @@ func runInstallMode(args []string, gpuOnly bool) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
+		ArgoCDReceiptRoot: argoCDReceiptRoot(document),
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
@@ -2041,7 +2041,7 @@ func runApply(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
+		ArgoCDReceiptRoot: argoCDReceiptRoot(document),
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
@@ -2099,7 +2099,7 @@ func runRetry(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
+		ArgoCDReceiptRoot: argoCDReceiptRoot(document),
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, retry)
 	printOperation(completed)

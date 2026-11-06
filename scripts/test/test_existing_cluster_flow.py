@@ -2,6 +2,8 @@
 """Exercise shared Ansible preconditions/dependencies against an isolated NKS fixture."""
 import base64
 import copy
+import functools
+import http.server
 import importlib.util
 import json
 import os
@@ -11,6 +13,7 @@ import site
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -50,6 +53,13 @@ if tool == 'helm':
  if args[:2]==['get','manifest']: print(''); sys.exit(0)
  if args[0]=='status': output({'info':{'status':'deployed'}})
  if args[:2]==['upgrade','--install']: print('fixture deployed'); sys.exit(0)
+ if args[0]=='template' and args[1]=='eva-agent-init':
+  import yaml
+  values=yaml.safe_load(pathlib.Path(args[args.index('--values')+1]).read_text())
+  print(yaml.safe_dump_all([{'apiVersion':'storage.k8s.io/v1','kind':'StorageClass',
+   'metadata':{'name':v['name']},'provisioner':v['provisioner'],'parameters':v.get('parameters',{}),
+   'reclaimPolicy':'Retain','volumeBindingMode':'WaitForFirstConsumer'} for v in values['storageClass'].values()]))
+  sys.exit(0)
  if args[0]=='template': output({'kind':'Deployment','metadata':{'name':args[1],'namespace':'eva-agent'},
    'spec':{'replicas':1,'template':{'spec':{'serviceAccountName':'sa-eva-agent','containers':[]}}}})
  raise SystemExit('Unexpected Helm mutation')
@@ -239,21 +249,30 @@ class SharedFlowTests(unittest.TestCase):
         for component in ["vllm","qdrant"]:
             (work/("eva-agent-"+component)).mkdir(parents=True)
             (work/("eva-agent-"+component)/"effective-input-values.yaml").write_text("{}\n")
+        (work/"eva-agent-init").mkdir()
+        (work/"eva-agent-init/values-ncp.yaml").write_text(yaml.safe_dump({'storageClass':{
+            'blockStorage':{'provisioner':'blk.csi.ncloud.com'},
+            'fileSystem':{'provisioner':'nas.csi.ncloud.com','parameters':{'zoneNo':'2'}}}}))
         self.variables.update(eva_enabled_components="agent",eva_agent_vllm_profile="L40sx1",
             eva_agent_workdir=str(work), eva_agent_namespace="eva-agent", eva_agent_kubeconfig=self.env["KUBECONFIG"],
             eva_agent_vllm_chart_version="3.3.0",eva_agent_qdrant_chart_version="1.18.2",airgap_mode=False,
             eva_agent_image_repository=NEW+"eva-agent",eva_agent_image_tag="3.3.0",
             eva_agent_sync_aws_credentials=True,eva_agent_aws_profile="default",
             eva_agent_aws_credentials_secret_name="aws-credentials",
-            eva_agent_qdrant_snapshot_source="local_pv",
+            eva_agent_qdrant_snapshot_source="s3",
+            eva_agent_init_chart_version="1.0.0",eva_agent_init_values_file="values-ncp.yaml",
             eva_agent_aws_credentials_file_override=str(self.workspace/"credentials/aws_key.ini"),
             eva_agent_qdrant_post_renderer_arg="--post-renderer fixture-qdrant-renderer",
             eva_versions_file=str(ROOT/"src/solution/version.yaml"))
         names={"Ensure sa-eva-agent serviceaccount exists","Create sa-eva-agent serviceaccount when missing",
+               "Create missing NKS CSI StorageClasses from the NCP init profile",
                "Validate exact NKS dependency manifests before changing workloads",
                "Install/Upgrade Qdrant (online)","Install/Upgrade eva-agent-vllm (online)"}
         shared=[t for t in yaml.safe_load((ROOT/"src/solution/roles/eva_agent/tasks/dependencies.yaml").read_text()) if t.get("name") in names]
-        self.assertEqual(len(shared),5)
+        self.assertEqual(len(shared),6)
+        for task in shared:
+            if task.get("ansible.builtin.include_tasks") == "init_cluster.yaml":
+                task["ansible.builtin.include_tasks"] = str(ROOT/"src/solution/roles/eva_agent/tasks/init_cluster.yaml")
         p=self.root/"dependency.yaml"
         p.write_text(yaml.safe_dump([{"hosts":"all","connection":"local", "vars_files":[str(ROOT/"src/playbook-vars.yaml")],
             "pre_tasks":[{"ansible.builtin.import_tasks":str(ROOT/"src/playbook-preflight.yaml")}],
@@ -270,9 +289,9 @@ class SharedFlowTests(unittest.TestCase):
         self.assertEqual({c["args"][2] for c in upgrades},{"eva-agent-vllm","eva-agent-qdrant"})
         self.assertTrue(all(c["args"][c["args"].index("--namespace")+1]=="eva-agent" for c in upgrades))
         renders=[c for c in calls if c["tool"]=="helm" and c["args"][0]=="template"]
-        self.assertEqual({c["args"][1] for c in renders},{"eva-agent-vllm","eva-agent-qdrant"})
+        self.assertEqual({c["args"][1] for c in renders},{"eva-agent-init","eva-agent-vllm","eva-agent-qdrant"})
         self.assertLess(calls.index(renders[-1]),calls.index(upgrades[0]))
-        self.assertFalse(any(c["tool"]=="helm" and "eva-agent-init" in c["args"] for c in calls))
+        self.assertEqual(renders[0]["args"][1],"eva-agent-init")
         self.assertFalse(any(c["tool"] == "sudo" or c["tool"] == "nvidia-smi" or (c["tool"] == "systemctl" and any(a in c["args"] for a in ["stop", "start", "enable", "disable"])) or (c["tool"] == "mount" and "-l" not in c["args"]) for c in calls))
 
     def test_vllm_verification_preserves_nks_csi_binding_without_local_nfs(self):
@@ -334,6 +353,74 @@ class SharedFlowTests(unittest.TestCase):
         self.execute(p,success=False)
         self.assertTrue(any("daemonset" in call["args"] for call in self.calls()))
 
+    def test_vision_ncp_profile_is_loaded_before_workspace_and_cli_overrides(self):
+        public=self.root/"public-profiles"
+        public.mkdir()
+        # Deliberately differ from the generated server defaults, so a passing
+        # assertion proves the fetched profile participates in the real merge.
+        profile={'image':{'repository':NEW+'eva-vision','tag':'3.3.0'},
+            'modelSource':{'type':'s3'},'s3':{'existingSecret':'eva-vision-s3'},
+            'modelCache':{'storageClass':'nks-block-storage'},
+            'resources':{kind:{'cpu':'6','memory':'48Gi','nvidia.com/gpu':1} for kind in ['limits','requests']},
+            'gpu':{'count':1,'mig':{'resourceName':''},'mps':{'enabled':False}}}
+        (public/"eva-vision-ncp.yaml").write_text(yaml.safe_dump(profile))
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *_): pass
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),functools.partial(QuietHandler,directory=str(public)))
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        definitions=yaml.safe_load((ROOT/'src/solution/roles/eva_vision/tasks/main.yaml').read_text())
+        source_names={'Download the published NCP Vision Values','Read the published NCP Vision Values',
+                      'Parse the published NCP Vision Values','Validate the NCP Vision Values document'}
+        sources=[t for t in definitions if t.get('name') in source_names]
+        merge=next(t for t in definitions if t.get('name')=='Build effective EVA Vision Helm input values')
+        metadata=next(t for t in definitions if t.get('name')=='Record EVA Vision values source metadata on control node')
+        for index,(managed,workspace,cli,missing,cpu,memory) in enumerate([
+                (True,{}, {},False,'6','48Gi'),
+                (True,{'resources':{'limits':{'cpu':'7','memory':'50Gi'}}}, {},False,'7','50Gi'),
+                (True,{'resources':{'limits':{'cpu':'7','memory':'50Gi'}}},
+                 {'resources':{'limits':{'cpu':'9','memory':'52Gi'}}},False,'9','52Gi'),
+                (False,{}, {},False,'4','24Gi'), (True,{}, {},True,None,None)]):
+            with self.subTest(managed=managed, workspace=bool(workspace), cli=bool(cli), missing=missing):
+                work=self.root/('vision-profile-'+str(index))
+                work.mkdir()
+                defaults=work/'chart.yaml'
+                defaults.write_text(yaml.safe_dump({'resources':{'limits':{'ephemeral-storage':'30Gi'}},
+                                                   'runtimeClassName':'nvidia'}))
+                self.variables.update(eva_managed_cluster=managed,airgap_mode=False,
+                    eva_vision_workdir=str(work),eva_vision_deploy_values_dir=str(work),
+                    eva_vision_ncp_values_url='http://127.0.0.1:'+str(server.server_port)+'/'+('missing.yaml' if missing else 'eva-vision-ncp.yaml'),
+                    eva_vision_chart_version='3.3.1',eva_vision_image_tag='3.3.1-beta.1',
+                    eva_vision_image_repository=NEW+'eva-vision',eva_vision_gpu_count=1,
+                    eva_vision_gpu_resource_name='nvidia.com/gpu',eva_vision_storage_class='local-path',eva_vision_pvc_size='20Gi',
+                    repository_registry='',repository_project='eva',eva_vision_workspace_chart_values=workspace,
+                    eva_vision_workspace_values=workspace,eva_vision_cli_values_override=cli)
+                tasks=[{'ansible.builtin.set_fact':{'eva_vision_ncp_values':{}}}]+sources+[
+                    {'ansible.builtin.template':{'src':str(ROOT/'src/solution/values/vision-k3s-override.yaml.j2'),
+                                                'dest':str(work/'generated.yaml')}},
+                    {'ansible.builtin.slurp':{'src':'{{ item }}'},'loop':[str(defaults),str(work/'generated.yaml')],
+                     'register':'eva_vision_generated_values_raw'},merge,
+                    {'ansible.builtin.copy':{'dest':str(work/'effective.yaml'),'content':'{{ eva_vision_effective_values | to_nice_yaml }}'}},metadata]
+                playbook=work/'playbook.yaml'
+                playbook.write_text(yaml.safe_dump([{'hosts':'all','connection':'local','gather_facts':False,'tasks':tasks}]))
+                self.execute(playbook,success=not missing)
+                if missing:
+                    self.assertFalse((work/'effective.yaml').exists())
+                    continue
+                effective=yaml.safe_load((work/'effective.yaml').read_text())
+                self.assertEqual(effective['resources']['limits']['cpu'],cpu)
+                self.assertEqual(effective['resources']['limits']['memory'],memory)
+                self.assertEqual(effective['resources']['limits']['ephemeral-storage'],'30Gi')
+                self.assertEqual(effective['image']['tag'],'3.3.1-beta.1')
+                self.assertEqual(effective['image']['repository'],NEW+'eva-vision')
+                self.assertEqual(effective['runtimeClassName'],'' if managed else 'nvidia')
+                self.assertEqual(effective['gpu']['mps']['enabled'],not managed)
+                self.assertEqual(effective['modelCache']['storageClass'],'nks-block-storage' if managed else 'local-path')
+                self.assertTrue(effective['modelCache']['enabled'])
+                source=yaml.safe_load((work/'values-sources.yaml').read_text())
+                self.assertEqual(source['environment_values_source'],self.variables['eva_vision_ncp_values_url'] if managed else '')
+
     def test_app_seeds_chart_selected_pull_secret_and_checks_selected_image_tag(self):
         self.incoming()
         self.variables.update(eva_enabled_components="app", eva_online_component="app", eva_online_action="prepare",
@@ -374,6 +461,46 @@ class SharedFlowTests(unittest.TestCase):
         values=yaml.safe_load(handoff.read_text())
         self.assertEqual(values["target"],"controller")
         self.assertEqual(values["sso"]["adminClientSecret"],"fixture-client-secret-do-not-print")
+
+    def test_nks_handoff_and_database_backups_use_account_paths_without_sudo(self):
+        # Exercise the production task-level privilege choice, without an
+        # ansible_become extra var masking an accidental become: true.
+        self.variables.pop("ansible_become")
+        resolver=next(t for t in yaml.safe_load((ROOT/"src/solution/roles/eva_cluster_context/tasks/main.yaml").read_text())
+                      if t.get("name")=="Resolve account-owned controller paths and the pinned Kubernetes connection")
+        app_tasks=yaml.safe_load((ROOT/"src/solution/roles/eva_app/tasks/main.yaml").read_text())
+        reads={"Check same-target IAM-to-App handoff","Read same-target IAM-to-App handoff",
+               "Check Argo CD handoff receipt on control node","Read Argo CD handoff receipt on control node"}
+        tasks=[resolver,*[t for t in app_tasks if t.get("name") in reads]]
+        self.assertEqual(len(tasks),5)
+        private=self.root/".local/state/eva"
+        iam=private/"sites/nks-test/controller/eva-iam.yaml"
+        argocd=private/"sites/nks-test/argocd-handoff.yaml"
+        iam.parent.mkdir(parents=True,mode=0o700)
+        iam.write_text("sso: {adminClientSecret: fixture-client-secret-do-not-print}\n");iam.chmod(0o600)
+        argocd.write_text("schema_version: v1\n");argocd.chmod(0o600)
+        tasks.append({"ansible.builtin.copy":{"dest":str(self.root/"paths.json"),"mode":"0600","content":
+            '{{ {"site": eva_site_state_root, "database": eva_app_db_backup_root, "helm": eva_helm_values_backup_root, '
+            '"iam": eva_app_iam_handoff_raw.content, "argocd": eva_app_argocd_handoff_raw.content} | to_json }}'},"no_log":True})
+        self.variables.update(eva_app_workspace_sso_complete=False,
+            eva_app_iam_handoff_path="{{ eva_site_state_root }}/controller/eva-iam.yaml",
+            eva_app_argocd_handoff_path=str(argocd))
+        p=self.root/"account-receipts.yaml"
+        p.write_text(yaml.safe_dump([{"hosts":"all","connection":"local","vars_files":[str(ROOT/"src/playbook-vars.yaml")],"tasks":tasks}]))
+        result=self.execute(p)
+        self.assertNotIn("fixture-client-secret-do-not-print",result.stdout+result.stderr)
+        paths=json.loads((self.root/"paths.json").read_text())
+        self.assertEqual(paths["site"],str(private/"sites/nks-test"))
+        self.assertEqual(paths["database"],str(private/"backups/app-db/nks-test/eva-app"))
+        self.assertEqual(paths["helm"],str(private/"backups/helm-values"))
+        self.assertEqual(base64.b64decode(paths["iam"]).decode(),iam.read_text())
+        self.assertEqual(base64.b64decode(paths["argocd"]).decode(),argocd.read_text())
+        self.assertFalse(any(call["tool"]=="sudo" for call in self.calls()))
+        spec=importlib.util.spec_from_file_location("app_database",ROOT/"src/solution/roles/eva_app/files/database_transition.py")
+        database=importlib.util.module_from_spec(spec);spec.loader.exec_module(database)
+        backup=database.private_dir(paths["database"])
+        self.assertEqual(backup.stat().st_uid,os.geteuid())
+        self.assertEqual(backup.stat().st_mode & 0o777,0o700)
 
 
 spec=importlib.util.spec_from_file_location("cluster_guard",ROOT/"src/solution/roles/eva_cluster_guard/files/guard_cluster.py")

@@ -855,7 +855,7 @@
     - "{{ eva_site_state_root }}"
     - "{{ eva_iam_app_handoff_dir }}"
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - eva_iam_write_app_config
     - not ansible_check_mode
@@ -883,7 +883,7 @@
         # 현재 값입니다. 콘솔에서 재생성(Regenerate)하면 이 값은 무효가 됩니다.
         adminClientSecret: {{ eva_iam_admin_api_client_secret | to_json }}
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - eva_iam_write_app_config
     - not ansible_check_mode

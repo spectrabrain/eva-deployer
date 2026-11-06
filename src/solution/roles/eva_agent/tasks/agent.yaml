@@ -24,7 +24,8 @@
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/'
            ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
-              | ternary('spectrabrain/eva-agent-chart/develop',
+              | ternary(('spectrabrain/eva-agent-chart/chartmuseum' if (eva_managed_cluster | default(false) | bool)
+                         else 'spectrabrain/eva-agent-chart/develop'),
                         'mellerikat/eva-agent/chartmuseum'))
            ~ '/release/' ~ eva_agent_deploy_version) }}
     eva_agent_image_tag: "{{ eva_agent_image_tag | default('') }}"
@@ -327,6 +328,8 @@
 - name: Record EVA Agent values source metadata on control node
   ansible.builtin.copy:
     content: |
+      release_values_source: {{ eva_agent_chartmuseum_base_url }}
+      release_values_file: {{ eva_agent_values_file }}
       config_generated_values: {{ (eva_agent_vllm_values_override_from_config | default({}) | length > 0) | lower }}
       workspace_override: {{ (eva_agent_workspace_values | length > 0) | lower }}
       cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}

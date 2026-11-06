@@ -21,7 +21,12 @@ func prepareOnlineRuntimeHost(destination string) error {
 	if destination != DefaultRoot {
 		return nil
 	}
-	return installOnlinePrerequisites(runPrerequisiteCommand)
+	if err := installOnlinePrerequisites(runPrerequisiteCommand); err != nil {
+		return err
+	}
+	return prepareOnlineRuntimePython(runPrerequisiteCommand, probePythonVersion, checkPythonVenv, func() ([]byte, error) {
+		return os.ReadFile("/etc/os-release")
+	})
 }
 
 func installOnlinePrerequisites(run prerequisiteRunner) error {
@@ -49,7 +54,11 @@ func installOnlinePrerequisitesWithRepository(run prerequisiteRunner, repository
 	if _, err := repository.Ensure(os.Stdout); err != nil {
 		return fmt.Errorf("update APT package index for Online Runtime bootstrap: %w", errors.Join(err, updateFailure))
 	}
-	install := []string{"install", "--yes", "--no-remove", "ca-certificates", "python3", "python3-venv"}
+	return installOnlinePrerequisitePackages(run, "ca-certificates", "python3", "python3-venv")
+}
+
+func installOnlinePrerequisitePackages(run prerequisiteRunner, packages ...string) error {
+	install := append([]string{"install", "--yes", "--no-remove"}, packages...)
 	output, installErr := run("apt-get", install...)
 	if installErr == nil {
 		return nil

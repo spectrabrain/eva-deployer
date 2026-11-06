@@ -40,9 +40,12 @@ func TestReadHarborCredentialReusesDockerAuthAndHelpers(t *testing.T) {
 }
 
 func TestHarborPublicationEnsuresPrivateProjectAndValidatesPushScope(t *testing.T) {
-	for _, state := range []string{"private", "missing", "public", "denied"} {
+	for _, state := range []string{"private", "missing", "public", "denied", "public-preserved"} {
 		t.Run(state, func(t *testing.T) {
 			current := state
+			if state == "public-preserved" {
+				current = "public"
+			}
 			creates, updates, tokens := 0, 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				user, password, _ := r.BasicAuth()
@@ -96,7 +99,7 @@ func TestHarborPublicationEnsuresPrivateProjectAndValidatesPushScope(t *testing.
 			defer server.Close()
 			receipt := testReceipt()
 			receipt.Registry = strings.TrimPrefix(server.URL, "http://")
-			err := ensureHarborPublicationWithClient(context.Background(), server.Client(), receipt, HarborCredential{Username: "robot-user", Password: "private-token"})
+			err := ensureHarborPublicationWithPolicy(context.Background(), server.Client(), receipt, HarborCredential{Username: "robot-user", Password: "private-token"}, state != "public-preserved")
 			if (state == "denied") != errors.Is(err, ErrHarborCredentialRequired) || state != "denied" && err != nil {
 				t.Fatalf("publication validation failed: %v", err)
 			}

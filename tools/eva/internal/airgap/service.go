@@ -63,7 +63,7 @@ var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$`)
 
 func ValidateOptions(options Options) error {
 	if options.Output == "" || !strings.HasSuffix(options.Output, ".tar.gz") {
-		return errors.New("airgap prepare requires --output FILE.tar.gz")
+		return errors.New("Airgap Bundle output must be a .tar.gz file")
 	}
 	switch options.VLLMProfile {
 	case "A6000x1", "L40sx1", "PRO5000x3", "PRO6000-MIGx4":
@@ -74,7 +74,7 @@ func ValidateOptions(options Options) error {
 		return errors.New("--driver-package must be nvidia-driver-NNN or nvidia-driver-NNN-open")
 	}
 	if _, err := os.Lstat(options.Output); err == nil {
-		return errors.New("Airgap Bundle output already exists; choose a new output path")
+		return fmt.Errorf("Airgap Bundle output already exists: %s; choose a new path with --output", options.Output)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -241,10 +241,12 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 	if err != nil || sha256.Sum256(currentMetadata) != sourceDigest {
 		return "", errors.New("original Release metadata changed during preparation; no Bundle was published")
 	}
-	if err := release.BuildAirgapBundle(options.Release, offline, output); err != nil {
+	digest, err := release.BuildAirgapBundleWithDigest(options.Release, offline, output)
+	if err != nil {
 		return "", err
 	}
 	fmt.Fprintf(options.Stdout, "[OK] Airgap Bundle verified: %s\n", output)
+	fmt.Fprintf(options.Stdout, "[OK] Bundle SHA-256: %s\n", digest)
 	return output, nil
 }
 

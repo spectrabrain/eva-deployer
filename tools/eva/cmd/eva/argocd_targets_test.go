@@ -232,3 +232,27 @@ func TestRemoteLocalTargetUsesTransferredReceiptRoot(t *testing.T) {
 		t.Fatalf("Target guard does not use transferred receipt location: %#v %v", targets, err)
 	}
 }
+
+func TestNKSPreflightAndAppUseTheSameAccountReceiptPaths(t *testing.T) {
+	document, _ := targetPreflightDocument(t)
+	defaultArgoCDReceiptRoot = argocd.DefaultReceiptRoot
+	t.Setenv("HOME", t.TempDir())
+	document.AnsibleExtraVars = append(document.AnsibleExtraVars, "eva_managed_cluster=true")
+	targets, _, err := argoCDTargets(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := argocd.WorkspaceReceiptPaths(document.Workspace, document.SiteID, argoCDReceiptRoot(document))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range targets {
+		if got := paths[target.Name]; got != argocd.ReceiptPath(target.StateRoot, document.SiteID) {
+			t.Fatalf("preflight/app receipt mismatch for %s: %s", target.Name, got)
+		}
+		prompt := &argoCDPrompter{stateRoot: target.StateRoot}
+		if prompt.receiptRoot() != target.StateRoot {
+			t.Fatal("preflight receipt recorder lost the account path")
+		}
+	}
+}

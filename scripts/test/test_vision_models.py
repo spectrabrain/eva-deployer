@@ -84,7 +84,7 @@ elif args[0] == "push":
     assert (Path.cwd() / name).is_dir()
     assert ref.endswith("/" + name.lower() + ":latest")
     auths = json.loads(config.read_text())["auths"]
-    if os.environ.get("REPOSITORY_USE_DOCKER_AUTH") == "true":
+    if os.environ.get("REPOSITORY_USE_DOCKER_AUTH") == "true" or "harbor.test:32080" in auths:
         import base64
         assert set(auths) == {"harbor.test:32080"}
         assert base64.b64decode(auths["harbor.test:32080"]["auth"]).decode() == "pull-user:" + os.environ["FAKE_EXPECTED_PASSWORD"]
@@ -131,6 +131,7 @@ class VisionModelsTests(unittest.TestCase):
             "REPOSITORY_REGISTRY": "harbor.test:32080", "REPOSITORY_PROJECT": "eva",
             "REPOSITORY_USERNAME": "admin", "REPOSITORY_PASSWORD": SECRET,
             "FAKE_EXPECTED_PASSWORD": SECRET, "LOCAL_HARBOR_YML": str(self.root / "absent.yml"),
+            "DOCKER_CONFIG": str(self.root / "absent-docker"),
             "TMPDIR": str(self.cache_root),
         })
         for name in DEFAULTS + ["DARTF"]:
@@ -449,6 +450,27 @@ class VisionModelsTests(unittest.TestCase):
                                       "DOCKER_CONFIG": str(docker), "LOCAL_HARBOR_YML": str(harbor)})
         self.assertEqual(before, (docker / "config.json").read_bytes())
         self.assertTrue(all(entry["args"][0] == "push" for entry in self.calls(self.oras_log)))
+        self.assert_clean_credentials()
+
+    def test_local_publish_automatically_reuses_prepared_docker_credential(self):
+        self.prepare("Owl-v2")
+        docker = self.root / "docker"
+        docker.mkdir()
+        config = {"auths": {"harbor.test:32080": {
+            "auth": base64.b64encode(("pull-user:" + SECRET).encode()).decode()}}}
+        (docker / "config.json").write_text(json.dumps(config))
+        before = (docker / "config.json").read_bytes()
+        harbor = self.root / "old-harbor.yml"
+        harbor.write_text('hostname: harbor.test\nhttp:\n  port: 32080\nharbor_admin_password: stale-password\n')
+        self.call("publish", updates={"REPOSITORY_PASSWORD": None,
+                                      "REPOSITORY_USERNAME": None,
+                                      "DOCKER_CONFIG": str(docker), "LOCAL_HARBOR_YML": str(harbor)})
+        self.assertTrue(all(entry["args"][0] == "push" for entry in self.calls(self.oras_log)))
+        self.assertEqual(before, (docker / "config.json").read_bytes())
+        calls = len(self.calls(self.oras_log))
+        self.call("publish", ok=False, updates={"REPOSITORY_PASSWORD": None,
+                  "DOCKER_CONFIG": str(docker), "REPOSITORY_REGISTRY": "unrelated.test:32080"})
+        self.assertEqual(calls, len(self.calls(self.oras_log)))
         self.assert_clean_credentials()
 
     def test_remote_harbor_credential_helper_is_reused_for_oras(self):

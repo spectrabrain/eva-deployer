@@ -36,6 +36,57 @@
       exit 1
     fi
 
+    if [[ "${EVA_VLLM_MANAGED_CLUSTER:-false}" == 'true' ]]; then
+      binding_verified=0
+      for attempt in $(seq 1 25); do
+        if kubectl get pvc "$claim" -n "$namespace" -o json > "$claim_file" &&
+           [[ "$(jq -r '.status.phase // empty' "$claim_file")" == 'Bound' ]]; then
+          binding_verified=1
+          break
+        fi
+        if (( attempt < 25 )); then sleep 5; fi
+      done
+      if (( binding_verified != 1 )); then
+        echo '[ERROR] NKS vLLM cache PVC did not become Bound within 120 seconds'
+        exit 1
+      fi
+      claim_uid="$(jq -r '.metadata.uid' "$claim_file")"
+      claim_volume="$(jq -r '.spec.volumeName' "$claim_file")"
+      if [[ -n "$EVA_VLLM_PREVIOUS_UID" &&
+            ( "$claim_uid" != "$EVA_VLLM_PREVIOUS_UID" || "$claim_volume" != "$EVA_VLLM_PREVIOUS_VOLUME" ) ]]; then
+        echo '[ERROR] NKS vLLM cache PVC identity changed during installation'
+        exit 1
+      fi
+      jq -e --arg sc "$EVA_VLLM_STORAGE_CLASS" --arg size "$EVA_VLLM_STORAGE_SIZE" '
+        .spec.storageClassName == $sc and
+        .spec.resources.requests.storage == $size and
+        (.spec.accessModes | index("ReadWriteMany")) != null
+      ' "$claim_file" >/dev/null || {
+        echo '[ERROR] NKS vLLM cache PVC storage contract mismatch'
+        exit 1
+      }
+      kubectl get pv "$claim_volume" -o json > "$static_pv_file"
+      jq -e --arg uid "$claim_uid" --arg ns "$namespace" --arg claim "$claim" '
+        .status.phase == "Bound" and
+        .spec.claimRef.uid == $uid and .spec.claimRef.namespace == $ns and
+        .spec.claimRef.name == $claim and .spec.csi != null
+      ' "$static_pv_file" >/dev/null || {
+        echo '[ERROR] NKS vLLM CSI PV/PVC binding mismatch'
+        exit 1
+      }
+      kubectl get deployments,statefulsets -n "$namespace" -o json > "$workloads_file"
+      jq -e --arg claim "$claim" '
+        [.items[] | select(.metadata.labels."app.kubernetes.io/instance" == "eva-agent-vllm") |
+         (.spec.template.spec.volumes // [])[] |
+         select(.persistentVolumeClaim.claimName == $claim)] | length > 0
+      ' "$workloads_file" >/dev/null || {
+        echo '[ERROR] no NKS vLLM workload references the expected cache PVC'
+        exit 1
+      }
+      echo '[OK] NKS vLLM CSI storage binding and cache PVC identity verified'
+      exit 0
+    fi
+
     binding_verified=0
 
     for attempt in $(seq 1 25)
@@ -281,3 +332,12 @@
   changed_when: false
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+    EVA_VLLM_MANAGED_CLUSTER: "{{ (eva_managed_cluster | default(false) | bool) | ternary('true', 'false') }}"
+    EVA_VLLM_STORAGE_CLASS: "{{ (eva_agent_cluster_vllm_values | default({})).get('sharedPvcStorage', {}).get('storageClass', '') }}"
+    EVA_VLLM_STORAGE_SIZE: "{{ (eva_agent_vllm_effective_values | default({})).get('sharedPvcStorage', {}).get('size', '100Gi') }}"
+    EVA_VLLM_PREVIOUS_UID: >-
+      {{ (eva_agent_cluster_vllm_pvc_before.stdout | from_json).metadata.uid
+         if (eva_agent_cluster_vllm_pvc_before | default({})).get('stdout', '') | trim | length > 0 else '' }}
+    EVA_VLLM_PREVIOUS_VOLUME: >-
+      {{ (eva_agent_cluster_vllm_pvc_before.stdout | from_json).spec.volumeName
+         if (eva_agent_cluster_vllm_pvc_before | default({})).get('stdout', '') | trim | length > 0 else '' }}

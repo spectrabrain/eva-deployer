@@ -36,6 +36,21 @@ Keep customer workspace configuration and credentials outside this Release.
 // runtime/cache artifact. It never reads customer workspace directories, changes
 // the source Release, or replaces an existing destination (including symlinks).
 func BuildAirgapBundle(source Resolved, offlinePath, destination string) error {
+	return buildAirgapBundle(source, offlinePath, destination, io.Discard)
+}
+
+// BuildAirgapBundleWithDigest returns the SHA-256 of the complete compressed
+// Bundle only after verification and publication succeed. Hashing while writing
+// avoids reading the potentially large archive again just to print its checksum.
+func BuildAirgapBundleWithDigest(source Resolved, offlinePath, destination string) (string, error) {
+	hash := sha256.New()
+	if err := buildAirgapBundle(source, offlinePath, destination, hash); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func buildAirgapBundle(source Resolved, offlinePath, destination string, digest io.Writer) error {
 	if destination == "" {
 		return errors.New("Airgap Bundle destination is required")
 	}
@@ -166,7 +181,7 @@ func BuildAirgapBundle(source Resolved, offlinePath, destination string) error {
 	}
 	defer os.Remove(archive.Name())
 	defer archive.Close()
-	if err := writeAirgapArchive(archive, staging); err != nil {
+	if err := writeAirgapArchive(io.MultiWriter(archive, digest), staging); err != nil {
 		return fmt.Errorf("write Airgap Bundle: %w", err)
 	}
 	if err := archive.Sync(); err != nil {

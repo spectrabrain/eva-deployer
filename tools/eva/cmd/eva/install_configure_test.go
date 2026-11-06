@@ -138,6 +138,84 @@ func TestInstallConfigureOnlineHTTP(t *testing.T) {
 	}
 }
 
+func TestInstallConfigureNKSUsesTheSameSolutionScaffold(t *testing.T) {
+	// Online/Bastion/NKS/default connection paths/Solution only/HTTPS/separate/IAM+App/no extras.
+	input, messages, path := configureTest(t, "1\n2\n2\n\n\n\n3\n2\n2\n1\n4\n")
+	target := input.Targets["controller"]
+	if input.Deployment == nil || input.Deployment.Environment != "nks" || input.Components["infra"] || !input.Components["iam"] || !input.Components["app"] || input.Components["agent"] {
+		t.Fatal("NKS must use one controller with the selected Solution components")
+	}
+	if input.Deployment.Release != "" {
+		t.Fatal("NKS must not pin an assumed home Release path when the installer leaves it blank")
+	}
+	if input.Credentials.AWS == nil || !strings.Contains(input.Site.ID, "<SITE_ID>") {
+		t.Fatal("NKS must retain the shared site/AWS required-input scaffold")
+	}
+	if target.Ansible["ansible_connection"] != "local" || target.Ansible["ansible_become_password"] != nil {
+		t.Fatal("NKS must not ask for worker SSH/sudo access")
+	}
+	app := target.Values["app"]["app"].(map[string]any)
+	if app["backendHost"] != "<APP_HOST>" || app["license"] == nil {
+		t.Fatal("NKS must generate the normal address/license Values, not an empty map")
+	}
+	if app["sso"].(map[string]any)["redis"].(map[string]any)["url"] != "<IAM_REDIS_URL>" {
+		t.Fatal("NKS must require the reachable Redis URL when its external service is disabled")
+	}
+	for _, c := range []string{"iam", "app"} {
+		values := target.Values[c]
+		if values["persistence"].(map[string]any)["type"] != "pvc" || values["imagePullSecrets"].(map[string]any)["authType"] != "secret" {
+			t.Fatalf("%s NKS scaffold contains host storage/credential defaults", c)
+		}
+		if values["ingress"].(map[string]any)["tls"].(map[string]any)["create"] != false {
+			t.Fatal("NKS must not create hostPath certificate jobs by default")
+		}
+	}
+	for _, question := range []string{"Solution 접속 프로토콜", "Solution 주소 구성", "IAM/APP 구성", "추가 Solution 구성", "workspace validate", "eva install --config"} {
+		if !strings.Contains(messages, question) {
+			t.Fatalf("NKS bypassed shared configure question/instruction: %s", question)
+		}
+	}
+	if strings.Contains(messages, "sudo eva") || strings.Contains(messages, "SSH 비밀번호") {
+		t.Fatal("NKS instructions must run as the kubeconfig owner")
+	}
+	if _, err := workspace.LoadInstaller(path, ""); err == nil {
+		t.Fatal("NKS placeholders must be filled before installation")
+	}
+}
+
+func TestInstallConfigureNKSExplicitReleaseIsPreserved(t *testing.T) {
+	input, _, _ := configureTest(t, "1\n2\n2\n\n\n/actual/nks-release\n3\n2\n2\n1\n4\n")
+	if input.Deployment.Release != "/actual/nks-release" {
+		t.Fatal("NKS must preserve the installer's explicit Release selection")
+	}
+}
+
+func TestInstallConfigureNKSAddsDependencyAndVisionInputsToSelectedComponents(t *testing.T) {
+	input, _, _ := configureTest(t, "1\n2\n2\n\n\n\n3\n2\n2\n1\n1\n")
+	values := input.Targets["controller"].Values
+	if !input.Components["agent"] || !input.Components["vision"] {
+		t.Fatal("NKS must retain the existing Agent/Vision selection")
+	}
+	deploy := values["agent"]["eva_agent_deploy"].(map[string]any)
+	if deploy["vllm_profile"] != "<VLLM_PROFILE>" || deploy["qdrant_values"] == nil {
+		t.Fatal("Agent must scaffold its vLLM and Qdrant installation inputs")
+	}
+	storage := deploy["vllm_values"].(map[string]any)["sharedPvcStorage"].(map[string]any)
+	if storage["mode"] != "dynamic" || storage["storageClass"] != "<AGENT_MODEL_STORAGE_CLASS>" {
+		t.Fatal("NKS must require provider storage instead of local NFS")
+	}
+	if values["vision"]["runtimeClassName"] != "" || values["vision"]["imagePullSecrets"].(map[string]any)["ExistingSecret"] != "ecr-registry" {
+		t.Fatal("NKS Vision must use the selected cluster runtime and managed ECR renewal")
+	}
+}
+
+func TestInstallConfigureServerSolutionOnly(t *testing.T) {
+	input, _, _ := configureTest(t, "1\n1\n3\n1\n2\n1\n4\n")
+	if input.Deployment != nil || input.Components["infra"] || !input.Components["app"] || !input.Components["iam"] {
+		t.Fatal("Solution only must not turn an On-premise server into an NKS controller")
+	}
+}
+
 func TestInstallConfigureRemoteUsesSameBastionTargetPrompts(t *testing.T) {
 	answers := "2\n\nnode-a\n192.0.2.10\neva\n1\n1\nnode-b\n192.0.2.11\neva\n1\n2\n"
 	input, messages, _ := configureTest(t, answers, "first-secret", "second-secret")
@@ -161,7 +239,7 @@ func TestInstallConfigureRemoteUsesSameBastionTargetPrompts(t *testing.T) {
 
 func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 	answers := strings.Join([]string{
-		"1", "2", // Online + Bastion
+		"1", "2", "1", // Online + Bastion + On-premise
 		"infra-a", "192.0.2.10", "eva", "1", "1", // Infra-only, add another
 		"iam-app", "192.0.2.11", "eva", "2", // don't reuse Infra-only
 		"2", "2", "3", "1", "1", "1", // Solution/HTTPS/IP/co-install/Agent+Vision/add
@@ -230,7 +308,7 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 		switch step.Component {
 		case "config", "app":
 			want = []string{"external-app", "iam-app"}
-		case "iam", "agent", "vision":
+		case "iam", "agent", "vision", "gpu":
 			want = []string{"iam-app"}
 		}
 		if !reflect.DeepEqual(step.Targets, want) {
@@ -249,7 +327,7 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 }
 
 func TestInstallConfigureReusesOptionsNotConnections(t *testing.T) {
-	answers := "1\n2\nfirst\n192.0.2.10\neva\n2\n2\n1\n1\n4\n1\nsecond\n192.0.2.11\n\n1\n2\n"
+	answers := "1\n2\n1\nfirst\n192.0.2.10\neva\n2\n2\n1\n1\n4\n1\nsecond\n192.0.2.11\n\n1\n2\n"
 	input, messages, _ := configureTest(t, answers, "first-private", "second-private")
 	first, second := input.Targets["first"], input.Targets["second"]
 	if !reflect.DeepEqual(first.Components, second.Components) || second.Ansible["ansible_host"] != "192.0.2.11" || second.Ansible["ansible_password"] != "second-private" {
@@ -263,7 +341,7 @@ func TestInstallConfigureReusesOptionsNotConnections(t *testing.T) {
 func TestInstallConfigureRejectsInvalidAndCancelledInputWithoutSaving(t *testing.T) {
 	for name, answers := range map[string]string{
 		"EOF":           "",
-		"after choices": "1\n2\nnode-a\n192.0.2.10\neva\n",
+		"after choices": "1\n2\n1\nnode-a\n192.0.2.10\neva\n",
 		"control":       "\x1b\n",
 		"long line":     strings.Repeat("x", 4097) + "\n",
 	} {
@@ -282,7 +360,7 @@ func TestInstallConfigureRejectsInvalidAndCancelledInputWithoutSaving(t *testing
 }
 
 func TestInstallConfigureRetriesInvalidChoicesAndTargetIdentity(t *testing.T) {
-	answers := "9\n1\n2\nall\nnode-a\nlocalhost\n127.0.0.1\n192.0.2.10\n-invalid-user\neva\n1\n1\nnode-a\nnode-b\n192.0.2.10\n192.0.2.11\n\n1\n2\n"
+	answers := "9\n1\n2\n1\nall\nnode-a\nlocalhost\n127.0.0.1\n192.0.2.10\n-invalid-user\neva\n1\n1\nnode-a\nnode-b\n192.0.2.10\n192.0.2.11\n\n1\n2\n"
 	input, _, _ := configureTest(t, answers, "first-secret", "second-secret")
 	if len(input.Targets) != 2 || input.Targets["node-b"].Ansible["ansible_host"] != "192.0.2.11" {
 		t.Fatal("wizard did not reprompt for invalid/duplicate identity")

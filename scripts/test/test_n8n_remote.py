@@ -218,7 +218,7 @@ for registry, mirror in config.get('mirrors', {}).items():
         registry_precondition[1]['ansible.builtin.include_role']['name'] = str(fixture_role)
         precondition_file = self.root / 'precondition-registry.yaml'
         precondition_file.write_text(yaml.safe_dump(registry_precondition, sort_keys=False))
-        task = next(task for task in yaml.safe_load((source / 'main.yaml').read_text())
+        task = next(task for task in yaml.safe_load((source / 'host.yaml').read_text())
                     if task['name'] == 'Prepare existing target k3s registry access')
         task['ansible.builtin.import_tasks'] = str(precondition_file)
         return task
@@ -343,7 +343,7 @@ for registry, mirror in config.get('mirrors', {}).items():
         self.assertEqual(merged['mirrors']['other.test'], existing['mirrors']['other.test'])
 
     def test_closed_network_precondition_skips_all_external_probes(self):
-        tasks = yaml.safe_load((ROOT / 'src/infra/roles/precondition/tasks/main.yaml').read_text())
+        tasks = yaml.safe_load((ROOT / 'src/infra/roles/precondition/tasks/host.yaml').read_text())
         selected = []
         for task in tasks:
             if task['name'] in ['Set infra check parameters', 'Select external connectivity probes for the repository mode',

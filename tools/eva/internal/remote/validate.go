@@ -420,8 +420,13 @@ func ValidateModels(root string) error {
 		if err != nil {
 			return fmt.Errorf("invalid model manifest file: %w", err)
 		}
-		if filepath.Base(root) == "cache" && strings.HasPrefix(filepath.ToSlash(relative), "cache/") {
-			relative = strings.TrimPrefix(filepath.ToSlash(relative), "cache/")
+		if filepath.Base(root) == "cache" {
+			for _, prefix := range []string{"out/cache/", "cache/"} {
+				if strings.HasPrefix(filepath.ToSlash(relative), prefix) {
+					relative = strings.TrimPrefix(filepath.ToSlash(relative), prefix)
+					break
+				}
+			}
 		}
 		if err := nonEmptyRegular(root, relative); err != nil {
 			return err

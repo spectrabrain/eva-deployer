@@ -1,0 +1,25 @@
+---
+# Only provider-specific inputs differ. The dependency installation/recovery
+# tasks below in dependencies.yaml remain the same for servers and NKS.
+- name: Define supported NKS vLLM release profiles
+  ansible.builtin.set_fact:
+    eva_agent_supported_vllm_profiles: [A6000x1, L40sx1, PRO5000x3, PRO6000-MIGx4]
+
+- name: Validate installer-supplied NKS dependency profile and CSI storage
+  ansible.builtin.assert:
+    that:
+      - eva_agent_vllm_profile in eva_agent_supported_vllm_profiles
+      - eva_agent_cluster_deploy.vllm_values.sharedPvcStorage.mode | default('') == 'dynamic'
+      - eva_agent_cluster_deploy.vllm_values.sharedPvcStorage.storageClass | default('') | length > 0
+      - eva_agent_cluster_deploy.qdrant_values.persistence.storageClassName | default('') | length > 0
+      - eva_agent_cluster_deploy.qdrant_values.snapshotPersistence.storageClassName | default('') | length > 0
+    fail_msg: "Fill agent.eva_agent_deploy with a supported vllm_profile, dynamic NAS storage and Qdrant block storage Values."
+
+- name: Resolve NKS vLLM platform defaults and explicit dependency Values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_cluster_vllm_values: >-
+      {{ {'routerSpec': {'nodeSelectorTerms': []},
+          'servingEngineSpec': {'runtimeClassName': ''},
+          'sharedPvcStorage': {'mode': 'dynamic'}}
+         | combine(eva_agent_cluster_deploy.vllm_values, recursive=true) }}

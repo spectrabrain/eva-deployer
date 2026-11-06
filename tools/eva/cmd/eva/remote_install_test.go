@@ -60,6 +60,75 @@ targets:
 	return path
 }
 
+func TestRemoteGPUPreflightUsesTargetCLIAndPreservesComponentSelection(t *testing.T) {
+	config := remoteControllerConfig(t)
+	contents, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents = []byte(strings.Replace(string(contents), "  n8n: true", "  n8n: true\n  agent: true\n  vision: true", 1))
+	contents = []byte(strings.Replace(string(contents), "  node-a:\n", "  node-a:\n    components:\n      agent: true\n", 1))
+	contents = []byte(strings.Replace(string(contents), "  node-b:\n", "  node-b:\n    components:\n      infra: true\n      n8n: true\n      vision: true\n", 1))
+	if err := os.WriteFile(config, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	mockRemoteInstaller(t, func(request remote.TargetAction) error {
+		if request.Action != "gpu-preflight" {
+			t.Fatalf("wrong target command: %s", request.Action)
+		}
+		var input workspace.Installer
+		if err := yaml.Unmarshal(request.Config, &input); err != nil {
+			t.Fatal(err)
+		}
+		if !input.Components["agent"] || input.Components["vision"] || input.Components["infra"] || input.Components["n8n"] {
+			t.Fatalf("GPU preparation forwarded unselected components: %v", input.Components)
+		}
+		names = append(names, request.Name)
+		return nil
+	})
+	captureRemoteTargetStdout(t, func() error {
+		return run([]string{"preflight", "gpu", "--release", writeRemotePublishRelease(t), "--config", config, "--component", "agent", "--state-root", t.TempDir(), "--log-root", t.TempDir()})
+	})
+	if len(names) != 1 || names[0] != "node-a" {
+		t.Fatalf("GPU command reached unrelated targets: %v", names)
+	}
+}
+
+func TestRemoteGPUPreflightUsesExplicitConfigWithoutConfirmation(t *testing.T) {
+	config := remoteControllerConfig(t)
+	contents, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents = []byte(strings.Replace(string(contents), "  n8n: true", "  n8n: true\n  agent: true", 1))
+	home := t.TempDir()
+	defaultConfig := filepath.Join(home, "eva-install.yaml")
+	if err := os.WriteFile(defaultConfig, contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousStat := stdinStat
+	t.Cleanup(func() { stdinStat = previousStat })
+	stdinStat = func() (os.FileInfo, error) {
+		t.Fatal("GPU preflight must not request an extra confirmation")
+		return nil, errors.New("unexpected stdin inspection")
+	}
+	var targets []string
+	mockRemoteInstaller(t, func(action remote.TargetAction) error {
+		if action.Action != "gpu-preflight" {
+			t.Fatalf("unexpected action: %s", action.Action)
+		}
+		targets = append(targets, action.Name)
+		return nil
+	})
+	output := captureRemoteTargetStdout(t, func() error {
+		return run([]string{"preflight", "gpu", "--release", writeRemotePublishRelease(t), "--config", defaultConfig, "--state-root", t.TempDir(), "--log-root", t.TempDir()})
+	})
+	if len(targets) != 2 || targets[0] != "node-a" || targets[1] != "node-b" || !strings.Contains(output, "status: succeeded") {
+		t.Fatalf("explicit GPU preflight did not use the configured targets: %v %s", targets, output)
+	}
+}
+
 func TestRemoteControllerTransfersOnlyMatchingCompletedArgoCDReceipt(t *testing.T) {
 	config := remoteControllerConfig(t)
 	previous := defaultArgoCDReceiptRoot

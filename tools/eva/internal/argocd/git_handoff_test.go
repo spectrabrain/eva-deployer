@@ -147,3 +147,40 @@ func TestRecordedRemovalAcceptsLaterRegistrationRevision(t *testing.T) {
 		t.Fatalf("recorded removal accepted a recreated cluster Secret: %v", err)
 	}
 }
+
+type completedReceiptPrompt struct {
+	fakePrompt
+	receipt Receipt
+	found   bool
+}
+
+func (*completedReceiptPrompt) LoadPending(string) (PendingHandoff, bool, error) {
+	return PendingHandoff{}, false, nil
+}
+func (prompt *completedReceiptPrompt) LoadCompletedReceipt(string) (Receipt, bool, error) {
+	return prompt.receipt, prompt.found, nil
+}
+func (*completedReceiptPrompt) RecordPending(PendingHandoff) error { return nil }
+func (*completedReceiptPrompt) RemovePending(string) error         { return nil }
+
+func TestGitHandoffRecoveryReadsTheSelectedReceiptStore(t *testing.T) {
+	receipt := Receipt{SchemaVersion: "v1", SiteID: testWorkspaceSite, ClusterName: testLegacyCluster,
+		ClusterServer: testClusterServer, Applications: []string{"legacy-a-eva-app"},
+		RegistrationApplication: registrationApplicationName, RegistrationRepository: "https://git.example/registration.git",
+		RegistrationBranch: "main", RegistrationManifest: "clusters/" + testLegacyCluster + ".yaml", RegistrationCommit: testGitCommit}
+	prompt := &completedReceiptPrompt{receipt: receipt, found: true}
+	session := &fakeSession{outputs: map[string]string{
+		registrationApplicationCommand(): registrationApplicationJSON(testLegacyCluster, testGitCommit, false),
+		clusterSecretListCommand():       clusterSecretsJSON(),
+		applicationListCommand():         applicationsJSON(),
+	}}
+	detection := Detection{SiteID: testWorkspaceSite, Applications: receipt.Applications}
+	got, recovered, err := recoverGitBackedHandoff(session, prompt, detection, nil, nil)
+	if err != nil || !recovered || got.ClusterName != receipt.ClusterName {
+		t.Fatalf("selected-store recovery = %#v, %t, %v", got, recovered, err)
+	}
+	prompt.found = false
+	if _, recovered, err := recoverGitBackedHandoff(session, prompt, detection, nil, nil); err != nil || recovered {
+		t.Fatalf("missing selected receipt must not fall back to system state: %t, %v", recovered, err)
+	}
+}

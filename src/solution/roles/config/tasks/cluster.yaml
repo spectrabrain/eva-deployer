@@ -1,0 +1,15 @@
+---
+- name: Ensure generated Config directory exists
+  ansible.builtin.file:
+    path: "{{ eva_site_config_root }}/{{ inventory_hostname }}"
+    state: directory
+    mode: "0700"
+
+- name: Write EVA Config from Kubernetes resources
+  ansible.builtin.copy:
+    dest: "{{ eva_site_config_root }}/{{ inventory_hostname }}/eva.yaml"
+    mode: "0600"
+    content: >-
+      {{ {'gpu_count': eva_cluster_gpu_count, 'mig_enabled': eva_cluster_mig_enabled,
+          'vllm_profile': eva_cluster_values.get('agent', {}).get('eva_agent_deploy', {}).get('vllm_profile', ''),
+          'app': {}, 'vllm': {}} | to_nice_yaml }}

@@ -123,11 +123,15 @@ jobs:
           EVA_TEST_HELM_DOWNLOAD: "1"
         run: python3 scripts/test/test_traefik_ports.py
 
+      - name: Test existing server Solution-only upgrade
+        run: python3 scripts/test/test_host_solution_upgrade.py
+
       - name: Test EVA Agent and Vision values contracts
         env:
           EVA_TEST_HELM_DOWNLOAD: "1"
         run: |
           python3 scripts/test/test_eva_agent_release.py
+          python3 scripts/test/test_existing_cluster_flow.py
           python3 scripts/test/test_n8n_remote.py
           scripts/test/test_eva_component_values.sh
           scripts/test/test_eva_agent_dependency_defaults.sh
@@ -152,6 +156,7 @@ jobs:
           scripts/test/test_playbook_path_contract.sh
           scripts/test/test_release_role_paths.sh
           scripts/test/test_role_template_syntax.sh
+          bash scripts/test/test_gpu_prepare.sh
 
       - name: Test Config GPU CDI contract
         run: scripts/test/test_config_gpu_cdi.sh

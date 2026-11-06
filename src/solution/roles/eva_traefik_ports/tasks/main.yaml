@@ -8,6 +8,34 @@
     - not ansible_check_mode
     - eva_traefik_ports_manage | bool
   block:
+    - name: Inspect companion App routing input on control node
+      ansible.builtin.stat:
+        path: "{{ eva_site_values_root | default('/nonexistent-eva-workspace') }}/app.yaml"
+      register: eva_traefik_app_input
+      delegate_to: localhost
+      become: false
+
+    - name: Select companion App routing input privately
+      no_log: true
+      ansible.builtin.set_fact:
+        eva_traefik_app_values: >-
+          {{ (lookup('ansible.builtin.file', eva_site_values_root ~ '/app.yaml') | from_yaml | default({}, true))
+             .get(ansible_host | default(inventory_hostname), {})
+             if eva_traefik_app_input.stat.exists else {} }}
+
+    - name: Resolve the selected App endpoint for legacy NodePort transition
+      no_log: true
+      ansible.builtin.set_fact:
+        eva_traefik_legacy_app:
+          enabled: "{{ 'app' in (eva_enabled_components | default('')).split(',') }}"
+          namespace: "{{ eva_app_namespace | default('eva-app') }}"
+          release: "{{ eva_app_name | default('eva-app') }}"
+          host: "{{ eva_traefik_app_values.app.backendHost | default(ansible_facts.default_ipv4.address | default('127.0.0.1')) }}"
+          port: "{{ eva_traefik_app_values.app.backendPublicPort | default(80) }}"
+          secure: "{{ eva_traefik_app_values.app.backendSecure | default(false) }}"
+          ingress_enabled: "{{ eva_traefik_app_values.ingress.enabled | default(true) }}"
+          path: "{{ eva_traefik_app_values.ingress.path | default('/') }}"
+
     - name: Copy common public listener helper
       ansible.builtin.copy:
         src: traefik_ports.py
@@ -34,6 +62,7 @@
               'values': eva_traefik_ports_values,
               'set': eva_traefik_ports_set,
               'timeout': eva_traefik_ports_timeout,
+              'legacy_app': eva_traefik_legacy_app,
               'backup_root': eva_traefik_ports_backup_root} | to_json }}
         dest: "{{ eva_traefik_ports_workdir }}/traefik-ports-request.json"
         mode: "0600"

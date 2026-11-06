@@ -136,7 +136,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 		if mode == "remote" {
 			fallback = "2"
 		}
-		choice, err = prompt.choice("설치 실행 방식\n  1) 현재 서버에 설치 (local connection)\n  2) 현재 서버는 Bastion/Main, 별도 타겟에 SSH 설치", fallback, "1", "2")
+		choice, err = prompt.choice("설치 실행 방식\n  1) 현재 서버에 설치 (local connection)\n  2) 현재 서버는 Bastion/Main, 별도 타겟에 설치", fallback, "1", "2")
 		if err != nil {
 			return err
 		}
@@ -144,7 +144,28 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	} else {
 		fmt.Fprintln(output, "Local은 현재 서버에 설치합니다. Local Harbor 주소와 반입한 Release/자산을 설정 파일에서 확인하세요.")
 	}
-	if bastion {
+	var deployment *workspace.Deployment
+	if bastion && mode == "online" {
+		choice, err = prompt.choice("Bastion 설치 대상\n  1) On-premise / 서버 — SSH 설치\n  2) Cloud (NCP NKS) — kubeconfig로 Solution 설치", "1", "1", "2")
+		if err != nil {
+			return err
+		}
+		if choice == "2" {
+			deployment = &workspace.Deployment{Environment: "nks"}
+			if deployment.Kubeconfig, err = prompt.line("kubeconfig 파일", filepath.Join(home, ".kube/config")); err != nil {
+				return err
+			}
+			if deployment.Context, err = prompt.line("Kubernetes context (비우면 현재 context)", ""); err != nil {
+				return err
+			}
+			if deployment.Release, err = prompt.line("Base Release 경로 (비우면 기존 Release 선택 규칙 사용)", ""); err != nil {
+				return err
+			}
+			fmt.Fprintln(output, "NKS는 Bastion 계정의 kubeconfig로 설치합니다. worker SSH 정보는 입력하지 않습니다.")
+		}
+	}
+	sshTargets := bastion && deployment == nil
+	if sshTargets {
 		fmt.Fprintln(output, "타겟을 한 대씩 등록합니다. 현재 Bastion은 설치 대상이 아닙니다. SSH 비밀번호를 sudo에도 사용합니다.")
 		if mode == "online" {
 			fmt.Fprintln(output, "Bastion→Target SSH 연결과 각 Target의 외부 저장소 직접 접근이 필요합니다. Bastion만 인터넷에 연결된 환경은 online이 아닙니다. 이 과정에서는 연결을 시험하지 않습니다.")
@@ -156,7 +177,10 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	names, hosts := make(map[string]bool), make(map[string]bool)
 	for {
 		target := workspace.ConfigureTarget{Name: "server-a", Ansible: map[string]any{"ansible_connection": "local", "ansible_user": username}}
-		if bastion {
+		if deployment != nil {
+			target.Name, target.Deployment = "controller", deployment
+		}
+		if sshTargets {
 			fmt.Fprintf(output, "\n타겟 #%d 등록\n", len(targets)+1)
 			if err := prompt.sshTarget(&target, len(targets)+1, names, hosts, username); err != nil {
 				return err
@@ -175,6 +199,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 			if choice == "1" {
 				target.Solution, target.IAM, target.Protocol, target.Address = previous.Solution, previous.IAM, previous.Protocol, previous.Address
 				target.Agent, target.Vision = previous.Agent, previous.Vision
+				target.SolutionOnly = previous.SolutionOnly
 				reuse = true
 			}
 		}
@@ -185,7 +210,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 		}
 		targets = append(targets, target)
 		fmt.Fprintf(output, "[%s] %s\n", target.Name, configureTargetSummary(target))
-		if !bastion {
+		if !sshTargets {
 			break
 		}
 		choice, err = prompt.choice("타겟 추가\n  1) 한 대 더 등록\n  2) 등록 완료, 설정 파일 생성", "2", "1", "2")
@@ -206,16 +231,22 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 	fmt.Fprintf(output, "\n설정 샘플 생성: %s (0600)\n", *path)
 	fmt.Fprintln(output, "파일의 <UPPER_CASE> 항목과 주석을 따라 site ID, credential, license, 주소·인증서를 채우세요.")
 	fmt.Fprintln(output, "타겟별 components와 SSO/Redis 값을 확인하고, 기본 Redis 비밀번호는 IAM과 동일하게 변경하세요. 파일에는 비밀번호가 있으므로 공유/커밋하지 마세요.")
-	fmt.Fprintf(output, "입력 확인: sudo eva workspace validate --config %s\n", shellQuoteConfigurePath(*path))
-	if bastion {
+	sudo := "sudo "
+	if deployment != nil {
+		sudo = ""
+		fmt.Fprintln(output, "NKS의 공개 주소·LB·PVC·StorageClass·GPU 설정을 Values에 채우세요. 기존 Helm Values를 자동으로 가져오지 않습니다.")
+	}
+	fmt.Fprintf(output, "입력 확인: %seva workspace validate --config %s\n", sudo, shellQuoteConfigurePath(*path))
+	if sshTargets {
 		fmt.Fprintln(output, "설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록합니다. 이미 등록된 키가 변경되면 중단합니다.")
 		if mode == "remote" {
 			fmt.Fprintln(output, "Main에서 Harbor와 Release 자산 준비를 완료한 뒤 설치하세요. install이 타겟 검증·Release 전달·타겟 설치를 처리합니다.")
 		}
 	}
-	fmt.Fprintf(output, "검토 후 설치: sudo eva install --config %s\n", shellQuoteConfigurePath(*path))
-	if bastion && mode == "online" {
-		fmt.Fprintln(output, "Bastion의 eva check/preflight gpu는 현재 서버 기준입니다. 타겟 상태는 타겟별로 확인하세요.")
+	fmt.Fprintf(output, "검토 후 설치: %seva install --config %s\n", sudo, shellQuoteConfigurePath(*path))
+	if sshTargets {
+		fmt.Fprintf(output, "타겟 GPU만 먼저 준비: sudo eva preflight gpu --config %s\n", shellQuoteConfigurePath(*path))
+		fmt.Fprintln(output, "--config를 생략한 GPU preflight와 eva check는 현재 서버 기준입니다. 서비스 상태는 타겟별로 확인하세요.")
 	}
 	return nil
 }
@@ -291,11 +322,24 @@ func (prompt configurePrompts) sshTarget(target *workspace.ConfigureTarget, inde
 }
 
 func (prompt configurePrompts) solution(target *workspace.ConfigureTarget) error {
-	choice, err := prompt.choice("설치 범위\n  1) Infra만 설치\n  2) Infra + Solution 설치", "2", "1", "2")
+	fallback := "2"
+	if target.Deployment != nil {
+		fallback = "3"
+	}
+	var choice string
+	var err error
+	for {
+		choice, err = prompt.choice("설치 범위\n  1) Infra만 설치\n  2) Infra + Solution 설치\n  3) Solution만 설치", fallback, "1", "2", "3")
+		if err != nil || target.Deployment == nil || choice == "3" {
+			break
+		}
+		fmt.Fprintln(prompt.output, "NKS Infra는 Cloud에서 관리합니다. Solution만 설치를 선택하세요.")
+	}
 	if err != nil || choice == "1" {
 		return err
 	}
 	target.Solution = true
+	target.SolutionOnly = choice == "3"
 	choice, err = prompt.choice("Solution 접속 프로토콜\n  1) HTTP — 암호화되지 않는 격리 검증 환경\n  2) HTTPS — 인증서 필요, 권장", "2", "1", "2")
 	if err != nil {
 		return err
@@ -317,7 +361,7 @@ func (prompt configurePrompts) solution(target *workspace.ConfigureTarget) error
 		}
 		fmt.Fprintln(prompt.output, "외부 IAM은 설치하지 않습니다. 위 주소/프로토콜은 App용이며 IAM baseUrl과 Redis 연결값은 파일에서 별도 설정합니다.")
 	}
-	fallback := "1"
+	fallback = "1"
 	if target.IAM == "external" {
 		fallback = "4"
 	}
@@ -326,7 +370,7 @@ func (prompt configurePrompts) solution(target *workspace.ConfigureTarget) error
 		return err
 	}
 	target.Agent, target.Vision = choice == "1" || choice == "2", choice == "1" || choice == "3"
-	if target.Address == "ip" && target.Protocol == "https" {
+	if target.Address == "ip" && target.Protocol == "https" && target.Deployment == nil {
 		fmt.Fprintln(prompt.output, "IP 직접 HTTPS는 해당 IP SAN을 포함한 인증서를 타겟에 준비해야 합니다.")
 	}
 	return nil
@@ -336,7 +380,11 @@ func configureTargetSummary(target workspace.ConfigureTarget) string {
 	if !target.Solution {
 		return "Infra만"
 	}
-	return fmt.Sprintf("Infra + Solution / %s / %s / IAM=%s / Agent=%t / Vision=%t", target.Protocol, target.Address, target.IAM, target.Agent, target.Vision)
+	scope := "Infra + Solution"
+	if target.SolutionOnly {
+		scope = "Solution만"
+	}
+	return fmt.Sprintf("%s / %s / %s / IAM=%s / Agent=%t / Vision=%t", scope, target.Protocol, target.Address, target.IAM, target.Agent, target.Vision)
 }
 
 func shellQuoteConfigurePath(path string) string {

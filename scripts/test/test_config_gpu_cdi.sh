@@ -94,9 +94,9 @@ EOF
   printf '%s\n' "$root"
 }
 
-grep -Fq 'roles/gpu/tasks/detect.yaml' "$REPO_ROOT/src/solution/roles/config/tasks/main.yaml"
-grep -Fq 'gpu_has_nvidia | default(false) | bool' "$REPO_ROOT/src/solution/roles/config/tasks/main.yaml"
-grep -Fq "config_gpu_cdi_status | default('enabled')" "$REPO_ROOT/src/solution/roles/config/tasks/main.yaml"
+grep -Fq 'roles/gpu/tasks/detect.yaml' "$REPO_ROOT/src/solution/roles/config/tasks/host.yaml"
+grep -Fq 'gpu_has_nvidia | default(false) | bool' "$REPO_ROOT/src/solution/roles/config/tasks/host.yaml"
+grep -Fq "config_gpu_cdi_status | default('enabled')" "$REPO_ROOT/src/solution/roles/config/tasks/host.yaml"
 
 # Public backendHost is independent of the inventory alias used in the output
 # directory: explicit App host > detected default IPv4 > loopback fallback.

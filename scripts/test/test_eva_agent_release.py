@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / 'src/solution/roles/eva_agent'
 CHART_BASE = 'https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum'
 PROFILE_BASE = 'https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/develop/release/3.3.0'
+NCP_PROFILE_BASE = CHART_BASE + '/release/3.3.0'
 REGISTRY = 'harbor.test:32080'
 ECR = '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-agent'
 ORAS_IMAGE = '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras:0.1.0'
@@ -119,6 +120,17 @@ else:
 '''
 
 
+def dependency_tasks():
+    tasks = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+    result = []
+    for task in tasks:
+        if task.get('ansible.builtin.include_tasks') == 'dependencies_host.yaml':
+            result.extend(yaml.safe_load((ROLE / 'tasks/dependencies_host.yaml').read_text()))
+        else:
+            result.append(task)
+    return result
+
+
 class AgentCredentialsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='eva-agent-credentials-')
@@ -161,7 +173,7 @@ print('private-agent-fixture-DO-NOT-PRINT')
             {'ansible.builtin.include_role': {'name': 'eva_agent', 'tasks_from': 'credentials'}},
         ]
         if cleanup_workdir:
-            dependencies = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+            dependencies = dependency_tasks()
             preparation.append(next(task for task in dependencies
                                     if task['name'] == 'Remove EVA dependency workspace if it exists'))
         preparation.append({'name': 'Enter subsequent storage and workload preparation',
@@ -457,13 +469,15 @@ print('private-agent-fixture-DO-NOT-PRINT')
 
 class AgentPreparationTests(unittest.TestCase):
     def test_install_and_preparation_use_the_same_release_profiles(self):
-        for version, expected in [
-                ('3.3.0', PROFILE_BASE),
-                ('3.2.0', 'https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/3.2.0'),
-                ('3.3.0', 'https://profiles.test/custom')]:
+        for version, expected, managed in [
+                ('3.3.0', PROFILE_BASE, False),
+                ('3.3.0', NCP_PROFILE_BASE, True),
+                ('3.2.0', 'https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/3.2.0', False),
+                ('3.3.0', 'https://profiles.test/custom', False)]:
             with self.subTest(version=version, expected=expected), tempfile.TemporaryDirectory() as temporary:
                 work = Path(temporary)
                 variables = {
+                    'eva_managed_cluster': managed,
                     'eva_agent_deploy_version': version, 'eva_agent_chart_version': version,
                     'eva_agent_vllm_chart_version': version,
                     'qdrant_chart_version': '1.18.2', 'eva_agent_vllm_profile': 'L40sx1',
@@ -483,8 +497,28 @@ class AgentPreparationTests(unittest.TestCase):
                     result = ansible(work, tasks, variables)
                     self.assertEqual(result.returncode, 0, filename + '\n' + result.stdout + result.stderr)
 
+    def test_nks_resolves_all_ncp_filenames_and_s3_snapshot_source(self):
+        names={'Set EVA Agent dependency defaults','Resolve EVA Agent Release values layout',
+               'Validate EVA Agent Release values layout','Resolve EVA Agent Release values files','Validate Qdrant snapshot source'}
+        tasks=[task for task in yaml.safe_load((ROLE/'tasks/dependencies.yaml').read_text()) if task.get('name') in names]
+        self.assertEqual(len(tasks),5)
+        for managed in [False,True]:
+            with self.subTest(managed=managed),tempfile.TemporaryDirectory() as directory:
+                work=Path(directory)
+                variables={'eva_managed_cluster':managed,'eva_agent_deploy_version':'3.3.0',
+                    'eva_agent_vllm_chart_version':'3.3.0','qdrant_chart_version':'1.18.2','eva_agent_vllm_profile':'L40sx1',
+                    'eva_cache_root':str(work/'cache'),'eva_site_deploy_root':str(work/'deploy'),
+                    'eva_agent_cache_root':str(work/'cache'),'eva_agent_offline_dir':str(work/'cache/eva-agent'),
+                    'ansible_facts':{'env':{'HOME':str(work)}}}
+                expected=['values-ncp.yaml','values-ncp.L40Sx1.yaml','values-ncp.yaml','values-ncp.yaml','s3'] if managed else [
+                    'values-k3s.ecr.yaml','values-k3s.L40sx1.docker.yaml','values-k3s.s3.yaml','values-k3s.yaml','local_pv']
+                result=ansible(work,tasks+[{'ansible.builtin.assert':{'that':[
+                    name+' == '+json.dumps(value) for name,value in zip(
+                    ['eva_agent_values_file','eva_agent_vllm_values_file','eva_agent_qdrant_values_file','eva_agent_init_values_file','eva_agent_qdrant_snapshot_source'],expected)]}}],variables)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
     def test_credentials_precede_storage_migrations_and_workload_changes(self):
-        tasks = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+        tasks = dependency_tasks()
         names = [task.get('name') for task in tasks]
         credential = names.index('Prepare namespace registry and model credentials before deploying Agent workloads')
         self.assertEqual(sum(task.get('ansible.builtin.include_tasks') == 'credentials.yaml' for task in tasks), 1)
@@ -493,6 +527,7 @@ class AgentPreparationTests(unittest.TestCase):
         for operation in [
             'Ensure NFS share and cache directories exist', 'Configure localhost-only NFS export for EVA Agent share',
             'Reconcile legacy eva-agent-init StorageClass ownership', 'Install eva-agent-init from online Helm repo',
+            'Create missing NKS CSI StorageClasses from the NCP init profile',
             'Scale down existing eva-agent-vllm deployment', 'Scale down existing eva-agent-qdrant statefulset',
             'Install/Upgrade Qdrant (online)', 'Install/Upgrade eva-agent-vllm (online)',
         ]:
@@ -616,6 +651,11 @@ class AgentPublishedChartsTests(unittest.TestCase):
             data = urllib.request.urlopen(PROFILE_BASE + '/' + component + '/' + filename, timeout=30).read()
             cls.raw_profiles[component, filename] = data
             cls.profiles[component, filename] = yaml.safe_load(data)
+        cls.ncp_profiles={}
+        for component,filename in [('eva-agent','values-ncp.yaml'),('eva-agent-vllm','values-ncp.L40Sx1.yaml'),
+                                   ('eva-agent-qdrant','values-ncp.yaml'),('eva-agent-init','values-ncp.yaml')]:
+            data=urllib.request.urlopen(NCP_PROFILE_BASE+'/'+component+'/'+filename,timeout=30).read()
+            cls.ncp_profiles[component]=yaml.safe_load(data)
 
     def test_image_discovery_and_snapshot_download_use_current_release(self):
         with tempfile.TemporaryDirectory(prefix='eva-agent-preparation-') as temporary:
@@ -682,7 +722,7 @@ class AgentPublishedChartsTests(unittest.TestCase):
                                   (work / 'aws.log').read_text())
 
     def test_all_profiles_render_with_mode_specific_credentials_and_storage(self):
-        dependencies = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+        dependencies = dependency_tasks()
         selected = [task for task in dependencies if task['name'] in ['Resolve vLLM modelSpec override', 'Build vLLM k3s override values']]
         tasks = selected + [{'ansible.builtin.copy': {'dest': str(self.work / 'vllm.yaml'),
                                                      'content': '{{ eva_agent_vllm_k3s_override_values | to_nice_yaml }}'}},
@@ -752,8 +792,162 @@ class AgentPublishedChartsTests(unittest.TestCase):
                         self.assertIn('custom-aws', output.stdout)
 
 
+    def test_agent_nks_selector_uses_actual_release_inputs_and_preserves_explicit_values(self):
+        names={'Build effective EVA Agent Helm input values'}
+        selected=[task for task in yaml.safe_load((ROLE/'tasks/agent.yaml').read_text()) if task.get('name') in names]
+        self.assertEqual(len(selected),1)
+        selected.append({'ansible.builtin.copy':{'dest':str(self.work/'agent-effective.yaml'),
+                        'content':'{{ eva_agent_effective_values | to_nice_yaml }}'}})
+        cases=[
+            (False,{}, {}, {'node.kubernetes.io/instance-type':'k3s','kubernetes.io/os':'linux'}),
+            (True,{}, {}, {}),
+            (True,{'nodeSelector':{'kubernetes.io/hostname':'nks-worker'}}, {},
+             {'kubernetes.io/hostname':'nks-worker'}),
+            (True,{'nodeSelector':{'node.kubernetes.io/instance-type':'k3s'}}, {},
+             {'node.kubernetes.io/instance-type':'k3s'}),
+            (True,{}, {'nodeSelector':{'node.kubernetes.io/instance-type':'nks-custom'}},
+             {'node.kubernetes.io/instance-type':'nks-custom'}),
+            (True,{'nodeSelector':None}, {}, {}),
+        ]
+        for managed,workspace,cli,expected in cases:
+            with self.subTest(managed=managed,workspace=workspace,cli=cli):
+                base=copy.deepcopy(self.ncp_profiles['eva-agent'] if managed else self.profiles['eva-agent','values-k3s.ecr.yaml'])
+                variables={'eva_managed_cluster':managed,'eva_agent_workspace_chart_values':workspace,
+                           'eva_agent_cli_values_override':cli,'eva_agent_values_secret_stat':{'stat':{'exists':False}},
+                           'eva_agent_generated_values_raw':{'results':[{'content':base64.b64encode(yaml.safe_dump(value).encode()).decode()}
+                             for value in [base,{'image':{'repository':ECR,'tag':'3.3.0'}}]]}}
+                result=ansible(self.work,selected,variables)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                rendered=run([self.helm,'template','eva-agent',str(self.charts['eva-agent-3.3.0.tgz']),
+                              '-n','eva-agent','-f',str(self.work/'agent-effective.yaml')])
+                self.assertEqual(rendered.returncode,0,rendered.stderr)
+                deployment=next(doc for doc in yaml.safe_load_all(rendered.stdout) if doc['kind']=='Deployment')
+                self.assertEqual(deployment['spec']['template']['spec'].get('nodeSelector',{}),expected)
+
+    def test_nks_dependencies_render_with_csi_storage_and_shared_release_repairs(self):
+        tasks=dependency_tasks()
+        names={'Resolve vLLM modelSpec override','Build vLLM k3s override values',
+               'Initialize NKS model scheduling defaults','Remove server-only model selectors from the NKS release profile',
+               'Apply NKS platform and installer Values to the shared vLLM input'}
+        selected=[t for t in tasks if t['name'] in names]
+        self.assertEqual(len(selected),5)
+        selected.append({'ansible.builtin.copy': {'dest':str(self.work/'nks-vllm.yaml'),
+                         'content':'{{ eva_agent_vllm_k3s_override_values | to_nice_yaml }}'}})
+        for profile in ['L40sx1']:
+            with self.subTest(profile=profile):
+                base=copy.deepcopy(self.ncp_profiles['eva-agent-vllm'])
+                variables={'eva_managed_cluster':True,'airgap_mode':False,'eva_agent_vllm_profile_values':base,
+                    'eva_agent_vllm_image_repository':'vllm/vllm-openai','eva_agent_vllm_image_tag':'v0.21.0',
+                    'eva_agent_vllm_router_image_repository':'lmcache/lmstack-router','eva_agent_vllm_router_image_tag':'v0.1.10',
+                    'eva_agent_aws_credentials_secret_name':'custom-aws',
+                    'eva_agent_cluster_vllm_values':{'routerSpec':{'nodeSelectorTerms':[]},
+                        'servingEngineSpec':{'runtimeClassName':''},
+                        'sharedPvcStorage':{'mode':'dynamic','storageClass':'nks-nas'}}}
+                result=ansible(self.work,selected,variables)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                rendered=run([self.helm,'template','eva-agent-vllm',str(self.charts['eva-agent-vllm-3.3.0.tgz']),
+                              '-n','eva-agent','-f',str(self.work/'nks-vllm.yaml')])
+                self.assertEqual(rendered.returncode,0,rendered.stderr)
+                docs=list(yaml.safe_load_all(rendered.stdout))
+                self.assertFalse(any(d['kind']=='PersistentVolume' for d in docs))
+                claim=next(d for d in docs if d['kind']=='PersistentVolumeClaim')
+                self.assertEqual(claim['spec']['storageClassName'],'nks-nas')
+                self.assertNotIn('k3s',rendered.stdout)
+                for d in docs:
+                    if d['kind']=='Deployment':
+                        self.assertNotIn('runtimeClassName',d['spec']['template']['spec'])
+                self.assertIn('custom-aws',rendered.stdout)
+        qdrant=copy.deepcopy(self.ncp_profiles['eva-agent-qdrant'])
+        qdrant['persistence']['storageClassName']='nks-block'
+        qdrant['snapshotPersistence']['storageClassName']='nks-block'
+        (self.work/'nks-qdrant.yaml').write_text(yaml.safe_dump(qdrant))
+        rendered=run([self.helm,'template','eva-agent-qdrant',str(self.charts['qdrant-1.18.2.tgz']),
+                      '-n','eva-agent','-f',str(self.work/'nks-qdrant.yaml')])
+        self.assertEqual(rendered.returncode,0,rendered.stderr)
+        stateful=next(d for d in yaml.safe_load_all(rendered.stdout) if d['kind']=='StatefulSet')
+        self.assertEqual({c['spec']['storageClassName'] for c in stateful['spec']['volumeClaimTemplates']},{'nks-block'})
+        self.assertIn('preserving existing collection',rendered.stdout)
+        (self.work/'ncp-init.yaml').write_text(yaml.safe_dump(self.ncp_profiles['eva-agent-init']))
+        rendered=run([self.helm,'template','eva-agent-init',str(self.charts['eva-agent-init-1.0.0.tgz']),
+                      '-n','eva-agent','-f',str(self.work/'ncp-init.yaml')])
+        self.assertEqual(rendered.returncode,0,rendered.stderr)
+        classes={d['metadata']['name']:d['provisioner'] for d in yaml.safe_load_all(rendered.stdout)}
+        self.assertEqual(classes,{'eva-agent-sc-bs':'blk.csi.ncloud.com','eva-agent-sc-fs':'nas.csi.ncloud.com'})
+
+    def test_ncp_init_creates_missing_classes_and_reuses_existing_classes(self):
+        for initial, separate_snapshot, forbidden, concurrent in [
+                ({}, False, False, False), ({'nks-block': {'external': True}}, False, False, False),
+                ({'nks-block': {'external': True}, 'nks-nas': {'external': True}}, False, False, False),
+                ({}, True, False, False), ({}, False, True, False), ({}, False, False, True)]:
+            with self.subTest(initial=initial, separate_snapshot=separate_snapshot,
+                              forbidden=forbidden, concurrent=concurrent), \
+                    tempfile.TemporaryDirectory(prefix='eva-ncp-init-') as temporary:
+                work=Path(temporary)
+                (work/'bin').mkdir()
+                (work/'bin/helm').symlink_to(self.helm)
+                (work/'eva-agent-init').mkdir()
+                (work/'eva-agent-init/values-ncp.yaml').write_text(yaml.safe_dump(self.ncp_profiles['eva-agent-init']))
+                (work/'classes.json').write_text(json.dumps(initial))
+                kubectl=work/'bin/kubectl'
+                kubectl.write_text('#!'+sys.executable+'\n'+r'''
+import json,os,pathlib,sys
+root=pathlib.Path(os.environ['AGENT_FIXTURE']); args=sys.argv[1:]
+state=json.loads((root/'classes.json').read_text())
+if args[:2]==['get','storageclass']:
+ name=args[2]
+ if name in state: print(json.dumps(state[name]) if args[-1]=='json' else 'storageclass/'+name)
+ elif '--ignore-not-found=true' not in args: sys.exit(1)
+elif args[:3]==['create','-f','-']:
+ document=json.load(sys.stdin); name=document['metadata']['name']
+ if (root/'forbidden').exists():
+  print('Error from server (Forbidden): StorageClass creation denied',file=sys.stderr); sys.exit(1)
+ if name in state: raise AssertionError('attempted to replace an existing class')
+ state[name]=document; (root/'classes.json').write_text(json.dumps(state))
+ with (root/'created.jsonl').open('a') as stream: stream.write(json.dumps(document)+'\n')
+ if (root/'concurrent').exists():
+  print('Error from server (AlreadyExists): StorageClass exists',file=sys.stderr); sys.exit(1)
+ print('storageclass/'+name+' created')
+else: raise AssertionError('unexpected command: '+str(args))
+''')
+                kubectl.chmod(0o700)
+                if forbidden: (work/'forbidden').touch()
+                if concurrent: (work/'concurrent').touch()
+                variables={'eva_managed_cluster':True,'airgap_mode':True,'eva_agent_namespace':'eva-agent',
+                    'eva_agent_workdir':str(work),'eva_agent_init_values_file':'values-ncp.yaml',
+                    'eva_agent_offline_init_chart_tgz':str(self.charts['eva-agent-init-1.0.0.tgz']),
+                    'eva_agent_kubeconfig':str(work/'config'),
+                    'eva_agent_cluster_deploy':{'vllm_values':{'sharedPvcStorage':{'storageClass':'nks-nas'}},
+                        'qdrant_values':{'persistence':{'storageClassName':'nks-block'},
+                                        'snapshotPersistence':{'storageClassName':'nks-snapshot' if separate_snapshot else 'nks-block'}},
+                        'init_values':{'storageClass':{'fileSystem':{'parameters':{'zoneNo':'3'}}}}}}
+                tasks=[{'ansible.builtin.include_tasks':str(ROLE/'tasks/init_cluster.yaml')}]
+                result=ansible(work,tasks,variables)
+                if forbidden:
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertIn('Forbidden',result.stdout)
+                    self.assertEqual(json.loads((work/'classes.json').read_text()),initial)
+                    continue
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                classes=json.loads((work/'classes.json').read_text())
+                expected={'nks-block','nks-nas'} | ({'nks-snapshot'} if separate_snapshot else set())
+                self.assertEqual(set(classes),expected)
+                for name, original in initial.items(): self.assertEqual(classes[name],original)
+                created=[json.loads(line) for line in (work/'created.jsonl').read_text().splitlines()] if (work/'created.jsonl').exists() else []
+                self.assertEqual({d['metadata']['name'] for d in created},expected-set(initial))
+                for d in created:
+                    is_nas=d['metadata']['name']=='nks-nas'
+                    self.assertEqual(d['provisioner'],'nas.csi.ncloud.com' if is_nas else 'blk.csi.ncloud.com')
+                    self.assertEqual(d['parameters'],{'zoneNo':'3'} if is_nas else {'fsType':'ext4','type':'SSD'})
+                    self.assertEqual(d['reclaimPolicy'],'Retain')
+                    self.assertEqual(d['volumeBindingMode'],'WaitForFirstConsumer')
+                result=ansible(work,tasks,variables)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                self.assertEqual(json.loads((work/'classes.json').read_text()),classes)
+                after=[json.loads(line) for line in (work/'created.jsonl').read_text().splitlines()] if (work/'created.jsonl').exists() else []
+                self.assertEqual(after,created)
+
     def test_qdrant_snapshot_sources_and_secret_shapes(self):
-        dependencies = yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text())
+        dependencies = dependency_tasks()
         names = ['Point Harbor Qdrant values at the selected registry',
                  'Resolve Harbor registry placeholders in Qdrant values',
                  'Resolve Harbor project placeholder in Qdrant values',

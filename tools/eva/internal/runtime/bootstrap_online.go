@@ -37,12 +37,13 @@ type onlineBootstrapSpec struct {
 }
 
 type onlineBootstrapDependencies struct {
-	download    func(string, string) error
-	run         func(string, ...string) error
-	runWithEnv  func([]string, string, ...string) error
-	prepareHost func(string) error
-	goos        string
-	goarch      string
+	download     func(string, string) error
+	run          func(string, ...string) error
+	runWithEnv   func([]string, string, ...string) error
+	prepareHost  func(string) error
+	selectPython func() (string, error)
+	goos         string
+	goarch       string
 }
 
 var defaultOnlineBootstrapSpec = onlineBootstrapSpec{
@@ -89,12 +90,13 @@ var defaultOnlineBootstrapSpec = onlineBootstrapSpec{
 // The payload is staged and validated before Install atomically publishes it.
 func BootstrapOnline(root string) (Resolved, error) {
 	return bootstrapOnline(root, defaultOnlineBootstrapSpec, onlineBootstrapDependencies{
-		download:    downloadFile,
-		run:         runCommand,
-		runWithEnv:  runCommandWithEnv,
-		prepareHost: prepareOnlineRuntimeHost,
-		goos:        goruntime.GOOS,
-		goarch:      goruntime.GOARCH,
+		download:     downloadFile,
+		run:          runCommand,
+		runWithEnv:   runCommandWithEnv,
+		prepareHost:  prepareOnlineRuntimeHost,
+		selectPython: selectOnlineRuntimePython,
+		goos:         goruntime.GOOS,
+		goarch:       goruntime.GOARCH,
 	})
 }
 
@@ -105,7 +107,7 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 	if spec.Version == "" || len(spec.AnsibleRequirements) == 0 || len(spec.Artifacts) == 0 {
 		return Resolved{}, fmt.Errorf("Online Runtime bootstrap specification is incomplete")
 	}
-	if dependencies.download == nil || dependencies.run == nil || dependencies.runWithEnv == nil || dependencies.prepareHost == nil {
+	if dependencies.download == nil || dependencies.run == nil || dependencies.runWithEnv == nil || dependencies.prepareHost == nil || dependencies.selectPython == nil {
 		return Resolved{}, fmt.Errorf("Online Runtime bootstrap dependencies are incomplete")
 	}
 	if root == "" {
@@ -121,6 +123,11 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 	if err := dependencies.prepareHost(destination); err != nil {
 		return Resolved{}, err
 	}
+	interpreter, err := dependencies.selectPython()
+	if err != nil {
+		return Resolved{}, err
+	}
+	fmt.Fprintf(os.Stdout, "[INFO] Online Runtime Python: %s\n", interpreter)
 	parent := filepath.Dir(destination)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return Resolved{}, fmt.Errorf("create runtime parent: %w", err)
@@ -134,8 +141,8 @@ func bootstrapOnline(root string, spec onlineBootstrapSpec, dependencies onlineB
 		return Resolved{}, fmt.Errorf("set Online Runtime staging directory mode: %w", err)
 	}
 
-	if err := dependencies.run("python3", "-m", "venv", filepath.Join(staging, "venv")); err != nil {
-		return Resolved{}, fmt.Errorf("create Runtime Python environment (install python3-venv if unavailable): %w", err)
+	if err := dependencies.run(interpreter, "-m", "venv", filepath.Join(staging, "venv")); err != nil {
+		return Resolved{}, fmt.Errorf("create Runtime Python environment with %s (install its matching venv package, such as python3.12-venv): %w", interpreter, err)
 	}
 	python := filepath.Join(staging, "venv", "bin", "python")
 	if err := dependencies.run(python, append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--no-input"}, spec.AnsibleRequirements...)...); err != nil {

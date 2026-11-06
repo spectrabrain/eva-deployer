@@ -231,6 +231,14 @@ func LoadInstallerHandoffReceipt(root, site, name string, target workspace.Insta
 }
 
 func (service InstallerService) Install(ctx context.Context, input workspace.Installer, resolved release.Resolved, args []string, streams Streams) ([]InstallerTargetResult, error) {
+	return service.install(ctx, input, resolved, args, streams, "install")
+}
+
+func (service InstallerService) PreflightGPU(ctx context.Context, input workspace.Installer, resolved release.Resolved, args []string, streams Streams) ([]InstallerTargetResult, error) {
+	return service.install(ctx, input, resolved, args, streams, "gpu-preflight")
+}
+
+func (service InstallerService) install(ctx context.Context, input workspace.Installer, resolved release.Resolved, args []string, streams Streams, action string) ([]InstallerTargetResult, error) {
 	if streams.Stdout == nil {
 		streams.Stdout = io.Discard
 	}
@@ -311,7 +319,7 @@ func (service InstallerService) Install(ctx context.Context, input workspace.Ins
 		}
 		_, err := publisher.PublishWithResult(PublishOptions{Release: resolved, Target: publishName, Registry: input.Repository.Registry, Project: input.Repository.Project, Streams: streams})
 		if err == nil {
-			err = service.Action(ctx, connections[name], TargetAction{Action: "install", Site: input.Site.ID, Name: name,
+			err = service.Action(ctx, connections[name], TargetAction{Action: action, Site: input.Site.ID, Name: name,
 				ReleaseRoot: filepath.Join("/var/lib/eva/inbox/releases", resolved.Metadata.Version), Config: configs[name], HandoffReceipt: receipts[name], Args: args}, streams)
 		}
 		if err != nil {
@@ -418,7 +426,9 @@ else:
                 root(["install", "-m", "0600", receipt_temp, receipt_directory + "/argocd-handoff.yaml"])
             finally:
                 os.unlink(receipt_temp)
-        root(["eva", "install", "--release", request["release_root"], "--config", destination, "--yes"] + request.get("args", []))
+        command = ["preflight", "gpu"] if request["action"] == "gpu-preflight" else ["install"]
+        confirmation = [] if request["action"] == "gpu-preflight" else ["--yes"]
+        root(["eva"] + command + ["--release", request["release_root"], "--config", destination] + confirmation + request.get("args", []))
     finally:
         os.unlink(temporary)
 `

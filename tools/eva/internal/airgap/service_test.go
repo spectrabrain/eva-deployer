@@ -436,6 +436,13 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 	if !strings.Contains(f.stdout.String(), "[OK] Airgap Bundle verified:") {
 		t.Fatalf("missing completion output: %s", &f.stdout)
 	}
+	bundle, err := os.ReadFile(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[OK] Bundle SHA-256: " + archiveTestDigest(bundle) + "\n"; !strings.Contains(f.stdout.String(), want) {
+		t.Fatalf("missing or incorrect Bundle checksum: want %q in %q", want, f.stdout.String())
+	}
 	if matches, err := filepath.Glob(filepath.Join(filepath.Dir(result), ".eva-airgap-*")); err != nil || len(matches) != 0 {
 		t.Fatalf("successful preparation left staging files: %q, %v", matches, err)
 	}

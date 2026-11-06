@@ -46,15 +46,19 @@
       {{
         eva_agent_qdrant_values_file
         | default(
-            ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
+            'values-ncp.yaml' if (eva_managed_cluster | default(false) | bool) else
+            (((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository'])
             | ternary('values-k3s.harbor.yaml', 'values-k3s.s3.yaml')
+            )
           )
       }}
+    eva_agent_init_values_file: "{{ eva_agent_init_values_file | default('values-ncp.yaml' if (eva_managed_cluster | default(false) | bool) else 'values-k3s.yaml') }}"
     # Filters bind tighter than comparisons; ternary must receive the boolean.
     eva_agent_qdrant_snapshot_source: >-
       {{
         eva_agent_qdrant_snapshot_source
         | default(
+            's3' if (eva_managed_cluster | default(false) | bool) else
             (
               (
                 eva_agent_qdrant_values_file
@@ -74,7 +78,8 @@
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/'
            ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
-              | ternary('spectrabrain/eva-agent-chart/develop',
+              | ternary(('spectrabrain/eva-agent-chart/chartmuseum' if (eva_managed_cluster | default(false) | bool)
+                         else 'spectrabrain/eva-agent-chart/develop'),
                         'mellerikat/eva-agent/chartmuseum'))
            ~ '/release/' ~ eva_agent_deploy_version) }}
     eva_agent_offline_release_dir: "{{ eva_agent_offline_release_dir | default(eva_agent_offline_dir ~ '/release/' ~ eva_agent_deploy_version) }}"
@@ -150,6 +155,7 @@
       {{
         eva_agent_values_file
         | default(
+            'values-ncp.yaml' if (eva_managed_cluster | default(false) | bool) else
             (eva_agent_values_layout == 'legacy')
             | ternary('values-k3s.yaml', 'values-k3s.' ~ ((eva_agent_values_variant == 'harbor') | ternary('harbor', 'ecr')) ~ '.yaml')
           )
@@ -158,6 +164,8 @@
       {{
         eva_agent_vllm_values_file
         | default(
+            'values-ncp.' ~ ({'L40sx1': 'L40Sx1'}.get(eva_agent_vllm_profile, eva_agent_vllm_profile)) ~ '.yaml'
+            if (eva_managed_cluster | default(false) | bool) else
             'values-k3s.' ~ eva_agent_vllm_profile
             ~ ((eva_agent_values_layout == 'legacy') | ternary('', '.' ~ ((eva_agent_values_variant == 'harbor') | ternary('harbor', 'docker'))))
             ~ '.yaml'
@@ -180,13 +188,15 @@
 - name: Validate Qdrant snapshot source
   ansible.builtin.assert:
     that:
-      - eva_agent_qdrant_snapshot_source in ['local_pv', 'harbor']
+      - eva_agent_qdrant_snapshot_source in ['local_pv', 'harbor', 's3']
       - >-
         (eva_agent_qdrant_values_file == 'values-k3s.s3.yaml' and eva_agent_qdrant_snapshot_source == 'local_pv')
         or (eva_agent_qdrant_values_file == 'values-k3s.harbor.yaml' and eva_agent_qdrant_snapshot_source == 'harbor')
+        or ((eva_managed_cluster | default(false) | bool) and eva_agent_qdrant_values_file == 'values-ncp.yaml' and eva_agent_qdrant_snapshot_source == 's3')
     fail_msg: >-
       Online Qdrant uses values-k3s.s3.yaml with local_pv bootstrap snapshots.
       Harbor snapshots require values-k3s.harbor.yaml with snapshot source harbor.
+      NKS uses values-ncp.yaml with snapshot source s3.
       Resolved values: repository_mode={{ repository_mode }},
       eva_agent_qdrant_values_file={{ eva_agent_qdrant_values_file }},
       eva_agent_qdrant_snapshot_source={{ eva_agent_qdrant_snapshot_source }}
@@ -267,263 +277,16 @@
     loop_var: eva_helm_backup_dependency
     label: "{{ eva_helm_backup_dependency.release }}"
 
-- name: Detect local disk mount candidates from facts
-  ansible.builtin.set_fact:
-    eva_agent_supported_vllm_profiles:
-      - A6000x1
-      - L40sx1
-      - PRO5000x3
-      - PRO6000-MIGx4
-    eva_agent_local_mount_candidates: >-
-      {{
-        ansible_facts.mounts
-        | selectattr('device', 'match', '^/dev/')
-        | rejectattr('fstype', 'in', ['tmpfs', 'devtmpfs', 'overlay', 'squashfs', 'nfs', 'nfs4', 'cifs'])
-        | rejectattr('fstype', 'in', ['fuse', 'fuse.sshfs'])
-        | rejectattr('fstype', 'match', '^fuse\\.')
-        | list
-      }}
+# NKS uses the same dependency deployment below with provider storage/GPU defaults.
+- name: Resolve NKS dependency Values without configuring worker Infra
+  ansible.builtin.include_tasks: dependencies_cluster.yaml
+  when: eva_managed_cluster | default(false) | bool
+  tags: [always]
 
-- name: Validate selected EVA Agent vLLM profile
-  ansible.builtin.assert:
-    that:
-      - eva_agent_vllm_profile in eva_agent_supported_vllm_profiles
-    fail_msg: >-
-      지원하지 않는 eva_agent_vllm_profile={{ eva_agent_vllm_profile }} 입니다.
-      사용 가능 값: {{ eva_agent_supported_vllm_profiles | join(', ') }}
-
-- name: Ensure local disk mount candidate exists
-  ansible.builtin.assert:
-    that:
-      - eva_agent_local_mount_candidates | length > 0
-    fail_msg: "로컬 디스크 마운트 후보를 찾지 못했습니다."
-
-- name: Detect largest local disk mount from facts
-  ansible.builtin.set_fact:
-    eva_agent_largest_local_mount: >-
-      {{ (eva_agent_local_mount_candidates | sort(attribute='size_total', reverse=true) | first).mount }}
-
-- name: Set NFS share path from largest local disk mount
-  ansible.builtin.set_fact:
-    eva_agent_nfs_share_path: >-
-      {{ eva_agent_nfs_share_path
-         | default((eva_agent_largest_local_mount | regex_replace('/+$', '')) ~ '/share/eva-agent') }}
-
-- name: Detect existing vLLM shared PV NFS path
-  ansible.builtin.command: >-
-    kubectl get pv eva-agent-vllm-shared-pvc-storage -o jsonpath='{.spec.nfs.path}'
-  register: eva_agent_vllm_pv_path
-  changed_when: false
-  failed_when: false
-  when: not ansible_check_mode
-  environment:
-    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
-
-- name: Reuse existing vLLM PV base path when present
-  ansible.builtin.set_fact:
-    eva_agent_nfs_share_path: "{{ eva_agent_vllm_pv_path.stdout | regex_replace('/vllm-cache$', '') }}"
-  when:
-    - not ansible_check_mode
-    - eva_agent_vllm_pv_path.rc == 0
-    - eva_agent_vllm_pv_path.stdout | length > 0
-
-- name: Ensure NFS share and cache directories exist
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: directory
-    mode: '0775'
-  loop:
-    - "{{ eva_agent_nfs_share_path }}"
-    - "{{ eva_agent_nfs_share_path }}/vllm-cache"
-  when: not ansible_check_mode
-
-- name: Ensure legacy Agent model cache directory exists when required
-  ansible.builtin.file:
-    path: "{{ eva_agent_nfs_share_path }}/agent-cache/hf"
-    state: directory
-    mode: '0775'
-  when:
-    - not ansible_check_mode
-    - eva_agent_models_required | bool
-
-- name: Check offline EVA model directories for airgap
-  ansible.builtin.stat:
-    path: "{{ item }}"
-  loop: "{{ ([eva_agent_offline_agent_model_dir] if eva_agent_models_required else []) + [eva_agent_offline_vllm_model_dir] }}"
-  register: eva_agent_offline_model_dir_stats
-  when:
-    - airgap_mode | default(false) | bool
-    - not ansible_check_mode
-
-- name: Assert offline EVA model directories exist for airgap
-  ansible.builtin.assert:
-    that:
-      - (eva_agent_offline_model_dir_stats.results | selectattr('stat.exists', 'equalto', true) | list | length) == ((eva_agent_models_required | bool) | ternary(2, 1))
-    fail_msg: >-
-      airgap_mode=true 인 경우 모델 캐시가 필요합니다.
-      먼저 ./scripts/download/download_eva_models.sh 실행 후
-      {{ eva_agent_offline_vllm_model_dir }} 경로를 준비하세요.
-      Agent 3.2 이하에서는 {{ eva_agent_offline_agent_model_dir }}도 필요합니다.
-  when:
-    - airgap_mode | default(false) | bool
-    - not ansible_check_mode
-
-- name: Check EVA agent model cache sync marker
-  ansible.builtin.stat:
-    path: "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.offline_sync_done"
-  register: eva_agent_agent_cache_sync_marker
-  when:
-    - airgap_mode | default(false) | bool
-    - eva_agent_models_required | bool
-    - not ansible_check_mode
-
-- name: Copy offline EVA agent model cache into NFS share
-  ansible.builtin.shell: >-
-    set -euo pipefail &&
-    cp -a "{{ eva_agent_offline_agent_model_dir }}/." "{{ eva_agent_nfs_share_path }}/agent-cache/hf/"
-  args:
-    executable: /bin/bash
-  when:
-    - airgap_mode | default(false) | bool
-    - eva_agent_models_required | bool
-    - not ansible_check_mode
-    - not eva_agent_agent_cache_sync_marker.stat.exists
-
-- name: Mark EVA agent model cache sync complete
-  ansible.builtin.file:
-    path: "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.offline_sync_done"
-    state: touch
-    mode: '0644'
-  when:
-    - airgap_mode | default(false) | bool
-    - eva_agent_models_required | bool
-    - not ansible_check_mode
-    - not eva_agent_agent_cache_sync_marker.stat.exists
-
-- name: Restore Hugging Face symlinks for EVA agent cache when script exists
-  ansible.builtin.shell: >-
-    if [ -f "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.restore_hf_symlinks.sh" ]; then
-      sh "{{ eva_agent_nfs_share_path }}/agent-cache/hf/.restore_hf_symlinks.sh" "{{ eva_agent_nfs_share_path }}/agent-cache/hf";
-    fi
-  args:
-    executable: /bin/bash
-  changed_when: false
-  when:
-    - airgap_mode | default(false) | bool
-    - eva_agent_models_required | bool
-    - not ansible_check_mode
-
-- name: Check EVA vLLM model cache sync marker
-  ansible.builtin.stat:
-    path: "{{ eva_agent_nfs_share_path }}/vllm-cache/.offline_sync_done"
-  register: eva_agent_vllm_cache_sync_marker
-  when:
-    - airgap_mode | default(false) | bool
-    - not ansible_check_mode
-
-- name: Copy offline EVA vLLM model cache into NFS share
-  ansible.builtin.shell: >-
-    set -euo pipefail &&
-    cp -a "{{ eva_agent_offline_vllm_model_dir }}/." "{{ eva_agent_nfs_share_path }}/vllm-cache/"
-  args:
-    executable: /bin/bash
-  when:
-    - airgap_mode | default(false) | bool
-    - not ansible_check_mode
-    - not eva_agent_vllm_cache_sync_marker.stat.exists
-
-- name: Mark EVA vLLM model cache sync complete
-  ansible.builtin.file:
-    path: "{{ eva_agent_nfs_share_path }}/vllm-cache/.offline_sync_done"
-    state: touch
-    mode: '0644'
-  when:
-    - airgap_mode | default(false) | bool
-    - not ansible_check_mode
-    - not eva_agent_vllm_cache_sync_marker.stat.exists
-
-- name: Restore Hugging Face symlinks for vLLM cache when script exists
-  ansible.builtin.shell: >-
-    if [ -f "{{ eva_agent_nfs_share_path }}/vllm-cache/.restore_hf_symlinks.sh" ]; then
-      sh "{{ eva_agent_nfs_share_path }}/vllm-cache/.restore_hf_symlinks.sh" "{{ eva_agent_nfs_share_path }}/vllm-cache";
-    fi
-  args:
-    executable: /bin/bash
-  changed_when: false
-  when:
-    - airgap_mode | default(false) | bool
-    - not ansible_check_mode
-
-- name: Set ownership and permissions for NFS share path
-  ansible.builtin.file:
-    path: "{{ eva_agent_nfs_share_path }}"
-    owner: "10001"
-    group: "10001"
-    mode: '0775'
-    recurse: true
-  when: not ansible_check_mode
-
-- name: Allow localhost-only NFS export for EVA Agent share (cleanup old entry)
-  ansible.builtin.lineinfile:
-    path: /etc/exports
-    regexp: '^.*/share/eva-agent 127\.0\.0\.1\(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001\)$'
-    state: absent
-  when: not ansible_check_mode
-
-- name: Configure localhost-only NFS export for EVA Agent share
-  ansible.builtin.lineinfile:
-    path: /etc/exports
-    line: "{{ eva_agent_nfs_share_path }} 127.0.0.1(rw,sync,no_subtree_check,root_squash,anonuid=10001,anongid=10001)"
-    create: true
-    mode: '0644'
-  register: eva_agent_exports_line
-  when: not ansible_check_mode
-
-- name: Reload NFS exports
-  ansible.builtin.command: exportfs -ra
-  changed_when: eva_agent_exports_line.changed
-  when: not ansible_check_mode
-
-- name: Ensure NFS services are available
-  ansible.builtin.shell: |
-    set -euo pipefail
-    systemctl start rpcbind nfs-mountd nfs-idmapd
-    if [ ! -r /proc/fs/nfsd/threads ] || [ "$(cat /proc/fs/nfsd/threads)" = "0" ]; then
-      rpc.nfsd 1
-    fi
-    exportfs -ra
-  args:
-    executable: /bin/bash
-  changed_when: false
-  when: not ansible_check_mode
-
-- name: Show NFS exports on localhost
-  ansible.builtin.command: showmount -e localhost
-  register: eva_agent_showmount
-  changed_when: false
-  when: not ansible_check_mode
-
-- name: Ensure temporary NFS test mount directory exists
-  ansible.builtin.file:
-    path: /mnt/tmp
-    state: directory
-    mode: '0755'
-  when: not ansible_check_mode
-
-- name: Mount NFS share for validation
-  ansible.posix.mount:
-    path: /mnt/tmp
-    src: "localhost:{{ eva_agent_nfs_share_path }}"
-    fstype: nfs
-    opts: rw,nfsvers=4
-    state: mounted
-  when: not ansible_check_mode
-
-- name: Unmount NFS validation mount
-  ansible.posix.mount:
-    path: /mnt/tmp
-    state: unmounted
-  when: not ansible_check_mode
+- name: Prepare server NFS and local model cache
+  ansible.builtin.include_tasks: dependencies_host.yaml
+  when: not (eva_managed_cluster | default(false) | bool)
+  tags: [always]
 
 - name: Remove EVA dependency workspace if it exists
   ansible.builtin.file:
@@ -585,8 +348,8 @@
 
 - name: Download eva-agent-init values from chartmuseum release
   ansible.builtin.get_url:
-    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent-init/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    url: "{{ eva_agent_chartmuseum_base_url }}/eva-agent-init/{{ eva_agent_init_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     mode: '0644'
   when:
     - not ansible_check_mode
@@ -630,8 +393,8 @@
 
 - name: Copy eva-agent-init values from offline bundle
   ansible.builtin.copy:
-    src: "{{ eva_agent_offline_release_dir }}/eva-agent-init/values-k3s.yaml"
-    dest: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    src: "{{ eva_agent_offline_release_dir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     mode: '0644'
     remote_src: true
   when:
@@ -855,7 +618,7 @@
   when:
     - not ansible_check_mode
     - not (airgap_mode | bool)
-    - eva_agent_qdrant_values_file == 'values-k3s.s3.yaml'
+    - eva_agent_qdrant_values_file in ['values-k3s.s3.yaml', 'values-ncp.yaml']
 
 - name: Check offline Qdrant snapshot files for airgap
   ansible.builtin.stat:
@@ -1015,17 +778,21 @@
 
 - name: Align NFS share path in eva-agent-init values
   ansible.builtin.replace:
-    path: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    path: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     regexp: '/data001/share/eva-agent'
     replace: "{{ eva_agent_nfs_share_path }}"
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
 
 - name: Set local-path provisioner in eva-agent-init values
   ansible.builtin.replace:
-    path: "{{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml"
+    path: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
     regexp: 'provisioner: ""'
     replace: 'provisioner: "rancher.io/local-path"'
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
 
 - name: Write vLLM override values from generated config (eva.yaml)
   ansible.builtin.set_fact:
@@ -1141,6 +908,7 @@
             ({'envFromSecret': {'name': eva_agent_aws_credentials_secret_name | default('aws-credentials')}}
              if not (airgap_mode | bool) and 'initContainer' in eva_agent_vllm_profile_values.servingEngineSpec.modelSpec[0]
              else {}), recursive=True)
+        | combine(({'nodeSelectorTerms': []} if (eva_managed_cluster | default(false) | bool) else {}), recursive=True)
       }}
   when: not ansible_check_mode
 
@@ -1180,7 +948,7 @@
                     {
                       'nfs': (
                         (eva_agent_vllm_profile_values.sharedPvcStorage.nfs | default({}))
-                        | combine({'path': eva_agent_nfs_share_path ~ '/vllm-cache'}, recursive=True)
+                        | combine(({} if (eva_managed_cluster | default(false) | bool) else {'path': eva_agent_nfs_share_path ~ '/vllm-cache'}), recursive=True)
                       )
                     },
                     recursive=True
@@ -1191,6 +959,29 @@
           )
       }}
   when: not ansible_check_mode
+
+- name: Initialize NKS model scheduling defaults
+  ansible.builtin.set_fact:
+    eva_agent_cluster_vllm_models: []
+  when: eva_managed_cluster | default(false) | bool
+
+- name: Remove server-only model selectors from the NKS release profile
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_cluster_vllm_models: >-
+      {{ eva_agent_cluster_vllm_models + [(item | dict2items
+           | rejectattr('key', 'equalto', 'nodeSelectorTerms') | items2dict)] }}
+  loop: "{{ eva_agent_vllm_k3s_override_values.servingEngineSpec.modelSpec }}"
+  when: eva_managed_cluster | default(false) | bool
+
+- name: Apply NKS platform and installer Values to the shared vLLM input
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_vllm_k3s_override_values: >-
+      {{ eva_agent_vllm_k3s_override_values
+         | combine({'servingEngineSpec': {'modelSpec': eva_agent_cluster_vllm_models}}, recursive=true)
+         | combine(eva_agent_cluster_vllm_values, recursive=true) }}
+  when: eva_managed_cluster | default(false) | bool
 
 - name: Render vLLM k3s override values on control node
   ansible.builtin.template:
@@ -1244,6 +1035,16 @@
       }}
   when: not ansible_check_mode
 
+- name: Apply NKS scheduling and explicit Qdrant Values to the shared input
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_qdrant_effective_values: >-
+      {{ eva_agent_qdrant_effective_values
+         | combine({'nodeSelector': (eva_agent_qdrant_effective_values.nodeSelector | default({})
+           | dict2items | rejectattr('key', 'equalto', 'node.kubernetes.io/instance-type') | items2dict)})
+         | combine(eva_agent_cluster_deploy.qdrant_values, recursive=true) }}
+  when: eva_managed_cluster | default(false) | bool
+
 - name: Record Qdrant profile defaults on control node
   no_log: true
   ansible.builtin.copy:
@@ -1275,6 +1076,8 @@
 - name: Record Qdrant values source metadata on control node
   ansible.builtin.copy:
     content: |
+      release_values_source: {{ eva_agent_chartmuseum_base_url }}
+      release_values_file: {{ eva_agent_qdrant_values_file }}
       release_values: true
       rendered_artifacts:
         chart_defaults: {{ eva_agent_qdrant_deploy_values_dir }}/chart-defaults.yaml
@@ -1326,6 +1129,8 @@
 - name: Record vLLM values source metadata on control node
   ansible.builtin.copy:
     content: |
+      release_values_source: {{ eva_agent_chartmuseum_base_url }}
+      release_values_file: {{ eva_agent_vllm_values_file }}
       config_generated_values: {{ (eva_agent_vllm_values_override_from_config | default({}) | length > 0) | lower }}
       release_values: true
       rendered_artifacts:
@@ -1337,6 +1142,18 @@
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
+
+- name: Record the existing NKS vLLM cache PVC identity before installation
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ eva_agent_namespace }}", get, pvc,
+           eva-agent-vllm-shared-pvc-storage-claim, --ignore-not-found=true, -o, json]
+  register: eva_agent_cluster_vllm_pvc_before
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
 
 - name: Check existing charts for airgap mode
   ansible.builtin.stat:
@@ -1376,9 +1193,17 @@
         reclaim_policy: Retain
         volume_binding_mode: WaitForFirstConsumer
   changed_when: false
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
   tags:
     - eva_agent_init_storageclass_migration
+
+- name: Create missing NKS CSI StorageClasses from the NCP init profile
+  ansible.builtin.include_tasks: init_cluster.yaml
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
 
 - name: Reconcile legacy eva-agent-init StorageClass ownership
   ansible.builtin.include_tasks:
@@ -1390,7 +1215,9 @@
   loop_control:
     loop_var: eva_agent_init_storage_class_contract
     label: "{{ eva_agent_init_storage_class_contract.name }}"
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
   tags:
     - eva_agent_init_storageclass_migration
 
@@ -1399,7 +1226,9 @@
   register: eva_agent_init_status
   changed_when: false
   failed_when: false
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
@@ -1409,8 +1238,9 @@
     --version {{ eva_agent_init_chart_version }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}
   when:
+    - not (eva_managed_cluster | default(false) | bool)
     - not ansible_check_mode
     - not (airgap_mode | default(false) | bool)
     - "eva_agent_init_status.rc != 0 or 'STATUS: failed' in eva_agent_init_status.stdout"
@@ -1423,8 +1253,9 @@
     helm upgrade --install eva-agent-init {{ eva_agent_offline_init_chart_tgz }}
     --namespace {{ eva_agent_namespace }}
     --create-namespace
-    --values {{ eva_agent_workdir }}/eva-agent-init/values-k3s.yaml
+    --values {{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}
   when:
+    - not (eva_managed_cluster | default(false) | bool)
     - not ansible_check_mode
     - airgap_mode | default(false) | bool
     - "eva_agent_init_status.rc != 0 or 'STATUS: failed' in eva_agent_init_status.stdout"
@@ -1452,9 +1283,44 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
+- name: Validate exact NKS dependency manifests before changing workloads
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  loop:
+    - component: vllm
+      release: eva-agent-vllm
+      chart: eva-agent/eva-agent-vllm
+      version: "{{ eva_agent_vllm_chart_version }}"
+      renderer: ""
+    - component: qdrant
+      release: eva-agent-qdrant
+      chart: qdrant/qdrant
+      version: "{{ eva_agent_qdrant_chart_version }}"
+      renderer: "{{ eva_agent_qdrant_post_renderer_arg | regex_replace('^--post-renderer ', '') }}"
+  loop_control:
+    loop_var: eva_agent_dependency_guard
+    label: "{{ eva_agent_dependency_guard.release }}"
+  vars:
+    eva_cluster_guard_component: "{{ eva_agent_dependency_guard.component }}"
+    eva_cluster_guard_namespace: "{{ eva_agent_namespace }}"
+    eva_cluster_guard_release: "{{ eva_agent_dependency_guard.release }}"
+    eva_cluster_guard_workdir: "{{ eva_agent_workdir }}/{{ eva_agent_dependency_guard.release }}"
+    eva_cluster_guard_chart: "{{ eva_agent_dependency_guard.chart }}"
+    eva_cluster_guard_version: "{{ eva_agent_dependency_guard.version }}"
+    eva_cluster_guard_values: "{{ [eva_agent_workdir ~ '/' ~ eva_agent_dependency_guard.release ~ '/effective-input-values.yaml'] }}"
+    eva_cluster_guard_post_renderer: "{{ eva_agent_dependency_guard.renderer }}"
+    eva_cluster_guard_set: []
+    eva_cluster_guard_environment:
+      HELM_PLUGINS: "{{ eva_agent_workdir }}/plugin"
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+
 - name: Reconcile exact legacy Argo CD-managed eva-agent-vllm resources
   ansible.builtin.include_tasks: migrate_legacy_vllm.yaml
-  when: not ansible_check_mode
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
 
 - name: Check existing eva-agent-vllm deployment
   ansible.builtin.command: kubectl get deployment {{ eva_agent_vllm_engine_deployment_name }} -n {{ eva_agent_namespace }}

@@ -251,7 +251,8 @@ Subsystem sftp internal-sftp
         names = [task.get('name') for task in tasks]
         tool_check = names.index('Prepare and validate EVA Agent managed kustomize on the target')
         for name in ('Prepare namespace registry and model credentials before deploying Agent workloads',
-                     'Ensure NFS share and cache directories exist',
+                     'Resolve NKS dependency Values without configuring worker Infra',
+                     'Prepare server NFS and local model cache',
                      'Remove EVA dependency workspace if it exists'):
             self.assertLess(tool_check, names.index(name))
 

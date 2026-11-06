@@ -354,7 +354,7 @@
     path: "{{ eva_app_iam_handoff_path }}"
   register: eva_app_iam_handoff_status
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when: not (eva_app_workspace_sso_complete | bool)
 
 - name: Read same-target IAM-to-App handoff
@@ -363,7 +363,7 @@
     src: "{{ eva_app_iam_handoff_path }}"
   register: eva_app_iam_handoff_raw
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - eva_app_iam_handoff_status.stat.exists | default(false)
     - not (eva_app_workspace_sso_complete | bool)
@@ -441,7 +441,7 @@
     path: "{{ eva_app_argocd_handoff_path }}"
   register: eva_app_argocd_handoff_status
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when: not ansible_check_mode
 
 - name: Read Argo CD handoff receipt on control node
@@ -450,7 +450,7 @@
     src: "{{ eva_app_argocd_handoff_path }}"
   register: eva_app_argocd_handoff_raw
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - not ansible_check_mode
     - eva_app_argocd_handoff_status.stat.exists | default(false)
@@ -871,6 +871,7 @@
     eva_traefik_tls_kubeconfig: "{{ eva_app_kubeconfig }}"
   when:
     - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
     - eva_app_tls_job_enabled | bool
     - >-
       (eva_traefik_ports_result.tls_host_path | length > 0)
@@ -896,6 +897,26 @@
          | regex_replace('^obsolete_ecr_resources=', '') | from_json }}
   changed_when: false
   when: not ansible_check_mode
+
+- name: Synchronize managed-cluster credentials before product workload changes
+  ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/online_credentials.yaml"
+  vars:
+    eva_online_component: app
+    eva_online_action: prepare
+    eva_online_input_values: "{{ eva_app_effective_values }}"
+  when: eva_managed_cluster | default(false) | bool
+
+
+- name: Validate shared EVA app inputs against the existing cluster
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  vars:
+    eva_cluster_guard_component: app
+    eva_cluster_guard_workdir: "{{ eva_app_workdir }}"
+    eva_cluster_guard_chart: "{{ eva_app_chart_source }}"
+    eva_cluster_guard_version: "{{ eva_app_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_cluster_guard_values: "{{ [eva_app_effective_values_dest] }}"
+  when: eva_managed_cluster | default(false) | bool
 
 - name: Validate EVA App Helm installation with server dry-run
   no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
@@ -987,6 +1008,31 @@
     - not ansible_check_mode
     - eva_app_deployment_exists.rc == 0
 
+- name: Prepare EVA App database transition tooling
+  ansible.builtin.include_tasks: prepare_database.yaml
+  when: not ansible_check_mode
+
+- name: Validate EVA App DB transition before stopping workloads
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ eva_app_workdir }}/database_transition.py"
+      - --namespace
+      - "{{ eva_app_namespace }}"
+      - --release
+      - "{{ eva_app_name }}"
+      - --manifest
+      - "{{ eva_app_workdir }}/db-target-manifest.yaml"
+      - --backup-root
+      - "{{ eva_app_db_backup_root | default('/var/lib/eva/backups/app-db/' ~ eva_site_id ~ '/' ~ eva_app_name) }}"
+      - --source
+      - "{{ eva_app_db_migration_source | default('') }}"
+      - --preflight
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
 - name: Delete existing EVA App TLS Job before upgrade
   ansible.builtin.command:
     argv:
@@ -1037,10 +1083,6 @@
 
 - name: Install EVA App and restore prior replicas if Helm fails
   block:
-    - name: Prepare EVA App database transition tooling
-      ansible.builtin.include_tasks: prepare_database.yaml
-      when: not ansible_check_mode
-
     - name: Preserve EVA App database identity and legacy local users before upgrade
       ansible.builtin.command:
         argv:
@@ -1058,6 +1100,10 @@
           - "{{ eva_app_db_migration_source | default('') }}"
           - --auto-migrate
           - "{{ eva_app_db_auto_migrate | default(true) | bool | lower }}"
+          - --client-image
+          - >-
+            {{ (eva_app_effective_values.database.internal.image.repository | default(eva_app_mysql_image_repository))
+               ~ ':' ~ (eva_app_effective_values.database.internal.image.tag | default(eva_app_mysql_image_tag)) }}
       register: eva_app_database_transition
       changed_when: >-
         ((eva_app_database_transition.stdout | from_json).changed | bool)
@@ -1160,6 +1206,12 @@
           replica restoration rc={{ eva_app_replica_restore.rc | default('not-attempted') }},
           rollout rc={{ eva_app_replica_restore_rollout.rc | default('not-attempted') }}.
 
+          {{ ('Replica restoration details: ' ~ (eva_app_replica_restore.stderr | default('')))
+             if (eva_app_replica_restore.rc | default(0)) != 0 else '' }}
+          {{ ('Restored App rollout details: ' ~ (eva_app_replica_restore_rollout.stderr | default(''))
+              ~ ' ' ~ (eva_app_replica_restore_rollout.stdout | default('')))
+             if (eva_app_replica_restore_rollout.rc | default(0)) != 0 else '' }}
+
 - name: Verify successful EVA App legacy Helm adoption
   ansible.builtin.include_tasks: verify_app_ownership.yaml
   when:
@@ -1214,18 +1266,24 @@
   when: not ansible_check_mode
 
 - name: Ensure EVA App deployment uses ecr-registry imagePullSecret (online only)
-  ansible.builtin.shell: >-
-    kubectl patch deployment {{ eva_app_name }}
-    -n {{ eva_app_namespace }}
-    --type=merge
-    -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ecr-registry"}]}}}}'
-  args:
-    executable: /bin/bash
+  vars:
+    eva_app_selected_pull_secret: >-
+      {{ (eva_app_effective_values.imagePullSecrets.ExistingSecret | default('', true)
+         or (eva_app_effective_values.imagePullSecrets.nameOverride | default('', true))
+         or (eva_app_name ~ '-secret-regcred'))
+         if (eva_managed_cluster | default(false) | bool) else 'ecr-registry' }}
+  ansible.builtin.command:
+    argv: [kubectl, patch, deployment, "{{ eva_app_name }}", -n, "{{ eva_app_namespace }}",
+           --type=merge, --patch-file=/dev/stdin]
+    stdin: >-
+      {{ {'spec': {'template': {'spec': {'imagePullSecrets': [{'name': eva_app_selected_pull_secret}]}}}} | to_json }}
   register: eva_app_patch_pullsecret
   changed_when: "'patched' in eva_app_patch_pullsecret.stdout"
   when:
     - not ansible_check_mode
     - repository_mode in ['online_repository', 'cloud_repository']
+    - not (eva_managed_cluster | default(false) | bool) or (eva_app_effective_values.imagePullSecrets.enabled | default(true) | bool)
+    - not (eva_managed_cluster | default(false) | bool) or (eva_app_effective_values.imagePullSecrets.create | default(true) | bool) or (eva_app_effective_values.imagePullSecrets.ExistingSecret | default('', true) | length > 0)
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 

@@ -22,7 +22,7 @@ fi
 
 release_root="$TMP_ROOT/release"
 mkdir -p "$release_root/src/infra/playbooks" "$TMP_ROOT/workspace/site-values"
-cp "$REPO_ROOT/src/playbook-vars.yaml" "$REPO_ROOT/src/playbook-preflight.yaml" "$release_root/src/"
+cp "$REPO_ROOT/src/playbook-vars.yaml" "$REPO_ROOT/src/playbook-preflight.yaml" "$REPO_ROOT/src/host-kubeconfig.yaml" "$release_root/src/"
 cp "$REPO_ROOT/src/infra/version.yaml" "$release_root/src/infra/version.yaml"
 cat >"$release_root/src/infra/playbooks/contract.yaml" <<'EOF'
 ---

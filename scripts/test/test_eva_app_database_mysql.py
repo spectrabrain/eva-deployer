@@ -6,6 +6,7 @@ ports, host mounts or live cluster access. Uses the production SQL/dump/CSV code
 
 import base64
 import csv
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -206,6 +207,54 @@ class RealMySQLTests(unittest.TestCase):
         self.assertFalse(result["copied"])
         self.assertEqual(len(result["legacy_user_csv"]), 1)
         self.assertTrue((Path(result["backup_directory"]) / "eva.sql").exists())
+
+    def test_external_backup_uses_non_root_user_without_global_session_privileges(self):
+        self.t.sql("CREATE USER IF NOT EXISTS 'eva_backup'@'127.0.0.1' IDENTIFIED BY 'private-test-password'; "
+                   "GRANT SELECT, SHOW VIEW, TRIGGER ON eva.* TO 'eva_backup'@'127.0.0.1';")
+        self.t.resources = [r for r in self.t.resources if r.get("metadata", {}).get("name") != "eva-app-mysql"]
+        del self.t.objects[("deployment", "eva-app-mysql")]
+        for secret in (self.t.resources[-1], self.t.objects[("secret", "app-secret")]):
+            for key, value in (("MYSQL_NAME", "eva"), ("MYSQL_HOST", "127.0.0.1"), ("MYSQL_USER", "eva_backup")):
+                secret["data"][key] = base64.b64encode(value.encode()).decode()
+        self.t.pods = []
+        before = self.t.snapshot("eva")
+
+        @contextmanager
+        def client(desired, proposed):
+            self.t.external = True
+            self.t.pod, self.t.container = "external-client", "client"
+            try:
+                yield
+            finally:
+                self.t.external = False
+
+        original_command = self.t.run_command
+        def bridge(args, **kwargs):
+            if args[0] == "kubectl" and "exec" in args:
+                # Exercise the production external mysql argv and shell on this
+                # test's isolated MySQL container instead of a Kubernetes Pod.
+                translated = ["docker", "exec", "-i", "-e", "EVA_DB_HOST=127.0.0.1",
+                              "-e", "EVA_DB_PORT=3306", "-e", "EVA_DB_USER=eva_backup",
+                              "-e", "EVA_DB_PASSWORD=private-test-password", self.container,
+                              *args[args.index("--") + 1:]]
+                result = subprocess.run(translated, stderr=subprocess.PIPE, timeout=120, **kwargs)
+                if result.returncode:
+                    raise AssertionError("Isolated external MySQL client failed: " + result.stderr.decode())
+                return result
+            return original_command(args, **kwargs)
+
+        with patch.object(self.t, "external_client", side_effect=client), \
+             patch.object(self.t, "mysql", side_effect=lambda args, **kwargs: MODULE.Transition.mysql(self.t, args, **kwargs)), \
+             patch.object(self.t, "run_command", side_effect=bridge):
+            result = self.t.run()
+        self.assertFalse(result["copied"])
+        self.assertFalse(result["identity_updated"])
+        self.assertEqual(self.t.snapshot("eva"), before)
+        directory = Path(result["backup_directory"])
+        self.assertTrue(json.loads((directory / "external-backup.json").read_text())["verified"])
+        self.assertIn(b"CREATE TABLE", (directory / "eva.sql").read_bytes())
+        with Path(result["legacy_user_csv"][0]).open(newline="") as stream:
+            self.assertEqual(len(list(csv.reader(stream))), 3)
 
     def create_fewshot_tables(self):
         self.t.sql("""CREATE TABLE eva.fewshot (seq INT PRIMARY KEY,frame_path VARCHAR(256)) ENGINE=InnoDB;

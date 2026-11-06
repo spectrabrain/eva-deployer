@@ -202,21 +202,42 @@
     while IFS=$'\t' read -r kind name
     do
       [[ -n "$kind" && -n "$name" ]] || continue
+      resource_json="$(kubectl get "$kind/$name" -n "$namespace" --ignore-not-found=true --show-managed-fields=true -o json)"
+      [[ -n "$resource_json" ]] || continue
       case "$kind" in
         PersistentVolume|PersistentVolumeClaim|StorageClass)
-          resource_json="$(kubectl get "$kind/$name" -n "$namespace" --ignore-not-found=true -o json)"
-          if [[ -n "$resource_json" ]]; then
+          # Already-owned storage is retained during a Helm upgrade. It is not
+          # a legacy adoption target; require both the release manifest and
+          # exact current Helm ownership before inspecting its Argo metadata.
+          storage_namespace=''
+          storage_api='v1'
+          [[ "$kind" != PersistentVolumeClaim ]] || storage_namespace="$namespace"
+          [[ "$kind" != StorageClass ]] || storage_api='storage.k8s.io/v1'
+          if [[ "$failed_release_recovery" != true && "$deployed_release_reconciliation" != true ]] ||
+            ! jq -e --arg kind "$kind" --arg name "$name" --arg api "$storage_api" --arg namespace "$storage_namespace" '
+              [.[] | select(.kind == $kind and .metadata.name == $name)]
+              | length == 1 and all(.[]; .apiVersion == $api and ((.metadata.namespace // $namespace) == $namespace))
+            ' "$failed_manifest_json_file" >/dev/null ||
+            ! jq -e --arg kind "$kind" --arg name "$name" --arg api "$storage_api" --arg namespace "$storage_namespace" '
+              [.[] | select(.kind == $kind and .metadata.name == $name)]
+              | length == 1 and all(.[]; .apiVersion == $api and ((.metadata.namespace // $namespace) == $namespace))
+            ' "$rendered_json_file" >/dev/null ||
+            ! jq -e --arg kind "$kind" --arg name "$name" --arg api "$storage_api" --arg namespace "$storage_namespace" \
+              --arg release "$release" --arg release_namespace "$namespace" '
+              .kind == $kind and .metadata.name == $name and .apiVersion == $api
+              and ((.metadata.namespace // "") == $namespace)
+              and .metadata.labels."app.kubernetes.io/managed-by" == "Helm"
+              and .metadata.annotations."meta.helm.sh/release-name" == $release
+              and .metadata.annotations."meta.helm.sh/release-namespace" == $release_namespace
+            ' <<< "$resource_json" >/dev/null; then
             echo "[ERROR] persistent resource cannot be adopted: $kind/$name"
             exit 1
           fi
-          continue
+          echo "[INFO] preserving existing Helm-owned storage: $kind/$name"
           ;;
       esac
-      resource_json="$(kubectl get "$kind/$name" -n "$namespace" --ignore-not-found=true --show-managed-fields=true -o json)"
-      if [[ -n "$resource_json" ]]; then
-        printf '%s' "$resource_json" | base64 | tr -d '\n' >> "$candidates_file"
-        printf '\n' >> "$candidates_file"
-      fi
+      printf '%s' "$resource_json" | base64 | tr -d '\n' >> "$candidates_file"
+      printf '\n' >> "$candidates_file"
     done < "$rendered_resources_file"
 
     # TLS Job/RBAC helpers omitted by HTTP or create:false are not adoption
@@ -259,6 +280,43 @@
       echo 'failed_release_recovery=false'
       echo '[INFO] clean EVA App installation state'
       exit 0
+    fi
+
+    # SSA manager records survive after Argo CD tracking has been removed.
+    # An existing Helm release with only its own manifest resources needs no
+    # legacy adoption receipt. Allow field reconciliation, never ownership
+    # takeover, when every candidate has exact Helm ownership and no Argo tags.
+    if [[ -z "${EVA_APP_ARGOCD_HANDOFF_B64:-}" && ! -s "$obsolete_ecr_file" ]] &&
+      [[ "$failed_release_recovery" == true || "$deployed_release_reconciliation" == true ]]; then
+      current_helm_only=true
+      while IFS= read -r encoded
+      do
+        resource_json="$(printf '%s' "$encoded" | base64 -d)"
+        kind="$(jq -r '.kind // empty' <<< "$resource_json")"
+        name="$(jq -r '.metadata.name // empty' <<< "$resource_json")"
+        expected_namespace="$namespace"
+        case "$kind" in PersistentVolume|StorageClass) expected_namespace='' ;; esac
+        if ! grep -Fxq "$kind"$'\t'"$name" "$failed_manifest_resources_file" ||
+          ! jq -e --arg namespace "$expected_namespace" --arg release "$release" --arg release_namespace "$namespace" '
+            ((.metadata.namespace // "") == $namespace)
+            and .metadata.labels."app.kubernetes.io/managed-by" == "Helm"
+            and .metadata.annotations."meta.helm.sh/release-name" == $release
+            and .metadata.annotations."meta.helm.sh/release-namespace" == $release_namespace
+            and ((.metadata.annotations."argocd.argoproj.io/tracking-id" // "") == "")
+            and ((.metadata.labels."argocd.argoproj.io/instance" // "") == "")
+            and ([.metadata.ownerReferences[]? | select(.controller == true)] | length == 0)
+          ' <<< "$resource_json" >/dev/null; then
+          current_helm_only=false
+          break
+        fi
+      done < "$candidates_file"
+      if [[ "$current_helm_only" == true ]]; then
+        echo 'take_ownership=false'
+        echo 'force_conflicts=true'
+        echo "failed_release_recovery=$failed_release_recovery"
+        echo '[INFO] residual SSA fields will be reconciled for existing Helm-owned EVA App resources'
+        exit 0
+      fi
     fi
 
     if [[ -z "${EVA_APP_ARGOCD_HANDOFF_B64:-}" ]]; then
@@ -373,7 +431,9 @@
       helm_namespace="$(jq -r '.metadata.annotations."meta.helm.sh/release-namespace" // empty' <<< "$resource_json")"
       controller_count="$(jq '[.metadata.ownerReferences[]? | select(.controller == true)] | length' <<< "$resource_json")"
 
-      if [[ -z "$kind" || -z "$name" || "$resource_namespace" != "$namespace" ]]; then
+      expected_namespace="$namespace"
+      case "$kind" in PersistentVolume|StorageClass) expected_namespace='' ;; esac
+      if [[ -z "$kind" || -z "$name" || "$resource_namespace" != "$expected_namespace" ]]; then
         echo "[ERROR] unsafe EVA App legacy resource identity: $kind/$name"
         exit 1
       fi
@@ -384,6 +444,7 @@
         tracking_group="$group/"
       fi
       expected_tracking="$legacy_application:$tracking_group$kind:$namespace/$name"
+      expected_scoped_tracking="$legacy_application:$tracking_group$kind:$expected_namespace/$name"
       if [[ "$deployed_release_reconciliation" == true ]] && ! grep -Fxq "$kind"$'\t'"$name" "$failed_manifest_resources_file"; then
         echo "[ERROR] deployed EVA App resource is absent from stored Helm manifest: $kind/$name"
         exit 1
@@ -401,7 +462,7 @@
           echo "[ERROR] unexpected controller ownership: $kind/$name"
           exit 1
         fi
-        if [[ "$tracking" != "$expected_tracking" ]]; then
+        if [[ "$tracking" != "$expected_tracking" && "$tracking" != "$expected_scoped_tracking" ]]; then
           echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
           exit 1
         fi
@@ -414,7 +475,7 @@
           echo "[ERROR] unexpected controller ownership: $kind/$name"
           exit 1
         fi
-        if [[ -n "$tracking" && "$tracking" != "$expected_tracking" ]]; then
+        if [[ -n "$tracking" && "$tracking" != "$expected_tracking" && "$tracking" != "$expected_scoped_tracking" ]]; then
           echo "[ERROR] EVA App tracking identity mismatch: $kind/$name"
           exit 1
         fi

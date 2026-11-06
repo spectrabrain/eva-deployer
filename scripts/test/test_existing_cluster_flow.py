@@ -50,8 +50,10 @@ if tool == 'helm':
   if '--filter' in args: release=args[args.index('--filter')+1].strip('^$').replace(chr(92),'')
   output([{'name':release,'namespace':namespace,'revision':'1','chart':release+'-3.2.1','app_version':'3.2.1','status':'deployed'}])
  if args[:2]==['get','values']: output(state['values'].get(component,{}))
- if args[:2]==['get','manifest']: print(''); sys.exit(0)
- if args[0]=='status': output({'info':{'status':'deployed'}})
+ if args[:2]==['get','manifest']:
+  if args[2]=='eva-app' and 'app_manifest' in state: output({'kind':'List','items':state['app_manifest']})
+  print(''); sys.exit(0)
+ if args[0]=='status': output({'name':args[1],'namespace':namespace,'version':1,'info':{'status':'deployed'}})
  if args[:2]==['upgrade','--install']: print('fixture deployed'); sys.exit(0)
  if args[0]=='template' and args[1]=='eva-agent-init':
   import yaml
@@ -60,6 +62,8 @@ if tool == 'helm':
    'metadata':{'name':v['name']},'provisioner':v['provisioner'],'parameters':v.get('parameters',{}),
    'reclaimPolicy':'Retain','volumeBindingMode':'WaitForFirstConsumer'} for v in values['storageClass'].values()]))
   sys.exit(0)
+ if args[0]=='template' and args[1]=='eva-app' and 'app_manifest' in state:
+  output({'kind':'List','items':state['app_manifest']})
  if args[0]=='template': output({'kind':'Deployment','metadata':{'name':args[1],'namespace':'eva-agent'},
    'spec':{'replicas':1,'template':{'spec':{'serviceAccountName':'sa-eva-agent','containers':[]}}}})
  raise SystemExit('Unexpected Helm mutation')
@@ -67,6 +71,10 @@ if tool != 'kubectl': raise SystemExit('Unexpected host command')
 if args[:2]==['config','current-context']: print('nks-fixture'); sys.exit(0)
 if 'get' in args:
  kind=args[args.index('get')+1]
+ if '/' in kind and 'app_live' in state:
+  matches=[d for d in state['app_live'] if d['kind']+'/'+d['metadata']['name']==kind]
+  if matches: output(matches[0])
+  print(''); sys.exit(0)
  if kind=='nodes': output({'items':state['nodes']})
  if kind=='storageclass': print('storageclass/'+args[args.index('get')+2]); sys.exit(0)
  if kind=='storageclasses': output({'items':[{'metadata':{'name':'nks-block','annotations':{'storageclass.kubernetes.io/is-default-class':'true'}}},{'metadata':{'name':'nks-nas'}}]})
@@ -89,6 +97,9 @@ if 'get' in args:
  if ',' in kind: print(''); sys.exit(0)
  output({'items':[]})
 if 'create' in args and '--dry-run=client' in args:
+ if '-f' in args:
+  import yaml
+  output(yaml.safe_load(pathlib.Path(args[args.index('-f')+1]).read_text()))
  if 'namespace' in args: output({'apiVersion':'v1','kind':'Namespace','metadata':{'name':args[args.index('namespace')+1]}})
  output({'apiVersion':'v1','kind':'ServiceAccount','metadata':{'name':'sa-eva-agent','namespace':ns()}})
 if 'create' in args and 'serviceaccount' in args:
@@ -501,6 +512,43 @@ class SharedFlowTests(unittest.TestCase):
         backup=database.private_dir(paths["database"])
         self.assertEqual(backup.stat().st_uid,os.geteuid())
         self.assertEqual(backup.stat().st_mode & 0o777,0o700)
+
+    def test_app_retains_helm_owned_pvc_and_reconciles_stale_ssa_without_handoff(self):
+        def owned(kind,name,spec):
+            return {'apiVersion':'apps/v1' if kind=='Deployment' else 'v1','kind':kind,
+                'metadata':{'name':name,'namespace':'eva-app','uid':'original-'+name,
+                    'labels':{'app.kubernetes.io/managed-by':'Helm'},
+                    'annotations':{'meta.helm.sh/release-name':'eva-app','meta.helm.sh/release-namespace':'eva-app'},
+                    'managedFields':[{'manager':'argocd-controller'}]},'spec':spec}
+        claim=owned('PersistentVolumeClaim','pvc-eva-app',{'storageClassName':'eva-agent-sc-fs',
+            'accessModes':['ReadWriteMany'],'resources':{'requests':{'storage':'500Gi'}}})
+        deployment=owned('Deployment','eva-app',{'template':{'spec':{'containers':[]}}})
+        bound=copy.deepcopy(claim)
+        bound['spec']['volumeName']='original-ncp-nas-volume'
+        bound['status']={'phase':'Bound'}
+        self.state.update(app_manifest=[deployment,claim],app_live=[deployment,bound])
+        (self.root/'state.json').write_text(json.dumps(self.state))
+        work=self.root/'app-reconciliation'
+        work.mkdir()
+        for filename in ['values.yaml','effective.yaml']: (work/filename).write_text('{}\n')
+        self.variables.update(eva_app_namespace='eva-app',eva_app_name='eva-app',eva_app_workdir=str(work),
+            eva_app_chart_source='eva-app/eva-app',eva_app_chart_version='3.3.0',
+            eva_app_effective_values_dest=str(work/'effective.yaml'),eva_app_kubeconfig=self.env['KUBECONFIG'],
+            eva_app_tls_job_enabled=False,eva_app_traefik_args='',eva_cli_helm_set=[],eva_cli_chart_path='',
+            eva_app_argocd_handoff_raw={})
+        fact=next(t for t in yaml.safe_load((ROOT/'src/solution/roles/eva_app/tasks/main.yaml').read_text())
+                  if t.get('name')=='Resolve EVA App Helm ownership adoption argument')
+        playbook=self.root/'app-ssa.yaml'
+        playbook.write_text(yaml.safe_dump([{'hosts':'all','connection':'local','gather_facts':False,'tasks':[
+            {'ansible.builtin.include_role':{'name':'eva_app','tasks_from':'reconcile_app'}},fact,
+            {'ansible.builtin.assert':{'that':[
+                'eva_app_take_ownership_arg == ""',
+                'eva_app_server_side_conflict_args == "--server-side=true --force-conflicts"',
+                'eva_app_obsolete_ecr_resources == []']}}]}]))
+        self.execute(playbook)
+        state=json.loads((self.root/'state.json').read_text())
+        self.assertEqual(state['app_live'],[deployment,bound])
+        self.assertFalse(any(c['tool']=='kubectl' and c['args'][0] in ['patch','delete','apply','scale'] for c in self.calls()))
 
 
 spec=importlib.util.spec_from_file_location("cluster_guard",ROOT/"src/solution/roles/eva_cluster_guard/files/guard_cluster.py")

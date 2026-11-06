@@ -492,6 +492,10 @@ Helm upgrade를 수행하며 기존 database와 영속 데이터를 보존합니
 `retry`는 원래 작업의 Workspace snapshot을 사용하며 수정한 원본 설정을 다시
 읽지 않습니다. 설정을 수정했다면 `install --config`로 새 작업을 시작합니다.
 
+App의 기존 Helm 소유 PV/PVC는 재사용합니다. 실제 Argo CD 관리 표시 없이 과거 필드 관리 기록만
+남아 있으면 handoff 파일 없이 현재 Helm 리소스의 필드를 갱신합니다. 다른 소유자의 저장소,
+PVC 용량 축소·StorageClass 변경은 별도 확인이나 마이그레이션이 필요합니다.
+
 ```bash
 sudo eva retry --yes
 ```

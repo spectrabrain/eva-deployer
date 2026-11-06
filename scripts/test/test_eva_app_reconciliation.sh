@@ -10,6 +10,7 @@ python3 - "$main" "$reconcile" "$verify" <<'PY'
 import base64
 import copy
 import getpass
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -81,6 +82,8 @@ if reconcile_task is None or internal_task is None:
     raise SystemExit("[ERROR] production EVA App assessment tasks are absent")
 reconcile_shell = reconcile_task.get("ansible.builtin.shell", "")
 internal_shell = internal_task.get("ansible.builtin.shell", "")
+verify_task = find_task(documents[Path(sys.argv[3])], "Verify adopted EVA App Helm ownership")
+verify_shell = verify_task["ansible.builtin.shell"]
 for task in (internal_task, reconcile_task):
     if (
         task.get("environment", {}).get("EVA_APP_ARGOCD_HANDOFF_B64")
@@ -285,7 +288,8 @@ def assert_read_only(log, name):
 
 def assess(name, *, status="deployed", old=None, live=None, rendered=None,
            enabled="false", receipt=valid_receipt, scan_extra=None, mode="online_repository",
-           error=None, assessment="reconcile", encoded=None, target_receipt=None):
+           error=None, assessment="reconcile", encoded=None, target_receipt=None,
+           take_ownership=True, verify_after=False):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         install_mock_cli(root)
@@ -319,7 +323,8 @@ def assess(name, *, status="deployed", old=None, live=None, rendered=None,
         if enabled is not None:
             env["EVA_APP_TLS_JOB_ENABLED"] = enabled
         shell = internal_shell if assessment == "internal" else reconcile_shell
-        expected = "preserve_internal_service=true" if assessment == "internal" else "take_ownership=true"
+        expected = "preserve_internal_service=true" if assessment == "internal" else "take_ownership=" + str(take_ownership).lower()
+        original_fixture = fixture.read_bytes()
         result = subprocess.run(["bash", "-c", shell], env=env, text=True,
                                 capture_output=True, check=False)
         output = result.stdout + result.stderr
@@ -328,6 +333,21 @@ def assess(name, *, status="deployed", old=None, live=None, rendered=None,
                 raise SystemExit(f"[ERROR] {name}: expected verified reconciliation\n{output}")
         elif result.returncode == 0 or error not in output:
             raise SystemExit(f"[ERROR] {name}: expected rejection containing {error!r}\n{output}")
+        if fixture.read_bytes() != original_fixture:
+            raise SystemExit(f"[ERROR] {name}: assessment changed live resource fixture")
+        if error is None and not take_ownership and 'force_conflicts=true' not in result.stdout:
+            raise SystemExit(f"[ERROR] {name}: residual SSA reconciliation was not enabled")
+        if verify_after:
+            # Simulate the successful Helm upgrade's new manifest, keeping the
+            # same live storage UID, volume binding and specification.
+            state = json.loads(fixture.read_text())
+            state.update(status="deployed", stored=state["rendered"])
+            fixture.write_text(json.dumps(state))
+            before_verify = fixture.read_bytes()
+            checked = subprocess.run(["bash", "-c", verify_shell], env=env, text=True,
+                                     capture_output=True, check=False)
+            if checked.returncode != 0 or fixture.read_bytes() != before_verify:
+                raise SystemExit(f"[ERROR] {name}: read-only ownership verification failed\n" + checked.stdout + checked.stderr)
         assert_read_only(root / "commands.log", name)
     print(f"[OK] App assessment: {name}")
 
@@ -380,6 +400,88 @@ ecr = resource("Job", "eva-app-ecr-job-once", "batch/v1")
 assess("repository ECR cleanup contract preserved", old=[*stored, ecr], live=[*stored, ecr], mode="remote_repository")
 assess("repository ECR-only cleanup preserved", old=[*stored, ecr], live=[ecr], mode="remote_repository")
 assess("local repository ECR cleanup contract preserved", old=[*stored, ecr], live=[*stored, ecr], mode="local_repository")
+
+claim = resource("PersistentVolumeClaim", "pvc-eva-app", "v1")
+claim["metadata"]["annotations"]["helm.sh/resource-policy"] = "keep"
+claim["spec"] = {"storageClassName": "eva-agent-sc-fs", "accessModes": ["ReadWriteMany"],
+                 "resources": {"requests": {"storage": "500Gi"}}}
+bound_claim = copy.deepcopy(claim)
+bound_claim["spec"]["volumeName"] = "pvc-original-ncp-nas"
+bound_claim["status"] = {"phase": "Bound"}
+for status in ("deployed", "failed"):
+    assess(status + " release retains existing 500Gi PVC", status=status,
+           old=[*stored, claim], live=[*stored, bound_claim], rendered=[deployment, claim], verify_after=True)
+    untracked = copy.deepcopy([*stored, bound_claim])
+    for item in untracked:
+        item["metadata"]["annotations"].pop("argocd.argoproj.io/tracking-id")
+    assess(status + " Helm-owned PVC with stale SSA fields needs no receipt", status=status,
+           old=[*stored, claim], live=untracked, rendered=[deployment, claim], receipt=None,
+           take_ownership=False, verify_after=True)
+default_namespace_claim = copy.deepcopy(claim)
+default_namespace_claim["metadata"].pop("namespace")
+assess("PVC manifest inherits Helm namespace", old=[*stored, default_namespace_claim],
+       live=[*stored, bound_claim], rendered=[deployment, default_namespace_claim], verify_after=True)
+
+for kind, api in (("PersistentVolume", "v1"), ("StorageClass", "storage.k8s.io/v1")):
+    cluster_storage = resource(kind, "eva-app-storage", api)
+    cluster_storage["metadata"].pop("namespace")
+    for tracking_namespace in ("eva-app", ""):
+        group = api.split('/')[0] if '/' in api else ''
+        cluster_storage["metadata"]["annotations"]["argocd.argoproj.io/tracking-id"] = (
+            f"cluster-a-eva-app:{group}/{kind}:{tracking_namespace}/eva-app-storage")
+        assess("retained " + kind + " cluster scope " + repr(tracking_namespace),
+               old=[*stored, cluster_storage], live=[*stored, cluster_storage],
+               rendered=[deployment, cluster_storage], verify_after=True)
+
+assess("owned PVC absent from stored manifest remains blocked", live=[*stored, bound_claim],
+       rendered=[deployment, claim], error="persistent resource cannot be adopted")
+assess("existing PVC without a Helm release remains blocked", status=None, live=[*stored, bound_claim],
+       rendered=[deployment, claim], error="persistent resource cannot be adopted")
+for name, mutate in (
+    ("foreign owner", lambda m: m["annotations"].update({"meta.helm.sh/release-name": "other"})),
+    ("foreign release namespace", lambda m: m["annotations"].update({"meta.helm.sh/release-namespace": "other"})),
+    ("partial owner", lambda m: m["annotations"].pop("meta.helm.sh/release-namespace")),
+    ("unmanaged", lambda m: m["labels"].update({"app.kubernetes.io/managed-by": "other"})),
+    ("wrong namespace", lambda m: m.update(namespace="other")),
+):
+    invalid = copy.deepcopy(bound_claim)
+    mutate(invalid["metadata"])
+    assess("PVC " + name, old=[*stored, claim], live=[*stored, invalid], rendered=[deployment, claim],
+           error="persistent resource cannot be adopted")
+for name, mutate, error in (
+    ("wrong tracking", lambda m: m["annotations"].update({"argocd.argoproj.io/tracking-id": "other:/PersistentVolumeClaim:eva-app/pvc-eva-app"}), "tracking identity mismatch"),
+    ("controller owner", lambda m: m.update(ownerReferences=[{"controller": True}]), "unexpected controller ownership"),
+):
+    invalid = copy.deepcopy(bound_claim)
+    mutate(invalid["metadata"])
+    assess("PVC " + name, old=[*stored, claim], live=[*stored, invalid], rendered=[deployment, claim], error=error)
+tagged = copy.deepcopy([*stored, bound_claim])
+for item in tagged: item["metadata"]["annotations"].pop("argocd.argoproj.io/tracking-id")
+tagged[0]["metadata"]["labels"]["argocd.argoproj.io/instance"] = "cluster-a-eva-app"
+assess("Argo instance label still requires receipt", old=[*stored, claim], live=tagged,
+       rendered=[deployment, claim], receipt=None, error="require a verified Argo CD handoff receipt")
+
+# Accepting current Helm ownership must not relax storage migration validation.
+guard_path = reconcile_path.parents[2] / "eva_cluster_guard/files/guard_cluster.py"
+spec = importlib.util.spec_from_file_location("app_storage_guard", guard_path)
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+def storage_query(kind, namespace=None, name=None):
+    if kind == "storageclasses": return [{"metadata": {"name": "eva-agent-sc-fs"}, "allowVolumeExpansion": False}]
+    if kind == "persistentvolumeclaims": return [bound_claim]
+    return []
+guard.validate({"component": "app", "namespace": "eva-app"}, [claim], [claim], storage_query)
+for name, mutate in (("shrink", lambda v: v["spec"]["resources"]["requests"].update(storage="10Gi")),
+                     ("class change", lambda v: v["spec"].update(storageClassName="other"))):
+    changed = copy.deepcopy(claim)
+    mutate(changed)
+    try:
+        guard.validate({"component": "app", "namespace": "eva-app"}, [changed], [claim], storage_query)
+    except RuntimeError:
+        pass
+    else:
+        raise SystemExit("[ERROR] App PVC " + name + " bypassed the storage guard")
+print("[OK] retained App PVC still rejects shrink and StorageClass migration")
 
 legacy_service = copy.deepcopy(internal_service)
 for key in ("meta.helm.sh/release-name", "meta.helm.sh/release-namespace"):

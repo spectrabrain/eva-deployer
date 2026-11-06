@@ -32,7 +32,9 @@
       managed_by="$(jq -r '.metadata.labels."app.kubernetes.io/managed-by" // empty' <<< "$resource_json")"
       release_name="$(jq -r '.metadata.annotations."meta.helm.sh/release-name" // empty' <<< "$resource_json")"
       release_namespace="$(jq -r '.metadata.annotations."meta.helm.sh/release-namespace" // empty' <<< "$resource_json")"
-      if [[ "$resource_namespace" != "$namespace" || "$managed_by" != 'Helm' || "$release_name" != "$release" || "$release_namespace" != "$namespace" ]]; then
+      expected_namespace="$namespace"
+      case "$kind" in PersistentVolume|StorageClass) expected_namespace='' ;; esac
+      if [[ "$resource_namespace" != "$expected_namespace" || "$managed_by" != 'Helm' || "$release_name" != "$release" || "$release_namespace" != "$namespace" ]]; then
         echo "[ERROR] adopted EVA App resource has invalid Helm ownership: $kind/$name"
         exit 1
       fi

@@ -118,6 +118,9 @@ jobs:
           EVA_TEST_HELM_DOWNLOAD: "1"
         run: python3 scripts/test/test_traefik_ports.py
 
+      - name: Test existing server Solution-only upgrade
+        run: python3 scripts/test/test_host_solution_upgrade.py
+
       - name: Test EVA Agent and Vision values contracts
         env:
           EVA_TEST_HELM_DOWNLOAD: "1"

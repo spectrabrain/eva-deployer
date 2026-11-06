@@ -357,6 +357,10 @@ sudo eva install --release /path/to/another/release --config /home/eva/eva-insta
 precondition -> infra -> GPU preflight -> config -> iam -> agent -> vision -> app
 ```
 
+기존 k3s 서버의 Solution-only 설치는 실행 계정에 기본 kubeconfig가 없으면 서버의 k3s 설정을 자동 준비합니다.
+기존 App HTTP NodePort를 같은 공개 포트의 App `/`·IAM `/iam` Ingress로 전환할 때는
+Helm 소유권과 기존 manifest를 확인해 자동 전환하며, 전환 실패 시 확인된 변경만 원래 NodePort로 복구합니다.
+
 Agent/Vision을 선택한 타겟에는 GPU preflight가 자동 포함됩니다.
 Agent, Vision, App 중 하나를 선택하면 Config가 자동으로 포함됩니다. Config를 별도로 실행하지
 않습니다. Component-only 작업은 선택하지 않은 제품 component를 실행하지 않습니다. Agent는

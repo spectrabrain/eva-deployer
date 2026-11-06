@@ -38,6 +38,13 @@
     }
     trap cleanup EXIT
 
+    is_verified_legacy_bridge() {
+      [[ "$kind" == Ingress && "$name" == "$release" ]] || return 1
+      [[ -f "${EVA_APP_TRAEFIK_HELPER:-}" && -n "${EVA_APP_TRAEFIK_BACKUP_ROOT:-}" ]] || return 1
+      python3 "$EVA_APP_TRAEFIK_HELPER" --verify-legacy-bridge "$EVA_APP_TRAEFIK_BACKUP_ROOT" \
+        <<< "$resource_json" >/dev/null 2>&1
+    }
+
     is_obsolete_ecr_resource() {
       [[ "$repository_mode" == remote_repository || "$repository_mode" == local_repository ]] || return 1
       case "$1/$2" in
@@ -330,7 +337,7 @@
         name="$(jq -r '.metadata.name // empty' <<< "$resource_json")"
         expected_namespace="$namespace"
         case "$kind" in PersistentVolume|StorageClass) expected_namespace='' ;; esac
-        if ! grep -Fxq "$kind"$'\t'"$name" "$failed_manifest_resources_file" ||
+        if { ! grep -Fxq "$kind"$'\t'"$name" "$failed_manifest_resources_file" && ! is_verified_legacy_bridge; } ||
           ! jq -e --arg namespace "$expected_namespace" --arg release "$release" --arg release_namespace "$namespace" '
             ((.metadata.namespace // "") == $namespace)
             and .metadata.labels."app.kubernetes.io/managed-by" == "Helm"
@@ -479,7 +486,8 @@
       fi
       expected_tracking="$legacy_application:$tracking_group$kind:$namespace/$name"
       expected_scoped_tracking="$legacy_application:$tracking_group$kind:$expected_namespace/$name"
-      if [[ "$deployed_release_reconciliation" == true ]] && ! grep -Fxq "$kind"$'\t'"$name" "$failed_manifest_resources_file"; then
+      if [[ "$deployed_release_reconciliation" == true ]] &&
+        ! grep -Fxq "$kind"$'\t'"$name" "$failed_manifest_resources_file" && ! is_verified_legacy_bridge; then
         echo "[ERROR] deployed EVA App resource is absent from stored Helm manifest: $kind/$name"
         exit 1
       fi
@@ -656,6 +664,8 @@
     EVA_APP_EFFECTIVE_VALUES_FILE: "{{ eva_app_effective_values_dest }}"
     EVA_APP_TRAEFIK_POST_RENDERER: "{{ eva_traefik_ports_result.renderer | default('') if (eva_app_traefik_args | default('') | length > 0) else '' }}"
     EVA_APP_TRAEFIK_ROUTER: "{{ eva_app_workdir }}/traefik-router.json"
+    EVA_APP_TRAEFIK_HELPER: "{{ eva_app_workdir }}/traefik_ports.py"
+    EVA_APP_TRAEFIK_BACKUP_ROOT: "{{ eva_traefik_ports_backup_root | default('/var/lib/eva/backups/traefik-ports') }}"
     EVA_APP_HELM_PLUGINS: "{{ (eva_app_traefik_env | default({})).HELM_PLUGINS | default('') }}"
     EVA_APP_ARGOCD_HANDOFF_B64: "{{ eva_app_argocd_handoff_raw.content | default('') }}"
     EVA_APP_SITE_ID: "{{ eva_site_id }}"

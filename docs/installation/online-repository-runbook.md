@@ -51,6 +51,9 @@ installer는 하나의 `eva-tool_*_linux_amd64.tar.gz` archive와 Release checks
 sudo eva runtime bootstrap
 ```
 
+Runtime은 **Python 3.12 이상**이 필요합니다. `bootstrap`이 호환되는 Python을 자동 선택하고,
+없으면 필요한 Python과 venv 패키지를 자동 설치한 뒤 Runtime을 구성합니다.
+
 EVA Release가 바뀌었다는 이유로 bootstrap을 반복하지 않습니다. `eva install`은 작업을
 시작하기 전에 Managed Runtime을 검증합니다.
 

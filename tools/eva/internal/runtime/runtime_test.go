@@ -310,7 +310,8 @@ func testOnlineBootstrapDependencies(t *testing.T, payloads map[string][]byte) o
 	}
 	return onlineBootstrapDependencies{
 		goos: "linux", goarch: "amd64", run: run,
-		prepareHost: func(string) error { return nil },
+		prepareHost:  func(string) error { return nil },
+		selectPython: func() (string, error) { return "python3", nil },
 		runWithEnv: func(_ []string, name string, args ...string) error {
 			return run(name, args...)
 		},

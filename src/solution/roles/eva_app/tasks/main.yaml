@@ -1008,6 +1008,31 @@
     - not ansible_check_mode
     - eva_app_deployment_exists.rc == 0
 
+- name: Prepare EVA App database transition tooling
+  ansible.builtin.include_tasks: prepare_database.yaml
+  when: not ansible_check_mode
+
+- name: Validate EVA App DB transition before stopping workloads
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ eva_app_workdir }}/database_transition.py"
+      - --namespace
+      - "{{ eva_app_namespace }}"
+      - --release
+      - "{{ eva_app_name }}"
+      - --manifest
+      - "{{ eva_app_workdir }}/db-target-manifest.yaml"
+      - --backup-root
+      - "{{ eva_app_db_backup_root | default('/var/lib/eva/backups/app-db/' ~ eva_site_id ~ '/' ~ eva_app_name) }}"
+      - --source
+      - "{{ eva_app_db_migration_source | default('') }}"
+      - --preflight
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
 - name: Delete existing EVA App TLS Job before upgrade
   ansible.builtin.command:
     argv:
@@ -1058,10 +1083,6 @@
 
 - name: Install EVA App and restore prior replicas if Helm fails
   block:
-    - name: Prepare EVA App database transition tooling
-      ansible.builtin.include_tasks: prepare_database.yaml
-      when: not ansible_check_mode
-
     - name: Preserve EVA App database identity and legacy local users before upgrade
       ansible.builtin.command:
         argv:
@@ -1079,6 +1100,10 @@
           - "{{ eva_app_db_migration_source | default('') }}"
           - --auto-migrate
           - "{{ eva_app_db_auto_migrate | default(true) | bool | lower }}"
+          - --client-image
+          - >-
+            {{ (eva_app_effective_values.database.internal.image.repository | default(eva_app_mysql_image_repository))
+               ~ ':' ~ (eva_app_effective_values.database.internal.image.tag | default(eva_app_mysql_image_tag)) }}
       register: eva_app_database_transition
       changed_when: >-
         ((eva_app_database_transition.stdout | from_json).changed | bool)
@@ -1180,6 +1205,12 @@
           observed UID={{ eva_app_restore_identity.stdout | default('not-checked') }}.
           replica restoration rc={{ eva_app_replica_restore.rc | default('not-attempted') }},
           rollout rc={{ eva_app_replica_restore_rollout.rc | default('not-attempted') }}.
+
+          {{ ('Replica restoration details: ' ~ (eva_app_replica_restore.stderr | default('')))
+             if (eva_app_replica_restore.rc | default(0)) != 0 else '' }}
+          {{ ('Restored App rollout details: ' ~ (eva_app_replica_restore_rollout.stderr | default(''))
+              ~ ' ' ~ (eva_app_replica_restore_rollout.stdout | default('')))
+             if (eva_app_replica_restore_rollout.rc | default(0)) != 0 else '' }}
 
 - name: Verify successful EVA App legacy Helm adoption
   ansible.builtin.include_tasks: verify_app_ownership.yaml

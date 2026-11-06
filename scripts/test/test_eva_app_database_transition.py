@@ -69,6 +69,18 @@ def fixture(root, live="eva", target="eva_v3_0"):
     return transition
 
 
+def external_fixture(root):
+    t = fixture(root, live="eva_v3_0", target="eva_v3_0")
+    t.databases["eva_v3_0"] = t.databases.pop("eva")
+    t.resources = [r for r in t.resources if r.get("metadata", {}).get("name") != "eva-app-mysql"]
+    del t.objects[("deployment", "eva-app-mysql")]
+    t.pods = []
+    for secret in (t.resources[-1], t.objects[("secret", "app-secret")]):
+        for key, value in (("MYSQL_HOST", "db-3q23sb.vpc-cdb.ntruss.com"), ("MYSQL_USER", "evauser")):
+            secret["data"][key] = base64.b64encode(value.encode()).decode()
+    return t
+
+
 class FakeTransition(MODULE.Transition):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -133,6 +145,8 @@ class FakeTransition(MODULE.Transition):
         if "information_schema.PROCESSLIST" in statement:
             return "1\t1\t0\t0\t0"
         if "information_schema.SCHEMATA" in statement:
+            if statement.startswith("SELECT COUNT(*)"):
+                return "1"
             return "utf8mb4\tutf8mb4_0900_ai_ci"
         if statement.startswith("CREATE DATABASE"):
             return ""
@@ -540,8 +554,61 @@ class DatabaseTransitionTests(unittest.TestCase):
             self.t.run()
         self.t.objects = {}
         self.t.resources = [r for r in self.t.resources if r.get("metadata", {}).get("name") != "eva-app-mysql"]
-        with self.assertRaisesRegex(MODULE.UnsafeTransition, "External DB"):
-            self.t.run()
+        self.t.databases = {}
+        result = self.t.run()
+        self.assertEqual(result["status"], "new-install-empty-external-database")
+
+    def test_existing_external_db_backup_preserves_data_identity_and_legacy_users(self):
+        t = external_fixture(self.root)
+        before = copy.deepcopy(t.databases)
+        result = t.run()
+        self.assertEqual(result["status"], "external-database-backed-up")
+        self.assertFalse(result["copied"])
+        self.assertFalse(result["identity_updated"])
+        self.assertEqual(t.databases, before)
+        directory = Path(result["backup_directory"])
+        self.assertTrue((directory / "eva_v3_0.sql").is_file())
+        self.assertTrue(json.loads((directory / "external-backup.json").read_text())["verified"])
+        with Path(result["legacy_user_csv"][0]).open(newline="") as stream:
+            rows = list(csv.reader(stream))
+        self.assertEqual(rows[1][1], '홍길동, "관리자"\n두번째 줄\t탭')
+        self.assertFalse(any(isinstance(c, str) and not c.startswith("SELECT ") for c in t.calls))
+        self.assertFalse(any(isinstance(c, str) and "PROCESSLIST" in c for c in t.calls))
+        for p in directory.iterdir():
+            self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+
+    def test_external_iam_schema_still_gets_sql_backup(self):
+        t = external_fixture(self.root)
+        t.databases["eva_v3_0"]["columns"] = ["seq", "keycloak_user_id"]
+        result = t.run()
+        self.assertEqual(result["legacy_user_csv"], [])
+        self.assertTrue((Path(result["backup_directory"]) / "eva_v3_0.sql").exists())
+
+    def test_external_preflight_runs_without_stopping_app_or_mutating_resources(self):
+        t = external_fixture(self.root)
+        t.objects[("deployment", "eva-app")]["spec"]["replicas"] = 1
+        self.assertEqual(t.preflight()["database_type"], "external")
+        self.assertEqual(t.calls, [])
+        with self.assertRaisesRegex(MODULE.UnsafeTransition, "scaled to zero"):
+            t.run()
+        for key, value in (("MYSQL_HOST", "another-db"), ("MYSQL_NAME", "renamed_db"), ("MYSQL_PSWD", "another-password")):
+            t = external_fixture(self.root)
+            t.resources[-1]["data"][key] = base64.b64encode(value.encode()).decode()
+            with self.assertRaises(MODULE.UnsafeTransition):
+                t.preflight()
+            self.assertEqual(t.calls, [])
+
+    def test_external_dump_failure_and_unknown_user_schema_block_before_install(self):
+        t = external_fixture(self.root)
+        t.dump_fails = True
+        with self.assertRaisesRegex(MODULE.UnsafeTransition, "dump failure"):
+            t.run()
+        self.assertFalse(list(self.root.glob("*/result.json")))
+        self.assertTrue(any(c[:2] == ["kubectl", "-n"] and "delete" in c and "secret" in c for c in t.calls if isinstance(c, list)))
+        t = external_fixture(self.root)
+        t.databases["eva_v3_0"]["columns"] = ["unknown"]
+        with self.assertRaisesRegex(MODULE.UnsafeTransition, "Unknown user schema"):
+            t.run()
 
     def test_scaled_deployment_and_running_db_storage_required(self):
         self.t.objects[("deployment", "eva-app")]["spec"]["replicas"] = 1
@@ -648,6 +715,26 @@ class DatabaseTransitionTests(unittest.TestCase):
                 t.run_command(["kubectl"], stdout=subprocess.PIPE)
         self.assertNotIn("private-password-and-row", str(raised.exception))
 
+    def test_external_client_uses_secret_refs_and_cleans_up_when_connection_fails(self):
+        t = MODULE.Transition("eva-app", "eva-app", [], self.root)
+        desired = {"MYSQL_HOST": "db.example", "MYSQL_PORT": "3306", "MYSQL_USER": "evauser", "MYSQL_PSWD": "private-test-password"}
+        proposed = {"spec": {"template": {"spec": {"imagePullSecrets": [{"name": "ecr-registry"}]}}}}
+        with patch.object(t, "run_command", return_value=subprocess.CompletedProcess([], 0)) as command:
+            with self.assertRaisesRegex(MODULE.UnsafeTransition, "injected"):
+                with t.external_client(desired, proposed):
+                    t.mysql(["mysql", "--user=root"], stdout=subprocess.PIPE)
+                    raise MODULE.UnsafeTransition("injected connection failure")
+        calls = command.call_args_list
+        self.assertEqual([json.loads(c.kwargs["input"])["kind"] for c in calls if "input" in c.kwargs], ["Secret", "Pod"])
+        pod = json.loads(calls[1].kwargs["input"])
+        self.assertFalse(pod["spec"]["automountServiceAccountToken"])
+        self.assertTrue(pod["spec"]["containers"][0]["securityContext"]["readOnlyRootFilesystem"])
+        self.assertTrue(all("secretKeyRef" in e["valueFrom"] for e in pod["spec"]["containers"][0]["env"]))
+        self.assertEqual([c.args[0][5] for c in calls if "delete" in c.args[0]], ["pod", "secret"])
+        for c in calls:
+            self.assertNotIn("private-test-password", " ".join(c.args[0]))
+            self.assertNotIn("--user=root", c.args[0])
+
     def test_task_order_and_exact_cli_render(self):
         tasks = yaml.safe_load((ROOT / "src/solution/roles/eva_app/tasks/main.yaml").read_text())
         names = [t["name"] for t in tasks]
@@ -655,7 +742,11 @@ class DatabaseTransitionTests(unittest.TestCase):
         inner = [t["name"] for t in block["block"]]
         self.assertLess(names.index("Wait until EVA App pods are terminated before reinstall"), names.index(block["name"]))
         self.assertLess(inner.index("Preserve EVA App database identity and legacy local users before upgrade"), inner.index("Install EVA App from online Helm repo"))
-        preparation = block["block"][1]
+        self.assertLess(names.index("Validate EVA App DB transition before stopping workloads"),
+                        names.index("Scale down existing EVA App deployment before reinstall"))
+        self.assertLess(names.index("Prepare EVA App database transition tooling"),
+                        names.index("Validate EVA App DB transition before stopping workloads"))
+        preparation = next(t for t in block["block"] if t["name"] == "Preserve EVA App database identity and legacy local users before upgrade")
         self.assertEqual(preparation["when"], "not ansible_check_mode")
         render = next(task for task in yaml.safe_load((ROOT / "src/solution/roles/eva_app/tasks/prepare_database.yaml").read_text())
                   if task["name"] == "Render exact EVA App target manifest for DB preparation")
@@ -668,6 +759,12 @@ class DatabaseTaskFailureTests(unittest.TestCase):
     """Execute the real registered task and rescue, without Helm or a cluster."""
 
     def test_failed_helper_preserves_original_error_and_restores_replicas(self):
+        self.check_helper_failure(rollout_error=False)
+
+    def test_restoration_rollout_failure_includes_underlying_error(self):
+        self.check_helper_failure(rollout_error=True)
+
+    def check_helper_failure(self, *, rollout_error):
         tasks = yaml.safe_load((ROOT / "src/solution/roles/eva_app/tasks/main.yaml").read_text())
         block = copy.deepcopy(next(task for task in tasks if task["name"] ==
                                    "Install EVA App and restore prior replicas if Helm fails"))
@@ -693,7 +790,8 @@ class DatabaseTaskFailureTests(unittest.TestCase):
                                "elif args[:2] == ['scale', 'deployment']:\n"
                                "    print('scaled')\n"
                                "elif args[:2] == ['rollout', 'status']:\n"
-                               "    print('successfully rolled out')\n"
+                               "    print('old image ImagePullBackOff' if " + repr(rollout_error) + " else 'successfully rolled out')\n"
+                               "    sys.exit(1 if " + repr(rollout_error) + " else 0)\n"
                                "else:\n    sys.exit(99)\n")
             kubectl.chmod(0o700)
             task["ansible.builtin.command"]["argv"] = [sys.executable, str(helper)]
@@ -720,10 +818,34 @@ class DatabaseTaskFailureTests(unittest.TestCase):
             self.assertNotIn("Expecting value", result.stdout)
             self.assertNotIn("MUST-NOT-RUN-INSTALL", result.stdout)
             self.assertIn('"changed": false', result.stdout)
-            self.assertIn("replica restoration rc=0, rollout rc=0", result.stdout)
+            self.assertIn("replica restoration rc=0, rollout rc=" + ("1" if rollout_error else "0"), result.stdout)
+            if rollout_error:
+                self.assertIn("Restored App rollout details:", result.stdout)
+                self.assertIn("old image ImagePullBackOff", result.stdout)
             calls = log.read_text().splitlines()
             self.assertEqual(len(calls), 3)
             self.assertIn("--replicas=2", calls[1])
+
+    def test_preflight_failure_prevents_app_scale_down(self):
+        tasks = yaml.safe_load((ROOT / "src/solution/roles/eva_app/tasks/main.yaml").read_text())
+        validation = copy.deepcopy(next(t for t in tasks if t["name"] == "Validate EVA App DB transition before stopping workloads"))
+        scale = next(t for t in tasks if t["name"] == "Scale down existing EVA App deployment before reinstall")
+        with tempfile.TemporaryDirectory(prefix="eva-db-preflight-failure-") as directory:
+            root = Path(directory)
+            helper = root / "fail.py"
+            helper.write_text("import sys\nprint('External DB name changes require a separate migration.',file=sys.stderr)\nsys.exit(1)\n")
+            validation["ansible.builtin.command"]["argv"] = [sys.executable, str(helper)]
+            playbook = root / "play.yaml"
+            playbook.write_text(yaml.safe_dump([{"hosts": "localhost", "connection": "local", "gather_facts": False,
+                "vars": {"ansible_python_interpreter": sys.executable, "eva_app_namespace": "eva-app",
+                         "eva_app_name": "eva-app", "eva_app_kubeconfig": str(root / "unused"),
+                         "eva_app_deployment_exists": {"rc": 0}}, "tasks": [validation, scale]}]))
+            ansible = shutil.which("ansible-playbook") or str(Path(sys.executable).parent / "ansible-playbook")
+            result = subprocess.run([ansible, "-i", "localhost,", str(playbook)], text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("External DB name changes", result.stdout)
+            self.assertNotIn("TASK [Scale down", result.stdout)
 
 
 class LicenseReaderTests(unittest.TestCase):

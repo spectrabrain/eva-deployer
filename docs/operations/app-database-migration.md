@@ -7,7 +7,7 @@ DB 복사, 라이선스 identity 정합화, 제품의 Alembic schema upgrade는 
 
 ## 기본 동작
 
-1. Helm server dry-run과 기존 소유권 검증 후 App을 0 replica로 내리고 Pod 종료를 기다린다.
+1. Helm server dry-run과 기존 소유권·DB 연결·저장소 검증 후 App을 0 replica로 내리고 Pod 종료를 기다린다.
 2. **CLI `--set`까지 적용한 실제 Chart 렌더**에서 대상 DB 이름을 읽는다. Chart 기본값이
    `eva_v3_0`이면 해당 이름을 사용하고, 명시한 `database.name`이 있으면 그 이름을 사용한다.
 3. 기존 내부 MySQL의 준비 상태·Pod 소유 관계·연결값·저장소와 App 데이터/license mount가
@@ -45,6 +45,22 @@ DB 이름/ID를 바꾸는 것만으로 IAM 사용자가 생성되지는 않는�
 로컬 cache는 기존에 저장된 identity의 근거이며 **라이선스 서버의 현재 활성 device·구독·권한을
 확인한 결과가 아니다.** ID 정합화 후에도 서버 측 등록 문제는 별도 점검이 필요할 수 있다.
 
+### 같은 외부 DB를 유지하는 설치와 업데이트
+
+외부 MySQL의 host·port·user·password·DB 이름이 유지되면 수동 백업 제출을 요구하지 않는다.
+App Pod 종료 후 임시 MySQL client Pod로 SQL dump와 필요한 이전 사용자 CSV를 자동 보관한다.
+이미 IAM 사용자 schema여도 SQL dump는 보관한다. 기존 `config.eva_id`를 읽어 백업 전후 검증에
+사용하며 DB 복사·생성·삭제·ID 보정은 하지 않는다. license cache 정합화는 내부 MySQL 경로의 기능이다.
+빈 외부 DB에 신규 설치하려면 DB와 연결 계정이 먼저 준비돼 있어야 한다.
+
+client는 `database.internal.image`로 설정된 MySQL 이미지를 사용한다. 기본은
+`mysql:8.0.42-bookworm`이며 Remote/Local에서는 해당 저장소의 MySQL 이미지를 사용한다.
+임시 Pod와 Secret은 백업 후 제거하며 비밀번호는 명령행·일반 로그에 출력하지 않는다.
+DB 계정에는 dump·사용자 CSV 조회에 필요한 SELECT·SHOW VIEW·TRIGGER 권한이 필요하다.
+읽기 전용 백업에는 root·전역 PROCESS·performance_schema 조회 권한을 요구하지 않는다.
+SQL dump 실패나 백업 전후 테이블 수·행 수·Alembic revision·ID 변경은 새 App 기동 전에 중단한다.
+다른 서비스가 같은 DB를 쓰면 백업·제품 schema migration 중에는 쓰기 작업을 중지해야 한다.
+
 ### DBeaver 등 DB 조회 도구를 연결한 상태
 
 **연결 자체를 끊을 필요는 없다.** 실행 중인 명령·열린 InnoDB 트랜잭션·대상 schema의
@@ -72,7 +88,8 @@ MySQL `performance_schema`와 `wait/lock/metadata/sql/mdl` 계측이 켜져 있�
 
 기본 위치는 **Ansible 실행 대상 서버**의
 `/var/lib/eva/backups/app-db/<site>/<release>/<UTC시각>-<고유값>/`이다.
-Bastion controller로 자동 복사하지 않는다. 설치 로그의 `Show private EVA App DB backup location`
+NKS에서는 설치 계정의 `~/.local/state/eva/backups/app-db/<site>/<release>/`에 보관한다.
+원격 설치 백업을 Bastion controller로 자동 복사하지 않는다. 설치 로그의 `Show private EVA App DB backup location`
 메시지에서 실제 경로를 확인한다. 이 위치는 버전별 App workdir 재생성으로 삭제되지 않는다.
 
 | 파일 | 내용 |
@@ -88,6 +105,7 @@ Bastion controller로 자동 복사하지 않는다. 설치 로그의 `Show priv
 | `identity-before.json` | 이전/보정 ID의 hex, cache·dump checksum, 변경 전 검증 정보; 민감정보 |
 | `identity-complete.json` | `config.eva_id` 단독 변경 검증 성공 기록 |
 | `result.json` | 완료된 DB 준비 결과와 CSV 경로 |
+| `external-backup.json` | 외부 DB 읽기 전용 백업 검증 정보와 dump checksum |
 
 디렉터리는 `0700`, 파일은 `0600`이며 실행 계정 소유다. 매 실행마다 새 디렉터리를 사용하고
 이전 백업은 덮어쓰지 않는다. 실패하면 부분 파일이 남을 수 있으므로 완료 metadata/checksum을
@@ -139,7 +157,8 @@ Chart Values 아래에 넣는 옵션이 아니다.
 - dump/restore/검증 실패: dump와 부분 대상 DB를 보존하고 **새 App 설치 전에 실패**한다.
   이전 Deployment UID가 같으면 기존 replica 복원을 시도한다. 원본으로 복귀한 App이 쓴 데이터와
   부분 대상 DB를 확인해야 하므로 실패한 복사를 자동 재개/덮어쓰기하지 않는다.
-- 외부 DB, root가 아닌 기존 App DB 사용자, DB endpoint/credential/저장소 변경: 지원 범위 밖이므로
+- 외부 DB의 이름 변경·내부/외부 DB 전환, 내부 MySQL의 root가 아닌 기존 App DB 사용자,
+  DB endpoint/credential/저장소 변경: 지원 범위 밖이므로
   사전 수동 migration/사용자 CSV 백업과 검토가 필요하다. 보호 절차를 끄고 진행하는 옵션은 없다.
 - 비-InnoDB 테이블, view/routine/event, cross-DB FK와 미지원 trigger: schema-qualified 참조를
    잘못 복사하지 않도록 자동 이름 이전을 거부한다. 단순 DB dump 명령의 성공만으로 안전하다고

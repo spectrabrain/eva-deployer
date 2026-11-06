@@ -495,6 +495,8 @@ Helm upgrade를 수행하며 기존 database와 영속 데이터를 보존합니
 App의 기존 Helm 소유 PV/PVC는 재사용합니다. 실제 Argo CD 관리 표시 없이 과거 필드 관리 기록만
 남아 있으면 handoff 파일 없이 현재 Helm 리소스의 필드를 갱신합니다. 다른 소유자의 저장소,
 PVC 용량 축소·StorageClass 변경은 별도 확인이나 마이그레이션이 필요합니다.
+App 소유권 검사도 서버 조회를 허용해 렌더링합니다. 차트의 `lookup`으로 기존 `keep` PVC가
+저장 manifest에서 생략된 경우에도 이를 신규 인수 대상으로 판단하지 않습니다.
 
 ```bash
 sudo eva retry --yes

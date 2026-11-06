@@ -136,7 +136,13 @@
       fi
     fi
 
-    helm_template=(helm template "$release" "$chart_source" --namespace "$namespace" --values "$values_file" --values "$effective_values_file")
+    # Use the same lookup behavior as the server dry-run and real upgrade.
+    # A client-only render invents PVC creation targets that the chart skips
+    # when an existing, retained volume is found in Kubernetes.
+    helm_template=(helm template "$release" "$chart_source" --namespace "$namespace" --dry-run=server --values "$values_file" --values "$effective_values_file")
+    if [[ "$failed_release_recovery" == true || "$deployed_release_reconciliation" == true ]]; then
+      helm_template+=(--is-upgrade)
+    fi
     while IFS= read -r helm_set
     do
       [[ -n "$helm_set" ]] || continue
@@ -174,6 +180,34 @@
       do
         [[ -n "$kind" && -n "$name" ]] || continue
         if ! grep -Fxq "$kind"$'\t'"$name" "$rendered_resources_file"; then
+          case "$kind" in
+            PersistentVolume|PersistentVolumeClaim)
+              # lookup may omit storage from the next manifest. Accept only
+              # live storage kept by this exact release; Helm must not delete
+              # or adopt it as part of residual SSA reconciliation.
+              storage_namespace=''
+              [[ "$kind" != PersistentVolumeClaim ]] || storage_namespace="$namespace"
+              resource_json="$(kubectl get "$kind/$name" -n "$namespace" --ignore-not-found=true -o json)"
+              if jq -e --arg kind "$kind" --arg name "$name" --arg namespace "$storage_namespace" '
+                [.[] | select(.kind == $kind and .metadata.name == $name)]
+                | length == 1 and all(.[]; .apiVersion == "v1"
+                  and ((.metadata.namespace // $namespace) == $namespace)
+                  and .metadata.annotations."helm.sh/resource-policy" == "keep")
+              ' "$failed_manifest_json_file" >/dev/null &&
+                jq -e --arg kind "$kind" --arg name "$name" --arg namespace "$storage_namespace" \
+                --arg release "$release" --arg release_namespace "$namespace" '
+                .kind == $kind and .apiVersion == "v1" and .metadata.name == $name
+                and ((.metadata.namespace // "") == $namespace)
+                and .metadata.labels."app.kubernetes.io/managed-by" == "Helm"
+                and .metadata.annotations."meta.helm.sh/release-name" == $release
+                and .metadata.annotations."meta.helm.sh/release-namespace" == $release_namespace
+                and .metadata.annotations."helm.sh/resource-policy" == "keep"
+              ' <<< "$resource_json" >/dev/null; then
+                echo "[INFO] reusing retained Helm storage omitted by chart lookup: $kind/$name"
+                continue
+              fi
+              ;;
+          esac
           if is_obsolete_ecr_resource "$kind" "$name"; then
             continue
           fi

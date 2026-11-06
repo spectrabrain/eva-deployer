@@ -63,6 +63,8 @@ if tool == 'helm':
    'reclaimPolicy':'Retain','volumeBindingMode':'WaitForFirstConsumer'} for v in values['storageClass'].values()]))
   sys.exit(0)
  if args[0]=='template' and args[1]=='eva-app' and 'app_manifest' in state:
+  if '--dry-run=server' in args and 'app_server_manifest' in state:
+   output({'kind':'List','items':state['app_server_manifest']})
   output({'kind':'List','items':state['app_manifest']})
  if args[0]=='template': output({'kind':'Deployment','metadata':{'name':args[1],'namespace':'eva-agent'},
    'spec':{'replicas':1,'template':{'spec':{'serviceAccountName':'sa-eva-agent','containers':[]}}}})
@@ -514,6 +516,15 @@ class SharedFlowTests(unittest.TestCase):
         self.assertEqual(backup.stat().st_mode & 0o777,0o700)
 
     def test_app_retains_helm_owned_pvc_and_reconciles_stale_ssa_without_handoff(self):
+        self.assert_app_storage_reconciliation(stored_claim=True,lookup=False)
+
+    def test_app_lookup_reuses_pvc_absent_from_stored_manifest(self):
+        self.assert_app_storage_reconciliation(stored_claim=False,lookup=True)
+
+    def test_app_lookup_keeps_pvc_omitted_from_next_manifest(self):
+        self.assert_app_storage_reconciliation(stored_claim=True,lookup=True)
+
+    def assert_app_storage_reconciliation(self, *, stored_claim, lookup):
         def owned(kind,name,spec):
             return {'apiVersion':'apps/v1' if kind=='Deployment' else 'v1','kind':kind,
                 'metadata':{'name':name,'namespace':'eva-app','uid':'original-'+name,
@@ -526,7 +537,11 @@ class SharedFlowTests(unittest.TestCase):
         bound=copy.deepcopy(claim)
         bound['spec']['volumeName']='original-ncp-nas-volume'
         bound['status']={'phase':'Bound'}
-        self.state.update(app_manifest=[deployment,claim],app_live=[deployment,bound])
+        self.state.update(app_manifest=[deployment,claim] if stored_claim else [deployment],app_live=[deployment,bound])
+        if lookup:
+            self.state['app_server_manifest']=[deployment]
+            claim['metadata']['annotations']['helm.sh/resource-policy']='keep'
+            bound['metadata']['annotations']['helm.sh/resource-policy']='keep'
         (self.root/'state.json').write_text(json.dumps(self.state))
         work=self.root/'app-reconciliation'
         work.mkdir()
@@ -549,6 +564,9 @@ class SharedFlowTests(unittest.TestCase):
         state=json.loads((self.root/'state.json').read_text())
         self.assertEqual(state['app_live'],[deployment,bound])
         self.assertFalse(any(c['tool']=='kubectl' and c['args'][0] in ['patch','delete','apply','scale'] for c in self.calls()))
+        renders=[c['args'] for c in self.calls() if c['tool']=='helm' and c['args'][:2]==['template','eva-app']]
+        self.assertTrue(renders)
+        self.assertTrue(all('--dry-run=server' in args and '--is-upgrade' in args for args in renders))
 
 
 spec=importlib.util.spec_from_file_location("cluster_guard",ROOT/"src/solution/roles/eva_cluster_guard/files/guard_cluster.py")

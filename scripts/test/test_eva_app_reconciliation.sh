@@ -229,7 +229,10 @@ if tool == "helm":
     elif args[:2] == ["get", "manifest"]:
         print(json.dumps({"kind": "List", "items": fixture["stored"]}))
     elif args[:2] == ["template", "eva-app"]:
-        print(json.dumps({"kind": "List", "items": fixture["rendered"]}))
+        rendered = fixture["rendered"]
+        if "--dry-run=server" in args and fixture.get("server_rendered") is not None:
+            rendered = fixture["server_rendered"]
+        print(json.dumps({"kind": "List", "items": rendered}))
     else:
         raise SystemExit("unexpected Helm command")
 elif args[:2] == ["create", "--dry-run=client"]:
@@ -246,7 +249,10 @@ elif args[0] == "get":
             sys.exit(1)
         print(json.dumps(matches[0]))
     elif "," in args[1]:
-        print(json.dumps({"items": fixture["live"] + fixture["scan_extra"]}))
+        requested = {kind.split(".")[0] for kind in args[1].split(",")}
+        live = [item for item in fixture["live"] + fixture["scan_extra"]
+                if item["kind"].lower() + ("es" if item["kind"] == "Ingress" else "s") in requested]
+        print(json.dumps({"items": live}))
     elif args[1] == "secret" and "-l" in args:
         print(json.dumps({"items": [{"metadata": {"labels": {
             "owner": "helm", "name": "eva-app", "status": "failed"}}}]}))
@@ -284,12 +290,14 @@ def assert_read_only(log, name):
         )
         if not allowed:
             raise SystemExit(f"[ERROR] {name}: forbidden assessment command: {command}")
+        if tool == "helm" and args[:2] == ["template", "eva-app"] and "--dry-run=server" not in args:
+            raise SystemExit(f"[ERROR] {name}: chart lookup requires a server render")
     return commands
 
 def assess(name, *, status="deployed", old=None, live=None, rendered=None,
            enabled="false", receipt=valid_receipt, scan_extra=None, mode="online_repository",
            error=None, assessment="reconcile", encoded=None, target_receipt=None,
-           take_ownership=True, verify_after=False):
+           take_ownership=True, verify_after=False, server_rendered=None):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         install_mock_cli(root)
@@ -300,6 +308,7 @@ def assess(name, *, status="deployed", old=None, live=None, rendered=None,
             "stored": default_resources if old is None else old,
             "live": default_resources if live is None else live,
             "rendered": [deployment] if rendered is None else rendered,
+            "server_rendered": server_rendered,
             "scan_extra": scan_extra or [],
         }))
         env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
@@ -341,7 +350,7 @@ def assess(name, *, status="deployed", old=None, live=None, rendered=None,
             # Simulate the successful Helm upgrade's new manifest, keeping the
             # same live storage UID, volume binding and specification.
             state = json.loads(fixture.read_text())
-            state.update(status="deployed", stored=state["rendered"])
+            state.update(status="deployed", stored=(state["rendered"] if server_rendered is None else server_rendered))
             fixture.write_text(json.dumps(state))
             before_verify = fixture.read_bytes()
             checked = subprocess.run(["bash", "-c", verify_shell], env=env, text=True,
@@ -417,6 +426,32 @@ for status in ("deployed", "failed"):
     assess(status + " Helm-owned PVC with stale SSA fields needs no receipt", status=status,
            old=[*stored, claim], live=untracked, rendered=[deployment, claim], receipt=None,
            take_ownership=False, verify_after=True)
+    # The actual App chart uses lookup to omit an existing PVC. Its last
+    # upgrade may already have removed the kept PVC from the stored manifest.
+    for stored_claim in (False, True):
+        assess(status + " lookup reuses kept PVC; stored=" + str(stored_claim), status=status,
+               old=[*stored, claim] if stored_claim else stored, live=untracked,
+               rendered=[deployment, claim], server_rendered=[deployment], receipt=None,
+               take_ownership=False, verify_after=True)
+        assess(status + " lookup with verified Argo handoff; stored=" + str(stored_claim), status=status,
+               old=[*stored, claim] if stored_claim else stored, live=[*stored, bound_claim],
+               rendered=[deployment, claim], server_rendered=[deployment], verify_after=True)
+
+for name, mutate in (
+    ("keep missing", lambda m: m["annotations"].pop("helm.sh/resource-policy")),
+    ("foreign owner", lambda m: m["annotations"].update({"meta.helm.sh/release-name": "other"})),
+    ("foreign release namespace", lambda m: m["annotations"].update({"meta.helm.sh/release-namespace": "other"})),
+):
+    invalid = copy.deepcopy(bound_claim)
+    mutate(invalid["metadata"])
+    assess("lookup-omitted stored PVC " + name, old=[*stored, claim], live=[*stored, invalid],
+           rendered=[deployment, claim], server_rendered=[deployment],
+           error="release manifest is incompatible with current rendered chart")
+not_kept = copy.deepcopy(claim)
+not_kept["metadata"]["annotations"].pop("helm.sh/resource-policy")
+assess("lookup-omitted stored PVC needs stored keep policy", old=[*stored, not_kept], live=[*stored, bound_claim],
+       rendered=[deployment, claim], server_rendered=[deployment],
+       error="release manifest is incompatible with current rendered chart")
 default_namespace_claim = copy.deepcopy(claim)
 default_namespace_claim["metadata"].pop("namespace")
 assess("PVC manifest inherits Helm namespace", old=[*stored, default_namespace_claim],

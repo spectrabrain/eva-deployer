@@ -68,7 +68,7 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 				}
 				answers += scope + "\n"
 				if scope == "2" {
-					answers += "2\n1\n1\n1\n" // HTTPS/shared/co-install/Agent+Vision
+					answers += "2\n1\n1\n1\n3\n" // HTTPS/shared/co-install/Agent+Vision/other GPU
 				}
 				input, messages, path := configureTest(t, answers)
 				if input.Repository.Mode != mode || (input.Credentials.AWS != nil) != (mode == "online") {
@@ -242,7 +242,7 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 		"1", "2", "1", // Online + Bastion + On-premise
 		"infra-a", "192.0.2.10", "eva", "1", "1", // Infra-only, add another
 		"iam-app", "192.0.2.11", "eva", "2", // don't reuse Infra-only
-		"2", "2", "3", "1", "1", "1", // Solution/HTTPS/IP/co-install/Agent+Vision/add
+		"2", "2", "3", "1", "1", "3", "1", // Solution/HTTPS/IP/co-install/Agent+Vision/other GPU/add
 		"external-app", "192.0.2.12", "eva", "2", // different solution
 		"2", "1", "2", "2", "4", "2", // Solution/HTTP/separate/external/no extras/done
 	}, "\n") + "\n"

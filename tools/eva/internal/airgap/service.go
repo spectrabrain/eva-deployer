@@ -66,9 +66,9 @@ func ValidateOptions(options Options) error {
 		return errors.New("Airgap Bundle output must be a .tar.gz file")
 	}
 	switch options.VLLMProfile {
-	case "A6000x1", "L40sx1", "PRO5000x3", "PRO6000-MIGx4":
+	case "A6000x1", "L40sx1", "PRO5000x3", "PRO6000x1", "PRO6000-MIGx4":
 	default:
-		return errors.New("--vllm-profile must be A6000x1, L40sx1, PRO5000x3 or PRO6000-MIGx4")
+		return errors.New("--vllm-profile must be A6000x1, L40sx1, PRO5000x3, PRO6000x1 or PRO6000-MIGx4")
 	}
 	if !driverPackagePattern.MatchString(options.DriverPackage) {
 		return errors.New("--driver-package must be nvidia-driver-NNN or nvidia-driver-NNN-open")
@@ -329,6 +329,10 @@ func preflight(ctx context.Context) error {
 }
 
 func vllmValuesFile(catalog, profile string) (string, error) {
+	// PRO6000 without MIG uses the published single whole-GPU Values.
+	if profile == "PRO6000x1" {
+		profile = "L40sx1"
+	}
 	contents, err := os.ReadFile(catalog)
 	if err != nil {
 		return "", err

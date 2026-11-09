@@ -67,14 +67,21 @@ Main의 Harbor·자산 준비를 먼저 완료하며 별도 타겟 등록 명령
 ## 4. GPU 구성 선택 (서버 설치)
 
 Agent를 설치할 서버의 GPU를 다음 표와 맞춥니다. `eva install`은 Agent/Vision 대상의 GPU 상태를
-확인하고 필요한 구성을 자동 적용합니다. RTX PRO 6000의 MIG를 수동으로 분할할 필요가 없습니다.
+확인하고 필요한 구성을 자동 적용합니다. `eva install configure`에서 RTX PRO 6000의 MIG 사용 여부를
+선택합니다. `MIG 사용`을 선택하면 4개를 자동 구성하며, `MIG 사용 안 함`은 전체 GPU를 재사용합니다.
 
 | Agent profile | 물리 GPU | MIG |
 | --- | --- | --- |
 | `A6000x1` | RTX A6000 1장 | 사용 안 함 |
 | `L40sx1` | L40S 1장 | 사용 안 함 |
 | `PRO5000x3` | RTX PRO 5000 Blackwell 3장 | 사용 안 함 |
+| `PRO6000x1` | RTX PRO 6000 Blackwell 1장 | 사용 안 함 |
 | `PRO6000-MIGx4` | RTX PRO 6000 Blackwell 1장 | 4개 자동 구성 |
+
+선택값은 `targets.<target>.ansible.eva_gpu_mig_enabled`에 `true` 또는 `false`로 저장하며,
+`infra: false`인 Solution-only 설치에도 적용합니다. 기존 설정에서 이 값을 생략하면 이전 자동 구성
+동작을 유지합니다. MIG 사용 안 함을 선택했는데 이미 MIG가 켜져 있으면 기존 분할을 보존하고 중단합니다.
+`PRO6000x1`은 Release의 `L40sx1` 단일 전체 GPU vLLM Values를 사용합니다.
 
 이미 맞는 GPU/MIG 구성은 재사용합니다. 다른 MIG 분할이 있거나 변경할 GPU에 workload가
 실행 중이면 중단하므로 해당 구성을 정리한 뒤 다시 실행합니다.
@@ -370,6 +377,8 @@ Runtime bootstrap과 Online Infra 설치는 APT 저장소를 자동 확인합니
 자동 복구하고 재검증한 뒤 설치를 계속합니다. Bastion 설치에서도 각 타겟에서 처리하며
 별도 진단·복구 명령을 실행할 필요가 없습니다. 복구 후 검증이 실패하면 기존 저장소 설정을 되돌리고
 설치를 중단합니다. 지원하지 않는 오류는 설치 로그에서 원인을 확인합니다.
+NVIDIA Container Toolkit의 알려진 서명 키 누락도 자동 복구합니다. Solution-only GPU 감지에서는
+설치된 `lspci`를 재사용하며, 도구가 없을 때만 APT를 확인하고 패키지를 설치합니다.
 
 인증서 SAN 검증이 실패하면 해당 IAM/App 외부 주소를 SAN에 포함한 인증서와 key를 같은 host path에
 다시 준비한 뒤, 설정 값을 바꾸지 않았다면 실패한 작업을 재시도합니다.

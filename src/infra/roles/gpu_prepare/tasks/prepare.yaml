@@ -26,14 +26,18 @@
 - name: Save the Release GPU model map
   ansible.builtin.copy:
     dest: /etc/eva/gpu-mig-models.json
-    content: "{{ eva_gpu_model_map | to_json }}"
+    content: "{{ (eva_gpu_model_map | combine({'_eva_mig_enabled': eva_gpu_mig_enabled} if eva_gpu_mig_enabled is defined else {})) | to_json }}"
     owner: root
     group: root
     mode: '0644'
 
+- name: Resolve GPU helper MIG selection arguments
+  ansible.builtin.set_fact:
+    eva_gpu_mig_arguments: "{{ ['--mig', 'enabled' if eva_gpu_mig_enabled else 'disabled'] if eva_gpu_mig_enabled is defined else [] }}"
+
 - name: Inspect GPU layout before any device changes
   ansible.builtin.command:
-    argv: "{{ ['python3', '/usr/local/libexec/eva-gpu-prepare.py', '--model-map', '/etc/eva/gpu-mig-models.json'] + (['--agent'] if 'agent' in (eva_enabled_components | default('')).split(',') else []) }}"
+    argv: "{{ ['python3', '/usr/local/libexec/eva-gpu-prepare.py', '--model-map', '/etc/eva/gpu-mig-models.json'] + eva_gpu_mig_arguments + (['--agent'] if 'agent' in (eva_enabled_components | default('')).split(',') else []) }}"
   register: eva_gpu_inspection
   changed_when: false
 
@@ -48,7 +52,7 @@
 
 - name: Apply missing GPU mode and MIG instances
   ansible.builtin.command:
-    argv: "{{ ['python3', '/usr/local/libexec/eva-gpu-prepare.py', '--model-map', '/etc/eva/gpu-mig-models.json', '--apply', '--selector', '/usr/local/libexec/eva-displaymodeselector'] + (['--agent'] if 'agent' in (eva_enabled_components | default('')).split(',') else []) }}"
+    argv: "{{ ['python3', '/usr/local/libexec/eva-gpu-prepare.py', '--model-map', '/etc/eva/gpu-mig-models.json', '--apply', '--selector', '/usr/local/libexec/eva-displaymodeselector'] + eva_gpu_mig_arguments + (['--agent'] if 'agent' in (eva_enabled_components | default('')).split(',') else []) }}"
   register: eva_gpu_application
   changed_when: eva_gpu_application.rc == 0 and ((eva_gpu_application.stdout | from_json).changed | bool)
   when: not (eva_gpu_state.ready | bool)

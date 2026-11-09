@@ -58,6 +58,35 @@ func writeInstaller(t *testing.T, content string) string {
 	return path
 }
 
+func TestInstallerMIGChoicePreservesTypeAndSSHDispatch(t *testing.T) {
+	for _, selection := range []string{"false", "true", `"false"`, "0"} {
+		t.Run(selection, func(t *testing.T) {
+			config := strings.Replace(installerFixture, "ansible_connection: local", "ansible_connection: ssh\n      eva_gpu_mig_enabled: "+selection, 1)
+			input, err := LoadInstaller(writeInstaller(t, config), "")
+			if selection != "true" && selection != "false" {
+				if err == nil || !strings.Contains(err.Error(), "must be a YAML boolean") {
+					t.Fatalf("invalid MIG selection accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := input.LocalTargetConfig("node-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var local Installer
+			if err := yaml.Unmarshal(data, &local); err != nil {
+				t.Fatal(err)
+			}
+			if local.Targets["node-a"].Ansible["eva_gpu_mig_enabled"] != (selection == "true") {
+				t.Fatal("SSH target dispatch lost the explicit MIG choice")
+			}
+		})
+	}
+}
+
 func TestInstallerMaterializesExistingWorkspaceContract(t *testing.T) {
 	path := writeInstaller(t, installerFixture)
 	cache := filepath.Join(t.TempDir(), "workspaces")

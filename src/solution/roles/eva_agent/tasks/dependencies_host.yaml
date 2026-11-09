@@ -4,6 +4,7 @@
       - A6000x1
       - L40sx1
       - PRO5000x3
+      - PRO6000x1
       - PRO6000-MIGx4
     eva_agent_local_mount_candidates: >-
       {{

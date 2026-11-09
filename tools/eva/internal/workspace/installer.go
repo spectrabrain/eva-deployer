@@ -156,6 +156,11 @@ func (input Installer) validate(requestedSiteID string) error {
 		if len(target.Ansible) == 0 {
 			return fmt.Errorf("target %s requires an ansible mapping (for example ansible_connection: local)", name)
 		}
+		if value, exists := target.Ansible["eva_gpu_mig_enabled"]; exists {
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("target %s eva_gpu_mig_enabled must be a YAML boolean (true or false)", name)
+			}
+		}
 		if target.Components != nil {
 			if err := validateTargetComponents(name, target.Components, input.Components); err != nil {
 				return err

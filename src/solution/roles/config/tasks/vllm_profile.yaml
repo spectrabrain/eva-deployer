@@ -89,11 +89,26 @@
            else []
          )
          + (
+           ['PRO6000x1']
+           if (config_vllm_gpu_model_names | unique | list | length) == 1
+              and (config_vllm_gpu_model_names | unique | list | first) in (config_gpu_mig_model_map | default({})).keys()
+              and ((config_gpu_mig_model_map[(config_vllm_gpu_model_names | unique | list | first)].gpu_mig_mig_instance_count | int) == 4)
+              and (config_detected_gpu_count | int) == 1
+              and eva_gpu_mig_enabled is defined
+              and eva_gpu_mig_enabled == false
+              and not (config_mig_enabled | bool)
+              and (config_mig_instance_count | int) == 0
+              and (config_vllm_mig_resource_names | length) == 0
+              and (config_vllm_gpu_resource_names | length) > 0
+           else []
+         )
+         + (
            ['PRO6000-MIGx4']
            if (config_vllm_gpu_model_names | unique | list | length) == 1
               and (config_vllm_gpu_model_names | unique | list | first) in (config_gpu_mig_model_map | default({})).keys()
               and ((config_gpu_mig_model_map[(config_vllm_gpu_model_names | unique | list | first)].gpu_mig_mig_instance_count | int) == 4)
               and (config_detected_gpu_count | int) == 1
+              and (eva_gpu_mig_enabled is not defined or eva_gpu_mig_enabled == true)
               and (config_mig_enabled | bool)
               and (config_mig_instance_count | int) == 4
               and (config_vllm_mig_resource_names | length) == 1
@@ -107,10 +122,13 @@
     that:
       - config_vllm_nodes.rc == 0
       - config_vllm_profile_candidates | length == 1
+      - eva_gpu_mig_enabled is not defined or eva_gpu_mig_enabled is boolean
+      - eva_gpu_mig_enabled is not defined or (config_vllm_profile_candidates | first | default('')) in ['PRO6000x1', 'PRO6000-MIGx4']
     fail_msg: >-
       EVA Agent vLLM profile cannot be determined from the detected GPU model,
       physical GPU count, MIG state, and Kubernetes NVIDIA allocatable resources.
-      Supported profiles are A6000x1, L40sx1, PRO5000x3, and PRO6000-MIGx4.
+      Supported profiles are A6000x1, L40sx1, PRO5000x3, PRO6000x1, and PRO6000-MIGx4.
+      PRO6000x1 requires eva_gpu_mig_enabled: false and verified whole GPU resources.
       Detected GPU models={{ config_vllm_gpu_model_names | to_json }},
       physical GPU count={{ config_detected_gpu_count | int }},
       MIG enabled={{ config_mig_enabled | bool }},

@@ -823,7 +823,7 @@ func TestServicePrepareRejectsOptionsBeforePreflight(t *testing.T) {
 }
 
 func TestValidateOptionsAcceptsSupportedProfilesAndDrivers(t *testing.T) {
-	for _, profile := range []string{"A6000x1", "L40sx1", "PRO5000x3", "PRO6000-MIGx4"} {
+	for _, profile := range []string{"A6000x1", "L40sx1", "PRO5000x3", "PRO6000x1", "PRO6000-MIGx4"} {
 		for _, driver := range []string{"nvidia-driver-580", "nvidia-driver-580-open", "nvidia-driver-535"} {
 			t.Run(profile+"/"+driver, func(t *testing.T) {
 				options := Options{Output: filepath.Join(t.TempDir(), "bundle.tar.gz"), VLLMProfile: profile, DriverPackage: driver}
@@ -993,6 +993,21 @@ func TestVLLMValuesFilePinnedReleaseLayouts(t *testing.T) {
 	}
 	if got, err := vllmValuesFile(filepath.Join(t.TempDir(), "missing.yaml"), "L40sx1"); err == nil || got != "" {
 		t.Fatalf("missing catalog accepted: %q, %v", got, err)
+	}
+}
+
+func TestPRO6000WholeGPUValuesReusePublishedSingleGPUProfile(t *testing.T) {
+	for _, version := range []string{"3.1.0", "3.3.0"} {
+		catalog := filepath.Join(t.TempDir(), "version.yaml")
+		archiveTestWriteFile(t, catalog, serviceTestYAML(t, map[string]string{"eva_agent_release": version}))
+		want, err := vllmValuesFile(catalog, "L40sx1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := vllmValuesFile(catalog, "PRO6000x1")
+		if err != nil || got != want {
+			t.Fatalf("PRO6000x1 values = %q, %v; want %q", got, err, want)
+		}
 	}
 }
 

@@ -53,6 +53,11 @@ eva-agent-vllm/values-k3s.PRO6000-MIGx4.docker.yaml
 eva-agent-vllm/values-k3s.PRO6000-MIGx4.harbor.yaml'
 [[ "$(eva_agent_release_values_paths legacy)" == "$expected_legacy" ]] || fail "legacy values paths differ"
 [[ "$(eva_agent_release_values_paths source-split)" == "$expected_split" ]] || fail "source-split values paths differ"
+for layout in legacy source-split; do
+  for variant in source harbor; do
+    [[ "$(eva_agent_values_file "$layout" eva-agent-vllm "$variant" PRO6000x1)" == "$(eva_agent_values_file "$layout" eva-agent-vllm "$variant" L40sx1)" ]] || fail "PRO6000x1 must reuse the published whole-GPU Values"
+  done
+done
 
 # prepare-offline-assets must check exactly the files the selected Agent
 # release publishes, and stop before any download when one is missing. curl

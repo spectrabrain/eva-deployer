@@ -66,20 +66,32 @@ def instances(gpu):
     return gpu_instances, compute_instances
 
 
-def inspect(model_map, agent=False, expected_uuid=""):
+def inspect(model_map, agent=False, expected_uuid="", mig_enabled=None):
     gpus = inventory()
     names = [gpu["name"] for gpu in gpus]
     model = model_map.get(names[0], {}) if len(gpus) == 1 else {}
-    needs_mig = int(model.get("gpu_mig_mig_instance_count", 0)) == 4
+    pro6000 = int(model.get("gpu_mig_mig_instance_count", 0)) == 4
+    # Persist the installer's choice beside the model entries so existing boot
+    # restoration units, which omit --mig, also honor MIG opt-out.
+    if mig_enabled is None:
+        mig_enabled = model_map.get("_eva_mig_enabled")
+    if mig_enabled is not None and not isinstance(mig_enabled, bool):
+        raise PreparationError("MIG selection must be true or false")
+    if mig_enabled is not None and not pro6000:
+        raise PreparationError("Explicit MIG selection requires one supported RTX PRO 6000; detected " + str(names))
+    needs_mig = pro6000 and mig_enabled is not False
     supported_non_mig = ((names == ["NVIDIA RTX A6000"])
                          or (names == ["NVIDIA L40S"])
+                         or (pro6000 and mig_enabled is False)
                          or (len(names) == 3 and len(set(names)) == 1
                              and names[0] in ("PRO 5000 Blackwell", "NVIDIA RTX PRO 5000 Blackwell")))
     if agent and not (needs_mig or supported_non_mig):
-        raise PreparationError("Unsupported Agent GPU layout. Expected A6000x1, L40sx1, PRO5000x3 or PRO6000-MIGx4; detected " + str(names))
+        raise PreparationError("Unsupported Agent GPU layout. Expected A6000x1, L40sx1, PRO5000x3, PRO6000x1 or PRO6000-MIGx4; detected " + str(names))
     if not needs_mig:
         if supported_non_mig and any(gpu["mode"] == "Enabled" for gpu in gpus):
             raise PreparationError("This EVA profile uses whole GPUs, but MIG is enabled. Existing MIG configuration was preserved; resolve the profile mismatch before installing.")
+        if pro6000 and gpus[0]["mode"] not in ("Disabled", "N/A", "[N/A]", "[Not Supported]"):
+            raise PreparationError("Cannot verify non-MIG mode for MIG opt-out. GPU mode and existing workloads were preserved.")
         return {"status": "whole_gpu_ready", "needs_mig": False, "ready": True, "changed": False, "gpus": gpus}
     gpu = gpus[0]
     if expected_uuid and gpu["uuid"] != expected_uuid:
@@ -101,8 +113,8 @@ def inspect(model_map, agent=False, expected_uuid=""):
             "gpu": gpu, "profile": profile, "gpu_instances": gi, "compute_instances": ci}
 
 
-def apply(model_map, selector="", agent=False, expected_uuid=""):
-    state = inspect(model_map, agent, expected_uuid)
+def apply(model_map, selector="", agent=False, expected_uuid="", mig_enabled=None):
+    state = inspect(model_map, agent, expected_uuid, mig_enabled)
     if state["ready"]:
         return state
     gpu = state["gpu"]
@@ -189,6 +201,7 @@ def main():
     parser.add_argument("--model-map", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--agent", action="store_true")
+    parser.add_argument("--mig", choices=("auto", "enabled", "disabled"), default="auto")
     parser.add_argument("--selector", default="")
     parser.add_argument("--gpu-uuid", default="")
     parser.add_argument("--reconcile-k3s", action="store_true")
@@ -199,7 +212,8 @@ def main():
             result = reconcile_k3s(args.require_k3s)
         else:
             model_map = json.loads(pathlib.Path(args.model_map).read_text())
-            result = apply(model_map, args.selector, args.agent, args.gpu_uuid) if args.apply else inspect(model_map, args.agent, args.gpu_uuid)
+            mig_enabled = {"auto": None, "enabled": True, "disabled": False}[args.mig]
+            result = apply(model_map, args.selector, args.agent, args.gpu_uuid, mig_enabled) if args.apply else inspect(model_map, args.agent, args.gpu_uuid, mig_enabled)
         print(json.dumps(result))
     except (PreparationError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         print(str(error), file=sys.stderr)

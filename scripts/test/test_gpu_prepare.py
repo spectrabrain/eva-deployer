@@ -152,6 +152,47 @@ class GPUPreparationTests(unittest.TestCase):
             self.assertFalse(self.apply(device, agent=True)["needs_mig"])
             self.assertEqual(device.mutations, [])
 
+    def test_pro6000_mig_opt_out_preserves_busy_whole_gpu_and_display_mode(self):
+        for mode in ("Disabled", "N/A", "[N/A]", "[Not Supported]"):
+            device = Device(mode=mode)
+            device.busy = True
+            device.display = "Enabled"
+            state = self.apply(device, agent=True, mig_enabled=False)
+            self.assertEqual(state["status"], "whole_gpu_ready")
+            self.assertFalse(state["needs_mig"])
+            self.assertEqual(device.mutations, [])
+            self.assertEqual(len(device.calls), 1)
+
+    def test_pro6000_explicit_mig_enable_still_prepares_four_slices(self):
+        device = Device(mode="Disabled")
+        state = self.apply(device, agent=True, mig_enabled=True)
+        self.assertTrue(state["needs_mig"])
+        self.assertEqual(device.profiles, ["67"] * 4)
+
+    def test_pro6000_opt_out_preserves_existing_mig_and_unknown_modes(self):
+        for mode in ("Enabled", "Unknown", ""):
+            device = Device(mode=mode, profiles=["67"] * 4, ci=range(4))
+            with self.assertRaises(gpu.PreparationError):
+                self.apply(device, mig_enabled=False)
+            self.assertEqual(device.mutations, [])
+
+    def test_boot_restoration_honors_saved_mig_opt_out(self):
+        device = Device(mode="Disabled")
+        device.busy = True
+        model_map = dict(MODEL_MAP, _eva_mig_enabled=False)
+        with patch.object(gpu, "run", device.run):
+            state = gpu.apply(model_map, expected_uuid="GPU-0")
+        self.assertFalse(state["needs_mig"])
+        self.assertEqual(device.mutations, [])
+
+    def test_explicit_mig_selection_requires_the_selected_hardware(self):
+        for names in (["NVIDIA RTX A6000"], ["NVIDIA L40S"], ["NVIDIA RTX PRO 6000 Blackwell"] * 2):
+            for enabled in (False, True):
+                device = Device(mode="Disabled", names=names)
+                with self.assertRaisesRegex(gpu.PreparationError, "requires one supported"):
+                    self.apply(device, mig_enabled=enabled)
+                self.assertEqual(device.mutations, [])
+
     def test_pro5000_mig_model_map_does_not_trigger_agent_mig(self):
         device = Device(mode="Disabled", names=["NVIDIA RTX PRO 5000 Blackwell"])
         with self.assertRaisesRegex(gpu.PreparationError, "Unsupported Agent"):

@@ -316,6 +316,9 @@ eva_agent_values_file() {
       suffix=ecr
       ;;
     eva-agent-vllm)
+      # PRO6000x1 reuses the published single whole-GPU Values; it does not
+      # add another required upstream release asset.
+      [[ "$profile" == PRO6000x1 ]] && profile=L40sx1
       if [[ " ${EVA_AGENT_VLLM_PROFILES[*]} " != *" ${profile} "* ]]; then
         echo "[ERROR] unsupported EVA Agent vLLM profile: ${profile}" >&2
         return 1

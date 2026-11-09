@@ -1,3 +1,10 @@
+- name: Validate explicit PRO6000 MIG selection
+  ansible.builtin.assert:
+    that:
+      - eva_gpu_mig_enabled is boolean
+    fail_msg: "eva_gpu_mig_enabled must be a YAML boolean (true or false)."
+  when: eva_gpu_mig_enabled is defined
+
 - name: Detect target NVIDIA GPU
   ansible.builtin.import_tasks: "{{ eva_infra_root }}/roles/gpu/tasks/detect.yaml"
   when: not (eva_gpu_current_host | default(false) | bool)

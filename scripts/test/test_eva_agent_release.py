@@ -517,6 +517,25 @@ class AgentPreparationTests(unittest.TestCase):
                     ['eva_agent_values_file','eva_agent_vllm_values_file','eva_agent_qdrant_values_file','eva_agent_init_values_file','eva_agent_qdrant_snapshot_source'],expected)]}}],variables)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
+    def test_pro6000_whole_gpu_uses_published_values_in_online_and_harbor_layouts(self):
+        names = {'Set EVA Agent dependency defaults', 'Resolve EVA Agent Release values layout',
+                 'Validate EVA Agent Release values layout', 'Resolve EVA Agent Release values files'}
+        tasks = [t for t in yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text()) if t.get('name') in names]
+        for version, suffix in [('3.1.0', ''), ('3.3.0', '.docker')]:
+            for mode in ['online_repository', 'local_repository']:
+                with self.subTest(version=version, mode=mode), tempfile.TemporaryDirectory() as directory:
+                    work = Path(directory)
+                    variables = {'eva_agent_deploy_version': version, 'eva_agent_vllm_chart_version': version,
+                                 'eva_agent_vllm_profile': 'PRO6000x1', 'repository_mode': mode,
+                                 'eva_cache_root': str(work), 'eva_site_deploy_root': str(work),
+                                 'eva_agent_cache_root': str(work), 'eva_agent_offline_dir': str(work),
+                                 'qdrant_chart_version': '1.18.2',
+                                 'ansible_facts': {'env': {'HOME': str(work)}}}
+                    expected = 'values-k3s.L40sx1' + (suffix.replace('docker', 'harbor') if mode == 'local_repository' else suffix) + '.yaml'
+                    result = ansible(work, tasks + [{'ansible.builtin.assert': {
+                        'that': ['eva_agent_vllm_values_file == ' + json.dumps(expected)]}}], variables)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_credentials_precede_storage_migrations_and_workload_changes(self):
         tasks = dependency_tasks()
         names = [task.get('name') for task in tasks]

@@ -200,6 +200,9 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 				target.Solution, target.IAM, target.Protocol, target.Address = previous.Solution, previous.IAM, previous.Protocol, previous.Address
 				target.Agent, target.Vision = previous.Agent, previous.Vision
 				target.SolutionOnly = previous.SolutionOnly
+				if enabled, exists := previous.Ansible["eva_gpu_mig_enabled"]; exists {
+					target.Ansible["eva_gpu_mig_enabled"] = enabled
+				}
 				reuse = true
 			}
 		}
@@ -370,6 +373,15 @@ func (prompt configurePrompts) solution(target *workspace.ConfigureTarget) error
 		return err
 	}
 	target.Agent, target.Vision = choice == "1" || choice == "2", choice == "1" || choice == "3"
+	if target.Deployment == nil && (target.Agent || target.Vision) {
+		choice, err = prompt.choice("PRO6000 GPU 구성\n  1) PRO6000 — MIG 사용 안 함 (전체 GPU 재사용)\n  2) PRO6000 — MIG 사용 (4개 자동 구성)\n  3) 다른 GPU — 모델에 맞게 자동 감지", "3", "1", "2", "3")
+		if err != nil {
+			return err
+		}
+		if choice != "3" {
+			target.Ansible["eva_gpu_mig_enabled"] = choice == "2"
+		}
+	}
 	if target.Address == "ip" && target.Protocol == "https" && target.Deployment == nil {
 		fmt.Fprintln(prompt.output, "IP 직접 HTTPS는 해당 IP SAN을 포함한 인증서를 타겟에 준비해야 합니다.")
 	}
@@ -384,7 +396,11 @@ func configureTargetSummary(target workspace.ConfigureTarget) string {
 	if target.SolutionOnly {
 		scope = "Solution만"
 	}
-	return fmt.Sprintf("%s / %s / %s / IAM=%s / Agent=%t / Vision=%t", scope, target.Protocol, target.Address, target.IAM, target.Agent, target.Vision)
+	summary := fmt.Sprintf("%s / %s / %s / IAM=%s / Agent=%t / Vision=%t", scope, target.Protocol, target.Address, target.IAM, target.Agent, target.Vision)
+	if enabled, exists := target.Ansible["eva_gpu_mig_enabled"]; exists {
+		summary += fmt.Sprintf(" / PRO6000 MIG=%t", enabled)
+	}
+	return summary
 }
 
 func shellQuoteConfigurePath(path string) string {

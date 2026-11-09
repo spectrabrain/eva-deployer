@@ -33,7 +33,7 @@ func runAirgap(args []string) error {
 	flags.SetOutput(os.Stderr)
 	input := flags.String("release", "", "verified original Release directory; defaults to Current Release")
 	output := flags.String("output", "", "new Bundle archive path (.tar.gz); defaults to the invoking user's home, never overwritten")
-	profile := flags.String("vllm-profile", "", "A6000x1|L40sx1|PRO5000x3|PRO6000-MIGx4")
+	profile := flags.String("vllm-profile", "", "A6000x1|L40sx1|PRO5000x3|PRO6000x1|PRO6000-MIGx4")
 	driver := flags.String("driver-package", "nvidia-driver-580", "NVIDIA driver package to include in the Bundle; defaults to nvidia-driver-580 for all profiles")
 	display := flags.String("display-mode-selector", "", "approved NVIDIA Display Mode Selector zip (optional)")
 	yes := flags.Bool("yes", false, "approve downloads, Docker pulls and missing Runtime online bootstrap")

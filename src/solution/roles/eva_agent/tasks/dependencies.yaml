@@ -150,6 +150,7 @@
     - eva_agent_values_layout
 
 - name: Resolve EVA Agent Release values files
+  # PRO6000x1 uses the published single whole-GPU L40sx1 Values.
   ansible.builtin.set_fact:
     eva_agent_values_file: >-
       {{
@@ -166,7 +167,7 @@
         | default(
             'values-ncp.' ~ ({'L40sx1': 'L40Sx1'}.get(eva_agent_vllm_profile, eva_agent_vllm_profile)) ~ '.yaml'
             if (eva_managed_cluster | default(false) | bool) else
-            'values-k3s.' ~ eva_agent_vllm_profile
+            'values-k3s.' ~ ({'PRO6000x1': 'L40sx1'}.get(eva_agent_vllm_profile, eva_agent_vllm_profile))
             ~ ((eva_agent_values_layout == 'legacy') | ternary('', '.' ~ ((eva_agent_values_variant == 'harbor') | ternary('harbor', 'docker'))))
             ~ '.yaml'
           )

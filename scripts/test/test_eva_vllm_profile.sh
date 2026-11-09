@@ -12,6 +12,7 @@ trap cleanup EXIT
 
 run_case() {
   local name="$1" models="$2" gpu_count="$3" mig_enabled="$4" mig_count="$5" resources="$6" expected="${7:-}"
+  local mig_choice="${8:-auto}"
   local root="$TMP_ROOT/$name"
   mkdir -p "$root/bin"
 
@@ -36,6 +37,7 @@ EOF
     config_detected_gpu_count: $gpu_count
     config_mig_enabled: $mig_enabled
     config_mig_instance_count: $mig_count
+$(if [[ "$mig_choice" != auto ]]; then printf '    eva_gpu_mig_enabled: %s' "$mig_choice"; fi)
   tasks:
     - ansible.builtin.include_tasks: $REPO_ROOT/src/solution/roles/config/tasks/vllm_profile.yaml
 EOF
@@ -65,6 +67,14 @@ run_case pro6000-mig 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 true 4 '{"
 run_case pro6000-workstation-mig 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"4"}}}]}' PRO6000-MIGx4
 run_case pro6000-maxq-mig 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"4"}}}]}' PRO6000-MIGx4
 run_case pro6000-maxq-no-mig 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}'
+run_case pro6000-whole 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}' PRO6000x1 false
+run_case pro6000-workstation-whole 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}' PRO6000x1 false
+run_case pro6000-maxq-whole 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}' PRO6000x1 false
+run_case pro6000-explicit-mig 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/mig-1g.24gb":"4"}}}]}' PRO6000-MIGx4 true
+run_case pro6000-optout-conflicts 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/mig-1g.24gb":"4"}}}]}' '' false
+run_case pro6000-optin-conflicts 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}' '' true
+run_case pro6000-optout-no-resources 'NVIDIA RTX PRO 6000 Blackwell Server Edition' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0"}}}]}' '' false
+run_case wrong-model-explicit-mig 'NVIDIA RTX A6000' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}' '' false
 run_case pro6000-maxq-incomplete-mig 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 true 3 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"3"}}}]}'
 run_case pro6000-maxq-zero-resources 'NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition' 1 true 4 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"0","nvidia.com/mig-1g.24gb":"0"}}}]}'
 run_case unsupported 'NVIDIA H100' 1 false 0 '{"items":[{"status":{"allocatable":{"nvidia.com/gpu":"1"}}}]}'

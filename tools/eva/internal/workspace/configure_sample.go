@@ -136,6 +136,9 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 			if err := node.Encode(value); err != nil {
 				return nil, errors.New("cannot encode target connection settings")
 			}
+			if key == "eva_gpu_mig_enabled" {
+				node.LineComment = "PRO6000: true이면 MIG 4개 구성, false이면 기존 전체 GPU 재사용. Solution-only에도 적용합니다."
+			}
 			setSampleMappingValue(ansible, key, node)
 		}
 		componentNode := new(yaml.Node)

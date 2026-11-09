@@ -51,8 +51,11 @@ print(json.dumps({{"changed": os.environ["EVA_APT_TEST_RESULT"] == "repaired"}})
                                 ANSIBLE_CONFIG=str(ROOT / 'ansible.cfg'),
                                 ANSIBLE_NOCOLOR='1', ANSIBLE_LOG_PATH=os.devnull)
 
-    def execute(self, result='healthy', base_gate=False, check=False, success=True):
+    def execute(self, result='healthy', base_gate=False, check=False, success=True,
+                gpu_detection=False):
         task = {'ansible.builtin.import_tasks': str(ROLE / 'tasks/apt_repositories.yaml')}
+        if gpu_detection:
+            task = {'ansible.builtin.import_tasks': str(ROOT / 'src/infra/roles/gpu/tasks/detect.yaml')}
         if base_gate:
             task = next(t for t in yaml.safe_load((ROLE / 'tasks/main.yaml').read_text())
                         if t.get('ansible.builtin.import_tasks') == 'apt_repositories.yaml')
@@ -62,7 +65,7 @@ print(json.dumps({{"changed": os.environ["EVA_APT_TEST_RESULT"] == "repaired"}})
         playbook = self.work / 'playbook.yaml'
         playbook.write_text(yaml.safe_dump([{
             'hosts': 'eva', 'become': False, 'vars': self.variables,
-            'environment': {'EVA_APT_TEST_RESULT': result, 'PATH': '/usr/bin:/bin'},
+            'environment': {'EVA_APT_TEST_RESULT': result, 'PATH': str(self.work) + ':/usr/bin:/bin'},
             'tasks': tasks,
         }]))
         self.packages.unlink(missing_ok=True)
@@ -95,6 +98,27 @@ print(json.dumps({{"changed": os.environ["EVA_APT_TEST_RESULT"] == "repaired"}})
             self.execute(base_gate=True, check=check)
             self.assertFalse(self.called.exists())
             self.assertFalse((self.work / 'target-tools').exists())
+
+    def test_gpu_detection_reuses_installed_lspci_without_apt(self):
+        lspci = self.work / 'lspci'
+        lspci.write_text('#!/bin/sh\necho "07:00.0 NVIDIA RTX PRO 6000"\n')
+        lspci.chmod(0o755)
+        self.variables['eva_infra_root'] = str(ROOT / 'src/infra')
+        self.environment['EVA_TOOL_EXECUTABLE'] = ''
+        for check in (False, True):
+            output = self.execute(gpu_detection=True, check=check)
+            self.assertIn('NVIDIA GPU detected: True', output)
+            self.assertFalse(self.called.exists())
+
+    def test_gpu_detection_checks_apt_before_installing_missing_prerequisite(self):
+        lspci = self.work / 'lspci'
+        lspci.write_text('#!/bin/sh\nexit 127\n')
+        lspci.chmod(0o755)
+        self.variables['eva_infra_root'] = str(ROOT / 'src/infra')
+        output = self.execute(result='failed', gpu_detection=True, success=False)
+        self.assertIn('APT repository validation failed', output)
+        self.assertEqual(self.called.read_text(), str(self.source))
+        self.assertNotIn('TASK [Install GPU detection prerequisite]', output)
 
     def test_ssh_install_uses_the_exact_transferred_helper_and_reuses_it(self):
         sshd = shutil.which('sshd')

@@ -51,7 +51,8 @@ Bundle 생성에는 **Base Release 원본**을 사용합니다.
 ### Bundle 생성과 검증
 
 Agent를 설치할 대상 서버의 GPU 구성으로 **GPU profile만 선택하면 됩니다.**
-준비 서버의 GPU와는 무관합니다. `PRO6000-MIGx4`는 GPU 1장을 MIG 4개로 나눈 구성입니다.
+준비 서버의 GPU와는 무관합니다. `PRO6000-MIGx4`는 GPU 1장을 MIG 4개로 나눈 구성이며,
+`PRO6000x1`은 MIG 없이 전체 GPU를 사용합니다.
 
 | 대상 GPU | 물리 GPU 수 | MIG 구성 | `--vllm-profile` |
 | --- | --- | --- | --- |
@@ -59,6 +60,7 @@ Agent를 설치할 대상 서버의 GPU 구성으로 **GPU profile만 선택하�
 | NVIDIA L40S | 1장 | 사용 안 함 | `L40sx1` |
 | NVIDIA RTX PRO 5000 Blackwell | 3장 | 사용 안 함 | `PRO5000x3` |
 | NVIDIA RTX PRO 6000 Blackwell | 1장 | 4개 | `PRO6000-MIGx4` |
+| NVIDIA RTX PRO 6000 Blackwell | 1장 | 사용 안 함 | `PRO6000x1` |
 
 예를 들어 대상 서버가 L40S 1장이고 MIG를 사용하지 않으면 다음과 같이 실행합니다.
 
@@ -268,7 +270,9 @@ Vision 모델은 이후 `eva install`의 Vision 단계에서 게시하고 서비
 ### GPU preflight
 
 Agent/Vision을 선택하면 `eva install`이 GPU 상태를 확인하고 필요한 구성을 적용합니다.
-RTX PRO 6000 1장은 `PRO6000-MIGx4`에 맞춰 MIG 4개를 생성하며, 이미 맞는 구성은 재사용합니다.
+RTX PRO 6000 1장은 `eva install configure`에서 MIG 사용 여부를 선택합니다.
+`targets.<target>.ansible.eva_gpu_mig_enabled: false`이면 전체 GPU를 재사용하고,
+`true`이면 `PRO6000-MIGx4`에 맞춰 MIG 4개를 구성합니다. 이미 맞는 구성은 재사용합니다.
 `A6000x1`, `L40sx1`, `PRO5000x3`에는 MIG를 적용하지 않습니다.
 Agent는 1절에서 준비한 Bundle profile과 대상 구성이 같아야 합니다.
 

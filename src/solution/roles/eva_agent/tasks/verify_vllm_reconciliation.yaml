@@ -7,7 +7,7 @@
     release='eva-agent-vllm'
     static_pv='eva-agent-vllm-shared-pvc-storage'
     claim='eva-agent-vllm-shared-pvc-storage-claim'
-    cache_path='/share/eva-agent/vllm-cache'
+    cache_path={{ ((eva_agent_nfs_share_path | default('/share/eva-agent', true)) ~ '/vllm-cache') | quote }}
     snapshot_file="$cache_path/.eva-vllm-storage-migration.tsv"
 
     static_pv_file="$(mktemp)"
@@ -143,59 +143,31 @@
         --arg claim "$claim" \
         --arg cache_path "$cache_path" \
         --arg release "$release" '
-          select(
-            .metadata.name
-              != "eva-agent-vllm-shared-pvc-storage"
-            or
-            .status.phase != "Bound"
-            or
-            .spec.persistentVolumeReclaimPolicy != "Retain"
-            or
-            .spec.storageClassName != "eva-agent-sc-fs"
-            or
-            .spec.capacity.storage != "50Gi"
-            or
-            (.spec.accessModes | index("ReadWriteMany")) == null
-            or
-            .spec.nfs.server != "localhost"
-            or
-            .spec.nfs.path != $cache_path
-            or
-            .spec.claimRef.namespace != $namespace
-            or
-            .spec.claimRef.name != $claim
-            or
-            (
-              .metadata.labels."app.kubernetes.io/managed-by"
-              // ""
-            ) != "Helm"
-            or
-            (
-              .metadata.annotations."meta.helm.sh/release-name"
-              // ""
-            ) != $release
-            or
-            (
-              .metadata.annotations."meta.helm.sh/release-namespace"
-              // ""
-            ) != $namespace
-            or
-            (
-              .metadata.annotations."helm.sh/resource-policy"
-              // ""
-            ) != "keep"
-            or
-            (
-              .metadata.annotations."argocd.argoproj.io/tracking-id"
-              // ""
-            ) != ""
-          )
-          | "invalid"
+          def mismatch($field; $actual; $expected):
+            if $actual == $expected then empty
+            else "\($field): expected=\($expected | tojson) actual=\($actual | tojson)" end;
+          [
+            mismatch("metadata.name"; .metadata.name; "eva-agent-vllm-shared-pvc-storage"),
+            mismatch("status.phase"; .status.phase; "Bound"),
+            mismatch("spec.persistentVolumeReclaimPolicy"; .spec.persistentVolumeReclaimPolicy; "Retain"),
+            mismatch("spec.storageClassName"; .spec.storageClassName; "eva-agent-sc-fs"),
+            mismatch("spec.capacity.storage"; .spec.capacity.storage; "50Gi"),
+            mismatch("spec.accessModes includes ReadWriteMany"; ((.spec.accessModes // []) | index("ReadWriteMany") != null); true),
+            mismatch("spec.nfs.server"; .spec.nfs.server; "localhost"),
+            mismatch("spec.nfs.path"; .spec.nfs.path; $cache_path),
+            mismatch("spec.claimRef.namespace"; .spec.claimRef.namespace; $namespace),
+            mismatch("spec.claimRef.name"; .spec.claimRef.name; $claim),
+            mismatch("metadata.labels.app.kubernetes.io/managed-by"; (.metadata.labels."app.kubernetes.io/managed-by" // ""); "Helm"),
+            mismatch("metadata.annotations.meta.helm.sh/release-name"; (.metadata.annotations."meta.helm.sh/release-name" // ""); $release),
+            mismatch("metadata.annotations.meta.helm.sh/release-namespace"; (.metadata.annotations."meta.helm.sh/release-namespace" // ""); $namespace),
+            mismatch("metadata.annotations.helm.sh/resource-policy"; (.metadata.annotations."helm.sh/resource-policy" // ""); "keep"),
+            mismatch("metadata.annotations.argocd.argoproj.io/tracking-id"; (.metadata.annotations."argocd.argoproj.io/tracking-id" // ""); "")
+          ] | .[]
         ' "$static_pv_file"
     )"
 
     if [[ -n "$static_pv_errors" ]]; then
-      echo "[ERROR] installed VLLM static PV contract mismatch"
+      printf '[ERROR] installed VLLM static PV contract mismatch\n%s\n' "$static_pv_errors"
       exit 1
     fi
 
@@ -209,52 +181,28 @@
         --arg claim "$claim" \
         --arg static_pv "$static_pv" \
         --arg release "$release" '
-          select(
-            .metadata.name != $claim
-            or
-            .metadata.namespace != $namespace
-            or
-            .status.phase != "Bound"
-            or
-            .spec.volumeName != $static_pv
-            or
-            .spec.storageClassName != "eva-agent-sc-fs"
-            or
-            .spec.resources.requests.storage != "50Gi"
-            or
-            (.spec.accessModes | index("ReadWriteMany")) == null
-            or
-            (
-              .metadata.labels."app.kubernetes.io/managed-by"
-              // ""
-            ) != "Helm"
-            or
-            (
-              .metadata.annotations."meta.helm.sh/release-name"
-              // ""
-            ) != $release
-            or
-            (
-              .metadata.annotations."meta.helm.sh/release-namespace"
-              // ""
-            ) != $namespace
-            or
-            (
-              .metadata.annotations."helm.sh/resource-policy"
-              // ""
-            ) != "keep"
-            or
-            (
-              .metadata.annotations."argocd.argoproj.io/tracking-id"
-              // ""
-            ) != ""
-          )
-          | "invalid"
+          def mismatch($field; $actual; $expected):
+            if $actual == $expected then empty
+            else "\($field): expected=\($expected | tojson) actual=\($actual | tojson)" end;
+          [
+            mismatch("metadata.name"; .metadata.name; $claim),
+            mismatch("metadata.namespace"; .metadata.namespace; $namespace),
+            mismatch("status.phase"; .status.phase; "Bound"),
+            mismatch("spec.volumeName"; .spec.volumeName; $static_pv),
+            mismatch("spec.storageClassName"; .spec.storageClassName; "eva-agent-sc-fs"),
+            mismatch("spec.resources.requests.storage"; .spec.resources.requests.storage; "50Gi"),
+            mismatch("spec.accessModes includes ReadWriteMany"; ((.spec.accessModes // []) | index("ReadWriteMany") != null); true),
+            mismatch("metadata.labels.app.kubernetes.io/managed-by"; (.metadata.labels."app.kubernetes.io/managed-by" // ""); "Helm"),
+            mismatch("metadata.annotations.meta.helm.sh/release-name"; (.metadata.annotations."meta.helm.sh/release-name" // ""); $release),
+            mismatch("metadata.annotations.meta.helm.sh/release-namespace"; (.metadata.annotations."meta.helm.sh/release-namespace" // ""); $namespace),
+            mismatch("metadata.annotations.helm.sh/resource-policy"; (.metadata.annotations."helm.sh/resource-policy" // ""); "keep"),
+            mismatch("metadata.annotations.argocd.argoproj.io/tracking-id"; (.metadata.annotations."argocd.argoproj.io/tracking-id" // ""); "")
+          ] | .[]
         ' "$claim_file"
     )"
 
     if [[ -n "$claim_errors" ]]; then
-      echo "[ERROR] installed VLLM PVC contract mismatch"
+      printf '[ERROR] installed VLLM PVC contract mismatch\n%s\n' "$claim_errors"
       exit 1
     fi
 

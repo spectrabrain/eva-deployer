@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise shared Ansible preconditions/dependencies against an isolated NKS fixture."""
+"""Exercise shared Ansible preconditions/dependencies against isolated cluster fixtures."""
 import base64
 import copy
 import functools
@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import site
 import subprocess
 import sys
@@ -53,7 +54,9 @@ if tool == 'helm':
  if args[:2]==['get','manifest']:
   if args[2]=='eva-app' and 'app_manifest' in state: output({'kind':'List','items':state['app_manifest']})
   print(''); sys.exit(0)
- if args[0]=='status': output({'name':args[1],'namespace':namespace,'version':1,'info':{'status':'deployed'}})
+ if args[0]=='status':
+  if args[1]=='eva-agent-vllm' and state.get('vllm_missing_release'): sys.exit(1)
+  output({'name':args[1],'namespace':namespace,'version':1,'info':{'status':'deployed'}})
  if args[:2]==['upgrade','--install']: print('fixture deployed'); sys.exit(0)
  if args[0]=='template' and args[1]=='eva-agent-init':
   import yaml
@@ -66,6 +69,8 @@ if tool == 'helm':
   if '--dry-run=server' in args and 'app_server_manifest' in state:
    output({'kind':'List','items':state['app_server_manifest']})
   output({'kind':'List','items':state['app_manifest']})
+ if args[0]=='template' and args[1]=='eva-agent-vllm' and 'vllm_rendered' in state:
+  output({'apiVersion':'v1','kind':'List','items':state['vllm_rendered']})
  if args[0]=='template': output({'kind':'Deployment','metadata':{'name':args[1],'namespace':'eva-agent'},
    'spec':{'replicas':1,'template':{'spec':{'serviceAccountName':'sa-eva-agent','containers':[]}}}})
  raise SystemExit('Unexpected Helm mutation')
@@ -83,8 +88,14 @@ if 'get' in args:
  if kind in ['runtimeclasses','ingressclasses','jobs']: output({'items':[]})
  if kind=='deployments': output({'items':state['deployments'].get(ns(),[])})
  if kind=='deployments,statefulsets': output({'items':state['deployments'].get(ns(),[])})
- if kind=='pv': output(state['vllm_pv'])
- if kind=='pvc': output(state['vllm_pvc'])
+ if kind=='pv':
+  if state.get('vllm_pv') is None: sys.exit(1)
+  if '-o' in args and args[args.index('-o')+1]=='jsonpath={.spec.nfs.path}':
+   print(state['vllm_pv']['spec']['nfs']['path'],end=''); sys.exit(0)
+  output(state['vllm_pv'])
+ if kind=='pvc':
+  if state.get('vllm_pvc') is None: sys.exit(1)
+  output(state['vllm_pvc'])
  if kind=='serviceaccount': sys.exit(0 if state.get('agent_sa') else 1)
  if kind=='serviceaccounts': output({'items':[{'kind':'ServiceAccount','metadata':{'name':'sa-eva-agent','namespace':'eva-agent'}}] if state.get('agent_sa') else []})
  if kind=='pods': output({'items':state['pods'].get(ns(),[])})
@@ -96,7 +107,9 @@ if 'get' in args:
    print(''); sys.exit(0)
   secret=dict(state['secret']); secret['metadata']=dict(secret['metadata'],namespace=ns()); output(secret)
  if kind=='cronjob': print(''); sys.exit(0)
- if ',' in kind: print(''); sys.exit(0)
+ if ',' in kind:
+  if 'legacy_vllm_resources' in state: output({'items':state['legacy_vllm_resources']})
+  print(''); sys.exit(0)
  output({'items':[]})
 if 'create' in args and '--dry-run=client' in args:
  if '-f' in args:
@@ -182,9 +195,11 @@ class SharedFlowTests(unittest.TestCase):
     def incoming(self):
         (self.workspace/"credentials/aws_key.ini").write_text("aws_access_key_id = AKIAfixtureIncoming\nsecret_unused = ignored\naws_secret_access_key = private-incoming-do-not-print\n")
 
-    def execute(self, playbook, success=True):
-        r = subprocess.run([ANSIBLE, "-i", "controller,", "-c", "local", str(playbook), "-e", json.dumps(self.variables)],
-                           env=self.env, text=True, capture_output=True, timeout=120)
+    def execute(self, playbook, success=True, verbose=False):
+        command = [ANSIBLE, "-i", "controller,", "-c", "local", str(playbook), "-e", json.dumps(self.variables)]
+        if verbose:
+            command.append('-v')
+        r = subprocess.run(command, env=self.env, text=True, capture_output=True, timeout=120)
         self.assertEqual(r.returncode==0,success,r.stdout+r.stderr)
         self.assertNotIn("private-incoming-do-not-print",r.stdout+r.stderr)
         self.assertNotIn("private-fixture-do-not-print",r.stdout+r.stderr)
@@ -192,6 +207,11 @@ class SharedFlowTests(unittest.TestCase):
 
     def calls(self):
         return [json.loads(line) for line in (self.root/"calls.jsonl").read_text().splitlines()]
+
+    @staticmethod
+    def task_output(result):
+        return '\n'.join(json.loads(line.partition(' => ')[2]).get('stdout', '')
+                         for line in result.stdout.splitlines() if ' => {' in line)
 
     def test_disabled_shared_key_fails_common_precondition_before_mutations(self):
         self.execute(ROOT/"src/infra/playbooks/site_precondition.yaml",success=False)
@@ -331,6 +351,190 @@ class SharedFlowTests(unittest.TestCase):
                 self.variables['eva_agent_cluster_vllm_pvc_before']={'stdout':json.dumps(before) if uid else ''}
                 self.execute(p,success=success)
         self.assertFalse(any(c['tool']=='mount' or 'eva-agent-vllm-shared-pvc-storage' in c['args'] for c in self.calls()))
+
+    def host_vllm_storage(self, relative_cache='data001 with space/share/eva-agent/vllm-cache'):
+        cache = self.root / relative_cache
+        (cache / 'hub').mkdir(parents=True)
+        (cache / 'hub/model.bin').write_bytes(b'preserved model cache')
+        pv_name = 'eva-agent-vllm-shared-pvc-storage'
+        claim = pv_name + '-claim'
+        annotations = {'meta.helm.sh/release-name':'eva-agent-vllm',
+                       'meta.helm.sh/release-namespace':'eva-agent', 'helm.sh/resource-policy':'keep'}
+        metadata = {'labels':{'app.kubernetes.io/managed-by':'Helm'}, 'annotations':annotations}
+        self.state['vllm_pv'] = {'apiVersion':'v1', 'kind':'PersistentVolume',
+            'metadata':dict(copy.deepcopy(metadata), name=pv_name, uid='pv-uid'),
+            'status':{'phase':'Bound'}, 'spec':{'accessModes':['ReadWriteMany'],
+                'capacity':{'storage':'50Gi'}, 'persistentVolumeReclaimPolicy':'Retain',
+                'storageClassName':'eva-agent-sc-fs', 'nfs':{'server':'localhost', 'path':str(cache)},
+                'claimRef':{'name':claim, 'namespace':'eva-agent', 'uid':'cache-uid'}}}
+        self.state['vllm_pvc'] = {'apiVersion':'v1', 'kind':'PersistentVolumeClaim',
+            'metadata':dict(copy.deepcopy(metadata), name=claim, namespace='eva-agent', uid='cache-uid'),
+            'status':{'phase':'Bound'}, 'spec':{'volumeName':pv_name,
+                'storageClassName':'eva-agent-sc-fs', 'accessModes':['ReadWriteMany'],
+                'resources':{'requests':{'storage':'50Gi'}}}}
+        self.state['deployments']['eva-agent'] = [{'metadata':{'name':'eva-agent-vllm-engine'},
+            'spec':{'template':{'spec':{'volumes':[{'persistentVolumeClaim':{'claimName':claim}}]}}}}]
+        self.variables.update(eva_managed_cluster=False, eva_agent_namespace='eva-agent',
+            eva_agent_kubeconfig=self.env['KUBECONFIG'], eva_agent_nfs_share_path=str(cache.parent),
+            eva_agent_vllm_chart_version='3.3.0', eva_agent_workdir=str(self.root / 'agent'))
+        return cache
+
+    def test_host_vllm_verification_accepts_different_server_paths(self):
+        for relative_cache in ('share/eva-agent/vllm-cache', 'data001/share/eva-agent/vllm-cache',
+                               'mnt/storage/share/eva-agent/vllm-cache', 'customer cache/site-a/vllm-cache'):
+            with self.subTest(cache=relative_cache):
+                cache = self.host_vllm_storage(relative_cache)
+                baseline = copy.deepcopy(self.state)
+                (self.root/'state.json').write_text(json.dumps(self.state))
+                self.variables.pop('eva_agent_nfs_share_path')
+                names = {'Detect existing vLLM shared PV NFS path', 'Reuse existing vLLM PV base path when present'}
+                tasks = [t for t in yaml.safe_load((ROOT/'src/solution/roles/eva_agent/tasks/dependencies_host.yaml').read_text())
+                         if t.get('name') in names]
+                tasks.append({'ansible.builtin.include_role':{'name':'eva_agent', 'tasks_from':'verify_vllm_reconciliation'}})
+                play = self.root/'different-cache-path.yaml'
+                play.write_text(yaml.safe_dump([{'hosts':'all', 'connection':'local', 'gather_facts':False,
+                    'vars':{'eva_agent_nfs_share_path':str(self.root/'unselected/share/eva-agent')}, 'tasks':tasks}]))
+                result = self.execute(play, verbose=True)
+                self.assertIn('static PV and PVC binding verified', self.task_output(result))
+                self.assertEqual(json.loads((self.root/'state.json').read_text()), baseline)
+                self.assertEqual((cache/'hub/model.bin').read_bytes(), b'preserved model cache')
+        self.assertTrue(all(c['args'][0] in ('get', 'status') for c in self.calls()))
+
+    def test_new_host_vllm_paths_follow_disk_selection_or_explicit_override(self):
+        self.variables.update(eva_managed_cluster=False, eva_agent_namespace='eva-agent',
+            eva_agent_kubeconfig=self.env['KUBECONFIG'], eva_agent_vllm_profile='L40sx1')
+        self.state['vllm_pv'] = None
+        (self.root/'state.json').write_text(json.dumps(self.state))
+        definitions = yaml.safe_load((ROOT/'src/solution/roles/eva_agent/tasks/dependencies_host.yaml').read_text())
+        end = next(i for i, task in enumerate(definitions) if task.get('name') == 'Ensure NFS share and cache directories exist')
+        tasks = definitions[:end]
+        for source in ('verify_vllm_reconciliation', 'migrate_legacy_vllm'):
+            shell = yaml.safe_load((ROOT/f'src/solution/roles/eva_agent/tasks/{source}.yaml').read_text())[0]['ansible.builtin.shell']
+            assignment = next(line for line in shell.splitlines() if line.startswith('cache_path='))
+            tasks.append({'ansible.builtin.copy':{'dest':str(self.root/(source+'.txt')), 'content':assignment}})
+        for largest_mount, override, expected in (
+            ('/', None, '/share/eva-agent'), ('/mnt/storage/', None, '/mnt/storage/share/eva-agent'),
+            ('/data002', None, '/data002/share/eva-agent'), ('/mnt/storage', '/srv/customer-eva', '/srv/customer-eva')):
+            with self.subTest(mount=largest_mount, override=override):
+                variables = {'ansible_facts':{'mounts':[
+                    {'device':'/dev/sda', 'fstype':'ext4', 'mount':largest_mount, 'size_total':200},
+                    {'device':'/dev/sdb', 'fstype':'ext4', 'mount':'/smaller', 'size_total':50},
+                    {'device':'tmpfs', 'fstype':'tmpfs', 'mount':'/ram', 'size_total':1000}]}}
+                if override is not None: variables['eva_agent_nfs_share_path'] = override
+                play = self.root/'new-server-path.yaml'
+                play.write_text(yaml.safe_dump([{'hosts':'all', 'connection':'local', 'gather_facts':False,
+                    'vars':variables, 'tasks':tasks}]))
+                self.execute(play)
+                for source in ('verify_vllm_reconciliation', 'migrate_legacy_vllm'):
+                    assignment = (self.root/(source+'.txt')).read_text()
+                    self.assertEqual(shlex.split(assignment), ['cache_path='+expected+'/vllm-cache'])
+        self.assertTrue(all(c['args'][:2] == ['get', 'pv'] for c in self.calls()))
+
+    def test_host_vllm_unset_path_defaults_to_share_without_accepting_storage_drift(self):
+        cache = self.host_vllm_storage()
+        self.state['vllm_rendered'] = [copy.deepcopy(self.state['vllm_pv']), copy.deepcopy(self.state['vllm_pvc'])]
+        (self.root/'state.json').write_text(json.dumps(self.state))
+        marker = cache/'.eva-vllm-storage-migration.tsv'
+        marker.write_text('persistent migration record')
+        for missing in ('undefined', '', None):
+            for source in ('verify_vllm_reconciliation', 'migrate_legacy_vllm'):
+                with self.subTest(path=missing, task=source):
+                    if missing == 'undefined': self.variables.pop('eva_agent_nfs_share_path', None)
+                    else: self.variables['eva_agent_nfs_share_path'] = missing
+                    # Verification needs deployed Helm; migration tests a missing release.
+                    self.state['vllm_missing_release'] = source == 'migrate_legacy_vllm'
+                    (self.root/'state.json').write_text(json.dumps(self.state))
+                    play = self.root/'missing-cache-path.yaml'
+                    play.write_text(yaml.safe_dump([{'hosts':'all', 'connection':'local', 'gather_facts':False, 'tasks':[
+                        {'ansible.builtin.include_role':{'name':'eva_agent', 'tasks_from':source}}]}]))
+                    result = self.execute(play, success=False, verbose=True)
+                    expected = ('installed' if source == 'verify_vllm_reconciliation' else 'rendered')
+                    self.assertIn(expected+' VLLM static PV contract mismatch', self.task_output(result))
+                    task_results = [json.loads(line.partition(' => ')[2]) for line in result.stdout.splitlines() if ' => {' in line]
+                    command = next(task['cmd'] for task in task_results if 'cmd' in task)
+                    assignment = next(line for line in command.splitlines() if line.startswith('cache_path='))
+                    self.assertEqual(shlex.split(assignment), ['cache_path=/share/eva-agent/vllm-cache'])
+                    self.assertEqual(marker.read_text(), 'persistent migration record')
+                    self.assertEqual((cache/'hub/model.bin').read_bytes(), b'preserved model cache')
+        self.assertTrue(all(c['args'][0] in ('get', 'status', 'template') or '--dry-run=client' in c['args']
+                            for c in self.calls()))
+
+    def test_host_vllm_verification_reuses_existing_pv_cache_path(self):
+        cache = self.host_vllm_storage()
+        state_before = copy.deepcopy(self.state)
+        (self.root / 'state.json').write_text(json.dumps(self.state))
+        # Exercise the real discovery/reuse tasks before verification, starting
+        # with a different disk path. No NFS setup or workload changes run.
+        self.variables.pop('eva_agent_nfs_share_path')
+        names = {'Detect existing vLLM shared PV NFS path', 'Reuse existing vLLM PV base path when present'}
+        tasks = [t for t in yaml.safe_load((ROOT/'src/solution/roles/eva_agent/tasks/dependencies_host.yaml').read_text())
+                 if t.get('name') in names]
+        self.assertEqual(len(tasks), 2)
+        tasks.append({'ansible.builtin.include_role':{'name':'eva_agent', 'tasks_from':'verify_vllm_reconciliation'}})
+        play = self.root / 'host-vllm.yaml'
+        play.write_text(yaml.safe_dump([{'hosts':'all', 'connection':'local', 'gather_facts':False,
+            'vars':{'eva_agent_nfs_share_path':str(self.root / 'other-disk/share/eva-agent')}, 'tasks':tasks}]))
+        marker = cache / '.eva-vllm-storage-migration.tsv'
+        for migrated in (False, True):
+            with self.subTest(migrated=migrated):
+                if migrated: marker.write_text('persistent migration record')
+                result = self.execute(play, verbose=True)
+                self.assertIn('static PV and PVC binding verified', self.task_output(result))
+                if migrated:
+                    self.assertIn('migrated VLLM cache content was preserved', self.task_output(result))
+                    self.assertFalse(marker.exists())
+                self.assertEqual((cache/'hub/model.bin').read_bytes(), b'preserved model cache')
+                self.assertEqual(json.loads((self.root/'state.json').read_text()), state_before)
+        self.assertTrue(all(c['args'][0] in ('get', 'status') for c in self.calls()))
+
+    def test_host_vllm_verification_rejects_drift_and_preserves_migration_record(self):
+        cache = self.host_vllm_storage()
+        baseline = copy.deepcopy(self.state)
+        marker = cache / '.eva-vllm-storage-migration.tsv'
+        marker.write_text('persistent migration record')
+        play = self.root / 'host-vllm.yaml'
+        play.write_text(yaml.safe_dump([{'hosts':'all', 'connection':'local', 'gather_facts':False, 'tasks':[
+            {'ansible.builtin.include_role':{'name':'eva_agent', 'tasks_from':'verify_vllm_reconciliation'}}]}]))
+        for change, expected in (
+            ('path', 'spec.nfs.path'), ('server', 'spec.nfs.server'),
+            ('owner', 'meta.helm.sh/release-name'), ('uid', 'UID binding mismatch')):
+            with self.subTest(change=change):
+                self.state = copy.deepcopy(baseline)
+                if change == 'path': self.state['vllm_pv']['spec']['nfs']['path'] = '/other/vllm-cache'
+                elif change == 'server': self.state['vllm_pv']['spec']['nfs']['server'] = 'foreign-server'
+                elif change == 'owner': self.state['vllm_pvc']['metadata']['annotations']['meta.helm.sh/release-name'] = 'foreign-release'
+                else: self.state['vllm_pv']['spec']['claimRef']['uid'] = 'different-cache-uid'
+                (self.root/'state.json').write_text(json.dumps(self.state))
+                result = self.execute(play, success=False)
+                self.assertIn(expected, self.task_output(result))
+                if change != 'uid':
+                    self.assertIn('expected=', self.task_output(result))
+                    self.assertIn('actual=', self.task_output(result))
+                self.assertEqual(marker.read_text(), 'persistent migration record')
+                self.assertEqual((cache/'hub/model.bin').read_bytes(), b'preserved model cache')
+                self.assertEqual(json.loads((self.root/'state.json').read_text()), self.state)
+        self.assertTrue(all(c['args'][0] in ('get', 'status') for c in self.calls()))
+
+    def test_host_vllm_migration_retry_uses_selected_cache_path(self):
+        cache = self.host_vllm_storage()
+        self.state['vllm_rendered'] = [self.state.pop('vllm_pv'), self.state.pop('vllm_pvc')]
+        self.state.update(vllm_missing_release=True, legacy_vllm_resources=[])
+        marker = cache / '.eva-vllm-storage-migration.tsv'
+        marker.write_text('persistent migration record')
+        play = self.root / 'host-vllm-migrate.yaml'
+        play.write_text(yaml.safe_dump([{'hosts':'all', 'connection':'local', 'gather_facts':False, 'tasks':[
+            {'ansible.builtin.include_role':{'name':'eva_agent', 'tasks_from':'migrate_legacy_vllm'}}]}]))
+        for matching in (True, False):
+            with self.subTest(matching=matching):
+                if not matching: self.state['vllm_rendered'][0]['spec']['nfs']['path'] = '/other/vllm-cache'
+                (self.root/'state.json').write_text(json.dumps(self.state))
+                result = self.execute(play, success=matching, verbose=True)
+                self.assertIn('migration retry state validated' if matching else 'rendered VLLM static PV contract mismatch', self.task_output(result))
+                self.assertEqual(marker.read_text(), 'persistent migration record')
+                self.assertEqual((cache/'hub/model.bin').read_bytes(), b'preserved model cache')
+                self.assertEqual(json.loads((self.root/'state.json').read_text()), self.state)
+        self.assertTrue(all(c['args'][0] in ('get', 'status', 'template') or '--dry-run=client' in c['args']
+                            for c in self.calls()))
 
     def test_vision_uses_existing_auth_helper_and_cluster_renewal_without_systemd(self):
         self.incoming()

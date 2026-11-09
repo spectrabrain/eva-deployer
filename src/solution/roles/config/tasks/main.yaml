@@ -1,3 +1,7 @@
+- name: Prepare Solution command-line prerequisites
+  ansible.builtin.import_role:
+    name: "{{ eva_solution_root }}/roles/eva_solution_prerequisites"
+
 - name: Prepare server configuration
   ansible.builtin.include_tasks: host.yaml
   when: not (eva_managed_cluster | default(false) | bool)

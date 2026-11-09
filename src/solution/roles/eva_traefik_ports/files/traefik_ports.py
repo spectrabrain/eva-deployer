@@ -853,8 +853,10 @@ def verify_routers(cluster, originals, selected):
         meta = original["metadata"]
         current = copy.deepcopy(live.get((meta["namespace"], meta["name"]), {}))
         target = isolate([original], selected[key])[0]
-        # Only the apiserver's write bookkeeping may differ after our CAS.
+        # Controllers update observed status independently of our router writes.
+        # Keep spec, identity and operator metadata checks exact.
         for obj in (current, target):
+            obj.pop("status", None)
             obj.get("metadata", {}).pop("resourceVersion", None)
             obj.get("metadata", {}).pop("managedFields", None)
         require(current == target, "EVA Ingress changed during router migration; stop without rollback")
@@ -1108,6 +1110,7 @@ def reconcile(cluster, request, planned, defaults=None):
 
 
 def recover_legacy_failure(cluster, receipt, backup, timeout, originals, selected, error):
+    failure_reason = str(error) if isinstance(error, Unsafe) else "private input or controller error (details withheld)"
     try:
         # Restore only changed routers proven to still match this attempt.
         saved = {(obj["metadata"]["namespace"], obj["metadata"]["name"]): obj for obj in receipt["ingresses"]}
@@ -1121,8 +1124,10 @@ def recover_legacy_failure(cluster, receipt, backup, timeout, originals, selecte
         restore_legacy_app(cluster, receipt, backup, timeout)
     except Exception as restoration:
         reason = str(restoration) if isinstance(restoration, Unsafe) else "private input or controller error (details withheld)"
-        raise Unsafe(f"Legacy App listener transition failed; automatic restoration stopped: {reason}. Private backup: {backup}") from error
-    raise Unsafe(f"Legacy App listener transition failed; original App NodePort restored. Private backup: {backup}") from error
+        raise Unsafe(f"Legacy App listener transition failed; automatic restoration stopped: {reason}. "
+                     f"Failure reason: {failure_reason}. Private backup: {backup}") from error
+    raise Unsafe(f"Legacy App listener transition failed; original App NodePort restored. "
+                 f"Failure reason: {failure_reason}. Private backup: {backup}") from error
 
 
 def converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,

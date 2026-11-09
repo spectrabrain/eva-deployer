@@ -150,6 +150,59 @@ class LegacyAppTests(unittest.TestCase):
         self.request.pop("legacy_app")
         self.assertTrue(self.reconcile("app")["changed"])
 
+    def test_ingress_controller_status_update_does_not_rollback_a_valid_transition(self):
+        get = self.cluster.get
+
+        def update_status(resource, namespace="kube-system", name=None, optional=False):
+            if resource == "ingresses":
+                for obj in self.cluster.live:
+                    if obj["kind"] == "Ingress" and obj["metadata"]["name"] == "eva-app":
+                        obj["status"] = {"loadBalancer": {"ingress": [{"ip": "192.1.70.21"}]}}
+                        obj["metadata"]["resourceVersion"] = "2"
+                        obj["metadata"]["managedFields"] = [{"manager": "traefik", "subresource": "status"}]
+            return get(resource, namespace, name, optional)
+
+        with patch.object(self.cluster, "get", side_effect=update_status):
+            result = self.reconcile()
+            self.assertTrue(result["changed"])
+            self.assertEqual(self.app_service()["spec"]["type"], "ClusterIP")
+            self.assertIsNotNone(self.cluster.config)
+            self.assertEqual(json.loads(Path(result["backup"]).read_text())["legacy"]["phase"], "active")
+            self.cluster.install(ports.isolate(objects("iam", host="222.108.131.192", path="/iam"), result["endpoint"]))
+            self.assertFalse(self.reconcile()["changed"])
+
+    def test_status_updates_do_not_hide_operator_router_or_identity_changes(self):
+        for field in ("spec", "annotations", "uid"):
+            with self.subTest(field=field):
+                self.cluster = LegacyCluster(self.temp.name)
+                get = self.cluster.get
+
+                def operator_edit(resource, namespace="kube-system", name=None, optional=False):
+                    if resource == "ingresses":
+                        for obj in self.cluster.live:
+                            if obj["kind"] != "Ingress" or obj["metadata"]["name"] != "eva-app":
+                                continue
+                            obj["status"] = {"loadBalancer": {"ingress": [{"ip": "192.1.70.21"}]}}
+                            if field == "spec":
+                                obj["spec"]["rules"][0]["http"]["paths"][0]["path"] = "/operator"
+                            elif field == "annotations":
+                                obj["metadata"]["annotations"]["operator"] = "preserve"
+                            else:
+                                obj["metadata"]["uid"] = "operator-recreated"
+                    return get(resource, namespace, name, optional)
+
+                with patch.object(self.cluster, "get", side_effect=operator_edit):
+                    with self.assertRaisesRegex(ports.Unsafe, "Ingress changed during router migration"):
+                        self.reconcile()
+                self.assertIsNone(self.cluster.config)
+                bridge = next(obj for obj in self.cluster.live if obj["kind"] == "Ingress")
+                if field == "spec":
+                    self.assertEqual(bridge["spec"]["rules"][0]["http"]["paths"][0]["path"], "/operator")
+                elif field == "annotations":
+                    self.assertEqual(bridge["metadata"]["annotations"]["operator"], "preserve")
+                else:
+                    self.assertEqual(bridge["metadata"]["uid"], "operator-recreated")
+
     def test_unselected_app_and_foreign_port_occupant_remain_blocked(self):
         self.request["legacy_app"]["enabled"] = False
         with self.assertRaisesRegex(ports.Unsafe, "conflicts"):
@@ -188,6 +241,23 @@ class LegacyAppTests(unittest.TestCase):
         deleted = next(i for i, call in enumerate(commands) if call[:3] == ("kubectl", "delete", "--raw"))
         restored = max(i for i, call in enumerate(commands) if call[:3] == ("kubectl", "patch", "services"))
         self.assertLess(deleted, restored)
+
+    def test_restored_failure_retains_safe_original_reason_and_withholds_private_exceptions(self):
+        secret = "PRIVATE-CONTROLLER-EXCEPTION"
+        for error in (ports.Unsafe("Injected verified failure"), ValueError(secret)):
+            with self.subTest(error=type(error).__name__):
+                self.cluster = LegacyCluster(self.temp.name)
+                with patch.object(ports, "verify_routers", side_effect=error):
+                    with self.assertRaises(ports.Unsafe) as failure:
+                        self.reconcile()
+                message = str(failure.exception)
+                self.assertIn("original App NodePort restored", message)
+                expected = "Injected verified failure" if isinstance(error, ports.Unsafe) else "details withheld"
+                self.assertIn("Failure reason:", message)
+                self.assertIn(expected, message)
+                self.assertNotIn(secret, message)
+                self.assertEqual(self.app_service()["spec"]["type"], "NodePort")
+                self.assertFalse(any(obj["kind"] == "Ingress" for obj in self.cluster.live))
 
     def test_history_mismatch_names_fields_without_exposing_configmap_values(self):
         service = self.app_service()

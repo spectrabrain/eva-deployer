@@ -189,6 +189,98 @@ class LegacyAppTests(unittest.TestCase):
         restored = max(i for i, call in enumerate(commands) if call[:3] == ("kubectl", "patch", "services"))
         self.assertLess(deleted, restored)
 
+    def test_history_mismatch_names_fields_without_exposing_configmap_values(self):
+        service = self.app_service()
+        service["spec"]["ports"][0]["targetPort"] = 9999
+        service["spec"]["selector"]["operator"] = "custom-selector"
+        configmap = self.cluster.live[0]
+        configmap["data"]["BACKEND_HOST"] = "private-live-endpoint"
+        self.cluster.history["eva-app"][0]["data"]["BACKEND_HOST"] = "private-history-endpoint"
+        configmap["data"]["JWT_SECRET"] = "private-live-credential"
+        self.cluster.history["eva-app"][0]["data"]["JWT_SECRET"] = "private-history-credential"
+        before = copy.deepcopy(self.cluster.live)
+        with self.assertRaises(ports.Unsafe) as failure:
+            self.reconcile()
+        message = str(failure.exception)
+        for field in ("Service.spec.ports[0].targetPort", "Service.spec.selector", "ConfigMap.data.BACKEND_HOST"):
+            self.assertIn(field, message)
+        for value in ("private-live-credential", "private-history-credential", "custom-selector",
+                      "private-live-endpoint", "private-history-endpoint", "JWT_SECRET"):
+            self.assertNotIn(value, message)
+        self.assertEqual(self.cluster.live, before)
+        self.assertIsNone(self.cluster.config)
+        self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def test_unrelated_manual_configmap_edits_are_preserved_through_transition_and_retry(self):
+        configmap = self.cluster.live[0]
+        configmap["data"].update(INGESTER_ASSIGNER="manual-assigner", JWT_SECRET="private-runtime-value")
+        self.cluster.history["eva-app"][0]["data"]["JWT_SECRET"] = "old-runtime-value"
+        self.cluster.history["eva-app"][0]["data"]["OLD_RUNTIME_SETTING"] = "removed-manually"
+        expected = copy.deepcopy(configmap)
+        result = self.reconcile()
+        self.assertEqual(self.cluster.live[0], expected)
+        receipt = json.loads(Path(result["backup"]).read_text())
+        self.assertEqual(receipt["legacy"]["configmap"], expected)
+        self.cluster.install(ports.isolate(objects("iam", host="222.108.131.192", path="/iam"), result["endpoint"]))
+        self.assertFalse(self.reconcile()["changed"])
+        self.assertFalse(self.reconcile("app")["changed"])
+        self.assertEqual(self.cluster.live[0], expected)
+
+    def test_public_endpoint_edits_remain_blocked_before_any_writes(self):
+        for field in ports.LEGACY_ENDPOINT_KEYS:
+            with self.subTest(field=field):
+                self.cluster = LegacyCluster(self.temp.name)
+                self.cluster.live[0]["data"][field] = "changed-endpoint"
+                before = copy.deepcopy(self.cluster.live)
+                with self.assertRaisesRegex(ports.Unsafe, "ConfigMap.data." + field):
+                    self.reconcile()
+                self.assertEqual(self.cluster.live, before)
+                self.assertIsNone(self.cluster.config)
+                self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create"))
+                                     for call in self.cluster.calls))
+
+    def test_removed_public_endpoint_fields_remain_blocked(self):
+        for field in ports.LEGACY_ENDPOINT_KEYS:
+            with self.subTest(field=field):
+                self.cluster = LegacyCluster(self.temp.name)
+                self.cluster.history["eva-app"][0]["data"][field] = "recorded-endpoint"
+                self.cluster.live[0]["data"].pop(field, None)
+                before = copy.deepcopy(self.cluster.live)
+                with self.assertRaises(ports.Unsafe):
+                    self.reconcile()
+                self.assertEqual(self.cluster.live, before)
+                self.assertIsNone(self.cluster.config)
+
+    def test_unrelated_configmap_edits_after_assessment_or_transition_remain_blocked(self):
+        for during_transition in (False, True):
+            with self.subTest(during_transition=during_transition):
+                self.cluster = LegacyCluster(self.temp.name)
+                self.cluster.live[0]["data"]["INGESTER_ASSIGNER"] = "manual-assigner"
+                if during_transition:
+                    snapshot = ports.snapshot
+
+                    def concurrent_edit(*args, **kwargs):
+                        backup = snapshot(*args, **kwargs)
+                        self.cluster.live[0]["data"]["INGESTER_ASSIGNER"] = "concurrent-edit"
+                        return backup
+
+                    with patch.object(ports, "snapshot", side_effect=concurrent_edit):
+                        with self.assertRaises(ports.Unsafe) as failure:
+                            self.reconcile()
+                    self.assertIn("ConfigMap changed during router migration", str(failure.exception.__cause__))
+                    self.assertEqual(ports.stable(self.app_service()), ports.stable(self.original[1]))
+                    self.assertIsNone(self.cluster.config)
+                    self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create"))
+                                         for call in self.cluster.calls))
+                else:
+                    self.reconcile()
+                    self.cluster.live[0]["data"]["INGESTER_ASSIGNER"] = "concurrent-edit"
+                    before = copy.deepcopy(self.cluster.live)
+                    with self.assertRaisesRegex(ports.Unsafe, "ConfigMap changed after transition"):
+                        self.reconcile("app")
+                    self.assertEqual(self.cluster.live, before)
+                self.assertEqual(self.cluster.live[0]["data"]["INGESTER_ASSIGNER"], "concurrent-edit")
+
     def test_failure_restores_existing_operator_traefik_configuration(self):
         self.cluster.config = {"apiVersion": "helm.cattle.io/v1", "kind": "HelmChartConfig", "metadata": {
             "name": "traefik", "namespace": "kube-system", "uid": "existing-config", "resourceVersion": "7",

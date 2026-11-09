@@ -5,7 +5,8 @@ Only local bundled charts, the default LoadBalancer Service and k3s ServiceLB
 are supported. No cluster mutation is made for DNS/disabled ingress. All writes
 are create-only or UID/resourceVersion CAS. Existing routers require exact Helm
 history and ownership. A legacy App NodePort can be bridged using its verified
-Service/ConfigMap history and a private durable receipt. Failed bridge transitions
+Service and endpoint ConfigMap history and a private durable receipt. Unrelated
+ConfigMap edits are preserved in the receipt. Failed bridge transitions
 restore only unchanged writes from that attempt, after the listener releases the
 port. Concurrent operator changes and Argo-only/no-history ownership are refused.
 """
@@ -36,6 +37,8 @@ TLS = "traefik.ingress.kubernetes.io/router.tls"
 RESOURCE = "helmchartconfigs.helm.cattle.io"
 CHART = "helmcharts.helm.cattle.io"
 LEGACY = "eva.spectrabrain.com/legacy-app-nodeport"
+LEGACY_ENDPOINT_KEYS = frozenset({"BACKEND_HOST", "BACKEND_PORT", "BACKEND_PUBLIC_PORT",
+                                  "BACKEND_SECURE", "BACKEND_SECURE_PORT"})
 
 
 class Unsafe(RuntimeError):
@@ -531,7 +534,24 @@ def template_matches(live, template):
     return live == template
 
 
+def template_difference_paths(live, template, path):
+    """Describe Helm-input mismatches without logging ConfigMap or other values."""
+    if isinstance(template, dict):
+        if not isinstance(live, dict):
+            return [path]
+        return [difference for key, value in template.items()
+                for difference in ([path + "." + key] if key not in live else
+                                   template_difference_paths(live[key], value, path + "." + key))]
+    if isinstance(template, list):
+        if not isinstance(live, list) or len(live) != len(template):
+            return [path]
+        return [difference for index, (left, right) in enumerate(zip(live, template))
+                for difference in template_difference_paths(left, right, path + "[" + str(index) + "]")]
+    return [] if live == template else [path]
+
+
 def legacy_history(manifest, service, configmap):
+    """Verify listener inputs; retain the entire live ConfigMap for receipt/CAS checks."""
     namespace = service["metadata"]["namespace"]
     found = {}
     for original in (service, configmap):
@@ -540,10 +560,28 @@ def legacy_history(manifest, service, configmap):
                    and obj.get("metadata", {}).get("name") == original["metadata"]["name"]]
         require(len(matches) == 1, "Legacy App requires the exact Service and ConfigMap in Helm history")
         found[original["kind"]] = matches[0]
-    require(template_matches(service["spec"], found["Service"]["spec"])
-            and service["spec"].get("selector") == found["Service"]["spec"].get("selector")
-            and configmap.get("data") == found["ConfigMap"].get("data"),
-            "Legacy App Service/ConfigMap differs from Helm history; automatic transition refused")
+    differences = template_difference_paths(service["spec"], found["Service"]["spec"], "Service.spec")
+    if service["spec"].get("selector") != found["Service"]["spec"].get("selector"):
+        differences.append("Service.spec.selector")
+    live_data, stored_data = configmap.get("data"), found["ConfigMap"].get("data")
+    if live_data != stored_data:
+        if isinstance(live_data, dict) and isinstance(stored_data, dict):
+            # This transition only changes the Service/Ingress, not application
+            # settings. Operators may have edited unrelated runtime keys since
+            # Helm installation. Preserve those edits in the full live snapshot;
+            # verified_bridge/verify_endpoint_maps still reject concurrent edits.
+            differences.extend("ConfigMap.data." + key
+                               for key in sorted((live_data.keys() | stored_data.keys()) & LEGACY_ENDPOINT_KEYS)
+                               if key not in live_data or key not in stored_data or live_data[key] != stored_data[key])
+        else:
+            differences.append("ConfigMap.data")
+    if differences:
+        fields = sorted(set(differences))
+        detail = ", ".join(fields[:12])
+        if len(fields) > 12:
+            detail += ", ... (" + str(len(fields)) + " fields total)"
+        raise Unsafe("Legacy App Service/ConfigMap differs from Helm history; automatic transition refused. "
+                     "Mismatched fields: " + detail)
 
 
 def no_foreign_owner(obj):

@@ -121,6 +121,9 @@ jobs:
       - name: Test existing server Solution-only upgrade
         run: python3 scripts/test/test_host_solution_upgrade.py
 
+      - name: Test Solution command-line prerequisites
+        run: python3 scripts/test/test_solution_prerequisites.py
+
       - name: Test EVA Agent and Vision values contracts
         env:
           EVA_TEST_HELM_DOWNLOAD: "1"

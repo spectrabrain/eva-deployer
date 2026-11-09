@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise Agent tool preparation and Helm post-rendering without a cluster."""
 import hashlib
+import http.client
+import io
 import os
 from pathlib import Path
 import pwd
@@ -8,16 +10,109 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import tarfile
 import time
 import unittest
+from unittest.mock import MagicMock, patch
+import urllib.error
 import urllib.request
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / 'src/solution/roles/eva_agent'
+
+
+def download_archive(url, archive, checksum):
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as response:
+                data = response.read()
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as error:
+            if isinstance(error, urllib.error.HTTPError) and error.code not in (408, 429, 500, 502, 503, 504):
+                raise
+            if attempt == attempts:
+                raise RuntimeError(f'Managed Runtime archive download failed after {attempts} attempts: {url}') from error
+            print(f'Managed Runtime archive download attempt {attempt}/{attempts} failed '
+                  f'({error}); retrying in {2 ** (attempt - 1)} seconds', file=sys.stderr)
+            time.sleep(2 ** (attempt - 1))
+            continue
+        if hashlib.sha256(data).hexdigest() != checksum:
+            raise AssertionError('Managed Runtime download checksum mismatch for ' + archive.name)
+        archive.write_bytes(data)
+        return
+
+
+class ArchiveDownloadTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix='eva-managed-download-test-')
+        self.addCleanup(temporary.cleanup)
+        self.archive = Path(temporary.name) / 'kustomize.tar.gz'
+        self.url = 'https://example.invalid/pinned-tool.tar.gz'
+        self.data = b'pinned archive payload'
+        self.checksum = hashlib.sha256(self.data).hexdigest()
+
+    def test_transient_http_errors_retry_before_publishing_verified_archive(self):
+        for code in (408, 429, 500, 502, 503, 504):
+            with self.subTest(code=code), patch.object(urllib.request, 'urlopen', side_effect=[
+                    urllib.error.HTTPError(self.url, code, 'transient', None, None), io.BytesIO(self.data)]) as request, \
+                    patch.object(time, 'sleep') as sleep:
+                download_archive(self.url, self.archive, self.checksum)
+                self.assertEqual(self.archive.read_bytes(), self.data)
+                self.assertEqual(request.call_count, 2)
+                self.assertTrue(all(call.kwargs == {'timeout': 60} for call in request.call_args_list))
+                sleep.assert_called_once_with(1)
+
+    def test_connection_failures_and_timeouts_retry(self):
+        for error in (urllib.error.URLError('connection unavailable'), TimeoutError(), ConnectionResetError()):
+            with self.subTest(error=type(error).__name__), patch.object(urllib.request, 'urlopen', side_effect=[
+                    error, io.BytesIO(self.data)]) as request, patch.object(time, 'sleep'):
+                download_archive(self.url, self.archive, self.checksum)
+                self.assertEqual(self.archive.read_bytes(), self.data)
+                self.assertEqual(request.call_count, 2)
+
+    def test_interrupted_response_does_not_publish_partial_archive(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.side_effect = http.client.IncompleteRead(b'partial', 100)
+        with patch.object(urllib.request, 'urlopen', side_effect=[response, io.BytesIO(self.data)]), \
+                patch.object(time, 'sleep') as sleep:
+            sleep.side_effect = lambda _: self.assertFalse(self.archive.exists())
+            download_archive(self.url, self.archive, self.checksum)
+        self.assertEqual(self.archive.read_bytes(), self.data)
+
+    def test_exhausted_retries_fail_without_publishing_an_archive(self):
+        error = urllib.error.HTTPError(self.url, 504, 'Gateway Time-out', None, None)
+        with patch.object(urllib.request, 'urlopen', side_effect=error) as request, \
+                patch.object(time, 'sleep') as sleep:
+            with self.assertRaisesRegex(RuntimeError, 'failed after 4 attempts') as failure:
+                download_archive(self.url, self.archive, self.checksum)
+        self.assertIs(failure.exception.__cause__, error)
+        self.assertEqual(request.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 4])
+        self.assertFalse(self.archive.exists())
+
+    def test_permanent_http_error_is_not_retried(self):
+        error = urllib.error.HTTPError(self.url, 404, 'Not Found', None, None)
+        with patch.object(urllib.request, 'urlopen', side_effect=error) as request, \
+                patch.object(time, 'sleep') as sleep:
+            with self.assertRaises(urllib.error.HTTPError):
+                download_archive(self.url, self.archive, self.checksum)
+        request.assert_called_once()
+        sleep.assert_not_called()
+        self.assertFalse(self.archive.exists())
+
+    def test_checksum_mismatch_fails_without_retry_or_publication(self):
+        with patch.object(urllib.request, 'urlopen', return_value=io.BytesIO(b'wrong archive')) as request, \
+                patch.object(time, 'sleep') as sleep:
+            with self.assertRaisesRegex(AssertionError, 'checksum mismatch'):
+                download_archive(self.url, self.archive, self.checksum)
+        request.assert_called_once()
+        sleep.assert_not_called()
+        self.assertFalse(self.archive.exists())
 
 
 class ManagedKustomizeTests(unittest.TestCase):
@@ -43,9 +138,7 @@ class ManagedKustomizeTests(unittest.TestCase):
                     raise AssertionError('Missing Managed Runtime artifact for ' + name)
                 url, checksum, member = artifact.groups()
                 archive = Path(assets.name) / (name + '.tar.gz')
-                urllib.request.urlretrieve(url, archive)
-                if hashlib.sha256(archive.read_bytes()).hexdigest() != checksum:
-                    raise AssertionError('Managed Runtime download checksum mismatch for ' + name)
+                download_archive(url, archive, checksum)
                 binary = Path(assets.name) / name
                 with tarfile.open(archive) as bundle:
                     binary.write_bytes(bundle.extractfile(member).read())

@@ -405,13 +405,32 @@ func validatePrepared(root string, metadata Metadata) error {
 	if err := validateMetadata(metadata); err != nil {
 		return err
 	}
-	for _, path := range []string{
+	required := []string{
 		"ansible.cfg",
 		"src/playbook-preflight.yaml",
 		"src/playbook-vars.yaml",
 		"src/infra/playbooks/site_precondition.yaml",
 		"src/infra/playbooks/site_infra.yaml",
-	} {
+	}
+	// Older Releases do not import this task. Require it only when their
+	// shared preflight actually depends on it, including prepared-tree reuse.
+	preflight, err := os.ReadFile(filepath.Join(root, "src/playbook-preflight.yaml"))
+	if err != nil {
+		return fmt.Errorf("read prepared Release playbook preflight: %w", err)
+	}
+	var tasks []struct {
+		ImportTasks yaml.Node `yaml:"ansible.builtin.import_tasks"`
+	}
+	if err := yaml.Unmarshal(preflight, &tasks); err != nil {
+		return fmt.Errorf("parse prepared Release playbook preflight: %w", err)
+	}
+	for _, task := range tasks {
+		if task.ImportTasks.Kind == yaml.ScalarNode && task.ImportTasks.Value == "host-kubeconfig.yaml" {
+			required = append(required, "src/host-kubeconfig.yaml")
+			break
+		}
+	}
+	for _, path := range required {
 		info, err := os.Stat(filepath.Join(root, path))
 		if err != nil {
 			return fmt.Errorf("prepared Release is missing %s: %w", path, err)

@@ -1,9 +1,25 @@
+- name: Inspect existing GPU detection prerequisite
+  ansible.builtin.command: lspci -nn
+  register: gpu_lspci_existing
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Prepare APT repositories only when GPU detection requires a package
+  ansible.builtin.include_tasks: "{{ eva_infra_root }}/roles/base/tasks/apt_repositories.yaml"
+  when:
+    - not (airgap_mode | default(false) | bool)
+    - not ansible_check_mode
+    - gpu_lspci_existing.rc != 0
+
 - name: Install GPU detection prerequisite
   ansible.builtin.apt:
     name: pciutils
     state: present
-    update_cache: true
-  when: not (airgap_mode | default(false) | bool)
+    update_cache: false
+  when:
+    - not (airgap_mode | default(false) | bool)
+    - gpu_lspci_existing.rc != 0
 
 - name: Verify GPU detection binary on airgap host
   ansible.builtin.command: lspci -nn

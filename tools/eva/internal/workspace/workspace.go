@@ -46,7 +46,8 @@ type Options struct {
 }
 
 type Config struct {
-	Site struct {
+	Deployment *Deployment `yaml:"deployment,omitempty"`
+	Site       struct {
 		ID string `yaml:"id"`
 	} `yaml:"site"`
 	Repository struct {
@@ -58,6 +59,17 @@ type Config struct {
 	// Generated scope metadata contains aliases and switches only, never credentials.
 	TargetComponents map[string]map[string]bool `yaml:"target_components,omitempty"`
 }
+
+// Deployment selects a controller-side Kubernetes connection. Repository mode
+// continues to describe supply; the same Ansible Solution roles execute here.
+type Deployment struct {
+	Environment string `yaml:"environment"`
+	Kubeconfig  string `yaml:"kubeconfig"`
+	Context     string `yaml:"context,omitempty"`
+	Release     string `yaml:"release,omitempty"`
+}
+
+func (config Config) ManagedCluster() bool { return config.Deployment != nil }
 
 type Resolved struct {
 	SiteID        string
@@ -134,6 +146,15 @@ func (resolved Resolved) AnsibleExtraVars() []string {
 	if project := resolved.Config.Repository.Project; project != "" {
 		values = append(values, "repository_project="+project)
 	}
+
+	if resolved.Config.ManagedCluster() {
+		kubeconfig := filepath.Join(resolved.Root, "credentials", "kubeconfig")
+		values = append(values, "eva_managed_cluster=true", "ansible_become=false",
+			"eva_cluster_kubeconfig="+kubeconfig,
+			"eva_agent_kubeconfig="+kubeconfig, "eva_app_kubeconfig="+kubeconfig,
+			"eva_vision_kubeconfig="+kubeconfig, "eva_iam_kubeconfig="+kubeconfig,
+			"precondition_argocd_kubeconfig_override="+kubeconfig)
+	}
 	return values
 }
 
@@ -149,10 +170,14 @@ func selectedComponents(components map[string]bool) string {
 }
 
 func (resolved Resolved) Environment() map[string]string {
-	return map[string]string{
+	result := map[string]string{
 		"EVA_SITE_ID":        resolved.SiteID,
 		"EVA_WORKSPACE_ROOT": resolved.Root,
 	}
+	if resolved.Config.ManagedCluster() {
+		result["KUBECONFIG"] = filepath.Join(resolved.Root, "credentials", "kubeconfig")
+	}
+	return result
 }
 
 // SelectComponents returns a copy of the workspace scoped to requested
@@ -244,6 +269,14 @@ func loadConfig(path string) (Config, error) {
 }
 
 func validateConfig(config Config, requestedSiteID string) error {
+	if deployment := config.Deployment; deployment != nil {
+		if deployment.Environment != "kubernetes" && deployment.Environment != "nks" {
+			return errors.New("deployment.environment must be kubernetes or nks")
+		}
+		if deployment.Kubeconfig == "" || NormalizeRepositoryMode(config.Repository.Mode) != "online" || config.Components["infra"] || config.Components["n8n"] {
+			return errors.New("existing Kubernetes requires deployment.kubeconfig, Online supply and Solution only (iam/app/agent/vision)")
+		}
+	}
 	if config.Site.ID == "" {
 		return errors.New("site.id is required in site configuration")
 	}

@@ -1,4 +1,4 @@
-"""Pre-start DB copy and legacy-user preservation for the internal App MySQL.
+"""Pre-start DB copy and legacy-user preservation for App MySQL.
 
 Uses kubectl/MySQL clients and an isolated read-only reader in the existing App image.
 Never start/import the application or call the LicenseSpring server. Child diagnostics may contain
@@ -9,6 +9,7 @@ import argparse
 import base64
 import csv
 import copy
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
@@ -79,7 +80,8 @@ def sha256(path):
 
 
 class Transition:
-    def __init__(self, namespace, release, resources, backup_root, source="", auto=True):
+    def __init__(self, namespace, release, resources, backup_root, source="", auto=True,
+                 client_image="mysql:8.0.42-bookworm"):
         self.namespace = namespace
         self.release = release
         self.resources = resources
@@ -91,6 +93,137 @@ class Transition:
         self.directory = None
         self.csv_files = []
         self.identity_updated = False
+        self.client_image = client_image
+        self.external = False
+
+    def preflight(self):
+        """Reject unsupported connection/storage changes while App is still running."""
+        proposed = self.resource("Deployment", self.release)
+        desired = self.env(self.app_container(proposed), rendered=True)
+        target = desired.get("MYSQL_NAME")
+        identifier(target)
+        mysql_name = (self.release + "-mysql")[:63].rstrip("-")
+        internal = any(r.get("kind") == "Deployment" and r.get("metadata", {}).get("name") == mysql_name
+                       for r in self.resources)
+        current_mysql = self.get("deployment", mysql_name)
+        current_app = self.get("deployment", self.release)
+        if not internal:
+            require(not current_mysql, "Internal-to-external DB changes require a separate migration before upgrade.")
+            require(desired.get("MYSQL_HOST") and desired.get("MYSQL_USER") and "MYSQL_PSWD" in desired,
+                    "External DB connection settings are incomplete.")
+            require(str(desired.get("MYSQL_PORT", "")).isdigit()
+                    and 0 < int(desired["MYSQL_PORT"]) <= 65535, "External DB port is invalid.")
+            require(not self.explicit_source or self.explicit_source == target,
+                    "External DB source/name changes require a separate migration before upgrade.")
+        elif not current_mysql:
+            require(not current_app, "Existing/external DB cannot be switched to internal MySQL without a separate migration.")
+        else:
+            require(current_app is not None, "Existing MySQL without App deployment: specify and validate recovery manually.")
+        if current_app is not None:
+            current = self.env(self.app_container(current_app))
+            require(all(current.get(k) == desired.get(k) for k in ("MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PSWD")),
+                    "DB endpoint/credentials change is not a DB-name migration; preserve current connection settings.")
+            if not internal:
+                require(current.get("MYSQL_NAME") == target,
+                        "External DB name changes require a separate migration before upgrade.")
+            for mount in ("/apps/backend/app/data", "/apps/backend/app/.license/LicenseSpring"):
+                require(self.storage(current_app, self.app_container(current_app), mount)
+                        == self.storage(proposed, self.app_container(proposed), mount),
+                        "App data/license storage must stay unchanged during DB preparation.")
+            if current_mysql is not None:
+                require(current.get("MYSQL_USER") == "root", "Automatic internal DB copy currently requires the existing root App user.")
+                old = current_mysql["spec"]["template"]["spec"]["containers"]
+                new = self.resource("Deployment", mysql_name)["spec"]["template"]["spec"]["containers"]
+                require(len(old) == len(new) == 1, "Ambiguous internal MySQL container.")
+                require(self.storage(current_mysql, old[0], "/var/lib/mysql")
+                        == self.storage(self.resource("Deployment", mysql_name), new[0], "/var/lib/mysql"),
+                        "MySQL storage change requires manual migration; refusing DB copy into different storage.")
+        return {"changed": False, "status": "database-preflight-passed", "database_type": "internal" if internal else "external"}
+
+    @contextmanager
+    def external_client(self, desired, proposed):
+        """A short-lived MySQL client; credentials travel through stdin/Secret refs."""
+        name = "eva-db-backup-" + uuid.uuid4().hex[:16]
+        values = {"HOST": desired["MYSQL_HOST"], "PORT": desired["MYSQL_PORT"],
+                  "USER": desired["MYSQL_USER"], "PASSWORD": desired["MYSQL_PSWD"]}
+        secret = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                  "metadata": {"name": name, "namespace": self.namespace}, "stringData": values}
+        pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "namespace": self.namespace},
+               "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False,
+                        "activeDeadlineSeconds": 3600, "terminationGracePeriodSeconds": 1,
+                        "containers": [{"name": "client", "image": self.client_image,
+                                        "command": ["sh", "-c", "sleep 3600"],
+                                        "env": [{"name": "EVA_DB_" + key,
+                                                 "valueFrom": {"secretKeyRef": {"name": name, "key": key}}}
+                                                for key in values],
+                                        "securityContext": {"allowPrivilegeEscalation": False,
+                                                            "readOnlyRootFilesystem": True,
+                                                            "capabilities": {"drop": ["ALL"]}},
+                                        "resources": {"requests": {"cpu": "100m", "memory": "128Mi"},
+                                                      "limits": {"cpu": "1", "memory": "512Mi"}}}]}}
+        source = proposed["spec"]["template"]["spec"]
+        if source.get("imagePullSecrets"):
+            pod["spec"]["imagePullSecrets"] = copy.deepcopy(source["imagePullSecrets"])
+        created = []
+        try:
+            for resource in (secret, pod):
+                self.run_command(self.kubectl("create", "-f", "-"), input=json.dumps(resource).encode(), stdout=subprocess.PIPE)
+                created.append(resource["kind"].lower())
+            self.run_command(self.kubectl("wait", "--for=condition=Ready", "pod/" + name, "--timeout=120s"), stdout=subprocess.PIPE)
+            self.external = True
+            self.pod, self.container = name, "client"
+            yield
+        finally:
+            self.external = False
+            cleanup_failed = False
+            for kind in reversed(created):
+                try:
+                    self.run_command(self.kubectl("delete", kind, name, "--ignore-not-found=true", "--wait=true", "--timeout=60s"), stdout=subprocess.PIPE)
+                except UnsafeTransition:
+                    cleanup_failed = True
+            require(not cleanup_failed, "External DB client cleanup failed; remove temporary eva-db-backup resources before retry.")
+
+    def run_external(self, current_app, desired, proposed):
+        self.preflight()
+        target = desired["MYSQL_NAME"]
+        if current_app is not None:
+            require(current_app["spec"].get("replicas", 1) == 0,
+                    "App Deployment must be scaled to zero before DB preparation.")
+            pods = json.loads(self.run_command(self.kubectl("get", "pods", "-l",
+                        "app.kubernetes.io/instance=" + self.release + ",component=eva-app", "-o", "json"),
+                        stdout=subprocess.PIPE).stdout)["items"]
+            require(not pods, "App Pods must be fully terminated before external DB backup.")
+        with self.external_client(desired, proposed):
+            # SELECT-only validation and transaction dump need no global PROCESS
+            # or performance_schema permissions on a managed external database.
+            require(self.sql("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='" + target + "';") == "1",
+                    "External database must exist and be accessible to the configured App user.")
+            tables = self.tables(target)
+            if not tables and current_app is None:
+                return {"changed": False, "status": "new-install-empty-external-database", "copied": False}
+            require({"config", "alembic_version"}.issubset(tables),
+                    "Existing external database is not an identifiable EVA App DB; refusing a silent fresh identity.")
+            self.backup_root = private_dir(self.backup_root)
+            with (self.backup_root / ".lock").open("a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise UnsafeTransition("Another App DB preparation is running.") from exc
+                before = self.snapshot(target)
+                self.export_legacy_users(target)
+                directory = self.backup_directory()
+                dump = directory / (target + ".sql")
+                self.dump(target, dump)
+                require(self.snapshot(target) == before,
+                        "External DB changed during backup; stop other writers and retry before upgrading.")
+                write_json(directory / "external-backup.json", {"database": target, "snapshot": before,
+                           "dump_sha256": sha256(dump), "verified": True, "scope": "read-only-backup"})
+                result = {"changed": True, "status": "external-database-backed-up", "copied": False,
+                          "source": target, "destination": target, "source_retained": True,
+                          "identity_updated": False, "license_identity": "existing-external-retained",
+                          "backup_directory": str(directory), "legacy_user_csv": self.csv_files}
+                write_json(directory / "result.json", result)
+                return result
 
     def cached_license(self, current_app, desired):
         """Use the existing image and storage, not App startup or network APIs."""
@@ -304,6 +437,13 @@ class Transition:
     def mysql(self, args, **kwargs):
         # Password remains inside the DB container; never pass it via argv,
         # controller env, shell history, or backup metadata.
+        if self.external:
+            shell = ('export MYSQL_PWD="$EVA_DB_PASSWORD"; client="$1"; shift; '
+                     'exec "$client" --host="$EVA_DB_HOST" --port="$EVA_DB_PORT" '
+                     '--user="$EVA_DB_USER" "$@"')
+            args = [arg for arg in args if arg != "--user=root"]
+            return self.run_command(self.kubectl("exec", "-i", self.pod, "-c", self.container,
+                                                "--", "sh", "-c", shell, "sh", *args), **kwargs)
         shell = ('test -n "$MYSQL_ROOT_PASSWORD" || exit 40; '
                  'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec "$@"')
         return self.run_command(self.kubectl("exec", "-i", self.pod, "-c", self.container,
@@ -505,11 +645,13 @@ class Transition:
         current_mysql = self.get("deployment", mysql_name)
         current_app = self.get("deployment", self.release)
         if not current_mysql:
-            require(not current_app, "Existing/external DB requires a verified manual dump and legacy-user export before upgrade.")
-            require(any(r.get("kind") == "Deployment" and r.get("metadata", {}).get("name") == mysql_name
-                        for r in self.resources),
-                    "External DB requires manual identity validation and pre-upgrade legacy-user export.")
+            internal_target = any(r.get("kind") == "Deployment" and r.get("metadata", {}).get("name") == mysql_name
+                                  for r in self.resources)
+            if not internal_target:
+                return self.run_external(current_app, desired, proposed)
+            require(not current_app, "Existing/external DB cannot be switched to internal MySQL without a separate migration.")
             return {"changed": False, "status": "new-install-no-existing-mysql"}
+        self.preflight()
         require(current_app is not None, "Existing MySQL without App deployment: specify and validate recovery manually.")
         require(current_app["spec"].get("replicas", 1) == 0,
             "App Deployment must be scaled to zero before DB preparation.")
@@ -648,12 +790,15 @@ def main():
     parser.add_argument("--backup-root", required=True)
     parser.add_argument("--source", default="")
     parser.add_argument("--auto-migrate", choices=("true", "false"), default="true")
+    parser.add_argument("--client-image", default="mysql:8.0.42-bookworm")
+    parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     try:
         resources = [r for r in yaml.safe_load_all(Path(args.manifest).read_text()) if isinstance(r, dict)]
-        result = Transition(args.namespace, args.release, resources, args.backup_root,
-                            args.source, args.auto_migrate == "true").run()
+        transition = Transition(args.namespace, args.release, resources, args.backup_root,
+                                args.source, args.auto_migrate == "true", args.client_image)
+        result = transition.preflight() if args.preflight else transition.run()
         print(json.dumps(result))
     except UnsafeTransition as exc:
         print("[ERROR] " + str(exc), file=sys.stderr)

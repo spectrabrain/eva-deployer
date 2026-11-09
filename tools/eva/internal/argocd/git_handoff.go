@@ -485,9 +485,12 @@ func verifyRemovalWindowWithSource(session Session, cluster clusterRegistration,
 	return nil
 }
 
-func recoverGitBackedHandoff(session Session, detection Detection, applications []applicationRecord, registrations []clusterRegistration) (Receipt, bool, error) {
-	receipt, err := LoadReceipt(DefaultReceiptRoot, detection.SiteID)
+func recoverGitBackedHandoff(session Session, prompt Prompter, detection Detection, applications []applicationRecord, registrations []clusterRegistration) (Receipt, bool, error) {
+	receipt, found, err := loadCompletedReceipt(prompt, detection.SiteID)
 	if err != nil {
+		return Receipt{}, false, err
+	}
+	if !found {
 		return Receipt{}, false, nil
 	}
 	if receipt.RegistrationCommit == "" {

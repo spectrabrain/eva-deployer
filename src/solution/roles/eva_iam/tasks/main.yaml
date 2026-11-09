@@ -61,6 +61,16 @@
           )
       }}
 
+- name: Pin existing IAM hostPath data to its worker
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_iam_effective_user_values: >-
+      {{ eva_iam_effective_user_values | combine(
+           ({'database': {'internal': {'nodeSelector': item.value}}}
+            if item.key == 'database' else {item.key: {'nodeSelector': item.value}}), recursive=true) }}
+  loop: "{{ eva_cluster_iam_node_selectors | default({}) | dict2items }}"
+  when: eva_managed_cluster | default(false) | bool
+
 - name: Apply eva-iam deploy options from values file
   ansible.builtin.set_fact:
     "eva_iam_{{ item.key }}": "{{ item.value }}"
@@ -590,6 +600,7 @@
     eva_traefik_tls_kubeconfig: "{{ eva_iam_kubeconfig }}"
   when:
     - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
     - "(eva_traefik_ports_result.endpoint.scheme == 'https') if (eva_traefik_ports_result.isolated | default(false)) else (eva_iam_effective_tls_enabled | bool)"
     - "eva_traefik_ports_result.tls_job_enabled if (eva_traefik_ports_result.isolated | default(false)) else (eva_iam_effective_user_values.ingress.enabled | default(true) | bool)"
     - "eva_traefik_ports_result.tls_job_enabled if (eva_traefik_ports_result.isolated | default(false)) else (eva_iam_effective_user_values.ingress.tls.create | default(true) | bool)"
@@ -629,6 +640,26 @@
   loop_control:
     label: "{{ item.item | default('') }}"
   when: not ansible_check_mode
+
+- name: Synchronize managed-cluster credentials before product workload changes
+  ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/online_credentials.yaml"
+  vars:
+    eva_online_component: iam
+    eva_online_action: prepare
+    eva_online_input_values: "{{ eva_iam_effective_values }}"
+  when: eva_managed_cluster | default(false) | bool
+
+
+- name: Validate shared EVA iam inputs against the existing cluster
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  vars:
+    eva_cluster_guard_component: iam
+    eva_cluster_guard_workdir: "{{ eva_iam_workdir }}"
+    eva_cluster_guard_chart: "{{ eva_iam_chart_source }}"
+    eva_cluster_guard_version: "{{ eva_iam_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_cluster_guard_values: "{{ [eva_iam_workdir ~ '/values.yaml', eva_iam_workdir ~ '/eva-iam-k3s-override.yaml', eva_iam_values_dest] }}"
+  when: eva_managed_cluster | default(false) | bool
 
 - name: Install/upgrade eva-iam from Helm repo or offline chart
   ansible.builtin.command: >-
@@ -816,15 +847,15 @@
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
-    owner: root
-    group: root
+    owner: "{{ omit if (eva_managed_cluster | default(false) | bool) else 'root' }}"
+    group: "{{ omit if (eva_managed_cluster | default(false) | bool) else 'root' }}"
     mode: "0700"
   loop:
     - "{{ eva_persistent_state_root }}"
     - "{{ eva_site_state_root }}"
     - "{{ eva_iam_app_handoff_dir }}"
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - eva_iam_write_app_config
     - not ansible_check_mode
@@ -833,8 +864,8 @@
   no_log: true
   ansible.builtin.copy:
     dest: "{{ eva_iam_app_handoff_path }}"
-    owner: root
-    group: root
+    owner: "{{ omit if (eva_managed_cluster | default(false) | bool) else 'root' }}"
+    group: "{{ omit if (eva_managed_cluster | default(false) | bool) else 'root' }}"
     mode: "0600"
     unsafe_writes: false
     content: |
@@ -852,7 +883,7 @@
         # 현재 값입니다. 콘솔에서 재생성(Regenerate)하면 이 값은 무효가 됩니다.
         adminClientSecret: {{ eva_iam_admin_api_client_secret | to_json }}
   delegate_to: localhost
-  become: true
+  become: "{{ not (eva_managed_cluster | default(false) | bool) }}"
   when:
     - eva_iam_write_app_config
     - not ansible_check_mode

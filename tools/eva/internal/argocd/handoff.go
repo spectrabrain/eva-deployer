@@ -518,7 +518,7 @@ func RunDetectedPreflight(detection Detection, prompt Prompter, connect Connecto
 		return nil
 	}
 
-	if recovery, recovered, err := recoverGitBackedHandoff(session, detection, applications, registrations); err != nil {
+	if recovery, recovered, err := recoverGitBackedHandoff(session, prompt, detection, applications, registrations); err != nil {
 		return fmt.Errorf("verify recorded Git-backed Argo CD handoff: %w", err)
 	} else if recovered {
 		if err := recordReceipt(prompt, recovery); err != nil {

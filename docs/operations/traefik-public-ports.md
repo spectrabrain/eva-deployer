@@ -59,6 +59,12 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
    `config.publicPort`가 렌더링된 runtime URL을 따른다. App의 `service.port`에서 추측하지 않는다.
 2. 기존 App/IAM이 있으면 Ingress·endpoint ConfigMap의 정확한 Helm 소유권과 Helm 저장 이력을
    대조한다. 기존 양쪽이 hostless Ingress여도 확인된 공개 포트를 함께 보존한다.
+   기존 App NodePort 전환에서는 Service 설정·selector와 ConfigMap의 `BACKEND_HOST`,
+   `BACKEND_PORT`, `BACKEND_PUBLIC_PORT`, `BACKEND_SECURE`, `BACKEND_SECURE_PORT`를 대조한다.
+   `INGESTER_ASSIGNER` 등 공개 주소·포트와 무관한 수동 변경은 전환 중 그대로 보존하고
+   전체 live ConfigMap을 private snapshot에 저장한다. 전환 중이나 이후 snapshot과 달라지면
+   중단한다. 불일치 오류에는 필드명만 표시하며 ConfigMap 값은 출력하지 않는다.
+   App Helm 업데이트 후에도 필요한 수동 값은 설치 Values의 `app.additional`에 명시한다.
 3. 변경 전 HelmChart·HelmChartConfig·해당 Ingress 원본을 대상 서버의
    `/var/lib/eva/backups/traefik-ports/`에 private snapshot으로 저장한다.
 4. App/IAM router를 서로 필요한 entrypoint에만 연결한다. `web`/`websecure`를 사용하거나

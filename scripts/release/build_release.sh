@@ -278,7 +278,7 @@ write_checksums() {
 
 assert_regular_tree "$repo_root/src/infra" "Infra source"
 assert_regular_tree "$repo_root/src/solution" "Solution source"
-for file in ansible.cfg src/playbook-preflight.yaml src/playbook-vars.yaml; do
+for file in ansible.cfg src/playbook-preflight.yaml src/playbook-vars.yaml src/host-kubeconfig.yaml; do
   if [[ ! -f "$repo_root/$file" ]]; then
     echo "[error] required Infra Release file is missing: $file" >&2
     exit 1
@@ -335,7 +335,7 @@ solution_file="eva-solution_${artifact_tag}.tar.gz"
 make_archive "$build_root/tool" "$staging_dist/$tool_file" bin libexec
 assert_tool_archive_layout "$staging_dist/$tool_file"
 install -m 0755 "$installer_source" "$staging_dist/$installer_file"
-make_archive "$repo_root" "$staging_dist/$infra_file" ansible.cfg src/playbook-preflight.yaml src/playbook-vars.yaml src/infra
+make_archive "$repo_root" "$staging_dist/$infra_file" ansible.cfg src/playbook-preflight.yaml src/playbook-vars.yaml src/host-kubeconfig.yaml src/infra
 make_archive "$repo_root" "$staging_dist/$solution_file" src/solution
 
 artifacts=(

@@ -1,7 +1,9 @@
 image:
   repository: "{{ eva_agent_qdrant_image_repository }}"
   tag: "{{ eva_agent_qdrant_image_tag }}"
+{% if not (eva_managed_cluster | default(false) | bool) %}
   pullPolicy: IfNotPresent
+{% endif %}
 
 {% if airgap_mode | default(false) | bool %}
 {% if eva_agent_repository_pull_secrets | default([]) | length > 0 %}

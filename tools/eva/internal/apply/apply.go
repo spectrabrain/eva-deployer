@@ -25,6 +25,7 @@ const DefaultLogRoot = "/var/log/eva/operations"
 var expectedPlaybooks = map[string]string{
 	"precondition": "src/infra/playbooks/site_precondition.yaml",
 	"infra":        "src/infra/playbooks/site_infra.yaml",
+	"gpu":          "src/infra/playbooks/site_gpu_prepare.yaml",
 	"config":       "src/solution/playbooks/site_eva_config.yaml",
 	"iam":          "src/solution/playbooks/site_eva_iam.yaml",
 	"agent":        "src/solution/playbooks/site_eva_agent.yaml",
@@ -393,6 +394,10 @@ func commandEnvironment(
 		resolvedRuntime.CollectionPath(),
 		values["ANSIBLE_COLLECTIONS_PATH"],
 	)
+	if document.Environment["KUBECONFIG"] != "" {
+		// Local cluster modules need the same Python/PyYAML as controller helpers.
+		values["ANSIBLE_PYTHON_INTERPRETER"] = filepath.Join(resolvedRuntime.Root, "venv", "bin", "python")
+	}
 	pathEntries := resolvedRuntime.ToolDirectories()
 	if values["PATH"] != "" {
 		pathEntries = append(pathEntries, values["PATH"])

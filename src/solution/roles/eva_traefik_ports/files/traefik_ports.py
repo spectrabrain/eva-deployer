@@ -2,12 +2,13 @@
 """Conservative k3s HelmChartConfig listener reconciliation and Helm post-rendering.
 
 Only local bundled charts, the default LoadBalancer Service and k3s ServiceLB
-are supported. No cluster mutation is made for DNS/disabled ingress. Failures do
-not roll back over concurrent operator changes; the original private snapshot is
-reported instead. All Kubernetes writes are create-only or resourceVersion CAS.
-Bootstrap requires Helm history and exact Helm ownership on both Ingress and
-endpoint ConfigMap. Argo-only installations without Helm history are deliberately
-refused; hand off ownership/history before using automatic listener migration.
+are supported. No cluster mutation is made for DNS/disabled ingress. All writes
+are create-only or UID/resourceVersion CAS. Existing routers require exact Helm
+history and ownership. A legacy App NodePort can be bridged using its verified
+Service and endpoint ConfigMap history and a private durable receipt. Unrelated
+ConfigMap edits are preserved in the receipt. Failed bridge transitions
+restore only unchanged writes from that attempt, after the listener releases the
+port. Concurrent operator changes and Argo-only/no-history ownership are refused.
 """
 
 import argparse
@@ -35,6 +36,9 @@ ENTRY = "traefik.ingress.kubernetes.io/router.entrypoints"
 TLS = "traefik.ingress.kubernetes.io/router.tls"
 RESOURCE = "helmchartconfigs.helm.cattle.io"
 CHART = "helmcharts.helm.cattle.io"
+LEGACY = "eva.spectrabrain.com/legacy-app-nodeport"
+LEGACY_ENDPOINT_KEYS = frozenset({"BACKEND_HOST", "BACKEND_PORT", "BACKEND_PUBLIC_PORT",
+                                  "BACKEND_SECURE", "BACKEND_SECURE_PORT"})
 
 
 class Unsafe(RuntimeError):
@@ -408,7 +412,7 @@ def endpoint_facts(selected):
             ("component", "namespace", "release", "host", "scheme", "port", "paths", "ingress")}
 
 
-def verified_installed(cluster, ingress, maps, component, namespace, release):
+def verified_installed(cluster, ingress, maps, component, namespace, release, backup_root=None):
     require(release and helm_owned(ingress, namespace, release)
             and len(maps) == 1 and helm_owned(maps[0], namespace, release),
             "EVA Ingress/ConfigMap Helm ownership mismatch; unknown ownership cannot be migrated")
@@ -425,6 +429,8 @@ def verified_installed(cluster, ingress, maps, component, namespace, release):
              and obj.get("metadata", {}).get("namespace", namespace) == namespace
              and (obj.get("kind"), obj.get("metadata", {}).get("name")) in
              (("Ingress", meta["name"]), ("ConfigMap", maps[0]["metadata"]["name"]))]
+    if len(installed) != 2 and component == "app" and meta.get("annotations", {}).get(LEGACY):
+        return verified_bridge(cluster, ingress, maps[0], manifest, backup_root)
     require(len(installed) == 2, "Helm history does not contain the exact EVA Ingress and endpoint ConfigMap")
     live = endpoint(maps + [ingress], component, namespace, release)
     recorded = endpoint(installed, component, namespace, release)
@@ -449,7 +455,7 @@ def managed_router(ingress, prior, installed):
             "Existing EVA Ingress has an unknown explicit router TLS setting")
 
 
-def discover(cluster, current, old_state):
+def discover(cluster, current, old_state, backup_root=None):
     """Verify installed endpoint facts; legacy missing router annotations are valid."""
     selected = {}
     unrelated = []
@@ -471,13 +477,16 @@ def discover(cluster, current, old_state):
         candidates = [obj for obj in objects if obj.get("metadata", {}).get("name") in (name, name + "-env")]
         component = "app" if any("BACKEND_HOST" in obj.get("data", {}) for obj in candidates) else "iam"
         candidates = [obj for obj in candidates if ("BACKEND_HOST" if component == "app" else "ISSUER") in obj.get("data", {})]
-        other = endpoint(candidates + [ingress], component, namespace, release) if candidates else None
+        bridge = bool(annotations.get(LEGACY))
+        other = (verified_installed(cluster, ingress, candidates, component, namespace, release, backup_root)
+                 if bridge else endpoint(candidates + [ingress], component, namespace, release) if candidates else None)
         if not other:
             require(not is_current, "Existing current EVA Ingress cannot be verified from its installed public endpoint")
             unrelated.append(ingress)
             continue
         require(not is_current or key == current_key, "Current EVA Ingress has unknown Helm ownership")
-        other = verified_installed(cluster, ingress, candidates, component, namespace, release)
+        if not bridge:
+            other = verified_installed(cluster, ingress, candidates, component, namespace, release, backup_root)
         require(key not in originals, "Multiple live ingresses for another EVA release")
         prior = old_state.get(key)
         if prior and key != current_key:
@@ -497,7 +506,305 @@ def discover(cluster, current, old_state):
     return selected, unrelated, originals, evidence
 
 
-def snapshot(root, chart, config, ingresses):
+def stable(obj):
+    if obj is None:
+        return None
+    result = copy.deepcopy(obj)
+    result.pop("status", None)
+    for key in ("resourceVersion", "managedFields", "generation"):
+        result.get("metadata", {}).pop(key, None)
+    return result
+
+
+def live_named(cluster, resource, namespace, name):
+    items = [obj for obj in cluster.get(resource, None if resource == "services" else namespace)["items"]
+             if obj["metadata"].get("namespace") == namespace and obj["metadata"]["name"] == name]
+    require(len(items) <= 1, "Ambiguous legacy App resource identity")
+    return items[0] if items else None
+
+
+def template_matches(live, template):
+    """Allow API defaults/allocated addresses, while checking every Helm input."""
+    if isinstance(template, dict):
+        return isinstance(live, dict) and all(key in live and template_matches(live[key], value)
+                                               for key, value in template.items())
+    if isinstance(template, list):
+        return isinstance(live, list) and len(live) == len(template) and all(
+            template_matches(left, right) for left, right in zip(live, template))
+    return live == template
+
+
+def template_difference_paths(live, template, path):
+    """Describe Helm-input mismatches without logging ConfigMap or other values."""
+    if isinstance(template, dict):
+        if not isinstance(live, dict):
+            return [path]
+        return [difference for key, value in template.items()
+                for difference in ([path + "." + key] if key not in live else
+                                   template_difference_paths(live[key], value, path + "." + key))]
+    if isinstance(template, list):
+        if not isinstance(live, list) or len(live) != len(template):
+            return [path]
+        return [difference for index, (left, right) in enumerate(zip(live, template))
+                for difference in template_difference_paths(left, right, path + "[" + str(index) + "]")]
+    return [] if live == template else [path]
+
+
+def legacy_history(manifest, service, configmap):
+    """Verify listener inputs; retain the entire live ConfigMap for receipt/CAS checks."""
+    namespace = service["metadata"]["namespace"]
+    found = {}
+    for original in (service, configmap):
+        matches = [obj for obj in manifest if obj.get("kind") == original["kind"]
+                   and obj.get("metadata", {}).get("namespace", namespace) == namespace
+                   and obj.get("metadata", {}).get("name") == original["metadata"]["name"]]
+        require(len(matches) == 1, "Legacy App requires the exact Service and ConfigMap in Helm history")
+        found[original["kind"]] = matches[0]
+    differences = template_difference_paths(service["spec"], found["Service"]["spec"], "Service.spec")
+    if service["spec"].get("selector") != found["Service"]["spec"].get("selector"):
+        differences.append("Service.spec.selector")
+    live_data, stored_data = configmap.get("data"), found["ConfigMap"].get("data")
+    if live_data != stored_data:
+        if isinstance(live_data, dict) and isinstance(stored_data, dict):
+            # This transition only changes the Service/Ingress, not application
+            # settings. Operators may have edited unrelated runtime keys since
+            # Helm installation. Preserve those edits in the full live snapshot;
+            # verified_bridge/verify_endpoint_maps still reject concurrent edits.
+            differences.extend("ConfigMap.data." + key
+                               for key in sorted((live_data.keys() | stored_data.keys()) & LEGACY_ENDPOINT_KEYS)
+                               if key not in live_data or key not in stored_data or live_data[key] != stored_data[key])
+        else:
+            differences.append("ConfigMap.data")
+    if differences:
+        fields = sorted(set(differences))
+        detail = ", ".join(fields[:12])
+        if len(fields) > 12:
+            detail += ", ... (" + str(len(fields)) + " fields total)"
+        raise Unsafe("Legacy App Service/ConfigMap differs from Helm history; automatic transition refused. "
+                     "Mismatched fields: " + detail)
+
+
+def no_foreign_owner(obj):
+    meta = obj["metadata"]
+    return (not meta.get("deletionTimestamp") and not meta.get("ownerReferences")
+            and not meta.get("labels", {}).get("argocd.argoproj.io/instance")
+            and not meta.get("annotations", {}).get("argocd.argoproj.io/tracking-id")
+            and meta.get("uid") and meta.get("resourceVersion"))
+
+
+def assess_legacy_app(cluster, request, planned):
+    target = request.get("legacy_app", {})
+    if planned["component"] == "app":
+        target = dict(enabled=True, ingress_enabled=True, namespace=planned["namespace"],
+                      release=planned["release"], host=planned["host"], port=planned["port"],
+                      secure=planned["scheme"] == "https", path=planned["paths"][0])
+    if not target.get("enabled") or not target.get("ingress_enabled"):
+        return None
+    namespace, release = target["namespace"], target["release"]
+    service = live_named(cluster, "services", namespace, release)
+    if not service or service.get("spec", {}).get("type") != "NodePort":
+        return None
+    port = port_number(target["port"])
+    if not any(item.get("nodePort") == port for item in service["spec"].get("ports", [])):
+        return None
+    # Automatic migration is limited to the existing root HTTP App endpoint.
+    require(not target.get("secure") and target.get("path") == "/" and is_ip(target["host"])
+            and planned["scheme"] == "http" and planned["port"] == port,
+            "Existing App NodePort requires a matching shared root HTTP endpoint for automatic transition")
+    spec = service["spec"]
+    require(helm_owned(service, namespace, release) and no_foreign_owner(service),
+            "Legacy App Service has unknown, active Argo CD or terminating ownership")
+    require(len(spec.get("ports", [])) == 1 and spec["ports"][0].get("nodePort") == port
+            and spec["ports"][0].get("port") == port and spec["ports"][0].get("protocol", "TCP") == "TCP"
+            and spec.get("selector") and spec.get("clusterIP") not in (None, "None")
+            and not spec.get("externalIPs") and not spec.get("loadBalancerClass"),
+            "Legacy App Service is not the supported single HTTP NodePort")
+    require(live_named(cluster, "ingresses", namespace, release) is None,
+            "Legacy App already has an Ingress; automatic NodePort transition requires review")
+    configmap = live_named(cluster, "configmaps", namespace, release + "-env")
+    require(configmap and "BACKEND_HOST" in configmap.get("data", {})
+            and helm_owned(configmap, namespace, release) and no_foreign_owner(configmap),
+            "Legacy App endpoint ConfigMap has no verified Helm ownership")
+    status = json.loads(cluster.run(["helm", "status", release, "-n", namespace, "-o", "json"]))
+    require(status.get("name") == release and status.get("namespace") == namespace
+            and status.get("info", {}).get("status") == "deployed" and status.get("version"),
+            "Legacy App transition requires a deployed Helm release")
+    manifest = documents(cluster.run(["helm", "get", "manifest", release, "-n", namespace]))
+    legacy_history(manifest, service, configmap)
+    converted = copy.deepcopy(spec)
+    converted["type"] = "ClusterIP"
+    converted.pop("externalTrafficPolicy", None)
+    for item in converted["ports"]:
+        item.pop("nodePort", None)
+    selected = {"component": "app", "namespace": namespace, "release": release,
+                "host": target["host"], "scheme": "http", "port": port, "paths": ["/"], "ingress": release}
+    return {"service": service, "configmap": configmap, "converted_spec": converted,
+            "endpoint": selected, "revision": status["version"]}
+
+
+def read_receipt(path, root):
+    file = Path(path)
+    require(root and file.parent == Path(root) and file.name.startswith("before-") and file.suffix == ".json"
+            and not any(item.is_symlink() for item in (file, *file.parents)), "Invalid legacy App receipt path")
+    descriptor = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as stream:
+        stat = os.fstat(stream.fileno())
+        require(stat.st_uid == os.geteuid() and stat.st_mode & 0o077 == 0,
+                "Legacy App receipt must be owned by the installation account and private")
+        return json.load(stream)
+
+
+def legacy_bridge(legacy, selected, backup):
+    meta = legacy["service"]["metadata"]
+    return {"apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "metadata": {
+        "name": meta["name"], "namespace": meta["namespace"], "labels": {"app.kubernetes.io/managed-by": "Helm"},
+        "annotations": {"meta.helm.sh/release-name": selected["release"],
+                        "meta.helm.sh/release-namespace": meta["namespace"], LEGACY: backup,
+                        ENTRY: selected["entrypoint"], TLS: "false"}},
+        "spec": {"ingressClassName": "traefik", "rules": [{"http": {"paths": [{"path": "/", "pathType": "Prefix",
+            "backend": {"service": {"name": meta["name"], "port": {"number": selected["port"]}}}}]}}]}}
+
+
+def save_receipt(path, receipt):
+    directory = Path(path).parent
+    descriptor, temporary = tempfile.mkstemp(prefix=".receipt-", dir=directory)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            json.dump(receipt, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def bridge_matches(live, legacy):
+    expected = legacy["bridge"]
+    meta = live.get("metadata", {})
+    return (template_matches(live, expected) and live.get("spec") == expected["spec"]
+            and meta.get("annotations") == expected["metadata"]["annotations"]
+            and meta.get("labels") == expected["metadata"]["labels"]
+            and not meta.get("finalizers") and no_foreign_owner(live)
+            and (not legacy.get("bridge_uid") or meta.get("uid") == legacy["bridge_uid"]))
+
+
+def verified_bridge(cluster, ingress, configmap, manifest, root):
+    path = ingress["metadata"]["annotations"][LEGACY]
+    receipt = read_receipt(path, root)
+    legacy = receipt.get("legacy")
+    require(legacy and legacy.get("phase") != "restored", "Legacy App receipt is not an active transition")
+    original = legacy["service"]
+    legacy_history(manifest, original, legacy["configmap"])
+    require(stable(configmap) == stable(legacy["configmap"]), "Legacy App endpoint ConfigMap changed after transition")
+    service = live_named(cluster, "services", original["metadata"]["namespace"], original["metadata"]["name"])
+    wanted = copy.deepcopy(original)
+    wanted["spec"] = legacy["converted_spec"]
+    require(service and stable(service) == stable(wanted) and no_foreign_owner(service),
+            "Legacy App converted Service changed after transition")
+    require(bridge_matches(ingress, legacy), "Legacy App bridge differs from its private transition receipt or UID changed")
+    # The first create is durable before the UID is recorded; its private,
+    # unique receipt annotation binds that interrupted create to this attempt.
+    return copy.deepcopy(legacy["endpoint"])
+
+
+def cas_restore(cluster, resource, current, original):
+    meta = current["metadata"]
+    operations = [{"op": "test", "path": "/metadata/uid", "value": meta["uid"]},
+                  {"op": "test", "path": "/metadata/resourceVersion", "value": meta["resourceVersion"]},
+                  {"op": "replace", "path": "/spec", "value": original["spec"]}]
+    if resource in (RESOURCE, "ingresses"):
+        operations.append({"op": "add", "path": "/metadata/annotations", "value": original["metadata"].get("annotations", {})})
+    return json.loads(cluster.run(["kubectl", "patch", resource, meta["name"], "-n", meta["namespace"],
+                                  "--type=json", "--patch-file=/dev/stdin", "-o", "json"], json.dumps(operations)))
+
+
+def cas_delete(cluster, resource, obj):
+    meta = obj["metadata"]
+    base = "/apis/helm.cattle.io/v1" if resource == RESOURCE else "/apis/networking.k8s.io/v1"
+    plural = "helmchartconfigs" if resource == RESOURCE else "ingresses"
+    options = {"apiVersion": "v1", "kind": "DeleteOptions", "preconditions":
+               {"uid": meta["uid"], "resourceVersion": meta["resourceVersion"]}}
+    cluster.run(["kubectl", "delete", "--raw", base + "/namespaces/" + meta["namespace"] + "/" + plural + "/" + meta["name"],
+                 "-f", "-"], json.dumps(options))
+
+
+def restore_legacy_app(cluster, receipt, backup, timeout):
+    """Restore only this attempt's exact writes; stop if an operator changed them."""
+    legacy = receipt["legacy"]
+    original = legacy["service"]
+    expected = copy.deepcopy(original)
+    expected["spec"] = legacy["converted_spec"]
+    live = live_named(cluster, "services", original["metadata"]["namespace"], original["metadata"]["name"])
+    require(live and (stable(live) == stable(original) or stable(live) == stable(expected)),
+            "App Service changed; automatic NodePort restoration refused")
+    bridge = live_named(cluster, "ingresses", original["metadata"]["namespace"], original["metadata"]["name"])
+    require(not bridge or bridge_matches(bridge, legacy), "App bridge changed; automatic restoration refused")
+    chart = cluster.get(CHART, name="traefik")
+    require(chart.get("spec") == receipt["helmchart"].get("spec"), "Traefik chart changed; automatic restoration refused")
+    config = cluster.get(RESOURCE, name="traefik", optional=True)
+    if legacy.get("written_config"):
+        require(config and stable(config) == stable(legacy["written_config"]),
+                "Traefik configuration changed; automatic restoration refused")
+        if receipt["helmchartconfig"]:
+            cas_restore(cluster, RESOURCE, config, receipt["helmchartconfig"])
+        else:
+            cas_delete(cluster, RESOURCE, config)
+    else:
+        require(stable(config) == stable(receipt["helmchartconfig"]),
+                "Traefik configuration changed before its write was verified; restoration refused")
+    # ServiceLB retains hostPorts while terminating. Never reallocate the old
+    # NodePort until the new listener and every such hostPort are gone.
+    deadline = time.monotonic() + timeout
+    while True:
+        service = cluster.get("services", name="traefik")
+        check_service(service)
+        occupied = {item["port"] for item in service["spec"]["ports"]}
+        for pod in cluster.get("pods", None)["items"]:
+            for container in pod.get("spec", {}).get("containers", []) + pod.get("spec", {}).get("initContainers", []):
+                occupied |= {item.get("hostPort") for item in container.get("ports", [])}
+        if legacy["endpoint"]["port"] not in occupied:
+            break
+        require(time.monotonic() < deadline, "Original App NodePort cannot be restored before Traefik releases the port")
+        time.sleep(2)
+    live = live_named(cluster, "services", original["metadata"]["namespace"], original["metadata"]["name"])
+    require(live and (stable(live) == stable(original) or stable(live) == stable(expected)),
+            "App Service changed; automatic NodePort restoration refused")
+    if stable(live) != stable(original):
+        cas_restore(cluster, "services", live, original)
+    bridge = live_named(cluster, "ingresses", original["metadata"]["namespace"], original["metadata"]["name"])
+    if bridge:
+        require(bridge_matches(bridge, legacy),
+                "App bridge changed; automatic deletion refused")
+        cas_delete(cluster, "ingresses", bridge)
+    legacy["phase"] = "restored"
+    save_receipt(backup, receipt)
+
+
+def recover_interrupted_bridge_create(cluster, request):
+    # If the process exited after create but before releasing the NodePort,
+    # remove only the receipt-proven unused bridge and reassess from scratch.
+    for bridge in cluster.get("ingresses", None)["items"]:
+        path = bridge.get("metadata", {}).get("annotations", {}).get(LEGACY)
+        if not path:
+            continue
+        receipt = read_receipt(path, request["backup_root"])
+        legacy = receipt.get("legacy")
+        require(legacy and legacy.get("phase") != "restored", "Invalid live legacy App transition receipt")
+        if legacy.get("phase") != "prepared":
+            continue
+        original = legacy["service"]
+        live = live_named(cluster, "services", original["metadata"]["namespace"], original["metadata"]["name"])
+        if stable(live) == stable(original):
+            restore_legacy_app(cluster, receipt, path, float(request.get("timeout", 300)))
+
+
+def snapshot(root, chart, config, ingresses, legacy=None):
     root = Path(root)
     require(root.is_absolute() and ".." not in root.parts and all(32 <= ord(char) < 127 for char in str(root)),
             "Traefik backup root must be a safe absolute path")
@@ -506,7 +813,7 @@ def snapshot(root, chart, config, ingresses):
     require(root.stat().st_mode & 0o077 == 0 and not root.is_symlink(), "Traefik backup root must be a private non-symlink directory")
     fd, name = tempfile.mkstemp(prefix="before-", suffix=".json", dir=root)
     with os.fdopen(fd, "w") as stream:
-        json.dump({"helmchart": chart, "helmchartconfig": config, "ingresses": list(ingresses.values())}, stream)
+        json.dump({"helmchart": chart, "helmchartconfig": config, "ingresses": list(ingresses.values()), "legacy": legacy}, stream)
         stream.flush()
         os.fsync(stream.fileno())
     descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -546,14 +853,16 @@ def verify_routers(cluster, originals, selected):
         meta = original["metadata"]
         current = copy.deepcopy(live.get((meta["namespace"], meta["name"]), {}))
         target = isolate([original], selected[key])[0]
-        # Only the apiserver's write bookkeeping may differ after our CAS.
+        # Controllers update observed status independently of our router writes.
+        # Keep spec, identity and operator metadata checks exact.
         for obj in (current, target):
+            obj.pop("status", None)
             obj.get("metadata", {}).pop("resourceVersion", None)
             obj.get("metadata", {}).pop("managedFields", None)
         require(current == target, "EVA Ingress changed during router migration; stop without rollback")
 
 
-def write_config(cluster, config, values, selected, backup, ownership):
+def write_config(cluster, config, values, selected, backup, ownership, capture=False):
     content = yaml.safe_dump(values, sort_keys=False)
     state = json.dumps(selected, sort_keys=True, separators=(",", ":"))
     if config:
@@ -565,18 +874,21 @@ def write_config(cluster, config, values, selected, backup, ownership):
         if config:
             patch = [{"op": "test", "path": "/metadata/resourceVersion", "value": config["metadata"]["resourceVersion"]},
                      {"op": "add", "path": "/spec/valuesContent", "value": content}]
+            if capture:
+                require(config["metadata"].get("uid"), "Legacy transition requires a stable Traefik configuration UID")
+                patch.insert(1, {"op": "test", "path": "/metadata/uid", "value": config["metadata"]["uid"]})
             if "annotations" not in config["metadata"]:
                 patch.append({"op": "add", "path": "/metadata/annotations", "value": {STATE: state, OWNED: ownership}})
             else:
                 for key, value in ((STATE, state), (OWNED, ownership)):
                     patch.append({"op": "add", "path": "/metadata/annotations/" + key.replace("~", "~0").replace("/", "~1"), "value": value})
-            cluster.run(["kubectl", "patch", RESOURCE, "traefik", "-n", "kube-system", "--type=json", "--patch-file=/dev/stdin"], json.dumps(patch))
+            output = cluster.run(["kubectl", "patch", RESOURCE, "traefik", "-n", "kube-system", "--type=json", "--patch-file=/dev/stdin"] + (["-o", "json"] if capture else []), json.dumps(patch))
         else:
             resource = {"apiVersion": "helm.cattle.io/v1", "kind": "HelmChartConfig", "metadata": {"name": "traefik", "namespace": "kube-system", "annotations": {STATE: state, OWNED: ownership}}, "spec": {"valuesContent": content}}
-            cluster.run(["kubectl", "create", "-f", "-"], json.dumps(resource))
+            output = cluster.run(["kubectl", "create", "-f", "-"] + (["-o", "json"] if capture else []), json.dumps(resource))
     except Unsafe as exc:
         raise Unsafe(f"HelmChartConfig CAS/create conflict; no adoption or blind retry. Original backup: {backup}") from exc
-    return True, backup
+    return True, json.loads(output) if capture else backup
 
 
 def check_service(service):
@@ -687,6 +999,7 @@ def ready(cluster, expected, previous_ports, addresses, http_entries=()):
 def reconcile(cluster, request, planned, defaults=None):
     timeout = float(request.get("timeout", 300))
     require(0 <= timeout <= 86400, "Invalid public listener convergence timeout")
+    recover_interrupted_bridge_create(cluster, request)
     chart = cluster.get(CHART, name="traefik", optional=True)
     require(chart, "Bundled k3s Traefik HelmChart is absent")
     defaults = chart_defaults(chart) if defaults is None else defaults
@@ -694,8 +1007,13 @@ def reconcile(cluster, request, planned, defaults=None):
     annotations = (config or {}).get("metadata", {}).get("annotations", {})
     old_state = json.loads(annotations.get(STATE, "{}"))
     require(isinstance(old_state, dict), "Invalid EVA endpoint ownership annotation")
-    selected, unrelated, originals, evidence = discover(cluster, planned, old_state)
-    values, selected, expected = plan(defaults, chart, config, selected, unrelated, preserve_primary=bool(originals))
+    selected, unrelated, originals, evidence = discover(cluster, planned, old_state, request["backup_root"])
+    legacy = assess_legacy_app(cluster, request, planned)
+    if legacy:
+        legacy_key = legacy["endpoint"]["namespace"] + "/" + legacy["endpoint"]["release"]
+        selected[legacy_key] = legacy["endpoint"]
+        evidence[legacy_key] = legacy["configmap"]
+    values, selected, expected = plan(defaults, chart, config, selected, unrelated, preserve_primary=bool(originals) or bool(legacy))
     effective = merge(merge(defaults, yaml.safe_load(chart.get("spec", {}).get("valuesContent", "")) or {}), values)
     recovered = eva_entrypoints(effective["ports"]) if not unrelated else set()
     owned_entries = owned_entrypoints(config) | recovered
@@ -724,15 +1042,39 @@ def reconcile(cluster, request, planned, defaults=None):
         occupied = {item.get("nodePort") for item in spec.get("ports", [])}
         if spec.get("type") == "LoadBalancer":
             occupied |= {item.get("port") for item in spec.get("ports", [])}
+        if legacy and stable(other_service) == stable(legacy["service"]):
+            continue
         require(not occupied & desired_ports, "Requested public port conflicts with another Service NodePort/LoadBalancer")
     before_chart = cluster.get(CHART, name="traefik")
     require(before_chart["metadata"]["resourceVersion"] == chart["metadata"]["resourceVersion"], "Traefik HelmChart changed during assessment; retry")
-    # One durable private snapshot contains ALL originals, before the first
-    # router/HCC mutation. No rollback: a failed CAS may mean an operator won.
-    backup = snapshot(request["backup_root"], chart, config, originals)
+    # One durable private snapshot contains ALL originals before mutation.
+    # Normal router changes never blindly roll back; legacy Service transitions
+    # have a separate, exact-write restoration path.
+    backup = snapshot(request["backup_root"], chart, config, originals, legacy)
+    receipt = read_receipt(backup, request["backup_root"]) if legacy else None
     try:
         verify_endpoint_maps(cluster, evidence)
         changed = False
+        if legacy:
+            selected_app = selected[legacy_key]
+            legacy["endpoint"] = selected_app
+            legacy["phase"] = "prepared"
+            meta = legacy["service"]["metadata"]
+            legacy["bridge"] = legacy_bridge(legacy, selected_app, backup)
+            receipt["legacy"] = legacy
+            save_receipt(backup, receipt)
+            bridge = json.loads(cluster.run(["kubectl", "create", "-f", "-", "-o", "json"], json.dumps(legacy["bridge"])))
+            legacy["bridge_uid"] = bridge["metadata"]["uid"]
+            save_receipt(backup, receipt)
+            # Recheck the live objects before releasing a working NodePort.
+            require(live_named(cluster, "services", meta["namespace"], meta["name"]) == legacy["service"],
+                    "Legacy App Service changed before port transition")
+            verify_endpoint_maps(cluster, evidence)
+            converted = copy.deepcopy(legacy["service"])
+            converted["spec"] = legacy["converted_spec"]
+            cas_restore(cluster, "services", legacy["service"], converted)
+            originals[legacy_key] = bridge
+            changed = True
         for key, ingress in originals.items():
             changed = patch_router(cluster, ingress, selected[key]) or changed
         verify_routers(cluster, originals, selected)
@@ -740,18 +1082,52 @@ def reconcile(cluster, request, planned, defaults=None):
         before_chart = cluster.get(CHART, name="traefik")
         require(before_chart["metadata"]["resourceVersion"] == chart["metadata"]["resourceVersion"],
                 "Traefik HelmChart changed before listener mutation")
-        config_changed, _ = write_config(cluster, config, values, selected, backup, ownership)
+        config_changed, written_config = write_config(cluster, config, values, selected, backup, ownership, capture=bool(legacy))
+        if legacy and config_changed:
+            legacy["written_config"] = written_config
+            save_receipt(backup, receipt)
         changed = config_changed or changed
     except Exception as exc:
+        if legacy:
+            recover_legacy_failure(cluster, receipt, backup, timeout, originals, selected, exc)
         raise Unsafe(f"EVA router/HCC CAS migration stopped; no blind retry or rollback. Review private original backup: {backup}") from exc
     try:
-        return converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
+        result = converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
                         addresses, current_key, changed, backup, timeout,
                         ownership, http_entries)
+        if legacy:
+            legacy["phase"] = "active"
+            save_receipt(backup, receipt)
+        return result
     except Unsafe as exc:
+        if legacy:
+            recover_legacy_failure(cluster, receipt, backup, timeout, originals, selected, exc)
         raise Unsafe(f"{exc}. Original backup: {backup}") from exc
     except Exception as exc:
+        if legacy:
+            recover_legacy_failure(cluster, receipt, backup, timeout, originals, selected, exc)
         raise Unsafe(f"Traefik convergence stopped on unexpected private input/controller error; no rollback. Original backup: {backup}") from exc
+
+
+def recover_legacy_failure(cluster, receipt, backup, timeout, originals, selected, error):
+    failure_reason = str(error) if isinstance(error, Unsafe) else "private input or controller error (details withheld)"
+    try:
+        # Restore only changed routers proven to still match this attempt.
+        saved = {(obj["metadata"]["namespace"], obj["metadata"]["name"]): obj for obj in receipt["ingresses"]}
+        for key, obj in originals.items():
+            meta = obj["metadata"]
+            original = saved.get((meta["namespace"], meta["name"]))
+            if original and stable(original) != stable(isolate([obj], selected[key])[0]):
+                live = live_named(cluster, "ingresses", meta["namespace"], meta["name"])
+                require(stable(live) == stable(isolate([obj], selected[key])[0]), "Existing router changed; restoration refused")
+                cas_restore(cluster, "ingresses", live, original)
+        restore_legacy_app(cluster, receipt, backup, timeout)
+    except Exception as restoration:
+        reason = str(restoration) if isinstance(restoration, Unsafe) else "private input or controller error (details withheld)"
+        raise Unsafe(f"Legacy App listener transition failed; automatic restoration stopped: {reason}. "
+                     f"Failure reason: {failure_reason}. Private backup: {backup}") from error
+    raise Unsafe(f"Legacy App listener transition failed; original App NodePort restored. "
+                 f"Failure reason: {failure_reason}. Private backup: {backup}") from error
 
 
 def converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
@@ -803,7 +1179,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request")
     parser.add_argument("--post-render", nargs="?")
+    parser.add_argument("--verify-legacy-bridge", metavar="BACKUP_ROOT")
     args = parser.parse_args()
+    if args.verify_legacy_bridge:
+        ingress = json.loads(sys.stdin.read())
+        require(ingress.get("kind") == "Ingress" and ingress.get("metadata", {}).get("annotations", {}).get(LEGACY),
+                "A receipt-proven legacy App bridge is required")
+        meta = ingress["metadata"]
+        namespace, release = meta["namespace"], meta["annotations"]["meta.helm.sh/release-name"]
+        cluster = Cluster()
+        configmap = live_named(cluster, "configmaps", namespace, release + "-env")
+        require(helm_owned(ingress, namespace, release) and configmap and helm_owned(configmap, namespace, release),
+                "Legacy bridge ownership mismatch")
+        manifest = documents(cluster.run(["helm", "get", "manifest", release, "-n", namespace]))
+        verified_bridge(cluster, ingress, configmap, manifest, args.verify_legacy_bridge)
+        return
     if args.post_render:
         selected = json.loads(Path(args.post_render).read_text())
         print(yaml.safe_dump_all(isolate(documents(sys.stdin.read()), selected), sort_keys=False))

@@ -73,16 +73,23 @@ func (service Service) Ensure(output io.Writer) (bool, error) {
 	if diagnosis.Healthy {
 		return false, nil
 	}
-	fmt.Fprintln(output, "[INFO] Repairing the Jenkins APT repository signing key")
-	if err := service.RemediateKnownJenkins(); err != nil {
-		return false, err
+	var repairErr error
+	if diagnosis.Problem.Repository == nvidiaRepositoryURL {
+		fmt.Fprintln(output, "[INFO] Repairing the NVIDIA Container Toolkit APT repository signing key")
+		repairErr = service.RemediateKnownNVIDIA()
+	} else {
+		fmt.Fprintln(output, "[INFO] Repairing the Jenkins APT repository signing key")
+		repairErr = service.RemediateKnownJenkins()
+	}
+	if repairErr != nil {
+		return false, repairErr
 	}
 	fmt.Fprintln(output, "[OK] APT repository repair and validation succeeded")
 	return true, nil
 }
 
-// Check runs apt-get update and identifies the Jenkins 2026 signing-key
-// migration without changing any APT configuration.
+// Check recognizes supported signing-key failures even when apt-get exits zero
+// after falling back to stale indexes. It does not change APT configuration.
 func (service Service) Check() (Diagnosis, error) {
 	result, err := service.run(Command{Name: "apt-get", Args: []string{"update"}, Privileged: true})
 	if err != nil {
@@ -93,7 +100,11 @@ func (service Service) Check() (Diagnosis, error) {
 		diagnosis.Problem = &Problem{Repository: jenkinsRepositoryURL, KeyID: "7198F4B714ABFC68"}
 		return diagnosis, nil
 	}
-	if result.ExitCode == 0 {
+	if strings.Contains(result.Output, nvidiaRepositoryURL) && strings.Contains(strings.ToUpper(result.Output), "NO_PUBKEY DDCAE044F796ECB0") {
+		diagnosis.Problem = &Problem{Repository: nvidiaRepositoryURL, KeyID: "DDCAE044F796ECB0"}
+		return diagnosis, nil
+	}
+	if result.ExitCode == 0 && !hasFailedIndexes(result.Output) {
 		diagnosis.Healthy = true
 		return diagnosis, nil
 	}
@@ -103,6 +114,10 @@ func (service Service) Check() (Diagnosis, error) {
 func (diagnosis Diagnosis) KnownProblemReport() string {
 	if diagnosis.Problem == nil {
 		return ""
+	}
+	if diagnosis.Problem.Repository == nvidiaRepositoryURL {
+		return fmt.Sprintf("APT repository validation failed.\n\nRepository:\n%s\n\nProblem:\nMissing signing key %s\n\nAutomatic repair installs the fingerprint-verified official NVIDIA key at %s and scopes existing NVIDIA sources to it.\n",
+			diagnosis.Problem.Repository, diagnosis.Problem.KeyID, nvidiaKeyPath)
 	}
 	return fmt.Sprintf(`APT repository validation failed.
 
@@ -246,6 +261,10 @@ func (service Service) restore(sourceBackup string, sourceExists bool, keyBackup
 }
 
 func (service Service) verifyFingerprint(gpgHome, keyPath string) error {
+	return service.verifyRepositoryFingerprint(gpgHome, keyPath, jenkinsFingerprint, "Jenkins 2026")
+}
+
+func (service Service) verifyRepositoryFingerprint(gpgHome, keyPath, expected, repository string) error {
 	result, err := service.run(Command{Name: "gpg", Args: []string{
 		"--batch",
 		"--no-options",
@@ -259,18 +278,30 @@ func (service Service) verifyFingerprint(gpgHome, keyPath string) error {
 		keyPath,
 	}})
 	if err != nil {
-		return fmt.Errorf("inspect Jenkins repository key fingerprint: %w", err)
+		return fmt.Errorf("inspect %s repository key fingerprint: %w", repository, err)
 	}
 	if result.ExitCode != 0 {
-		return fmt.Errorf("inspect Jenkins repository key fingerprint: exit code %d: %s", result.ExitCode, strings.TrimSpace(result.Output))
+		return fmt.Errorf("inspect %s repository key fingerprint: exit code %d: %s", repository, result.ExitCode, strings.TrimSpace(result.Output))
 	}
+	verified := false
+	primary := true
 	for _, line := range strings.Split(result.Output, "\n") {
 		fields := strings.Split(line, ":")
-		if len(fields) > 9 && fields[0] == "fpr" && strings.EqualFold(fields[9], jenkinsFingerprint) {
-			return nil
+		if fields[0] == "pub" {
+			primary = true
+		} else if fields[0] == "sub" {
+			primary = false
+		} else if len(fields) > 9 && fields[0] == "fpr" && primary {
+			if !strings.EqualFold(fields[9], expected) {
+				return fmt.Errorf("official %s key fingerprint mismatch; expected %s", repository, expected)
+			}
+			verified = true
 		}
 	}
-	return fmt.Errorf("official Jenkins 2026 key fingerprint mismatch; expected %s", jenkinsFingerprint)
+	if verified {
+		return nil
+	}
+	return fmt.Errorf("official %s key fingerprint mismatch; expected %s", repository, expected)
 }
 
 func (service Service) require(command Command) error {
@@ -296,9 +327,20 @@ func remediationFailure(diagnosis Diagnosis, err error) string {
 		return err.Error()
 	}
 	if diagnosis.Problem != nil {
-		return "apt-get update still reports the Jenkins repository signing-key problem"
+		return "apt-get update still reports the " + diagnosis.Problem.Repository + " signing-key problem"
 	}
 	return "apt-get update did not succeed"
+}
+
+func hasFailedIndexes(output string) bool {
+	for _, line := range strings.Split(strings.ToLower(output), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "err:") || strings.HasPrefix(line, "e:") || strings.HasPrefix(line, "w: failed to fetch ") ||
+			strings.HasPrefix(line, "w: an error occurred during the signature verification") {
+			return true
+		}
+	}
+	return false
 }
 
 func isJenkins2026KeyFailure(output string) bool {
@@ -312,7 +354,9 @@ func systemRunner(command Command) (Result, error) {
 		name = "sudo"
 		arguments = append([]string{"--", command.Name}, arguments...)
 	}
-	output, err := exec.Command(name, arguments...).CombinedOutput()
+	process := exec.Command(name, arguments...)
+	process.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	output, err := process.CombinedOutput()
 	result := Result{Output: string(output)}
 	if err == nil {
 		return result, nil

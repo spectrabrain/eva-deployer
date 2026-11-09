@@ -70,6 +70,35 @@ ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 if ! command -v "$ANSIBLE_PLAYBOOK" >/dev/null 2>&1 && [[ ! -x "$ANSIBLE_PLAYBOOK" ]]; then
   fail "ansible-playbook was not found: $ANSIBLE_PLAYBOOK"
 fi
+
+# Parse the real callers from the shipped tree, including nested shared task
+# imports. Repository-only parsing previously hid missing archive members.
+syntax_check() {
+  local playbook="$1"
+  ANSIBLE_CONFIG="$release/ansible.cfg" \
+    ANSIBLE_ROLES_PATH="$release/src/infra/roles:$release/src/solution/roles" \
+    EVA_REPO_ROOT="$release" EVA_SITE_ID=release-contract \
+    "$ANSIBLE_PLAYBOOK" --syntax-check -i localhost, "$release/$playbook" >"$TMP_ROOT/syntax.log" 2>&1
+}
+for playbook in src/infra/playbooks/site_precondition.yaml src/solution/playbooks/site_eva_iam.yaml src/solution/playbooks/site_eva_app.yaml; do
+  syntax_check "$playbook" || {
+    cat "$TMP_ROOT/syntax.log" >&2
+    fail "packaged Release cannot resolve tasks for $playbook"
+  }
+done
+
+# Reproduce alpha.16: neither the repository source nor another family's
+# playbook directory may hide a missing shared task in the prepared Release.
+mv "$release/src/host-kubeconfig.yaml" "$TMP_ROOT/host-kubeconfig.yaml"
+if syntax_check src/infra/playbooks/site_precondition.yaml; then
+  fail "packaged Release parsing accepted a missing kubeconfig task"
+fi
+grep -Fq 'host-kubeconfig.yaml' "$TMP_ROOT/syntax.log" || {
+  cat "$TMP_ROOT/syntax.log" >&2
+  fail "missing task error does not identify host-kubeconfig.yaml"
+}
+mv "$TMP_ROOT/host-kubeconfig.yaml" "$release/src/host-kubeconfig.yaml"
+
 cache="$TMP_ROOT/cache with space"
 mkdir -p "$cache/apt/debs"
 build_deb eva-test-package 1.0 "$cache/apt/debs"

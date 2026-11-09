@@ -1,0 +1,20 @@
+---
+- name: Require exact ownership before changing Vision ECR renewal
+  ansible.builtin.assert:
+    that:
+      - (eva_vision_previous_renewal.stdout | from_json).metadata.annotations['meta.helm.sh/release-name'] | default('') == 'eva-vision'
+      - (eva_vision_previous_renewal.stdout | from_json).metadata.annotations['meta.helm.sh/release-namespace'] | default('') == eva_vision_namespace
+    fail_msg: "Cannot verify existing eva-vision-ecr-refresh ownership; operator renewal was left unchanged."
+
+- name: Suspend only the previously managed Vision ECR CronJob
+  ansible.builtin.command:
+    argv: [kubectl, -n, "{{ eva_vision_namespace }}", patch, cronjob, eva-vision-ecr-refresh,
+           --type=merge, --patch-file=/dev/stdin]
+    stdin: '{"spec":{"suspend":true}}'
+  environment:
+    KUBECONFIG: "{{ eva_cluster_kubeconfig }}"
+  changed_when: not ((eva_vision_previous_renewal.stdout | from_json).spec.suspend | default(false) | bool)
+
+- name: Keep intentionally disabled Vision ECR renewal suspended
+  ansible.builtin.set_fact:
+    eva_online_suspended: []

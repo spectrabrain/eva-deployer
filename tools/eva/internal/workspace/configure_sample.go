@@ -19,14 +19,16 @@ type configuredSampleTarget struct {
 // ConfigureTarget separates connection inputs from reusable installation choices.
 // Address "ip" selects path separation and uses the SSH IP when available.
 type ConfigureTarget struct {
-	Name     string
-	Ansible  map[string]any
-	Solution bool
-	IAM      string
-	Protocol string
-	Address  string
-	Agent    bool
-	Vision   bool
+	Name         string
+	Ansible      map[string]any
+	Solution     bool
+	SolutionOnly bool
+	IAM          string
+	Protocol     string
+	Address      string
+	Agent        bool
+	Vision       bool
+	Deployment   *Deployment // NKS controller connection; endpoint/Values questions stay shared.
 }
 
 func ValidateConfigureTargetName(name string) error {
@@ -54,7 +56,7 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 	root := document.Content[0]
 	targetMapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	setSampleMappingValue(root, "targets", targetMapping)
-	global := map[string]bool{"infra": true, "iam": false, "app": false, "agent": false, "vision": false, "n8n": false}
+	global := map[string]bool{"infra": false, "iam": false, "app": false, "agent": false, "vision": false, "n8n": false}
 	configured := make(map[string]configuredSampleTarget, len(targets))
 	seen := make(map[string]bool)
 	for index, options := range targets {
@@ -65,6 +67,9 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 			return nil, errors.New("configure target nicknames must be distinct")
 		}
 		seen[options.Name] = true
+		if options.Deployment != nil && (mode != "online" || len(targets) != 1 || !options.Solution || !options.SolutionOnly) {
+			return nil, errors.New("NKS configure requires Online, one controller and Solution only")
+		}
 		profile := SampleOptions{Mode: mode, IAM: options.IAM, Address: options.Address, Protocol: options.Protocol}
 		if options.Address == "ip" {
 			profile.Address = "shared"
@@ -73,7 +78,7 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 			}
 		}
 		var target *yaml.Node
-		components := map[string]bool{"infra": true, "iam": false, "app": false, "agent": false, "vision": false, "n8n": false}
+		components := map[string]bool{"infra": !options.SolutionOnly, "iam": false, "app": false, "agent": false, "vision": false, "n8n": false}
 		if options.Solution {
 			contents, err := InstallerSampleFor(profile)
 			if err != nil {
@@ -94,11 +99,45 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 			target = sampleMappingValue(sampleMappingValue(base.Content[0], "targets"), "server-a")
 			removeSampleMappingValue(target, "values")
 		}
+		if options.Deployment != nil {
+			cluster, err := readSampleNode("samples/nks.yaml")
+			if err != nil {
+				return nil, err
+			}
+			values := sampleMappingValue(target, "values")
+			// Only overlay components selected through the existing questions.
+			for _, component := range []string{"iam", "app", "agent", "vision"} {
+				if !components[component] {
+					continue
+				}
+				value := sampleMappingValue(values, component)
+				if value == nil {
+					value = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+					setSampleMappingValue(values, component, value)
+				}
+				overrideSampleMapping(value, sampleMappingValue(cluster.Content[0], component))
+				if ingress := sampleMappingValue(value, "ingress"); ingress != nil {
+					removeSampleMappingValue(sampleMappingValue(ingress, "tls"), "hostPath")
+				}
+			}
+			connection := sampleMappingValue(target, "ansible")
+			for _, key := range []string{"ansible_become", "ansible_become_password", "ansible_password"} {
+				removeSampleMappingValue(connection, key)
+			}
+			deployment := new(yaml.Node)
+			if err := deployment.Encode(options.Deployment); err != nil {
+				return nil, err
+			}
+			setSampleMappingValue(root, "deployment", deployment)
+		}
 		ansible := sampleMappingValue(target, "ansible")
 		for key, value := range options.Ansible {
 			node := new(yaml.Node)
 			if err := node.Encode(value); err != nil {
 				return nil, errors.New("cannot encode target connection settings")
+			}
+			if key == "eva_gpu_mig_enabled" {
+				node.LineComment = "PRO6000: true이면 MIG 4개 구성, false이면 기존 전체 GPU 재사용. Solution-only에도 적용합니다."
 			}
 			setSampleMappingValue(ansible, key, node)
 		}
@@ -177,6 +216,19 @@ func equalBoolMap(left, right map[string]bool) bool {
 		}
 	}
 	return true
+}
+
+// NKS changes only the infrastructure-dependent defaults of the same scaffold.
+func overrideSampleMapping(destination, source *yaml.Node) {
+	for index := 0; index+1 < len(source.Content); index += 2 {
+		key, value := source.Content[index], source.Content[index+1]
+		previous := sampleMappingValue(destination, key.Value)
+		if previous != nil && previous.Kind == yaml.MappingNode && value.Kind == yaml.MappingNode {
+			overrideSampleMapping(previous, value)
+		} else {
+			setSampleMappingValue(destination, key.Value, value)
+		}
+	}
 }
 
 func setSampleMappingValue(mapping *yaml.Node, key string, value *yaml.Node) {

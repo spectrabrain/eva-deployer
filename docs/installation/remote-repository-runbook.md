@@ -310,7 +310,7 @@ Pod `1/1 Running`, PVC `Bound`를 확인하고 `http://<TARGET_IP>:30678/`에 �
 수동 manifest로 설치한 n8n은 배포 이름·namespace·PVC를 맞추고 기존 owner 계정 입력도
 확인한 뒤 Tool 설치로 전환합니다. EVA Alert Workflow는 Tool의 n8n 설치 단계에서 구성합니다.
 
-## 7. 설치 전 타겟 확인
+## 7. [Main] 설치 전 타겟 확인
 
 설치는 각 타겟의 `/etc/rancher/k3s/registries.yaml`에 Main에서 확인한 Harbor의 HTTP/HTTPS
 endpoint를 자동 반영합니다. Infra를 선택하지 않은 기존 k3s 타겟도 설치 앞단에서 처리하므로
@@ -319,10 +319,30 @@ endpoint를 자동 반영합니다. Infra를 선택하지 않은 기존 k3s 타�
 다른 registry와 기존 인증·CA 설정은 보존하며 변경이 있을 때만 k3s를 재시작합니다.
 HTTP endpoint에는 인증서 검증 설정이 사용되지 않습니다.
 
-Agent/Vision 또는 GPU Infra를 설치할 타겟에는 NVIDIA driver가 준비되어 있어야 합니다.
-타겟에서 `nvidia-smi`로 GPU 상태를 확인하고 MIG를 사용할 경우 의도한 구성을 적용합니다.
-n8n 단독 설치에는 GPU 점검이 필요하지 않습니다. TLS certificate/key도 설정한 타겟의
-`hostPath`에 준비합니다. `infra`와 Config 단계가 타겟의 GPU/MIG 자원과 Device Plugin을 확인합니다.
+Agent/Vision을 선택하면 `eva install`이 해당 타겟의 GPU 상태를 확인하고 필요한 구성을 적용합니다.
+RTX PRO 6000 Blackwell 1장은 MIG 4개를 생성하며, 이미 맞는 구성은 재사용합니다.
+`A6000x1`, `L40sx1`, `PRO5000x3`에는 MIG를 적용하지 않습니다.
+다른 MIG 분할이 있거나 변경할 GPU에 workload가 실행 중이면 중단하므로 해당 구성을 정리한 뒤 다시 실행합니다.
+재부팅 안내가 나오면 **해당 타겟을 재부팅하고 Main에서 같은 명령을 다시 실행**합니다.
+
+GPU preflight만 먼저 실행하려면 Harbor 자산 준비를 마친 뒤 **Main에서 설정 파일을 명시**합니다.
+
+```bash
+sudo eva preflight gpu --config "$HOME/eva-install.yaml"
+```
+
+설정된 Agent/Vision 타겟으로 Tool과 준비 자산을 전달해 필요한 드라이버·GPU/MIG를 준비합니다.
+추가 실행 확인은 필요하지 않습니다. k3s가 아직 없으면 일반 설치에서 Kubernetes 자원 노출을 확인합니다.
+
+Tool·Release가 전달된 **Target에서 현재 서버만** 준비하려면 다음을 실행합니다.
+
+```bash
+sudo eva preflight gpu
+```
+
+`--config`를 생략하면 설치 설정 파일을 읽지 않고 현재 서버만 대상으로 합니다.
+Main에서 생략하면 Main 자신의 GPU를 확인합니다.
+n8n 단독 설치에는 GPU preflight가 포함되지 않습니다. TLS certificate/key는 설정한 타겟의 `hostPath`에 준비합니다.
 
 ### Argo CD 관리 연결 확인
 
@@ -363,6 +383,7 @@ sudo eva install --config /home/eva/eva-install.yaml --yes
 `targets.<name>.values`에 작성하며, Remote Main 설치에서는 CLI `--chart`·`--values`·`--set`을 사용하지 않습니다.
 
 타겟의 Managed Runtime과 package/model cache는 검증된 delivery에서 준비합니다.
+Agent/Vision 타겟은 Infra → GPU preflight → Config 순서로 진행한 뒤 제품을 설치합니다.
 image·Qdrant snapshot·Vision 모델은 Main Harbor를 사용하며 타겟에서 외부 저장소로 fallback하지 않습니다.
 기존 PVC와 영속 데이터는 재사용합니다. 설치 중 기존 서비스가 재시작될 수 있습니다.
 

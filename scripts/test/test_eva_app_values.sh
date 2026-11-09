@@ -222,6 +222,8 @@ EOF
 - hosts: all
   gather_facts: false
   vars:
+    eva_solution_root: $REPO_ROOT/src/solution
+    eva_infra_root: $REPO_ROOT/src/infra
     ansible_facts:
       env:
         HOME: /tmp

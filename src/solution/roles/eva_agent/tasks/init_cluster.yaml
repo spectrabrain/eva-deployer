@@ -1,0 +1,97 @@
+---
+# Render the published NCP init chart, then create only absent classes. Existing
+# provider/admin-managed classes must not be adopted by Helm or patched.
+- name: Read the NCP init profile
+  ansible.builtin.slurp:
+    src: "{{ eva_agent_workdir }}/eva-agent-init/{{ eva_agent_init_values_file }}"
+  register: eva_agent_cluster_init_profile_raw
+
+- name: Resolve NCP init parameters and selected CSI StorageClass names
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_agent_cluster_init_values: >-
+      {{ (eva_agent_cluster_init_profile_raw.content | b64decode | from_yaml)
+         | combine(eva_agent_cluster_deploy.init_values | default({}), recursive=true)
+         | combine({'storageClass': {
+           'blockStorage': {'name': eva_agent_cluster_deploy.qdrant_values.persistence.storageClassName},
+           'fileSystem': {'name': eva_agent_cluster_deploy.vllm_values.sharedPvcStorage.storageClass}}}, recursive=true) }}
+
+- name: Write the selected NCP init Values
+  ansible.builtin.copy:
+    content: "{{ eva_agent_cluster_init_values | to_nice_yaml }}"
+    dest: "{{ eva_agent_workdir }}/eva-agent-init/selected-values.yaml"
+    mode: '0644'
+
+- name: Render NCP CSI StorageClasses using eva-agent-init
+  ansible.builtin.command:
+    argv: >-
+      {{ ['helm', 'template', 'eva-agent-init',
+          (eva_agent_offline_init_chart_tgz if (airgap_mode | bool) else 'eva-agent/eva-agent-init'),
+          '--namespace', eva_agent_namespace,
+          '--values', eva_agent_workdir ~ '/eva-agent-init/selected-values.yaml']
+         + ([] if (airgap_mode | bool) else ['--version', eva_agent_init_chart_version]) }}
+  register: eva_agent_cluster_init_render
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Select rendered NCP StorageClasses
+  ansible.builtin.set_fact:
+    eva_agent_cluster_init_classes: >-
+      {{ eva_agent_cluster_init_render.stdout | from_yaml_all | select('mapping')
+         | selectattr('kind', 'equalto', 'StorageClass') | list }}
+
+- name: Include a separate Qdrant snapshot StorageClass when selected
+  ansible.builtin.set_fact:
+    eva_agent_cluster_init_classes: >-
+      {{ eva_agent_cluster_init_classes + [(eva_agent_cluster_init_block_class
+           | combine({'metadata': {'name': eva_agent_cluster_deploy.qdrant_values.snapshotPersistence.storageClassName}}, recursive=true))] }}
+  vars:
+    eva_agent_cluster_init_block_class: >-
+      {{ eva_agent_cluster_init_classes
+         | selectattr('metadata.name', 'equalto', eva_agent_cluster_deploy.qdrant_values.persistence.storageClassName) | first }}
+  when:
+    - >-
+      eva_agent_cluster_deploy.qdrant_values.snapshotPersistence.storageClassName !=
+      eva_agent_cluster_deploy.qdrant_values.persistence.storageClassName
+    - >-
+      eva_agent_cluster_init_classes
+      | selectattr('metadata.name', 'equalto', eva_agent_cluster_deploy.qdrant_values.persistence.storageClassName) | list | length > 0
+
+- name: Check for existing NCP CSI StorageClasses
+  ansible.builtin.command:
+    argv: [kubectl, get, storageclass, "{{ item.metadata.name }}", --ignore-not-found=true, -o, json]
+  loop: "{{ eva_agent_cluster_init_classes }}"
+  loop_control:
+    label: "{{ item.metadata.name }}"
+  register: eva_agent_cluster_init_existing
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Create absent NCP CSI StorageClasses without changing existing classes
+  ansible.builtin.command:
+    argv: [kubectl, create, -f, '-']
+    stdin: "{{ item.item | to_json }}"
+  loop: "{{ eva_agent_cluster_init_existing.results }}"
+  loop_control:
+    label: "{{ item.item.metadata.name }}"
+  when: item.stdout | trim | length == 0
+  register: eva_agent_cluster_init_create
+  changed_when: eva_agent_cluster_init_create.rc == 0
+  # A concurrent installer may have created the same class after the lookup.
+  failed_when:
+    - eva_agent_cluster_init_create.rc != 0
+    - "'(AlreadyExists)' not in eva_agent_cluster_init_create.stderr"
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+
+- name: Verify selected NKS dependency StorageClasses exist
+  ansible.builtin.command:
+    argv: [kubectl, get, storageclass, "{{ item }}", -o, name]
+  loop: "{{ [eva_agent_cluster_deploy.vllm_values.sharedPvcStorage.storageClass,
+             eva_agent_cluster_deploy.qdrant_values.persistence.storageClassName,
+             eva_agent_cluster_deploy.qdrant_values.snapshotPersistence.storageClassName] | unique }}"
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ eva_agent_kubeconfig }}"

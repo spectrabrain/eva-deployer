@@ -1,0 +1,46 @@
+---
+- name: Load the shared Solution version catalogue for cluster preconditions
+  ansible.builtin.include_vars:
+    file: "{{ eva_solution_root }}/version.yaml"
+
+- name: Resolve account-owned controller paths and the pinned Kubernetes connection
+  ansible.builtin.set_fact:
+    eva_agent_kubeconfig: "{{ eva_cluster_kubeconfig }}"
+    eva_vision_kubeconfig: "{{ eva_cluster_kubeconfig }}"
+    eva_app_kubeconfig: "{{ eva_cluster_kubeconfig }}"
+    eva_iam_kubeconfig: "{{ eva_cluster_kubeconfig }}"
+    precondition_argocd_kubeconfig_override: "{{ eva_cluster_kubeconfig }}"
+    eva_persistent_state_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/sites"
+    eva_site_state_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/sites/{{ eva_site_id }}"
+    eva_helm_values_backup_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/backups/helm-values"
+    eva_app_db_backup_root: >-
+      {{ eva_app_db_backup_root | default(ansible_facts.env.HOME ~ '/.local/state/eva/backups/app-db/'
+         ~ eva_site_id ~ '/' ~ (eva_app_name | default('eva-app'))) }}
+    eva_agent_workdir: "{{ eva_site_deploy_root }}/controller/agent-work"
+    eva_vision_workdir: "{{ eva_site_deploy_root }}/controller/vision-work"
+    eva_app_workdir: "{{ eva_site_deploy_root }}/controller/app-work"
+    eva_iam_workdir: "{{ eva_site_deploy_root }}/controller/iam-work"
+    eva_agent_credentials_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/agent-credentials"
+    eva_traefik_ports_manage: false
+    eva_app_image_pull_auth_type: secret
+    eva_iam_image_pull_auth_type: secret
+
+- name: Inspect existing releases without changing cluster resources
+  ansible.builtin.script:
+    cmd: inspect_cluster.py --workspace {{ eva_workspace_root | quote }} --host {{ inventory_hostname | quote }}
+      --output {{ (eva_site_config_root ~ '/controller') | quote }}
+    executable: "{{ ansible_facts.python.executable }}"
+  environment:
+    KUBECONFIG: "{{ eva_cluster_kubeconfig }}"
+    EVA_CLUSTER_COMPONENTS: "{{ eva_enabled_components }}"
+  register: eva_cluster_inspection
+  changed_when: false
+
+- name: Load private managed-cluster defaults
+  ansible.builtin.include_vars:
+    file: "{{ eva_site_config_root }}/controller/context.yaml"
+  no_log: true
+
+- name: Show selected cluster identity
+  ansible.builtin.debug:
+    msg: "{{ eva_cluster_inspection.stdout | from_json }}"

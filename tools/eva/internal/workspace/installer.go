@@ -104,6 +104,16 @@ func LoadInstaller(path, requestedSiteID string) (Installer, error) {
 			}
 		}
 	}
+	if input.Deployment != nil {
+		for _, path := range []*string{&input.Deployment.Kubeconfig, &input.Deployment.Release} {
+			if strings.HasPrefix(*path, "~") {
+				return Installer{}, errors.New("deployment paths must be absolute or relative to the config file, not ~")
+			}
+			if *path != "" && !filepath.IsAbs(*path) {
+				*path = filepath.Join(filepath.Dir(absolute), *path)
+			}
+		}
+	}
 	return input, nil
 }
 
@@ -123,6 +133,21 @@ func (input Installer) validate(requestedSiteID string) error {
 	if len(input.Targets) == 0 {
 		return errors.New("installer config requires at least one target")
 	}
+	if input.Config.ManagedCluster() {
+		if len(input.Targets) != 1 {
+			return errors.New("existing Kubernetes uses one local controller target")
+		}
+		for _, target := range input.Targets {
+			if target.Ansible["ansible_connection"] != "local" {
+				return errors.New("existing Kubernetes requires a local controller, not worker SSH access")
+			}
+			for key := range target.Ansible {
+				if key != "ansible_connection" && key != "ansible_user" {
+					return errors.New("Cloud controller ansible mapping supports only ansible_connection: local and ansible_user")
+				}
+			}
+		}
+	}
 	identities := make(map[string]bool)
 	for name, target := range input.Targets {
 		if !siteIDPattern.MatchString(name) || name == "all" || name == "ungrouped" || name == "eva" {
@@ -130,6 +155,11 @@ func (input Installer) validate(requestedSiteID string) error {
 		}
 		if len(target.Ansible) == 0 {
 			return fmt.Errorf("target %s requires an ansible mapping (for example ansible_connection: local)", name)
+		}
+		if value, exists := target.Ansible["eva_gpu_mig_enabled"]; exists {
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("target %s eva_gpu_mig_enabled must be a YAML boolean (true or false)", name)
+			}
 		}
 		if target.Components != nil {
 			if err := validateTargetComponents(name, target.Components, input.Components); err != nil {
@@ -327,6 +357,13 @@ func (input Installer) workspaceFiles() (map[string][]byte, error) {
 		return nil, errors.New("cannot encode installer site settings")
 	}
 	files := map[string][]byte{"site-values/site.yaml": site}
+	if input.Config.ManagedCluster() {
+		kubeconfig, err := pinKubeconfig(input.Deployment.Kubeconfig, input.Deployment.Context)
+		if err != nil {
+			return nil, err
+		}
+		files["credentials/kubeconfig"] = kubeconfig
+	}
 	names := make([]string, 0, len(input.Targets))
 	components := make(map[string]map[string]any)
 	for name, target := range input.Targets {

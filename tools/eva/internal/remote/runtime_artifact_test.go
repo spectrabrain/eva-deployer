@@ -58,12 +58,48 @@ func TestRuntimeArtifactBuildLoadAndBootstrapTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeRemoteDeliveryMarker(t, targetRelease.Root, targetIdentity)
+	repository, err := PublishedTargetRepository(targetRelease)
+	if err != nil || repository == nil || repository.Registry != targetIdentity.RepositoryRegistry || repository.Project != targetIdentity.RepositoryProject {
+		t.Fatalf("published asset repository: %v %v", repository, err)
+	}
 	installed, err := BootstrapTargetRuntime(targetRelease, targetIdentity.RepositoryRegistry, targetIdentity.RepositoryProject, filepath.Join(t.TempDir(), "runtime"))
 	if err != nil {
 		t.Fatalf("BootstrapTargetRuntime() error = %v", err)
 	}
 	if installed.Descriptor.Version != artifact.Manifest.Runtime.Version {
 		t.Fatalf("installed version = %s", installed.Descriptor.Version)
+	}
+	if err := os.WriteFile(filepath.Join(targetRelease.Root, "remote-runtime/manifest.yaml"), []byte("corrupt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PublishedTargetRepository(targetRelease); err == nil {
+		t.Fatal("repository discovery accepted a corrupt delivery")
+	}
+}
+
+func TestPublishedTargetRepositoryRejectsUnsafeMarker(t *testing.T) {
+	for _, kind := range []string{"symlink", "oversized", "invalid", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			source := writeOriginalRelease(t, false)
+			path := filepath.Join(source.Root, ".eva-remote-release")
+			var err error
+			switch kind {
+			case "symlink":
+				err = os.Symlink("release.yaml", path)
+			case "directory":
+				err = os.Mkdir(path, 0o700)
+			case "oversized":
+				err = os.WriteFile(path, []byte(strings.Repeat("x", 65537)), 0o600)
+			default:
+				err = os.WriteFile(path, []byte("invalid: [yaml"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := PublishedTargetRepository(source); err == nil {
+				t.Fatal("unsafe delivery marker accepted")
+			}
+		})
 	}
 }
 

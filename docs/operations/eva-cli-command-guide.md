@@ -6,7 +6,7 @@
 [Local](../installation/local-repository-runbook.md) Runbook을 따른다.
 이 문서는 현재 소스에 구현된 명령을 기준으로 하며, 기존 설치 binary에는 새 명령이 없을 수 있다.
 `eva version`과 `eva help`로 설치된 Tool의 버전과 지원 명령을 먼저 확인한다.
-`airgap prepare`, `backup`, `inspect`, `install configure`, `config sample`, `--config`를 현장에서 사용하려면 해당 명령이 포함된 Tool·Release를 배포해야 한다.
+`airgap prepare`, `local prepare`, `backup`, `inspect`, `install configure`, `config sample`, `--config`를 현장에서 사용하려면 해당 명령이 포함된 Tool·Release를 배포해야 한다.
 
 ## 1. 가장 자주 쓰는 조회
 
@@ -226,6 +226,7 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva config sample --mode online` | mode별 단일 설치 설정 샘플 출력 | 조회 |
 | `eva config sample --mode remote --output FILE` | 주소/프로토콜 선택 후 private 샘플 저장 | 로컬 파일 생성 |
 | `eva install --config FILE` | private YAML을 내부 Workspace로 변환해 설치 | 변경 |
+| `eva preflight gpu [--config FILE]` | 기본은 현재 서버의 드라이버·GPU/MIG 확인·준비; `--config`를 명시하면 설정된 Agent/Vision 타겟 사용 | 변경 |
 | `eva install [RELEASE_PATH] --site ID` | Workspace와 Release로 설치 | 변경 |
 | `eva install --workspace PATH` | 명시적 Workspace로 설치 | 변경 |
 | `eva plan --release PATH --workspace PATH` | Plan YAML 출력, 설치하지 않음 | 조회 |
@@ -241,15 +242,20 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva backup values --path DIR` | SHA-256 확인 후 선택한 백업 Values 원문 출력 | 민감정보 조회 |
 
 일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Online/Remote/Local → Online/Remote 현재 서버/SSH 설치 →
-타겟별 Infra-only/Solution·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
-Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입력하며 sudo도 같은 비밀번호를 쓴다.
+타겟별 Infra만/Infra + Solution/Solution만·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
+Online에서 Bastion을 선택하면 On-premise / Cloud(NKS)를 추가로 선택한다. NKS는 같은 Values 틀을 채우고
+Solution만으로 설치하며 worker SSH 대신 kubeconfig를 사용한다. 기존 Helm Values는 자동 병합하지 않는다.
+서버용 Bastion 타겟은 한 대씩 닉네임/IP/SSH 계정/숨김 비밀번호를 입력하며 sudo도 같은 비밀번호를 쓴다.
 다음 타겟은 이전 설치 옵션을 재사용하거나 별도로 고른다. 서비스 주소/Secret은 복사하지 않는다.
 기본 결과는 사용자 홈의 `eva-install.yaml`(`0600`)이며, 필수 입력을 채우라는 안내만 하고 설치하지 않는다.
 기존 파일은 덮어쓰지 않으며 `--output FILE`로 다른 위치를 고른다. 타겟별 컴포넌트 선택은 Plan의
 설치 범위에 보존된다. Bastion·Main은 설치 대상이 아니다. Online 타겟은 외부 저장소에 직접 접근하며
 Remote 타겟은 준비된 Main Harbor를 사용한다. Remote에서는 별도 `remote target` 등록 없이
 Main의 `eva install --config FILE`이 전달과 타겟 설치를 실행한다. 설치 후 Main의 `eva check`는 Remote 타겟을
-점검한다. Online의 `eva check`와 `preflight gpu`는 실행 서버 기준이다.
+점검한다. 서버의 GPU preflight는 설치 설정의 Agent/Vision 타겟을 확인하고 준비한다.
+Online 서버의 `eva check`는 실행 서버 기준이다. NKS는 작업에 고정된 kubeconfig의 클러스터를 점검한다.
+NKS install/check/status/retry는 kubeconfig 소유 계정으로 sudo 없이 실행한다. 서버 Infra·GPU/MIG·NFS 작업만 제외하며
+공통 Solution 역할의 인증·백업·보정·SSO·복구는 유지한다. NKS 작업은 `~/.local/state/eva`에 보관한다.
 
 Bastion의 설치/preflight는 설정된 SSH 계정·비밀번호로 연결하고 최초 host key를 자동 등록한다.
 별도 SSH 접속 준비는 필요 없으며 이미 등록된 키가 변경되면 중단한다.
@@ -267,7 +273,7 @@ Redis는 `port: 32079`, `db: 0`, `password: eva-redis-pass`를 실제 IAM과 맞
 HTTP는 격리된 검증 환경에서 사용하며 운영 환경에서는 HTTPS와 유효한 인증서를 준비한다.
 `<...>` 필수 입력 옆에는 예시 주석이 있으며 모두 실제 값으로 교체해야 한다.
 미입력은 Secret 값 대신 필드 경로로 안내한다.
-`--config`는 install/plan, `preflight argocd`, Workspace 명령에 적용되고 `--workspace`와
+`--config`는 install/plan, `local prepare`, `preflight argocd`, Workspace 명령에 적용되고 `--workspace`와
 동시에 사용하지 않는다. `workspace validate --config`는 입력만 검사한다. 그 외 명령은
 private 관리 Workspace를 생성할 수 있으며 `plan --config`도 예외가 아니다.
 설정 수정 후에는 새 install을 시작하고 retry는 이전 snapshot을 사용한다.
@@ -296,7 +302,7 @@ IAM/App/Agent/Vision에 적용한다. 한 component의 Chart/Values 파일은 �
 `--set`보다 승인된 private Values 파일을 사용한다. 조회 시에는 Secret을 가리지 않는다.
 
 install/plan의 `--release`와 positional Release는 동시에 사용하지 않는다.
-`install`, `verify`, `airgap prepare`, Remote preparation 명령은 Current Release를 사용할 수 있다.
+`install`, `verify`, `airgap prepare`, `local prepare`, Remote preparation 명령은 Current Release를 사용할 수 있다.
 현재 `plan`과 `release` 하위 명령은 기본적으로 현재 디렉터리 또는 명시적 경로를 해석하므로
 원하는 Release를 `--release PATH`로 명시하는 편이 안전하다.
 저장 Plan을 apply할 때는 실행 가능한 준비된 Release 소스를 사용한다.
@@ -320,35 +326,46 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 현재 Git tag나 S3 위치로 Release를 자동 다운로드하는 일반 명령은 제공하지 않는다.
 `--release-root`는 inspect 전용 진단 입력이고 install의 `--release`와 의미가 다르다.
 `release prepare`는 Infra·Solution 실행 소스만 추출하며 `eva-offline`의 `out/cache`는 배치하지 않는다.
-Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation/local-repository-runbook.md)을 따른다.
+Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 이미지·snapshot을 준비한다.
+최초 반입과 Tool 설치는 [Local Runbook](../installation/local-repository-runbook.md)을 따른다.
 
 ### Airgap 준비 — 인터넷 준비 서버에서 실행
 
 | 명령 | 역할·변경 범위 |
 | --- | --- |
-| `sudo eva airgap prepare [--release ORIGINAL_DIR] --output FILE.tar.gz --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes` | 원본 Release에 맞는 오프라인 자산·Runtime을 받아 검증된 새 Local Bundle 생성; Docker pull/export 및 누락 Runtime 온라인 bootstrap |
+| `sudo eva airgap prepare [--release ORIGINAL_DIR] [--output FILE.tar.gz] --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes` | 원본 Release에 맞는 오프라인 자산·Runtime을 받아 검증된 새 Local Bundle 생성; Docker pull/export 및 누락 Runtime 온라인 bootstrap |
 | `eva airgap prepare --help` | 지원 옵션·실행 범위 조회 |
 
 - `--release` 생략 시 Current Release를 사용한다. installer artifact를 포함한 **검증된 완전한 원본
 	Release 디렉터리**만 허용하며 prepared/imported Release와 Bundle archive는 입력으로 쓰지 않는다.
-- `--output FILE.tar.gz`, `--vllm-profile`, `--yes`는 필수다. profile은 `A6000x1`, `L40sx1`,
+- `--output`을 생략하면 실행한 사용자 홈에 `eva-airgap-bundle_<version>_<os>_<arch>.tar.gz`를
+	저장한다. 버전·플랫폼은 선택한 Release에서 가져온다. `sudo` 실행 시 원래 사용자의 홈과
+	소유권을 사용하며 완료 후 전체 경로·디렉터리·파일명·반입용 SHA-256을 표시한다. 다른 위치나 이름은
+	`--output FILE.tar.gz`로 지정한다. 기존 파일은 덮어쓰지 않으며 같은 Release의 다른 GPU
+	profile을 준비할 때는 파일명을 따로 지정한다.
+- `--vllm-profile`, `--yes`는 필수다. profile은 `A6000x1`, `L40sx1`,
 	`PRO5000x3`, `PRO6000-MIGx4` 중 하나이며 선택한 vLLM 이미지만 받는다. 모든 profile Values가
 	포함되어도 실제 대상 GPU/MIG·설치 profile과 다르면 사용할 수 없다.
-- driver 기본값은 `nvidia-driver-580`; `nvidia-driver-NNN` 또는 `nvidia-driver-NNN-open`을 지원한다.
-	전체 의존성 repo를 준비하고 누락을 허용하지 않는다. Display Mode Selector 옵션은 특정 GPU
+- `--driver-package`는 선택 옵션이며 모든 profile의 기본 반입 패키지는 `nvidia-driver-580`이다.
+	GPU profile과 드라이버 패키지는 별도 선택이다. `nvidia-driver-NNN` 또는
+	`nvidia-driver-NNN-open`을 지원하며 전체 의존성 repo를 준비하고 누락을 허용하지 않는다.
+	이 옵션은 Bundle 내용만 변경하며 대상의 `gpu_driver_package` 설정을 변경하지 않는다.
+	대상의 기존 드라이버가 정상 동작하면 유지하고, 신규 오프라인 설치의 기본값도
+	`nvidia-driver-580`이다. Display Mode Selector 옵션은 특정 GPU
 	전환에 필요한 승인된 독점 배포 ZIP 입력이며 GPU/MIG 구성을 실행하지 않는다.
 - **온라인 Ubuntu 24.04 amd64에서 root(`sudo`)**로 실행한다. 동작하는 amd64 Docker daemon,
 	AWS CLI, sudo, Ubuntu·Docker·NVIDIA APT 인덱스와 package candidate가 선행 조건이다.
-	필수 OS 도구 전체 목록과 대상 kernel·저장공간 조건은 Local Runbook을 따른다.
+	준비 서버의 도구·대상 kernel·저장공간 조건은 Local Runbook을 따른다.
 - AWS credential은 `/var/lib/eva/credentials/aws_key.ini`를 재사용하고 STS로 검증한다. 없으면
 	대화형 숨김 입력을 사용하며 CLI Secret 옵션은 없다. 비대화형은 승인된 credential 파일이 필요하다.
 - Infra/App/IAM/Agent/Vision 패키지·Chart·helper, n8n 이미지, 모델, Harbor Qdrant snapshot,
 	Harbor offline installer도 준비한다. 기존 유효 Runtime은 재사용하며 없으면 **온라인 bootstrap의
 	APT/pip 호스트 변경**을 `--yes`로 승인한다. 손상된 Runtime은 먼저 복구한다.
 - Docker/AWS 설치, Harbor 배포·이미지/snapshot 게시, GPU driver 설치·MIG 전환, Docker daemon
-	설정 변경은 하지 않는다. 대상의 cache 배치와 Repository 준비는 별도 작업이다.
+	설정 변경은 하지 않는다. 대상의 cache 배치와 Repository 준비는 `eva local prepare`로 진행한다.
 - 출력 옆의 격리 임시 작업은 성공·실패 시 정리하고 resume하지 않는다. 기존 출력은 거부하며
-	검증된 Bundle만 최종 경로에 게시한다. 다운로드 backend 출력은 숨기고 단계명·최종 결과를 표시한다.
+	검증된 Bundle만 최종 경로에 게시한다. 선택한 profile·드라이버 패키지·출력 경로를 표시하며,
+	다운로드 backend 출력은 숨기고 단계명·최종 결과를 표시한다.
 	누락 Runtime bootstrap 시 기존 설치기의 APT/pip 진행 출력은 추가될 수 있다.
 	다운로드·staging 복사본·검증 압축 해제까지 고려한 상당한 디스크 공간이 필요하다.
 - 결과는 installer와 Tool archive가 root에 나란히 있는 flat Release Bundle이다. 새 metadata와
@@ -356,8 +373,23 @@ Local의 검증·반입·새/빈 cache 배치는 [Local Runbook](../installation
 	`runtime/`과 `out/cache/`가 있다. `eva verify --release BUNDLE.tar.gz`로 검증할 수 있으며,
 	credential은 반입하지 않는다. 최초 대상 검증은 Tool 설치 전에 OS checksum 검증부터 시작한다.
 
-실행 예시·안전한 최초 반입·cache 배치와 별도 Harbor 준비는
+실행 예시·최초 반입·대상 서버의 Local 준비는
 [Local Repository 준비·설치](../installation/local-repository-runbook.md)를 따른다.
+
+### Local 준비 — 폐쇄망 대상 서버에서 실행
+
+| 명령 | 역할 |
+| --- | --- |
+| `sudo eva local prepare --config FILE [--release PATH] --yes` | Current Release의 캐시·Runtime을 배치하고 필요한 Docker·Harbor 설치, Bundle 이미지 적재·게시, Agent 선택 시 Qdrant snapshot 게시 |
+| `eva local prepare --help` | 실행 옵션 확인 |
+
+반입한 Bundle에서 Tool을 설치한 뒤 대상 서버에서 실행한다. `--config`는 이후 `eva install`에
+사용할 Local 설정이며 `ansible_connection: local`인 대상 하나를 지정한다. 준비 중에는
+인터넷 다운로드와 AWS credential을 사용하지 않는다. 별도 서버의 Harbor는 미리 준비한다.
+기존 Harbor 설정·데이터와 다른 Registry 설정을 보존하며, 게시 인증은 기존 인증 또는
+설정 파일·대화형 숨김 입력으로 준비한다. 같은 Bundle의 캐시는 checksum 검증 후 재사용한다.
+기존 캐시에 EVA 준비 기록이 없거나 checksum이 다르면 덮어쓰지 않고 중단한다.
+준비 완료 후 같은 설정 파일로 `sudo eva install --config FILE --yes`를 실행한다.
 
 ### Remote 준비·설치 — Main에서 실행
 
@@ -399,7 +431,8 @@ Harbor 설치 방식과 HTTP/HTTPS는 bootstrap이 자동 확인한다. 기존 H
 | `eva runtime validate [--runtime-root PATH]` | Runtime 유효성 검사 |
 | `eva runtime bootstrap [--offline PATH] [--runtime-root PATH]` | pin된 online Runtime 또는 offline archive로 구성 |
 | `eva runtime install --source PATH [--runtime-root PATH]` | 추출된 Runtime payload 설치 |
-| `eva preflight gpu` | NVIDIA driver·GPU·MIG 상태 확인 |
+| `eva preflight gpu` | 현재 서버의 GPU 확인·준비; 설치 설정 파일을 읽지 않음 |
+| `eva preflight gpu --config FILE` | 설정된 Agent/Vision 타겟의 GPU 확인·준비; Online Bastion·Remote Main의 SSH 타겟 지원 |
 | `eva preflight argocd --workspace PATH` | 기존 관리 연결 검증 및 승인 기반 handoff |
 | `eva troubleshoot apt` | 지원 APT 문제 진단 |
 | `eva troubleshoot apt --fix-known --yes` | 명시적으로 지원되는 APT 복구 |
@@ -408,6 +441,13 @@ Harbor 설치 방식과 HTTP/HTTPS는 bootstrap이 자동 확인한다. 기존 H
 | `eva exec <ansible-playbook\|helm\|kubectl\|kustomize\|oras> [args...]` | 관리 도구 직접 실행 |
 
 `shell`/`exec`는 Operation에 기록되지 않는 고급 실행이다. 명령에 따라 cluster를 변경할 수 있다.
+Online·Remote·Local의 `eva install`은 Agent/Vision 대상에서 Infra 다음, Config 전에 GPU preflight를 자동 실행한다.
+`eva preflight gpu`는 같은 준비만 별도로 실행하고 Operation에 결과를 기록한다. RTX PRO 6000 1장은 MIG 4개를
+구성하고 기존의 올바른 분할은 재사용한다. A6000/L40S/PRO5000의 지원 profile에는 MIG를 적용하지 않는다.
+`--config`를 생략하면 설치 설정 파일을 읽지 않고 현재 서버만 대상으로 한다.
+설정된 Agent/Vision 타겟을 준비하려면 `--config FILE`을 명시한다. GPU preflight에 `--yes`나 추가 실행 확인은 필요하지 않다.
+기존의 다른 분할과 실행 중인 GPU workload는 보존하며 변경이 필요하면 중단한다.
+드라이버 설치·GPU Mode 변경 후 재부팅이 필요하면 해당 타겟을 재부팅하고 같은 명령을 다시 실행한다.
 `exec --runtime-root PATH`로 다른 관리 Runtime을 지정할 수 있다.
 Runtime bootstrap과 Online Infra 설치는 지원하는 APT 저장소 문제를 자동 복구하고 재검증한다.
 Bastion 설치는 각 타겟에서 처리한다. `troubleshoot apt`는 개별 진단이 필요할 때 사용하는 명령이며

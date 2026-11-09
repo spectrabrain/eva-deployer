@@ -35,15 +35,11 @@ import (
 )
 
 var (
-	version       = "0.1.0-migration"
-	commit        = "unknown"
-	buildDate     = "unknown"
-	newAPTService = apt.NewService
-	stdinStat     = func() (os.FileInfo, error) { return os.Stdin.Stat() }
-	runGPUCommand = func(args ...string) (string, error) {
-		output, err := exec.Command("nvidia-smi", args...).CombinedOutput()
-		return string(output), err
-	}
+	version                           = "0.1.0-migration"
+	commit                            = "unknown"
+	buildDate                         = "unknown"
+	newAPTService                     = apt.NewService
+	stdinStat                         = func() (os.FileInfo, error) { return os.Stdin.Stat() }
 	newRemoteService                  = remote.NewService
 	newRemoteInstallerService         = remote.NewInstallerService
 	newRemotePrepareService           = remote.NewPrepareService
@@ -84,7 +80,8 @@ func usage() {
 	fmt.Println("  config sample [--mode online|remote|local] [--iam install|external] [--address shared|separate] [--protocol http|https] [--output FILE]")
 	fmt.Println("  workspace <validate|show|ansible-vars|env> [--config FILE | --site ID | --workspace PATH]")
 	fmt.Println("  release <validate|show|prepare|env|import-airgap> [--release PATH]")
-	fmt.Println("  airgap prepare [--release PATH] --output FILE.tar.gz --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes")
+	fmt.Println("  airgap prepare [--release PATH] [--output FILE.tar.gz] --vllm-profile PROFILE [--driver-package PACKAGE] [--display-mode-selector FILE.zip] --yes")
+	fmt.Println("  local prepare --config FILE [--release PATH] --yes")
 	fmt.Println("  remote bootstrap [--registry HOST[:PORT]] --yes [--replace-registry]")
 	fmt.Println("  remote publish [RELEASE_PATH] [--registry HOST[:PORT]] --target TARGET")
 	fmt.Println("  remote target list | <add|verify> NAME | remove NAME [--yes]")
@@ -99,7 +96,8 @@ func usage() {
 	fmt.Println("  inspect [paths|operations|files|values|config|plan|result|logs] [options]")
 	fmt.Println("  backup [list|show|values] [--root PATH] [--site ID] [--component NAME] [--namespace NS] [--version VERSION] [--release NAME] [--latest | --path DIR]")
 	fmt.Println("  check [--verbose] [--state-root PATH] [--runtime-root PATH]")
-	fmt.Println("  preflight <gpu|argocd>")
+	fmt.Println("  preflight gpu [--config FILE] [--release PATH]  (defaults to current server; --config selects configured GPU targets)")
+	fmt.Println("  preflight argocd --config FILE|--site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 	fmt.Println("  troubleshoot apt [--fix-known --yes]")
 	fmt.Println("  verify [--release PATH | RELEASE_PATH]")
 	fmt.Println("  runtime <install|bootstrap|validate|show> [--runtime-root PATH]")
@@ -109,7 +107,7 @@ func usage() {
 	fmt.Println("  help")
 	fmt.Println("")
 	fmt.Println("Without --workspace, --site resolves /etc/eva/sites/<site-id>.")
-	fmt.Println("--config accepts one private installer YAML and generates a managed Workspace.")
+	fmt.Println("--config accepts one private installer YAML; all environments use Workspace/Plan/Ansible.")
 	fmt.Println("Install orchestration and Runtime bootstrap are added incrementally.")
 }
 
@@ -153,6 +151,8 @@ func run(args []string) error {
 		return runRelease(args[1:])
 	case "airgap":
 		return runAirgap(args[1:])
+	case "local":
+		return runLocal(args[1:])
 	case "internal":
 		return runInternal(args[1:])
 	case "remote":
@@ -1025,10 +1025,10 @@ func runWorkspace(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("installer config is valid (site=%s, mode=%s); no Workspace was written\n", input.Site.ID, input.Repository.Mode)
+		fmt.Printf("installer config is valid (site=%s, mode=%s)\n", input.Site.ID, input.Repository.Mode)
 		return nil
 	}
-	resolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	resolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()})
 	if err != nil {
 		return err
 	}
@@ -1165,29 +1165,57 @@ func runInstall(args []string) error {
 	if len(args) != 0 && args[0] == "configure" {
 		return runInstallConfigureCommand(args[1:])
 	}
+	return runInstallMode(args, false)
+}
+
+func runInstallMode(args []string, gpuOnly bool) error {
 	normalizedArgs, err := normalizeInstallArgs(args)
 	if err != nil {
 		return err
 	}
-	flags := flag.NewFlagSet("install", flag.ContinueOnError)
+	commandName := "install"
+	if gpuOnly {
+		commandName = "preflight gpu"
+	}
+	flags := flag.NewFlagSet(commandName, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	siteID := flags.String("site", "", "site identifier")
-	workspaceRoot := flags.String("workspace", "", "workspace path")
-	configFile := flags.String("config", "", "single installer YAML file (0600)")
+	siteID, workspaceRoot := new(string), new(string)
+	if !gpuOnly {
+		siteID = flags.String("site", "", "site identifier")
+		workspaceRoot = flags.String("workspace", "", "workspace path")
+	}
+	configHelp := "single installer YAML file (0600)"
+	if gpuOnly {
+		configHelp += "; explicitly selects configured hosts instead of the current server"
+	}
+	configFile := flags.String("config", "", configHelp)
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	installRoot := flags.String("install-root", release.DefaultInstallRoot, "prepared Release installation directory")
 	artifactRoot := flags.String("artifact-root", release.DefaultArtifactRoot, "Airgap artifact cache directory")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
-	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
+	logRoot := flags.String("log-root", userLogRoot(), "operation log directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
-	yes := flags.Bool("yes", false, "confirm target changes without a prompt")
+	yesHelp := "confirm target changes without a prompt"
+	if gpuOnly {
+		yesHelp = "optional; GPU preflight applies required changes without an extra confirmation"
+	}
+	yes := flags.Bool("yes", false, yesHelp)
 	var components stringList
-	flags.Var(&components, "component", "enabled component to install (repeatable; use all for every enabled component)")
+	componentHelp := "enabled component to install (repeatable; use all for every enabled component)"
+	if gpuOnly {
+		componentHelp = "enabled Agent or Vision component whose targets to preflight (repeatable)"
+	}
+	flags.Var(&components, "component", componentHelp)
 	var charts, values, sets stringList
-	flags.Var(&charts, "chart", "IAM, App, Agent, or Vision chart override in COMPONENT=PATH form")
-	flags.Var(&values, "values", "IAM, App, Agent, or Vision values override in COMPONENT=PATH form")
-	flags.Var(&sets, "set", "IAM, App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
+	if !gpuOnly {
+		flags.Var(&charts, "chart", "IAM, App, Agent, or Vision chart override in COMPONENT=PATH form")
+		flags.Var(&values, "values", "IAM, App, Agent, or Vision values override in COMPONENT=PATH form")
+		flags.Var(&sets, "set", "IAM, App, Agent, or Vision Helm override in COMPONENT:KEY=VALUE form")
+	}
 	if err := flags.Parse(normalizedArgs); err != nil {
+		if gpuOnly && errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if flags.NArg() > 1 {
@@ -1200,9 +1228,36 @@ func runInstall(args []string) error {
 		*releaseInput = flags.Arg(0)
 	}
 
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	if gpuOnly && *configFile == "" {
+		if len(components) != 0 {
+			return errors.New("--component for GPU preflight requires --config FILE; a bare preflight checks the current server's GPU layout")
+		}
+		return runCurrentHostGPUPreflight(currentHostGPUOptions{
+			Release: *releaseInput, InstallRoot: *installRoot, ArtifactRoot: *artifactRoot,
+			RuntimeRoot: *runtimeRoot, StateRoot: *stateRoot, LogRoot: *logRoot,
+		})
+	}
+	workspaceInput := workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()}
+	workspaceResolved, err := workspace.Resolve(workspaceInput)
 	if err != nil {
 		return err
+	}
+	if workspaceResolved.Config.ManagedCluster() {
+		if gpuOnly {
+			return errors.New("Cloud worker GPU/MIG configuration is managed by the provider; eva install validates Kubernetes GPU resources")
+		}
+		if os.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
+			return errors.New("run Cloud installation without sudo as the kubeconfig owner")
+		}
+		if *releaseInput == "" {
+			*releaseInput = workspaceResolved.Config.Deployment.Release
+		}
+		flags.VisitAll(func(f *flag.Flag) {
+			if f.Name == "install-root" && f.Value.String() == release.DefaultInstallRoot {
+				home, _ := os.UserHomeDir()
+				*installRoot = filepath.Join(home, ".local/share/eva/releases")
+			}
+		})
 	}
 	workspaceResolved, err = workspaceResolved.SelectComponents(components)
 	if err != nil {
@@ -1211,6 +1266,9 @@ func runInstall(args []string) error {
 	overrides, err := fieldoverride.Parse(charts, values, sets, workspaceResolved.Config.Components)
 	if err != nil {
 		return err
+	}
+	if gpuOnly && !overrides.Empty() {
+		return errors.New("eva preflight gpu does not accept Helm overrides")
 	}
 	var releaseResolved release.Resolved
 	var releaseSource release.SelectionSource
@@ -1230,11 +1288,17 @@ func runInstall(args []string) error {
 		printSelectedRelease(releaseResolved, releaseSource)
 	}
 	draft := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, time.Now())
+	if gpuOnly {
+		draft, err = plan.GPUPreflight(draft)
+		if err != nil {
+			return err
+		}
+	}
 	if draft.ExecutionMode == remote.InstallerExecutionMode && !overrides.Empty() {
 		return errors.New("Remote controller installation uses targets.<name>.values in the installer config; CLI chart/values/set overrides are not supported for this execution mode")
 	}
 	printInstallSummary(draft)
-	if !*yes {
+	if !gpuOnly && !*yes {
 		if err := confirmInstall(draft); err != nil {
 			return err
 		}
@@ -1269,6 +1333,12 @@ func runInstall(args []string) error {
 	}
 	now := time.Now()
 	document := plan.BuildWithOverrides(workspaceResolved, releaseResolved, overrides, now)
+	if gpuOnly {
+		document, err = plan.GPUPreflight(document)
+		if err != nil {
+			return err
+		}
+	}
 	if remoteCacheRoot != "" {
 		document.AnsibleExtraVars = append(document.AnsibleExtraVars,
 			"eva_cache_root="+remoteCacheRoot,
@@ -1281,11 +1351,13 @@ func runInstall(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
+		ArgoCDReceiptRoot: argoCDReceiptRoot(document),
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
-	printCompletedAccess(completed, *stateRoot, *runtimeRoot)
+	if !gpuOnly {
+		printCompletedAccess(completed, *stateRoot, *runtimeRoot)
+	}
 	return err
 }
 
@@ -1399,7 +1471,11 @@ func printInstallSummary(document plan.Document) {
 	for _, step := range document.Steps {
 		components = append(components, step.Component)
 	}
-	fmt.Printf("install plan: site=%s release=%s components=%s\n", document.SiteID, document.ReleaseVersion, strings.Join(components, ","))
+	label := "install plan"
+	if document.GPUPreflightOnly {
+		label = "GPU preflight plan"
+	}
+	fmt.Printf("%s: site=%s release=%s components=%s\n", label, document.SiteID, document.ReleaseVersion, strings.Join(components, ","))
 	for _, message := range overrideMessages(document) {
 		fmt.Println(message)
 	}
@@ -1413,7 +1489,11 @@ func confirmInstall(document plan.Document) error {
 	if info.Mode()&os.ModeCharDevice == 0 {
 		return errors.New("eva install requires --yes when standard input is not a terminal")
 	}
-	fmt.Fprintf(os.Stderr, "Install release %s for site %s? [y/N]: ", document.ReleaseVersion, document.SiteID)
+	action := "Install release"
+	if document.GPUPreflightOnly {
+		action = "Run GPU preflight using release"
+	}
+	fmt.Fprintf(os.Stderr, "%s %s for site %s? [y/N]: ", action, document.ReleaseVersion, document.SiteID)
 	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && len(answer) == 0 {
 		return fmt.Errorf("read install confirmation: %w", err)
@@ -1437,7 +1517,7 @@ func runPlan(args []string) error {
 	releaseInput := flags.String("release", "", "release directory or release.yaml path")
 	output := flags.String("output", "", "write the plan to this path")
 	save := flags.Bool("save", false, "save the plan as an operation")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
 	var components stringList
 	flags.Var(&components, "component", "enabled component to plan (repeatable; use all for every enabled component)")
 	var charts, values, sets stringList
@@ -1460,7 +1540,7 @@ func runPlan(args []string) error {
 		*releaseInput = flags.Arg(0)
 	}
 
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *root, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()})
 	if err != nil {
 		return err
 	}
@@ -1514,7 +1594,7 @@ func runPlan(args []string) error {
 func runStatus(args []string) error {
 	flags := flag.NewFlagSet("status", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -1542,7 +1622,7 @@ func runCheck(args []string) error {
 	flags := flag.NewFlagSet("check", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	verbose := flags.Bool("verbose", false, "show details for unhealthy EVA components")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -1575,14 +1655,15 @@ func runCheck(args []string) error {
 				return checkErr
 			}
 			input.Components = checkComponents(document)
+			input.ManagedCluster = document.Environment["KUBECONFIG"] != ""
 			installedPlan = document
 		}
 	}
 
-	report := health.Check(input, checkRunner(resolvedRuntime, runtimeErr == nil))
+	report := health.Check(input, checkPlanRunner(resolvedRuntime, runtimeErr == nil, installedPlan))
 	printCheck(report, *verbose)
 	access.Print(os.Stdout, access.Discover(installedPlan, access.Options{
-		Run: checkRunner(resolvedRuntime, runtimeErr == nil), PreferLive: true,
+		Run: checkPlanRunner(resolvedRuntime, runtimeErr == nil, installedPlan), PreferLive: true,
 		HarborReceiptPath: defaultRemoteBootstrapReceiptPath,
 	}))
 	if !report.Healthy {
@@ -1613,9 +1694,22 @@ func checkComponents(document plan.Document) []health.Component {
 }
 
 func checkRunner(resolved runtime.Resolved, hasRuntime bool) health.Runner {
+	return checkPlanRunner(resolved, hasRuntime, plan.Document{})
+}
+
+func checkPlanRunner(resolved runtime.Resolved, hasRuntime bool, document plan.Document) health.Runner {
 	return func(name string, args ...string) health.CommandResult {
 		path := name
 		environment := os.Environ()
+		if kubeconfig := document.Environment["KUBECONFIG"]; kubeconfig != "" {
+			filtered := make([]string, 0, len(environment)+1)
+			for _, entry := range environment {
+				if !strings.HasPrefix(entry, "KUBECONFIG=") {
+					filtered = append(filtered, entry)
+				}
+			}
+			environment = append(filtered, "KUBECONFIG="+kubeconfig)
+		}
 		if name == "kubectl" {
 			if !hasRuntime {
 				return health.CommandResult{Err: errors.New("managed Runtime is unavailable")}
@@ -1669,44 +1763,21 @@ func printCheckDetail(label string, entries []string) {
 	}
 }
 
-type gpuPreflight struct {
-	GPUs         []string
-	MIGInstances int
-}
-
 func runPreflight(args []string) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Println("Usage: eva preflight gpu")
+		fmt.Println("Usage: eva preflight gpu [--config FILE] [--release PATH]")
+		fmt.Println("       Defaults to the current server. Only --config selects configured hosts; no extra confirmation.")
+		fmt.Println("       Checks target GPUs and applies missing driver/MIG configuration; records an Operation.")
 		fmt.Println("       eva preflight argocd --config FILE|--site ID|--workspace PATH [--release PATH] [--runtime-root PATH]")
 		return nil
+	}
+	if args[0] == "gpu" {
+		return runInstallMode(args[1:], true)
 	}
 	if args[0] == "argocd" {
 		return runArgoCDPreflight(args[1:])
 	}
-	if len(args) != 1 || args[0] != "gpu" {
-		return fmt.Errorf("unknown preflight command %q", args[0])
-	}
-
-	result, err := inspectGPUPreflight(runGPUCommand)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "[ERROR] NVIDIA Driver unavailable")
-		fmt.Fprintln(os.Stderr, "Install a supported NVIDIA driver, confirm nvidia-smi succeeds, then rerun:")
-		fmt.Fprintln(os.Stderr, "  sudo eva preflight gpu")
-		return &displayedError{message: "GPU prerequisite check failed."}
-	}
-
-	fmt.Println("EVA GPU prerequisite check")
-	fmt.Printf("[OK] NVIDIA Driver GPUs=%d\n", len(result.GPUs))
-	for _, gpu := range result.GPUs {
-		fmt.Printf("     %s\n", gpu)
-	}
-	if result.MIGInstances > 0 {
-		fmt.Printf("[OK] MIG            instances=%d\n", result.MIGInstances)
-	} else {
-		fmt.Println("[OK] MIG            not configured")
-	}
-	fmt.Println("[OK] Ready          eva install will configure Docker, CDI, k3s, and the NVIDIA Device Plugin")
-	return nil
+	return fmt.Errorf("unknown preflight command %q", args[0])
 }
 
 func runArgoCDPreflight(args []string) error {
@@ -1727,7 +1798,7 @@ func runArgoCDPreflight(args []string) error {
 			strings.Join(flags.Args(), " "),
 		)
 	}
-	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: defaultWorkspaceCacheRoot})
+	workspaceResolved, err := workspace.Resolve(workspace.Options{SiteID: *siteID, Workspace: *workspaceRoot, ConfigFile: *configFile, CacheRoot: userWorkspaceCacheRoot()})
 	if err != nil {
 		return err
 	}
@@ -1788,33 +1859,6 @@ func runArgoCDPreflight(args []string) error {
 		"[OK] Argo CD handoff preflight passed.",
 	)
 	return nil
-}
-
-func inspectGPUPreflight(run func(...string) (string, error)) (gpuPreflight, error) {
-	info, err := run("--query-gpu=name,driver_version", "--format=csv,noheader")
-	if err != nil {
-		return gpuPreflight{}, err
-	}
-	result := gpuPreflight{}
-	for _, line := range strings.Split(info, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			result.GPUs = append(result.GPUs, line)
-		}
-	}
-	if len(result.GPUs) == 0 {
-		return gpuPreflight{}, errors.New("nvidia-smi reported no GPUs")
-	}
-
-	devices, err := run("-L")
-	if err != nil {
-		return gpuPreflight{}, err
-	}
-	for _, line := range strings.Split(devices, "\n") {
-		if strings.Contains(line, "MIG ") {
-			result.MIGInstances++
-		}
-	}
-	return result, nil
 }
 
 func runTroubleshoot(args []string) error {
@@ -1959,8 +2003,8 @@ func runApply(args []string) error {
 	flags := flag.NewFlagSet("apply", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	yes := flags.Bool("yes", false, "confirm target changes without a prompt")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
-	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
+	logRoot := flags.String("log-root", userLogRoot(), "operation log directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -1997,7 +2041,7 @@ func runApply(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
+		ArgoCDReceiptRoot: argoCDReceiptRoot(document),
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, record)
 	printOperation(completed)
@@ -2009,8 +2053,8 @@ func runRetry(args []string) error {
 	flags := flag.NewFlagSet("retry", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	yes := flags.Bool("yes", false, "confirm retry without a prompt")
-	stateRoot := flags.String("state-root", operation.DefaultRoot, "operation state directory")
-	logRoot := flags.String("log-root", apply.DefaultLogRoot, "operation log directory")
+	stateRoot := flags.String("state-root", userStateRoot(), "operation state directory")
+	logRoot := flags.String("log-root", userLogRoot(), "operation log directory")
 	runtimeRoot := flags.String("runtime-root", runtime.DefaultRoot, "managed runtime directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -2055,7 +2099,7 @@ func runRetry(args []string) error {
 	}
 	completed, err := apply.Execute(apply.Options{
 		StateRoot: *stateRoot, LogRoot: *logRoot, RuntimeRoot: *runtimeRoot,
-		ArgoCDReceiptRoot: defaultArgoCDReceiptRoot,
+		ArgoCDReceiptRoot: argoCDReceiptRoot(document),
 		AfterPrecondition: requireNoArgoCDTracking, Stdout: os.Stdout, Stderr: os.Stderr,
 	}, retry)
 	printOperation(completed)
@@ -2073,7 +2117,7 @@ func printCompletedAccess(record operation.Record, stateRoot, runtimeRoot string
 	}
 	resolvedRuntime, runtimeErr := runtime.Resolve(runtimeRoot)
 	access.Print(os.Stdout, access.Discover(document, access.Options{
-		Run:               checkRunner(resolvedRuntime, runtimeErr == nil),
+		Run:               checkPlanRunner(resolvedRuntime, runtimeErr == nil, document),
 		HarborReceiptPath: defaultRemoteBootstrapReceiptPath,
 	}))
 }

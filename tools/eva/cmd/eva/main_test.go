@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -562,34 +561,19 @@ func TestCheckComponentsUsesOnlySelectedProductSteps(t *testing.T) {
 	}
 }
 
-func TestInspectGPUPreflightReportsGPUsAndMIGInstances(t *testing.T) {
-	result, err := inspectGPUPreflight(func(args ...string) (string, error) {
-		switch strings.Join(args, " ") {
-		case "--query-gpu=name,driver_version --format=csv,noheader":
-			return "NVIDIA RTX PRO 6000 Blackwell Server Edition, 570.42.01\n", nil
-		case "-L":
-			return "GPU 0: NVIDIA RTX PRO 6000 Blackwell Server Edition\n  MIG 1g.24gb Device 0\n  MIG 1g.24gb Device 1\n", nil
-		default:
-			return "", errors.New("unexpected nvidia-smi arguments")
-		}
-	})
-	if err != nil {
-		t.Fatalf("inspectGPUPreflight() error = %v", err)
+func TestGPUPreflightHelpAndCommandRouting(t *testing.T) {
+	output := captureRemoteTargetStdout(t, func() error { return run([]string{"preflight", "--help"}) })
+	if !strings.Contains(output, "eva preflight gpu [--config") || !strings.Contains(output, "applies missing driver/MIG configuration") || !strings.Contains(output, "no extra confirmation") {
+		t.Fatalf("GPU preflight help does not describe target preparation: %s", output)
 	}
-	if got, want := result.GPUs, []string{"NVIDIA RTX PRO 6000 Blackwell Server Edition, 570.42.01"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("GPUs = %v, want %v", got, want)
+	if err := run([]string{"preflight", "gpu", "--help"}); err != nil {
+		t.Fatalf("GPU preflight help failed: %v", err)
 	}
-	if result.MIGInstances != 2 {
-		t.Fatalf("MIGInstances = %d, want 2", result.MIGInstances)
+	if err := run([]string{"gpu", "prepare"}); err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatal("GPU preparation must be exposed only through preflight gpu")
 	}
-}
-
-func TestInspectGPUPreflightFailsWithoutGPU(t *testing.T) {
-	_, err := inspectGPUPreflight(func(args ...string) (string, error) {
-		return "", nil
-	})
-	if err == nil {
-		t.Fatal("inspectGPUPreflight() succeeded without GPUs")
+	if err := run([]string{"preflight", "unknown"}); err == nil {
+		t.Fatal("unknown preflight subcommand was accepted")
 	}
 }
 
@@ -1105,6 +1089,7 @@ func writePreparableRelease(t *testing.T) string {
 			"src/playbook-vars.yaml":                     "---\n",
 			"src/infra/playbooks/site_precondition.yaml": "---\n",
 			"src/infra/playbooks/site_infra.yaml":        "---\n",
+			"src/infra/playbooks/site_gpu_prepare.yaml":  "---\n",
 		}),
 		"eva-solution.tar.gz": archive(map[string]string{"src/solution/playbooks/site_eva_app.yaml": "---\n"}),
 	}

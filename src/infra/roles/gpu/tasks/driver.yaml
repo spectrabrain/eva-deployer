@@ -122,8 +122,11 @@
     - gpu_nvidia_driver_install is defined
     - gpu_nvidia_driver_install is changed
 
-- name: Stop execution on this host until reboot after NVIDIA driver install
-  ansible.builtin.meta: end_host
+- name: Stop installation until reboot after NVIDIA driver install
+  ansible.builtin.fail:
+    msg: >-
+      EVA_GPU_REBOOT_REQUIRED: NVIDIA driver를 설치했습니다. 이 대상 서버를 재부팅한 뒤
+      같은 eva install 또는 eva preflight gpu 명령을 다시 실행하세요.
   when:
     - gpu_nvidia_driver_install is defined
     - gpu_nvidia_driver_install is changed

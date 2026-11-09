@@ -1,4 +1,8 @@
-- name: Set EVA Vision install defaults (k3s/on-premise)
+- name: Prepare Solution command-line prerequisites
+  ansible.builtin.import_role:
+    name: "{{ eva_solution_root }}/roles/eva_solution_prerequisites"
+
+- name: Set EVA Vision install defaults
   ansible.builtin.set_fact:
     repository_mode: "{{ repository_mode | default('online_repository') }}"
     repository_project: "{{ repository_project | default('eva') }}"
@@ -19,6 +23,7 @@
     eva_vision_chart_version: "{{ eva_vision_chart_version | mandatory }}"
     eva_vision_image_tag: "{{ eva_vision_image_tag | default(eva_vision_chart_version) }}"
     eva_vision_offline_dir: "{{ eva_vision_offline_dir | default(eva_cache_root ~ '/eva-vision') }}"
+    eva_vision_ncp_values: {}
 
 - name: Resolve derived EVA Vision install paths
   ansible.builtin.set_fact:
@@ -37,6 +42,8 @@
            (eva_vision_chart_version is version('3.3.0', '>='))
            | ternary('https://raw.githubusercontent.com/spectrabrain/eva-vision-chart/chartmuseum/',
                      'https://raw.githubusercontent.com/mellerikat/eva-vision/chartmuseum/')) }}
+    eva_vision_ncp_values_url: >-
+      {{ eva_vision_ncp_values_url | default('https://raw.githubusercontent.com/spectrabrain/eva-vision-chart/main/deploy-values/eva-vision-ncp.yaml') }}
 
 - name: Load target-specific EVA Vision Workspace values
   ansible.builtin.import_tasks: workspace_values.yaml
@@ -115,6 +122,7 @@
   check_mode: false
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+  when: not (eva_managed_cluster | default(false) | bool)
 
 - name: Validate NVIDIA device plugin prerequisite
   ansible.builtin.assert:
@@ -122,6 +130,9 @@
       - "'nvidia-device-plugin' in daemonsets_result.stdout"
     fail_msg: "NVIDIA Device Plugin daemonset is not installed. Install it before EVA Vision deployment."
     success_msg: "NVIDIA Device Plugin daemonset detected."
+  # NKS GPU prerequisites are checked from node allocatable resources by the
+  # cluster context and manifest guard, without assuming the provider's DaemonSet name.
+  when: not (eva_managed_cluster | default(false) | bool)
 
 - name: Add Helm repository for EVA Vision
   ansible.builtin.command: >-
@@ -176,6 +187,44 @@
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
 
+- name: Download the published NCP Vision Values
+  ansible.builtin.get_url:
+    url: "{{ eva_vision_ncp_values_url }}"
+    dest: "{{ eva_vision_workdir }}/eva-vision-ncp.yaml"
+    mode: '0644'
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+    - not (airgap_mode | default(false) | bool)
+    - eva_vision_chart_version is version('3.3.0', '>=')
+
+- name: Read the published NCP Vision Values
+  no_log: true
+  ansible.builtin.slurp:
+    src: "{{ eva_vision_workdir }}/eva-vision-ncp.yaml"
+  register: eva_vision_ncp_values_raw
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+    - not (airgap_mode | default(false) | bool)
+    - eva_vision_chart_version is version('3.3.0', '>=')
+
+- name: Parse the published NCP Vision Values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_ncp_values: "{{ eva_vision_ncp_values_raw.content | b64decode | from_yaml }}"
+  when:
+    - not ansible_check_mode
+    - eva_managed_cluster | default(false) | bool
+    - not (airgap_mode | default(false) | bool)
+    - eva_vision_chart_version is version('3.3.0', '>=')
+
+- name: Validate the NCP Vision Values document
+  ansible.builtin.assert:
+    that: eva_vision_ncp_values is mapping
+    fail_msg: "The published NCP Vision Values must be a YAML mapping."
+  when: not ansible_check_mode
+
 - name: Ensure EVA Vision deploy values directory exists on control node
   ansible.builtin.file:
     path: "{{ eva_vision_deploy_values_dir }}"
@@ -200,7 +249,7 @@
   become: false
   when: not ansible_check_mode
 
-- name: Render EVA Vision k3s override values on control node
+- name: Render shared EVA Vision override values on control node
   no_log: true
   ansible.builtin.template:
     src: "{{ eva_template_values_root }}/vision-k3s-override.yaml.j2"
@@ -210,7 +259,7 @@
   become: false
   when: not ansible_check_mode
 
-- name: Copy EVA Vision k3s override values to target workspace
+- name: Copy shared EVA Vision override values to target workspace
   no_log: true
   ansible.builtin.copy:
     src: "{{ eva_vision_deploy_values_dir }}/vision-k3s-override.yaml"
@@ -240,6 +289,9 @@
     eva_vision_effective_values: >-
       {{ (eva_vision_generated_values_raw.results[0].content | b64decode | from_yaml)
          | combine(eva_vision_generated_values_raw.results[1].content | b64decode | from_yaml, recursive=true)
+         | combine(eva_vision_ncp_values | default({}), recursive=true)
+         | combine(({'image': {'repository': eva_vision_image_repository, 'tag': eva_vision_image_tag | default(eva_vision_chart_version)}}
+                    if (eva_vision_ncp_values | default({}) | length > 0) else {}), recursive=true)
          | combine(eva_vision_workspace_chart_values, recursive=true)
          | combine(eva_vision_cli_values_override | default({}, true), recursive=true) }}
   when: not ansible_check_mode
@@ -265,6 +317,7 @@
 - name: Record EVA Vision values source metadata on control node
   ansible.builtin.copy:
     content: |
+      environment_values_source: {{ (eva_vision_ncp_values_url if (eva_vision_ncp_values | length > 0) else '') | to_json }}
       config_generated_values: {{ (eva_vision_mig_enabled_from_config | default(false) | bool) | lower }}
       workspace_override: {{ (eva_vision_workspace_values | length > 0) | lower }}
       cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}
@@ -289,6 +342,85 @@
   when:
     - not ansible_check_mode
     - eva_vision_chart_version is version('3.3.0', '>=')
+
+- name: Ensure EVA Vision Helm post-renderer plugin directory exists
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer"
+    state: directory
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Render EVA Vision Helm post-renderer plugin metadata
+  ansible.builtin.template:
+    src: post-renderer/plugin.yaml.j2
+    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/plugin.yaml"
+    mode: "0644"
+  when: not ansible_check_mode
+
+- name: Render EVA Vision Helm post-renderer
+  ansible.builtin.template:
+    src: post-renderer/post-renderer.py.j2
+    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Ensure EVA Vision Helm post-renderer is executable
+  ansible.builtin.file:
+    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
+    mode: "0755"
+  when: not ansible_check_mode
+
+- name: Verify Helm recognizes the EVA Vision post-renderer plugin
+  ansible.builtin.command: helm plugin list
+  register: eva_vision_helm_plugins
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+
+- name: Assert Helm recognizes the EVA Vision post-renderer plugin
+  ansible.builtin.assert:
+    that:
+      - eva_vision_helm_plugins.stdout is search('(^|\\n)eva-vision-postrenderer\\s')
+    fail_msg: EVA Vision Helm post-renderer plugin was not recognized.
+  when: not ansible_check_mode
+
+- name: Render and verify final EVA Vision Helm manifest before deployment
+  no_log: >-
+    {{
+      (eva_cli_values_path | default('') | length > 0)
+      or
+      (eva_cli_helm_set | default([]) | length > 0)
+    }}
+  ansible.builtin.shell: >-
+    helm template {{ eva_vision_name }} {{ eva_vision_chart_source }}
+    -n {{ eva_vision_namespace }}
+    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
+    -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    --post-renderer eva-vision-postrenderer
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    > /dev/null
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
+    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+
+- name: Validate shared EVA vision inputs against the existing cluster
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  vars:
+    eva_cluster_guard_component: vision
+    eva_cluster_guard_workdir: "{{ eva_vision_workdir }}"
+    eva_cluster_guard_chart: "{{ eva_vision_chart_source }}"
+    eva_cluster_guard_version: "{{ eva_vision_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_cluster_guard_values: "{{ [eva_vision_workdir ~ '/effective-input-values.yaml'] }}"
+    eva_cluster_guard_post_renderer: eva-vision-postrenderer
+    eva_cluster_guard_environment:
+      HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
+  when: eva_managed_cluster | default(false) | bool
 
 - name: Check existing EVA Vision deployment
   no_log: true
@@ -359,71 +491,6 @@
     - eva_vision_deployment_exists.rc == 0
   environment:
     KUBECONFIG: "{{ eva_vision_kubeconfig }}"
-
-- name: Ensure EVA Vision Helm post-renderer plugin directory exists
-  ansible.builtin.file:
-    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer"
-    state: directory
-    mode: "0755"
-  when: not ansible_check_mode
-
-- name: Render EVA Vision Helm post-renderer plugin metadata
-  ansible.builtin.template:
-    src: post-renderer/plugin.yaml.j2
-    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/plugin.yaml"
-    mode: "0644"
-  when: not ansible_check_mode
-
-- name: Render EVA Vision Helm post-renderer
-  ansible.builtin.template:
-    src: post-renderer/post-renderer.py.j2
-    dest: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
-    mode: "0755"
-  when: not ansible_check_mode
-
-- name: Ensure EVA Vision Helm post-renderer is executable
-  ansible.builtin.file:
-    path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer/post-renderer.py"
-    mode: "0755"
-  when: not ansible_check_mode
-
-- name: Verify Helm recognizes the EVA Vision post-renderer plugin
-  ansible.builtin.command: helm plugin list
-  register: eva_vision_helm_plugins
-  changed_when: false
-  when: not ansible_check_mode
-  environment:
-    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
-
-- name: Assert Helm recognizes the EVA Vision post-renderer plugin
-  ansible.builtin.assert:
-    that:
-      - eva_vision_helm_plugins.stdout is search('(^|\\n)eva-vision-postrenderer\\s')
-    fail_msg: EVA Vision Helm post-renderer plugin was not recognized.
-  when: not ansible_check_mode
-
-- name: Render and verify final EVA Vision Helm manifest before deployment
-  no_log: >-
-    {{
-      (eva_cli_values_path | default('') | length > 0)
-      or
-      (eva_cli_helm_set | default([]) | length > 0)
-    }}
-  ansible.builtin.shell: >-
-    helm template {{ eva_vision_name }} {{ eva_vision_chart_source }}
-    -n {{ eva_vision_namespace }}
-    {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
-    -f {{ eva_vision_workdir }}/effective-input-values.yaml
-    --post-renderer eva-vision-postrenderer
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
-    > /dev/null
-  args:
-    executable: /bin/bash
-  changed_when: false
-  when: not ansible_check_mode
-  environment:
-    KUBECONFIG: "{{ eva_vision_kubeconfig }}"
-    HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
 
 - name: Reconcile exact legacy Argo CD-managed EVA Vision resources
   ansible.builtin.include_tasks: reconcile_vision.yaml

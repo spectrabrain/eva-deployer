@@ -45,7 +45,7 @@
 
     static_pv='eva-agent-vllm-shared-pvc-storage'
     claim='eva-agent-vllm-shared-pvc-storage-claim'
-    cache_path='/share/eva-agent/vllm-cache'
+    cache_path={{ ((eva_agent_nfs_share_path | default('/share/eva-agent', true)) ~ '/vllm-cache') | quote }}
     snapshot_file="$cache_path/.eva-vllm-storage-migration.tsv"
     rendered_json_file="$(mktemp)"
     static_pv_file="$(mktemp)"

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -108,6 +109,54 @@ func TestPrepareRejectsArchivePathTraversal(t *testing.T) {
 	}
 	if _, err := Prepare(resolved, t.TempDir()); err == nil {
 		t.Fatal("Prepare() accepted path traversal archive")
+	}
+}
+
+func TestPrepareRequiresImportedKubeconfigTask(t *testing.T) {
+	for _, included := range []bool{false, true} {
+		t.Run(fmt.Sprintf("included=%t", included), func(t *testing.T) {
+			infra := map[string]string{
+				"ansible.cfg":                                "[defaults]\n",
+				"src/playbook-preflight.yaml":                "- ansible.builtin.import_tasks: host-kubeconfig.yaml\n",
+				"src/playbook-vars.yaml":                     "---\n",
+				"src/infra/playbooks/site_precondition.yaml": "---\n",
+				"src/infra/playbooks/site_infra.yaml":        "---\n",
+			}
+			if included {
+				infra["src/host-kubeconfig.yaml"] = "---\n"
+			}
+			root := writeRelease(t, map[string]string{
+				"eva-tool.tar.gz": "tool", "eva-infra.tar.gz": gzipTar(t, infra),
+				"eva-solution.tar.gz": gzipTar(t, map[string]string{"src/solution/playbooks/site_eva_app.yaml": "---\n"}),
+			})
+			resolved, err := Resolve(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			installRoot := t.TempDir()
+			prepared, err := Prepare(resolved, installRoot)
+			if !included {
+				if err == nil || !strings.Contains(err.Error(), "src/host-kubeconfig.yaml") {
+					t.Fatalf("Prepare() error = %v, want missing imported task", err)
+				}
+				if _, err := os.Stat(filepath.Join(installRoot, resolved.Metadata.Version)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("incomplete Release was published: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Prepare(resolved, installRoot); err != nil {
+				t.Fatalf("reuse complete Release: %v", err)
+			}
+			if err := os.Remove(filepath.Join(prepared.Root, "src/host-kubeconfig.yaml")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Prepare(resolved, installRoot); err == nil || !strings.Contains(err.Error(), "src/host-kubeconfig.yaml") {
+				t.Fatalf("reuse incomplete Release error = %v, want missing imported task", err)
+			}
+		})
 	}
 }
 
@@ -224,8 +273,12 @@ func TestBuildAirgapBundleFlatVerifyAndImport(t *testing.T) {
 	}
 	outputRoot := t.TempDir()
 	destination := filepath.Join(outputRoot, "new-output", "bundle.tar.gz")
-	if err := BuildAirgapBundle(source, offlinePath, destination); err != nil {
-		t.Fatalf("BuildAirgapBundle() error = %v", err)
+	digest, err := BuildAirgapBundleWithDigest(source, offlinePath, destination)
+	if err != nil {
+		t.Fatalf("BuildAirgapBundleWithDigest() error = %v", err)
+	}
+	if want, err := fileChecksum(destination); err != nil || digest != want {
+		t.Fatalf("Bundle SHA-256 = %q, want %q, error = %v", digest, want, err)
 	}
 	metadata, err := VerifyAirgapBundle(destination)
 	if err != nil {

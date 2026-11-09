@@ -48,3 +48,14 @@
       예시 1) 기본값 사용: {{ eva_default_workspace_root }}
       예시 2) 환경변수: EVA_WORKSPACE_ROOT=/data/eva-sites/customer-a
       예시 3) extra var: -e eva_workspace_root=/data/eva-sites/customer-a
+
+- name: Load managed-cluster controller context for the shared Solution roles
+  ansible.builtin.include_role:
+    name: "{{ eva_solution_root }}/roles/eva_cluster_context"
+  when: eva_managed_cluster | default(false) | bool
+
+- name: Prepare the existing k3s connection for server installation
+  ansible.builtin.import_tasks: host-kubeconfig.yaml
+  when:
+    - not (eva_managed_cluster | default(false) | bool)
+    - ansible_facts.env.HOME is defined

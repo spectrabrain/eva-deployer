@@ -1,0 +1,44 @@
+---
+- name: Inspect the target JSON command-line prerequisite
+  ansible.builtin.command:
+    argv: [jq, --version]
+  register: eva_solution_jq_existing
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Prepare missing Online Solution prerequisites
+  when:
+    - eva_solution_jq_existing.rc != 0
+    - not ansible_check_mode
+    - not (airgap_mode | default(false) | bool)
+    - (repository_mode | default('online_repository')) in ['online_repository', 'cloud_repository']
+  block:
+    - name: Validate APT repositories before installing the JSON prerequisite
+      ansible.builtin.include_tasks: "{{ eva_infra_root }}/roles/base/tasks/apt_repositories.yaml"
+
+    - name: Install the target JSON command-line prerequisite
+      ansible.builtin.apt:
+        name: jq
+        state: present
+        update_cache: false
+
+- name: Verify the target JSON command-line prerequisite
+  ansible.builtin.command:
+    argv: [jq, -n, -e, 'true']
+  register: eva_solution_jq_verified
+  changed_when: false
+  failed_when: false
+  when: not ansible_check_mode
+
+- name: Require working JSON tooling before Solution changes
+  ansible.builtin.assert:
+    that:
+      - eva_solution_jq_verified.rc == 0
+      - eva_solution_jq_verified.stdout | trim == 'true'
+    fail_msg: >-
+      jq is unavailable on the installation target. Online installation prepares
+      jq automatically; verify the target PATH if it remains unavailable.
+      Offline installation requires jq from the prepared package bundle.
+      Solution resources have not been changed by this prerequisite check.
+  when: not ansible_check_mode

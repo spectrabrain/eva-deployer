@@ -1,3 +1,7 @@
+- name: Prepare Solution command-line prerequisites
+  ansible.builtin.import_role:
+    name: "{{ eva_solution_root }}/roles/eva_solution_prerequisites"
+
 - name: Load target-specific EVA Agent Workspace values
   ansible.builtin.import_tasks: workspace_values.yaml
 

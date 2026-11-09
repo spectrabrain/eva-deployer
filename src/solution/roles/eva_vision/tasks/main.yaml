@@ -1,3 +1,7 @@
+- name: Prepare Solution command-line prerequisites
+  ansible.builtin.import_role:
+    name: "{{ eva_solution_root }}/roles/eva_solution_prerequisites"
+
 - name: Set EVA Vision install defaults
   ansible.builtin.set_fact:
     repository_mode: "{{ repository_mode | default('online_repository') }}"

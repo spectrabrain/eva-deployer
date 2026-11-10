@@ -7,8 +7,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ansible-playbook}"
 HELM="${HELM:-helm}"
 PYTHON="${PYTHON:-python3}"
-EVA_APP_CHART_ARCHIVE="${EVA_APP_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-app/eva-app-3.3.0.tgz}"
-EVA_IAM_CHART_ARCHIVE="${EVA_IAM_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-iam/eva-iam-3.3.0.tgz}"
+# Follow the catalog independently for each product; App and IAM may release
+# separately. Source only helpers, never preparation/download entrypoints.
+# shellcheck source=scripts/lib/load_versions.sh
+source "$REPO_ROOT/scripts/lib/load_versions.sh"
+VERSIONS_QUIET=1 load_deploy_versions
+EVA_APP_CHART_ARCHIVE="${EVA_APP_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz}"
+EVA_IAM_CHART_ARCHIVE="${EVA_IAM_CHART_ARCHIVE:-$REPO_ROOT/out/cache/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz}"
 
 for archive in "$EVA_APP_CHART_ARCHIVE" "$EVA_IAM_CHART_ARCHIVE"; do
   if [[ ! -f "$archive" || ! -r "$archive" ]]; then
@@ -27,9 +32,7 @@ done
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/eva-app-iam-contract.XXXXXXXX")"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-# Source only the shared functions, never any preparation/download entrypoint.
-source "$REPO_ROOT/scripts/lib/load_versions.sh"
-for version in 3.1.8 3.2.0 3.3.0-beta.9 3.3.0-beta.1 3.3.0 4.0.0; do
+for version in 3.1.8 3.2.0 3.3.0-beta.9 3.3.0-beta.1 3.3.0 4.0.0 "$EVA_APP_CHART_VERSION" "$EVA_IAM_CHART_VERSION"; do
   for component in app iam; do
     printf '%s\t%s\t%s\n' "$component" "$version" "$(eva_product_chart_base "$component" "$version")"
   done
@@ -51,12 +54,9 @@ import yaml
 repo, tmp = map(Path, sys.argv[1:3])
 ansible, helm = (shutil.which(value) for value in sys.argv[3:5])
 archives = dict(zip(("app", "iam"), (str(Path(p).resolve()) for p in sys.argv[5:7])))
-versions = {"app": "3.3.0", "iam": "3.3.0"}
 catalog = yaml.safe_load((repo / "src/solution/version.yaml").read_text())
-for key, expected in (("eva_app_deploy_version", versions["app"]),
-                      ("eva_app_chart_version", versions["app"]),
-                      ("eva_iam_chart_version", versions["iam"])):
-    assert catalog[key] == expected, f"catalog {key}: {catalog[key]!r} != {expected!r}"
+versions = {"app": catalog["eva_app_chart_version"], "iam": catalog["eva_iam_chart_version"]}
+assert catalog["eva_app_deploy_version"] == versions["app"], "App image/chart catalog versions must match"
 bases = {}
 for line in (tmp / "chart-bases.tsv").read_text().splitlines():
     component, version, base = line.split("\t")

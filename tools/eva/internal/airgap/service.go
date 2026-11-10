@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/remote"
@@ -38,6 +39,7 @@ type Options struct {
 // apt, the managed Runtime, internet sources or customer repositories.
 type Service struct {
 	RuntimeRoot    string
+	LogRoot        string
 	Preflight      func(context.Context) error
 	ResolveBackend func(string) (string, error)
 	Run            remote.ProcessRunner
@@ -46,9 +48,12 @@ type Service struct {
 	ValidateAssets func(string) error
 }
 
+const DefaultLogRoot = "/var/log/eva/airgap-prepare"
+
 func NewService() Service {
 	return Service{
 		RuntimeRoot:    managedruntime.DefaultRoot,
+		LogRoot:        DefaultLogRoot,
 		Preflight:      preflight,
 		ResolveBackend: remote.ResolveBackend,
 		Run:            runProcess,
@@ -167,6 +172,11 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 		}
 		env["DISPLAY_MODE_SELECTOR_ZIP_PATH"] = asset
 	}
+	logs, err := preparationLogs(service.LogRoot)
+	if err != nil {
+		return "", fmt.Errorf("prepare private Airgap logs: %w", err)
+	}
+	fmt.Fprintf(options.Stdout, "[INFO] preparation_logs=%s\n", logs)
 	steps := []string{
 		"scripts/download/download_offline_assets.sh",
 		"scripts/download/download_python_venv_debs.sh",
@@ -189,9 +199,23 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 		}
 		fmt.Fprintf(options.Stdout, "[INFO] %s\n", filepath.Base(step))
 		// Backend output can contain upstream rendered values or authentication
-		// diagnostics. Do not send it to public logs or into the Bundle.
-		if err := service.Run(ctx, remote.ProcessOptions{Path: backend, Args: args, Dir: work, Env: env, Streams: remote.Streams{Stdout: io.Discard, Stderr: io.Discard}}); err != nil {
-			return "", fmt.Errorf("Airgap preparation stopped at %s; check host prerequisites, source access and AWS permissions; no Bundle was published", filepath.Base(step))
+		// diagnostics. Keep it in protected logs outside staging and the Bundle;
+		// failed preparation must not delete the only evidence of its cause.
+		logPath := filepath.Join(logs, filepath.Base(step)+".log")
+		log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return "", fmt.Errorf("open private Airgap step log: %w", err)
+		}
+		runErr := service.Run(ctx, remote.ProcessOptions{Path: backend, Args: args, Dir: work, Env: env, Streams: remote.Streams{Stdout: log, Stderr: log}})
+		if runErr != nil {
+			fmt.Fprintf(log, "\n[ERROR] backend execution failed: %v\n", runErr)
+		}
+		closeErr := log.Close()
+		if runErr != nil {
+			return "", fmt.Errorf("Airgap preparation stopped at %s; inspect private log: %s; no Bundle was published", filepath.Base(step), logPath)
+		}
+		if closeErr != nil {
+			return "", fmt.Errorf("close private Airgap step log: %w", closeErr)
 		}
 	}
 	if err := service.ValidateAssets(cache); err != nil {
@@ -217,8 +241,19 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 		{imageArchive, images},
 		{filepath.Join(cache, "images/k3s-images.tar"), []string{env["K3S_PAUSE_IMAGE"]}},
 	} {
-		if err := saveDockerImages(ctx, service.Run, remote.ProcessOptions{Dir: work, Env: env}, export.archive, export.images); err != nil {
-			return "", fmt.Errorf("export %s: %w", filepath.Base(export.archive), err)
+		logPath := filepath.Join(logs, filepath.Base(export.archive)+".docker-save.log")
+		log, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return "", fmt.Errorf("open private Docker export log: %w", err)
+		}
+		fmt.Fprintf(log, "[INFO] exporting images:\n%s\n", strings.Join(export.images, "\n"))
+		exportErr := saveDockerImages(ctx, service.Run, remote.ProcessOptions{Dir: work, Env: env, Streams: remote.Streams{Stderr: log}}, export.archive, export.images)
+		closeErr := log.Close()
+		if exportErr != nil {
+			return "", fmt.Errorf("export %s: %w; inspect private log: %s", filepath.Base(export.archive), exportErr, logPath)
+		}
+		if closeErr != nil {
+			return "", fmt.Errorf("close private Docker export log: %w", closeErr)
 		}
 		if err := validateDockerArchive(export.archive, export.images); err != nil {
 			return "", fmt.Errorf("Docker transport archive %s is incomplete or unsupported: %w", filepath.Base(export.archive), err)
@@ -259,7 +294,28 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 	return output, nil
 }
 
+func preparationLogs(root string) (string, error) {
+	if root == "" {
+		root = DefaultLogRoot
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("Airgap log root must be a private, non-symlink directory")
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != os.Geteuid() {
+		return "", errors.New("Airgap log root must be owned by the current user")
+	}
+	return os.MkdirTemp(root, "prepare-")
+}
+
 func preparationEnvironment(work, cache, infra, solution string, rt managedruntime.Resolved, options Options, vllm string) map[string]string {
+	oras, _ := rt.ToolPath("oras")
 	env := map[string]string{
 		"PATH": strings.Join(append(rt.ToolDirectories(), "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"), string(os.PathListSeparator)),
 		"HOME": filepath.Join(work, "home"), "TMPDIR": filepath.Join(work, "tmp"), "LC_ALL": "C", "DEBIAN_FRONTEND": "noninteractive",
@@ -270,6 +326,7 @@ func preparationEnvironment(work, cache, infra, solution string, rt managedrunti
 		"EVA_SITE_ID": "airgap-preparation", "HARBOR_ASSET_DIR": filepath.Join(cache, "harbor"), "HARBOR_INSTALL_ROOT": filepath.Join(work, "harbor"),
 		"COMPONENTS": "all", "PULL_PLATFORM": "linux/amd64", "STRICT_MISSING": "true", "DRIVER_REPO_MODE": "full", "NVIDIA_DRIVER_PACKAGE": options.DriverPackage,
 		"EVA_MANAGED_IMAGE_EXPORT": "true", "K3S_PAUSE_IMAGE": "rancher/mirrored-pause:3.6",
+		"EVA_ORAS_BINARY":                  oras,
 		"EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor", "EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "EVA_AGENT_VLLM_VALUES_FILE": vllm,
 	}
 	// The Python backend and Go validator must use the same exact selection.

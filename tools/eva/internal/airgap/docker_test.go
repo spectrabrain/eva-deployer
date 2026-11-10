@@ -125,20 +125,30 @@ func TestSaveDockerImagesArchiveFormats(t *testing.T) {
 // Opt-in export of an already cached image. Never pulls, loads, deletes images
 // or changes the daemon; it exercises the real CLI, server and archive format.
 func TestSaveDockerImagesRealDaemon(t *testing.T) {
-	image := os.Getenv("EVA_TEST_DOCKER_IMAGE")
-	if image == "" {
-		t.Skip("set EVA_TEST_DOCKER_IMAGE to an already cached linux/amd64 image")
+	images := strings.Fields(os.Getenv("EVA_TEST_DOCKER_IMAGES"))
+	if len(images) == 0 && os.Getenv("EVA_TEST_DOCKER_IMAGE") != "" {
+		images = []string{os.Getenv("EVA_TEST_DOCKER_IMAGE")}
+	}
+	if len(images) == 0 {
+		t.Skip("set EVA_TEST_DOCKER_IMAGES to already cached linux/amd64 image references")
 	}
 	env := make(map[string]string)
 	for _, entry := range os.Environ() {
 		key, value, _ := strings.Cut(entry, "=")
 		env[key] = value
 	}
+	if os.Getenv("EVA_TEST_DOCKER_REGISTRY_FALLBACK") == "1" {
+		env["EVA_MANAGED_IMAGE_EXPORT"] = "true"
+		env["EVA_ORAS_BINARY"] = os.Getenv("EVA_TEST_ORAS_BINARY")
+	}
 	archive := filepath.Join(t.TempDir(), "images.tar")
-	if err := saveDockerImages(context.Background(), runProcess, remote.ProcessOptions{Env: env}, archive, []string{image}); err != nil {
+	var log bytes.Buffer
+	if err := saveDockerImages(context.Background(), runProcess, remote.ProcessOptions{Env: env, Streams: remote.Streams{Stderr: &log}}, archive, images); err != nil {
+		t.Log(log.String())
 		t.Fatal(err)
 	}
-	if err := validateDockerArchive(archive, []string{image}); err != nil {
+	t.Log(log.String())
+	if err := validateDockerArchive(archive, images); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -245,6 +255,37 @@ func TestSaveDockerImagesDoesNotRetryContentFailures(t *testing.T) {
 			err := saveDockerImages(context.Background(), run, remote.ProcessOptions{}, filepath.Join(t.TempDir(), "images.tar"), []string{"example.test/eva:1"})
 			if err == nil || calls != 1 || strings.Contains(err.Error(), "private-test-credential") {
 				t.Fatalf("failed export retried or diagnostic exposed: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestSaveDockerImagesRetainsPrivateDiagnostics(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy=%t", legacy), func(t *testing.T) {
+			var log bytes.Buffer
+			calls := 0
+			run := func(_ context.Context, process remote.ProcessOptions) error {
+				calls++
+				if process.Streams.Stdout != io.Discard {
+					t.Fatal("Docker archive output must remain disconnected from diagnostics")
+				}
+				if legacy && calls == 1 {
+					fmt.Fprintln(process.Streams.Stderr, "unknown flag: --platform")
+				} else {
+					fmt.Fprintln(process.Streams.Stderr, "content digest sha256:missing: not found private-test-credential")
+				}
+				return errors.New("runner-private-credential")
+			}
+			err := saveDockerImages(context.Background(), run, remote.ProcessOptions{Streams: remote.Streams{Stderr: &log}}, filepath.Join(t.TempDir(), "images.tar"), []string{"example.test/eva:1"})
+			if err == nil || strings.Contains(err.Error(), "credential") {
+				t.Fatalf("failed export succeeded or exposed diagnostics: %v", err)
+			}
+			if !strings.Contains(log.String(), "sha256:missing") || !strings.Contains(log.String(), "private-test-credential") || !strings.Contains(log.String(), "runner-private-credential") {
+				t.Fatal("original Docker or runner error was discarded")
+			}
+			if legacy && (calls != 2 || !strings.Contains(log.String(), "unknown flag: --platform") || !strings.Contains(log.String(), "legacy export")) || !legacy && calls != 1 {
+				t.Fatalf("unexpected retry or missing retry diagnostics: calls=%d log=%s", calls, &log)
 			}
 		})
 	}

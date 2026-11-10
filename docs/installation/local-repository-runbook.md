@@ -91,6 +91,24 @@ Bundle은 `sudo`를 실행한 원래 사용자 홈에
 소유권을 맞춥니다. 기존 파일은 덮어쓰지 않습니다.
 중단·실패하면 원인을 해결한 뒤 처음부터 다시 실행하고, 검증된 최종 Bundle만 반입합니다.
 
+다운로드와 Docker 이미지 내보내기의 상세 출력은
+`/var/log/eva/airgap-prepare/prepare-*/`의 비공개 로그에 저장합니다.
+실패 메시지에 표시된 `inspect private log:` 경로를 `sudo tail -n 80 '<로그 경로>'`로 확인합니다.
+로그는 실패 후에도 남으며 Bundle에 포함되지 않습니다. 인증 정보가 포함될 수 있으므로
+공유할 때에는 필요한 오류 부분만 골라 인증 정보를 제거합니다.
+상세 로그 경로를 출력하지 않는 기존 Tool은 이 기능을 제공하지 않습니다.
+
+Docker의 containerd 기반 저장소에서 일부 단일 manifest가 `--platform linux/amd64` 내보내기를
+거부할 수 있습니다. Tool은 요청된 이미지의 OS·아키텍처·manifest 형식을 확인한 뒤,
+단일 manifest와 여러 플랫폼의 index를 따로 내보내 합칩니다. Index에는 플랫폼 선택을 유지하고,
+합친 archive의 태그·설정·레이어를 검증합니다. 로컬에 남아 있는 다른 테스트 이미지는
+자동으로 Bundle 대상에 추가하지 않습니다.
+
+Docker가 성공으로 종료해도 config·레이어가 빠져 있으면 해당 export를 사용하지 않습니다.
+이 경우에는 관리형 ORAS와 준비 단계의 비공개 registry 인증으로 **같은 image digest**의
+원본 구성요소를 registry에서 직접 받습니다. 이 archive도 digest·태그·플랫폼·레이어 검증을
+통과해야 사용하며, 복구에 실패하면 Bundle을 저장하지 않습니다.
+
 `prepare`는 Bundle을 검증한 뒤 최종 파일을 저장하고 위치·파일명·반입용 SHA-256을 표시합니다.
 사용자가 `eva`, Release가 `3.3.0`인 경우 출력 예시는 다음과 같습니다.
 

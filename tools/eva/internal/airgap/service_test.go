@@ -139,6 +139,7 @@ func newServiceTestFixture(t *testing.T) *serviceTestFixture {
 	}))
 	f.service = Service{
 		RuntimeRoot: serviceTestRuntime(t),
+		LogRoot:     filepath.Join(t.TempDir(), "logs"),
 		Preflight: func(context.Context) error {
 			f.preflights++
 			return nil
@@ -195,8 +196,19 @@ func (f *serviceTestFixture) run(_ context.Context, options remote.ProcessOption
 		copyOptions.Env[key] = value
 	}
 	f.calls = append(f.calls, copyOptions)
-	if options.Streams.Stdout != io.Discard || (options.Path != "docker" && options.Streams.Stderr != io.Discard) {
-		f.t.Fatal("backend diagnostics must not be connected to public output")
+	if options.Path == "docker" {
+		if options.Streams.Stdout != io.Discard {
+			f.t.Fatal("Docker diagnostics must not be connected to public output")
+		}
+	} else {
+		log, ok := options.Streams.Stdout.(*os.File)
+		if !ok || options.Streams.Stderr != log {
+			f.t.Fatal("backend diagnostics must only use their private log")
+		}
+		info, err := log.Stat()
+		if err != nil || info.Mode().Perm() != 0o600 || !strings.HasPrefix(log.Name(), f.service.LogRoot+string(os.PathSeparator)) {
+			f.t.Fatal("backend log is not a protected file in the configured log root")
+		}
 	}
 	cache := options.Env["EVA_CACHE_ROOT"]
 	if cache == "" || cache != filepath.Join(options.Dir, "cache") {
@@ -333,7 +345,7 @@ func (f *serviceTestFixture) assertClean() {
 
 func TestNewServiceDefaults(t *testing.T) {
 	service := NewService()
-	if service.RuntimeRoot != managedruntime.DefaultRoot || service.Preflight == nil || service.ResolveBackend == nil ||
+	if service.RuntimeRoot != managedruntime.DefaultRoot || service.LogRoot != DefaultLogRoot || service.Preflight == nil || service.ResolveBackend == nil ||
 		service.Run == nil || service.EnsureRuntime == nil || service.ExportRuntime == nil || service.ValidateAssets == nil {
 		t.Fatalf("NewService has incomplete defaults: %#v", service)
 	}
@@ -349,6 +361,10 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "inherited-secret-key")
 	t.Setenv("HTTPS_PROXY", "https://proxy.example.test:8443")
 	f := newServiceTestFixture(t)
+	f.afterStep = func(_ string, _ string) {
+		fmt.Fprintln(f.calls[len(f.calls)-1].Streams.Stdout, f.options.AWSCredential.AccessKeyID)
+		fmt.Fprintln(f.calls[len(f.calls)-1].Streams.Stderr, f.options.AWSCredential.SecretAccessKey)
+	}
 	before := serviceTestReleaseContents(t, f.options.Release)
 	result, err := f.service.Prepare(context.Background(), f.options)
 	if err != nil {
@@ -362,6 +378,11 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 	}
 	for i, call := range f.calls {
 		if i < len(serviceTestSteps) {
+			logPath := call.Streams.Stdout.(*os.File).Name()
+			contents, err := os.ReadFile(logPath)
+			if err != nil || !bytes.Contains(contents, []byte(f.options.AWSCredential.SecretAccessKey)) {
+				t.Fatalf("successful backend log did not survive cleanup: %s: %v", logPath, err)
+			}
 			if call.Path != filepath.Join(serviceTestBackendRoot, serviceTestSteps[i]) {
 				t.Fatalf("step %d = %q", i, call.Path)
 			}
@@ -378,6 +399,20 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 		serviceTestCheckEnvironment(t, f, call)
 		if _, err := os.Lstat(call.Dir); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("successful preparation retained private staging: %v", err)
+		}
+	}
+	for _, name := range []string{"eva-images.tar", "k3s-images.tar"} {
+		paths, err := filepath.Glob(filepath.Join(f.service.LogRoot, "prepare-*", name+".docker-save.log"))
+		if err != nil || len(paths) != 1 {
+			t.Fatalf("missing durable Docker export log: %q: %v", name, err)
+		}
+		info, err := os.Stat(paths[0])
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("Docker export log is not private: %s: %v", paths[0], err)
+		}
+		contents, err := os.ReadFile(paths[0])
+		if err != nil || !bytes.Contains(contents, []byte("rancher/mirrored-pause:3.6")) {
+			t.Fatalf("Docker export log omitted expected images: %s: %v", paths[0], err)
 		}
 	}
 	if got := serviceTestReleaseContents(t, f.options.Release); !reflect.DeepEqual(got, before) {
@@ -436,7 +471,7 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 		if !strings.HasPrefix(name, "runtime/") && !strings.HasPrefix(name, "out/cache/") {
 			t.Errorf("unexpected Offline entry: %q", name)
 		}
-		if strings.Contains(name, "images/rendered") || strings.Contains(name, "docker-auth") || strings.Contains(name, ".aws") {
+		if strings.Contains(name, "images/rendered") || strings.Contains(name, "docker-auth") || strings.Contains(name, ".aws") || strings.HasSuffix(name, ".sh.log") || strings.HasSuffix(name, ".docker-save.log") {
 			t.Errorf("private/rendered path transported: %q", name)
 		}
 		for _, secret := range []string{f.options.AWSCredential.AccessKeyID, f.options.AWSCredential.SecretAccessKey, "inherited-private-override", "inherited-secret-key"} {
@@ -650,6 +685,52 @@ func TestServicePrepareStopsAtEveryFailedDownload(t *testing.T) {
 					t.Fatal("backend error or diagnostic leaked to public output")
 				}
 			}
+			logs, globErr := filepath.Glob(filepath.Join(f.service.LogRoot, "prepare-*", filepath.Base(step)+".log"))
+			if globErr != nil || len(logs) != 1 || !strings.Contains(err.Error(), logs[0]) {
+				t.Fatalf("failed backend did not report its durable private log: paths=%v error=%v", logs, err)
+			}
+			contents, readErr := os.ReadFile(logs[0])
+			if readErr != nil || !bytes.Contains(contents, []byte(f.options.AWSCredential.AccessKeyID)) || !bytes.Contains(contents, []byte(f.options.AWSCredential.SecretAccessKey)) {
+				t.Fatal("failed backend stdout/stderr were discarded")
+			}
+			for _, path := range []string{f.service.LogRoot, filepath.Dir(logs[0]), logs[0]} {
+				info, statErr := os.Stat(path)
+				if statErr != nil || info.Mode().Perm()&0o077 != 0 {
+					t.Fatal("private preparation diagnostics are accessible to other users")
+				}
+			}
+			f.assertClean()
+		})
+	}
+}
+
+func TestServicePrepareRejectsUnsafeLogRoot(t *testing.T) {
+	for _, kind := range []string{"public directory", "symlink", "file"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newServiceTestFixture(t)
+			root := filepath.Join(t.TempDir(), "logs")
+			switch kind {
+			case "public directory":
+				if err := os.Mkdir(root, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink(t.TempDir(), root); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				if err := os.WriteFile(root, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.service.LogRoot = root
+			result, err := f.service.Prepare(context.Background(), f.options)
+			if err == nil || result != "" || len(f.calls) != 0 || !strings.Contains(err.Error(), "prepare private Airgap logs") {
+				t.Fatalf("unsafe log root did not stop preparation: result=%q error=%v calls=%d", result, err, len(f.calls))
+			}
 			f.assertClean()
 		})
 	}
@@ -771,6 +852,16 @@ func TestServicePrepareRejectsIncompleteDockerTransport(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), f.options.AWSCredential.SecretAccessKey) || strings.Contains(f.stdout.String(), f.options.AWSCredential.SecretAccessKey) {
 				t.Fatal("Docker diagnostic leaked")
+			}
+			if tc.name == "save failure" {
+				paths, globErr := filepath.Glob(filepath.Join(f.service.LogRoot, "prepare-*", "eva-images.tar.docker-save.log"))
+				if globErr != nil || len(paths) != 1 || !strings.Contains(err.Error(), paths[0]) {
+					t.Fatalf("failed Docker export did not report its durable log: %v, %v", paths, err)
+				}
+				contents, readErr := os.ReadFile(paths[0])
+				if readErr != nil || !bytes.Contains(contents, []byte(f.options.AWSCredential.SecretAccessKey)) {
+					t.Fatal("Docker runner failure was discarded")
+				}
 			}
 			f.assertClean()
 		})

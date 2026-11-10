@@ -36,22 +36,24 @@ const serviceTestBackendRoot = "/trusted-airgap-test-backends"
 // Every host-facing boundary is installed explicitly, rather than falling back
 // to NewService. Only asset validation and Runtime export use production code.
 type serviceTestFixture struct {
-	t               *testing.T
-	service         Service
-	options         Options
-	stdout          bytes.Buffer
-	calls           []remote.ProcessOptions
-	resolved        []string
-	preflights      int
-	runtimes        int
-	validations     int
-	exports         int
-	infraCatalog    []byte
-	solutionCatalog []byte
-	dockerArchive   []byte
-	failStep        string
-	resolveFailure  string
-	afterStep       func(string, string)
+	t                   *testing.T
+	service             Service
+	options             Options
+	stdout              bytes.Buffer
+	calls               []remote.ProcessOptions
+	resolved            []string
+	preflights          int
+	runtimes            int
+	validations         int
+	exports             int
+	infraCatalog        []byte
+	solutionCatalog     []byte
+	dockerArchive       []byte
+	k3sArchive          []byte
+	dockerPlatformError string
+	failStep            string
+	resolveFailure      string
+	afterStep           func(string, string)
 }
 
 func serviceTestYAML(t *testing.T, value any) []byte {
@@ -128,7 +130,13 @@ func newServiceTestFixture(t *testing.T) *serviceTestFixture {
 		},
 		Stdout: &f.stdout,
 	}
-	f.dockerArchive = archiveTestTarBytes(t, archiveTestDockerEntries(t))
+	entries := archiveTestChangeManifest(t, archiveTestDockerEntries(t), func(manifest []dockerSaveManifestEntry) {
+		manifest[0].RepoTags = append(manifest[0].RepoTags, "rancher/mirrored-pause:3.6")
+	})
+	f.dockerArchive = archiveTestTarBytes(t, entries)
+	f.k3sArchive = archiveTestTarBytes(t, archiveTestChangeManifest(t, archiveTestDockerEntries(t), func(manifest []dockerSaveManifestEntry) {
+		manifest[0].RepoTags = []string{"rancher/mirrored-pause:3.6"}
+	}))
 	f.service = Service{
 		RuntimeRoot: serviceTestRuntime(t),
 		Preflight: func(context.Context) error {
@@ -187,7 +195,7 @@ func (f *serviceTestFixture) run(_ context.Context, options remote.ProcessOption
 		copyOptions.Env[key] = value
 	}
 	f.calls = append(f.calls, copyOptions)
-	if options.Streams.Stdout != io.Discard || options.Streams.Stderr != io.Discard {
+	if options.Streams.Stdout != io.Discard || (options.Path != "docker" && options.Streams.Stderr != io.Discard) {
 		f.t.Fatal("backend diagnostics must not be connected to public output")
 	}
 	cache := options.Env["EVA_CACHE_ROOT"]
@@ -195,13 +203,35 @@ func (f *serviceTestFixture) run(_ context.Context, options remote.ProcessOption
 		f.t.Fatalf("backend must use its private work/cache: dir=%q cache=%q", options.Dir, cache)
 	}
 	if options.Path == "docker" {
-		if len(options.Args) < 4 || !reflect.DeepEqual(options.Args[:3], []string{"save", "--output", filepath.Join(cache, "images/eva-images.tar")}) {
+		if len(options.Args) < 4 || options.Args[0] != "save" || options.Args[1] != "--output" ||
+			filepath.Dir(options.Args[2]) != filepath.Join(cache, "images") {
 			f.t.Fatalf("unexpected Docker operation (only fake save allowed): %q", options.Args)
+		}
+		images := options.Args[3:]
+		if len(images) >= 2 && reflect.DeepEqual(images[:2], []string{"--platform", "linux/amd64"}) {
+			if f.dockerPlatformError != "" {
+				fmt.Fprintln(options.Streams.Stderr, f.dockerPlatformError)
+				return errors.New("Docker does not support platform-selective save")
+			}
+			images = images[2:]
+		} else if f.dockerPlatformError == "" {
+			f.t.Fatalf("supported Docker export omitted its platform: %q", options.Args)
 		}
 		if f.failStep == "docker" {
 			return errors.New("docker export private diagnostic: " + f.options.AWSCredential.SecretAccessKey)
 		}
-		return os.WriteFile(options.Args[2], f.dockerArchive, 0o600)
+		switch filepath.Base(options.Args[2]) {
+		case "eva-images.tar":
+			return os.WriteFile(options.Args[2], f.dockerArchive, 0o600)
+		case "k3s-images.tar":
+			if !reflect.DeepEqual(images, []string{"rancher/mirrored-pause:3.6"}) {
+				f.t.Fatalf("k3s export must contain only the pause image: %q", options.Args)
+			}
+			return os.WriteFile(options.Args[2], f.k3sArchive, 0o600)
+		default:
+			f.t.Fatalf("unexpected Docker archive: %q", options.Args[2])
+			return errors.New("unexpected Docker archive")
+		}
 	}
 	step := strings.TrimPrefix(options.Path, serviceTestBackendRoot+"/")
 	allowed := false
@@ -259,11 +289,13 @@ func (f *serviceTestFixture) writeStepAssets(step string, options remote.Process
 		write("harbor/harbor-offline-installer-v2.12.2.tgz", "synthetic Harbor installer\n")
 	case "scripts/download/download_eva_images.sh", "scripts/download/download_infra_images.sh":
 		prefix := ""
+		images := "example.test/eva:1\n"
 		if strings.HasSuffix(step, "download_infra_images.sh") {
 			prefix = "infra-"
+			images += "rancher/mirrored-pause:3.6\n"
 		}
-		write("images/"+prefix+"images-all.txt", "example.test/eva:1\n")
-		write("images/"+prefix+"images-pulled.txt", "example.test/eva:1\n")
+		write("images/"+prefix+"images-all.txt", images)
+		write("images/"+prefix+"images-pulled.txt", images)
 		write("images/"+prefix+"images-missing.txt", "")
 	case "scripts/download/download_n8n_images.sh":
 		write("images/n8n-images.txt", "example.test/eva:1\n")
@@ -325,7 +357,7 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 	if result != f.options.Output || f.preflights != 1 || f.runtimes != 1 || f.validations != 1 || f.exports != 1 {
 		t.Fatalf("pipeline boundaries: result=%q preflight=%d runtime=%d validate=%d export=%d", result, f.preflights, f.runtimes, f.validations, f.exports)
 	}
-	if !reflect.DeepEqual(f.resolved, serviceTestSteps) || len(f.calls) != len(serviceTestSteps)+1 {
+	if !reflect.DeepEqual(f.resolved, serviceTestSteps) || len(f.calls) != len(serviceTestSteps)+2 {
 		t.Fatalf("unexpected pipeline: resolved=%q calls=%d", f.resolved, len(f.calls))
 	}
 	for i, call := range f.calls {
@@ -340,7 +372,7 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 			} else if len(call.Args) != 0 {
 				t.Fatalf("unexpected backend arguments: %q", call.Args)
 			}
-		} else if !reflect.DeepEqual(call.Args[3:], []string{"example.test/eva:1"}) {
+		} else if i == len(serviceTestSteps) && !reflect.DeepEqual(call.Args[5:], []string{"example.test/eva:1", "rancher/mirrored-pause:3.6"}) {
 			t.Fatalf("transport union was not deduplicated: %q", call.Args)
 		}
 		serviceTestCheckEnvironment(t, f, call)
@@ -385,7 +417,7 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 		"out/cache/manifest.txt", "out/cache/python-debs/python3-venv.deb", "out/cache/harbor/harbor-offline-installer-v2.12.2.tgz",
 		"out/cache/models/agent/hf/model.bin", "out/cache/models/vllm/hf/model.bin", "out/cache/qdrant-snapshots/snapshot.bin",
 		"out/cache/vision-models/manifest.json", "out/cache/vision-models/model_dir/Owl-v2/weights/model.bin",
-		"out/cache/images/eva-images.tar", "out/cache/images/airgap-images.txt", "out/cache/airgap-preparation.yaml",
+		"out/cache/images/eva-images.tar", "out/cache/images/k3s-images.tar", "out/cache/images/airgap-images.txt", "out/cache/airgap-preparation.yaml",
 	} {
 		if len(entries[name].body) == 0 {
 			t.Errorf("required nonempty Offline entry missing: %q", name)
@@ -394,7 +426,10 @@ func TestServicePrepareVerifiedImportableBundle(t *testing.T) {
 	if !bytes.Equal(entries["out/cache/images/eva-images.tar"].body, f.dockerArchive) {
 		t.Fatal("Docker save payload changed during packaging")
 	}
-	if got := string(entries["out/cache/images/airgap-images.txt"].body); got != "example.test/eva:1\n" {
+	if !bytes.Equal(entries["out/cache/images/k3s-images.tar"].body, f.k3sArchive) {
+		t.Fatal("k3s image payload changed during packaging")
+	}
+	if got := string(entries["out/cache/images/airgap-images.txt"].body); got != "example.test/eva:1\nrancher/mirrored-pause:3.6\n" {
 		t.Fatalf("transport image manifest = %q", got)
 	}
 	for name, entry := range entries {
@@ -479,6 +514,7 @@ func serviceTestCheckEnvironment(t *testing.T, f *serviceTestFixture, call remot
 		"AWS_EC2_METADATA_DISABLED": "true", "AWS_ACCESS_KEY_ID": f.options.AWSCredential.AccessKeyID,
 		"AWS_SECRET_ACCESS_KEY": f.options.AWSCredential.SecretAccessKey, "AWS_REGION": f.options.AWSCredential.Region, "AWS_DEFAULT_REGION": f.options.AWSCredential.Region,
 		"COMPONENTS": "all", "PULL_PLATFORM": "linux/amd64", "STRICT_MISSING": "true", "DRIVER_REPO_MODE": "full",
+		"EVA_MANAGED_IMAGE_EXPORT": "true", "K3S_PAUSE_IMAGE": "rancher/mirrored-pause:3.6",
 		"NVIDIA_DRIVER_PACKAGE": f.options.DriverPackage, "EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor",
 		"EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "EVA_AGENT_VLLM_VALUES_FILE": "values-k3s.L40sx1.docker.yaml",
 		"HARBOR_ASSET_DIR": filepath.Join(call.Dir, "cache/harbor"), "HARBOR_INSTALL_ROOT": filepath.Join(call.Dir, "harbor"),
@@ -701,6 +737,12 @@ func TestServicePrepareRejectsIncompleteDockerTransport(t *testing.T) {
 	}{
 		{"save failure", func(_ *testing.T, f *serviceTestFixture) { f.failStep = "docker" }},
 		{"empty save", func(_ *testing.T, f *serviceTestFixture) { f.dockerArchive = nil }},
+		{"missing blob config", func(t *testing.T, f *serviceTestFixture) {
+			entries := archiveTestChangeManifest(t, archiveTestDockerEntries(t), func(manifest []dockerSaveManifestEntry) {
+				manifest[0].Config = "blobs/sha256/" + strings.Repeat("a", 64)
+			})
+			f.dockerArchive = archiveTestTarBytes(t, entries)
+		}},
 		{"missing layer", func(t *testing.T, f *serviceTestFixture) {
 			var entries []archiveTestEntry
 			for _, entry := range archiveTestDockerEntries(t) {
@@ -731,6 +773,58 @@ func TestServicePrepareRejectsIncompleteDockerTransport(t *testing.T) {
 				t.Fatal("Docker diagnostic leaked")
 			}
 			f.assertClean()
+		})
+	}
+}
+
+func TestServicePrepareRejectsIncompleteK3sTransport(t *testing.T) {
+	for _, variant := range []string{"empty", "missing config", "missing pause tag", "wrong architecture"} {
+		t.Run(variant, func(t *testing.T) {
+			f := newServiceTestFixture(t)
+			entries := archiveTestChangeManifest(t, archiveTestDockerEntries(t), func(manifest []dockerSaveManifestEntry) {
+				manifest[0].RepoTags = []string{"rancher/mirrored-pause:3.6"}
+			})
+			switch variant {
+			case "missing config":
+				entries = entries[1:]
+			case "missing pause tag":
+				entries = archiveTestChangeManifest(t, entries, func(manifest []dockerSaveManifestEntry) {
+					manifest[0].RepoTags = []string{"different-pause:1"}
+				})
+			case "wrong architecture":
+				entries = archiveTestChangeConfig(t, entries, func(config map[string]any) { config["architecture"] = "arm64" })
+			}
+			f.k3sArchive = archiveTestTarBytes(t, entries)
+			if variant == "empty" {
+				f.k3sArchive = nil
+			}
+			result, err := f.service.Prepare(context.Background(), f.options)
+			if err == nil || result != "" || !strings.Contains(err.Error(), "k3s-images.tar") {
+				t.Fatalf("invalid k3s archive accepted: result=%q err=%v", result, err)
+			}
+			if f.exports != 0 || len(f.calls) != len(serviceTestSteps)+2 {
+				t.Fatal("incomplete k3s archive reached Bundle packaging")
+			}
+			f.assertClean()
+		})
+	}
+}
+
+func TestServicePrepareLegacyDockerExportsBothArchives(t *testing.T) {
+	for _, diagnostic := range []string{"unknown flag: --platform", `"--platform" requires API version 1.48, but the Docker daemon API version is 1.47`} {
+		t.Run(diagnostic, func(t *testing.T) {
+			f := newServiceTestFixture(t)
+			f.dockerPlatformError = diagnostic
+			result, err := f.service.Prepare(context.Background(), f.options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(f.calls) != len(serviceTestSteps)+4 {
+				t.Fatalf("expected one compatibility fallback per archive: calls=%d", len(f.calls))
+			}
+			if _, err := release.VerifyAirgapBundle(result); err != nil {
+				t.Fatalf("legacy Docker Bundle is invalid: %v", err)
+			}
 		})
 	}
 }

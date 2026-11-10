@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	dockerreference "github.com/distribution/reference"
+
 	"eva-deployer/tools/eva/internal/remote"
 )
 
@@ -596,15 +598,30 @@ func validateDockerArchive(archivePath string, expected []string) error {
 			}
 		}
 		for _, tag := range image.RepoTags {
-			tags[tag] = true
+			key, err := dockerImageReferenceKey(tag)
+			if err != nil {
+				return fmt.Errorf("invalid docker-save tag %q: %w", tag, err)
+			}
+			tags[key] = true
 		}
 	}
 	for _, reference := range expected {
-		if reference == "" || !tags[reference] {
+		key, err := dockerImageReferenceKey(reference)
+		if err != nil || !tags[key] {
 			return fmt.Errorf("docker-save archive is missing expected tag %q", reference)
 		}
 	}
 	return nil
+}
+
+// Docker save may use familiar names even when pull used a fully qualified
+// Docker Hub reference. Normalize aliases without relaxing registry/tag identity.
+func dockerImageReferenceKey(value string) (string, error) {
+	named, err := dockerreference.ParseNormalizedNamed(value)
+	if err != nil {
+		return "", err
+	}
+	return dockerreference.TagNameOnly(named).String(), nil
 }
 
 func dockerConfigFilenameDigest(name string) string {

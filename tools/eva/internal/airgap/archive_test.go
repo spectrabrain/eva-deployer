@@ -571,6 +571,35 @@ func TestValidateDockerArchiveCompressedOCILayers(t *testing.T) {
 	}
 }
 
+func TestValidateDockerArchiveImageReferenceAliases(t *testing.T) {
+	for _, tc := range []struct {
+		tag, expected string
+		accepted      bool
+	}{
+		{"busybox:latest", "docker.io/library/busybox:latest", true},
+		{"docker.io/library/busybox:latest", "busybox", true},
+		{"busybox:latest", "index.docker.io/library/busybox:latest", true},
+		{"qdrant/qdrant:v1.18.2", "docker.io/qdrant/qdrant:v1.18.2", true},
+		{"registry.test:5000/team/image:1", "registry.test:5000/team/image:1", true},
+		{"busybox:latest", "registry.test/library/busybox:latest", false},
+		{"busybox:latest", "docker.io/other/busybox:latest", false},
+		{"busybox:latest", "busybox:old", false},
+		{"registry.test:5000/team/image:1", "registry.test:5001/team/image:1", false},
+		{"busybox:latest", "", false},
+		{"invalid reference", "busybox:latest", false},
+	} {
+		t.Run(tc.tag+"/"+tc.expected, func(t *testing.T) {
+			entries := archiveTestChangeManifest(t, archiveTestDockerEntries(t), func(manifest []dockerSaveManifestEntry) {
+				manifest[0].RepoTags = []string{tc.tag}
+			})
+			err := validateDockerArchive(archiveTestWriteTar(t, entries, false), []string{tc.expected})
+			if (err == nil) != tc.accepted {
+				t.Fatalf("tag=%q expected=%q accepted=%t err=%v", tc.tag, tc.expected, tc.accepted, err)
+			}
+		})
+	}
+}
+
 func TestBuildOfflineArchivePublicRuntimeCAAndAdditionalCaches(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cache")
 	for _, name := range []string{"qdrant-snapshots/snapshot.bin", "harbor/harbor-offline-installer.tgz"} {

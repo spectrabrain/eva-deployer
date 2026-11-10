@@ -208,12 +208,21 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 	}
 	imageArchive := filepath.Join(cache, "images/eva-images.tar")
 	fmt.Fprintln(options.Stdout, "[INFO] Exporting and verifying linux/amd64 image layers")
-	args := append([]string{"save", "--output", imageArchive}, images...)
-	if err := service.Run(ctx, remote.ProcessOptions{Path: "docker", Args: args, Dir: work, Env: env, Streams: remote.Streams{Stdout: io.Discard, Stderr: io.Discard}}); err != nil {
-		return "", errors.New("Docker image export failed; no Bundle was published")
-	}
-	if err := validateDockerArchive(imageArchive, images); err != nil {
-		return "", fmt.Errorf("Docker transport archive is incomplete or unsupported (do not change/restart the daemon automatically): %w", err)
+	// Both the Docker-load payload and the k3s/containerd-import payload must
+	// select and verify the same target platform, regardless of the host store.
+	for _, export := range []struct {
+		archive string
+		images  []string
+	}{
+		{imageArchive, images},
+		{filepath.Join(cache, "images/k3s-images.tar"), []string{env["K3S_PAUSE_IMAGE"]}},
+	} {
+		if err := saveDockerImages(ctx, service.Run, remote.ProcessOptions{Dir: work, Env: env}, export.archive, export.images); err != nil {
+			return "", fmt.Errorf("export %s: %w", filepath.Base(export.archive), err)
+		}
+		if err := validateDockerArchive(export.archive, export.images); err != nil {
+			return "", fmt.Errorf("Docker transport archive %s is incomplete or unsupported: %w", filepath.Base(export.archive), err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(cache, "images/airgap-images.txt"), []byte(strings.Join(images, "\n")+"\n"), 0o600); err != nil {
 		return "", err
@@ -260,6 +269,7 @@ func preparationEnvironment(work, cache, infra, solution string, rt managedrunti
 		"EVA_INFRA_VERSION_FILE": infra, "EVA_SOLUTION_VERSION_FILE": solution, "EVA_CACHE_ROOT": cache,
 		"EVA_SITE_ID": "airgap-preparation", "HARBOR_ASSET_DIR": filepath.Join(cache, "harbor"), "HARBOR_INSTALL_ROOT": filepath.Join(work, "harbor"),
 		"COMPONENTS": "all", "PULL_PLATFORM": "linux/amd64", "STRICT_MISSING": "true", "DRIVER_REPO_MODE": "full", "NVIDIA_DRIVER_PACKAGE": options.DriverPackage,
+		"EVA_MANAGED_IMAGE_EXPORT": "true", "K3S_PAUSE_IMAGE": "rancher/mirrored-pause:3.6",
 		"EVA_AGENT_QDRANT_SNAPSHOT_SOURCE": "harbor", "EVA_AGENT_QDRANT_VALUES_FILE": "values-k3s.harbor.yaml", "EVA_AGENT_VLLM_VALUES_FILE": vllm,
 	}
 	// The Python backend and Go validator must use the same exact selection.

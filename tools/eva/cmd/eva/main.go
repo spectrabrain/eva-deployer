@@ -53,14 +53,20 @@ var (
 	defaultRemoteBootstrapReceiptPath = remote.DefaultHarborReceiptPath
 	defaultRemoteAWSCredentialPath    = remote.DefaultManagedAWSCredentialPath
 	validateRemoteAWSCredential       = remote.ValidateAWSCredential
-	materializeRemotePayload          = remote.MaterializeTargetPayload
-	bootstrapRemoteRuntime            = remote.BootstrapTargetRuntime
-	runArgoCDPrecondition             = apply.RunPrecondition
-	defaultCurrentReleaseReceiptPath  = release.DefaultCurrentReceiptPath
-	defaultRemoteInboxRoot            = release.DefaultRemoteInboxRoot
-	defaultWorkspaceCacheRoot         = workspace.DefaultCacheRoot
-	currentReleaseNow                 = time.Now
-	prepareAirgapBundle               = func(ctx context.Context, options airgap.Options) (string, error) {
+	requestPreparationAWSCredential   = func() (remote.AWSCredential, error) {
+		return promptPreparationAWSCredential(os.Stdin, os.Stderr, func() (string, error) {
+			secret, err := term.ReadPassword(int(os.Stdin.Fd()))
+			return string(secret), err
+		})
+	}
+	materializeRemotePayload         = remote.MaterializeTargetPayload
+	bootstrapRemoteRuntime           = remote.BootstrapTargetRuntime
+	runArgoCDPrecondition            = apply.RunPrecondition
+	defaultCurrentReleaseReceiptPath = release.DefaultCurrentReceiptPath
+	defaultRemoteInboxRoot           = release.DefaultRemoteInboxRoot
+	defaultWorkspaceCacheRoot        = workspace.DefaultCacheRoot
+	currentReleaseNow                = time.Now
+	prepareAirgapBundle              = func(ctx context.Context, options airgap.Options) (string, error) {
 		return airgap.NewService().Prepare(ctx, options)
 	}
 )
@@ -759,32 +765,9 @@ func resolvePreparationAWSCredential(ctx context.Context, scope string) (remote.
 	}
 	fmt.Fprintf(os.Stderr, "AWS credential is required for %s preparation.\n", scope)
 	fmt.Fprintf(os.Stderr, "No usable AWS credential was found at: %s\n", defaultRemoteAWSCredentialPath)
-	reader := bufio.NewReader(os.Stdin)
-	read := func(label string) (string, error) {
-		fmt.Fprint(os.Stderr, label)
-		value, readErr := reader.ReadString('\n')
-		if readErr != nil && len(value) == 0 {
-			return "", readErr
-		}
-		return strings.TrimSpace(value), nil
-	}
-	accessKey, err := read("AWS Access Key ID: ")
-	if err != nil || accessKey == "" {
-		return remote.AWSCredential{}, errors.New("AWS Access Key ID is required")
-	}
-	fmt.Fprint(os.Stderr, "AWS Secret Access Key: ")
-	secret, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
-	if err != nil || strings.TrimSpace(string(secret)) == "" {
-		return remote.AWSCredential{}, errors.New("AWS Secret Access Key is required")
-	}
-	region, err := read("AWS Region [ap-northeast-2]: ")
+	credential, err := requestPreparationAWSCredential()
 	if err != nil {
-		return remote.AWSCredential{}, errors.New("read AWS Region")
-	}
-	credential := remote.AWSCredential{AccessKeyID: accessKey, SecretAccessKey: strings.TrimSpace(string(secret)), Region: region}
-	if credential.Region == "" {
-		credential.Region = remote.DefaultAWSRegion
+		return remote.AWSCredential{}, err
 	}
 	fmt.Fprintln(os.Stderr, "Validating AWS credential...")
 	if err := validateRemoteAWSCredential(ctx, credential); err != nil {

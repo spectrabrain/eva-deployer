@@ -23,25 +23,24 @@ Base Release 압축을 풀고 포함된 installer로 EVA Tool을 설치한 뒤, 
 
 `prepare`가 필요한 도구와 자산을 확인하며, 부족한 항목이 있으면 중단합니다.
 Runtime이 없으면 준비 서버에 온라인으로 설치하므로 APT/pip 변경이 가능한 서버를 사용합니다.
-AWS 인증은 `/var/lib/eva/credentials/aws_key.ini`를 재사용하고, 사용할 수 없으면 터미널에서
-숨김 입력으로 받습니다. 비대화형 실행은 해당 파일을 미리 준비합니다.
+`sudo eva airgap prepare`는 저장된 AWS 인증을 검증하고, 인증이 없거나 검증에 실패하면
+AWS Access Key ID, AWS Secret Access Key와 Region을 입력받습니다. Secret은 화면에 표시하지
+않으며, Region의 기본값은 `ap-northeast-2`입니다. 검증된 인증은
+`/var/lib/eva/credentials/aws_key.ini`에 자동 저장해 다음 실행에서 재사용합니다.
+비대화형 실행은 해당 파일을 미리 준비합니다.
 
 ### 준비 서버의 Tool 설치와 Release 검증
 
-준비할 `eva-base-release-<version>.zip` 하나를 사용자 홈에 둡니다.
-아래 `<version>`을 전달받은 ZIP 파일명의 버전으로 바꿉니다.
+전달받은 `eva-base-release-*.zip` 하나를 사용자 홈에 둡니다.
 기존 `eva-base-release` 폴더가 있다면 별도 보관한 뒤 새 폴더에 풉니다.
 
 ```bash
-(
-  set -e
-  cd "$HOME"
-  unzip -q 'eva-base-release-<version>.zip' -d eva-base-release
-  cd eva-base-release
-  sudo bash ./eva-tool-installer.sh
-  sudo eva verify
-  eva airgap prepare --help
-)
+cd "$HOME"
+unzip -q eva-base-release-*.zip -d eva-base-release
+cd eva-base-release
+sudo bash ./eva-tool-installer.sh
+sudo eva verify
+eva airgap prepare --help
 ```
 
 installer는 Release를 검증하고 **Current Release**로 등록합니다. 이후 명령은 해당 Release를

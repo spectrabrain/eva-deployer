@@ -119,6 +119,7 @@ class FakeCluster:
         self.config = None
         self.live = []
         self.history = {}
+        self.routes = {}
         self.calls = []
         self.stale = False
         self.failed = False
@@ -174,6 +175,8 @@ class FakeCluster:
 
     def get(self, resource, namespace="kube-system", name=None, optional=False):
         self.calls.append(("get", resource))
+        if resource in self.routes:
+            return {"items": copy.deepcopy(self.routes[resource])}
         active = self.state_ports()
         hostports = [{"hostPort": item["port"]} for item in active.values()]
         labels = {"svccontroller.k3s.cattle.io/svcname": "traefik", "svccontroller.k3s.cattle.io/svcnamespace": "kube-system"}
@@ -233,7 +236,8 @@ class FakeCluster:
                 raise ports.Unsafe("Helm history absent")
             return yaml.safe_dump_all(self.history[args[3]])
         if args[:2] == ["kubectl", "api-resources"]:
-            return ""
+            group = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--api-group="))
+            return "\n".join(resource for resource in self.routes if resource.endswith("." + group))
         if args[:2] == ["kubectl", "create"]:
             if self.race or self.config:
                 raise ports.Unsafe("AlreadyExists")
@@ -526,6 +530,197 @@ class TraefikPortsTests(unittest.TestCase):
                         self.reconcile()
                     self.assertEqual(self.cluster.config, before)
                     self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def shared_routing(self, modern=True, records=True, router_kind="Ingress", router_group="traefik.io"):
+        self.cluster = FakeCluster(self.directory, modern)
+        state = {}
+        for component, path in (("app", "/"), ("iam", "/iam")):
+            selected = dict(endpoint(component, 32010, path=path), entrypoint="eva-h-32010")
+            self.cluster.install(ports.isolate(objects(component, 32010, path=path), selected))
+            state[f"eva-{component}/eva-{component}"] = selected
+        annotations = {"operator": "preserve"}
+        if records:
+            annotations.update({ports.STATE: json.dumps(state), ports.OWNED: '["eva-h-32010"]'})
+        self.cluster.config = {"metadata": {"resourceVersion": "1", "annotations": annotations},
+                               "spec": {"failurePolicy": "abort", "valuesContent": yaml.safe_dump({"ports": {
+                                   "web": {"exposedPort": 80, "expose": {"default": False} if modern else False},
+                                   "websecure": {"exposedPort": 443, "expose": {"default": True} if modern else True,
+                                                 "forwardedHeaders": {"trustedIPs": ["10.0.0.0/8"]}},
+                                   "eva-h-32010": {"port": 32010, "exposedPort": 32010, "protocol": "TCP",
+                                                   "expose": {"default": True} if modern else True}}})}}
+        router = {"kind": router_kind, "apiVersion": "networking.k8s.io/v1" if router_kind == "Ingress" else router_group + "/v1alpha1",
+                  "metadata": {"name": "eva-dock", "namespace": "eva-dock", "uid": "dock-uid", "resourceVersion": "1",
+                               "annotations": {ports.ENTRY: "websecure", ports.TLS: "true"}},
+                  "spec": {"ingressClassName": "traefik", "rules": [{"http": {"paths": [{"path": "/"}]}}]}}
+        if router_kind == "Ingress":
+            self.cluster.live.append(router)
+        else:
+            router["spec"] = {"entryPoints": ["websecure"], "routes": [{"match": "PathPrefix(`/`)", "kind": "Rule"}]}
+            self.cluster.routes[router_kind.lower() + "s." + router_group] = [router]
+        return router
+
+    def test_reported_iam_and_app_upgrades_preserve_separate_dock_listener(self):
+        for modern in (False, True):
+            for records in (False, True):
+                for components in (("iam",), ("app", "iam"), ("iam", "app")):
+                    with self.subTest(modern=modern, records=records, components=components):
+                        router = self.shared_routing(modern, records)
+                        original_router = copy.deepcopy(router)
+                        original_ports = copy.deepcopy(self.cluster.effective_values()["ports"])
+                        for component in components:
+                            selected = endpoint(component, 32010, path="/iam" if component == "iam" else "/")
+                            result = self.reconcile(selected)
+                            self.assertEqual(result["endpoint"]["entrypoint"], "eva-h-32010")
+                            self.assertEqual(self.cluster.effective_values()["ports"], original_ports)
+                            self.assertEqual(router, original_router)
+                            self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 443})
+                            self.assertFalse(self.reconcile(selected)["changed"])
+                        self.assertEqual(self.cluster.config["metadata"]["annotations"]["operator"], "preserve")
+                        self.assertEqual(self.cluster.config["spec"]["failurePolicy"], "abort")
+
+    def test_scoped_traefik_crds_preserve_foreign_routers(self):
+        for group in ("traefik.io", "traefik.containo.us"):
+            for kind in ("IngressRoute", "IngressRouteTCP", "IngressRouteUDP"):
+                with self.subTest(group=group, kind=kind):
+                    router = self.shared_routing(router_kind=kind, router_group=group)
+                    original = copy.deepcopy(router)
+                    result = self.reconcile(endpoint("iam", 32010, path="/iam"))
+                    self.assertEqual(result["endpoint"]["entrypoint"], "eva-h-32010")
+                    self.assertEqual(self.cluster.routes[kind.lower() + "s." + group], [original])
+                    self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 443})
+
+    def test_eva_port_change_preserves_app_and_foreign_https_port(self):
+        for secure in (False, True):
+            with self.subTest(secure=secure):
+                router = self.shared_routing()
+                original = copy.deepcopy(router)
+                desired = endpoint("iam", 32111, secure, "/iam")
+                result = self.reconcile(desired)
+                self.assertEqual(result["endpoint"]["entrypoint"], "eva-" + ("s" if secure else "h") + "-32111")
+                self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 32111, 443})
+                self.assertEqual(router, original)
+                self.cluster.install(ports.isolate(objects("iam", 32111, secure, path="/iam"), result["endpoint"]))
+                self.assertFalse(self.reconcile(desired)["changed"])
+
+    def test_foreign_custom_or_reserved_entrypoint_is_not_adopted(self):
+        for name, number in (("docksecure", 8444), ("eva-s-443", 443)):
+            with self.subTest(name=name):
+                router = self.shared_routing(records=False)
+                router["metadata"]["annotations"][ports.ENTRY] = name
+                values = yaml.safe_load(self.cluster.config["spec"]["valuesContent"])
+                values["ports"]["websecure"]["expose"]["default"] = False
+                listener = {"port": number, "exposedPort": 443, "protocol": "TCP", "expose": {"default": True}}
+                values["ports"][name] = listener
+                self.cluster.config["spec"]["valuesContent"] = yaml.safe_dump(values)
+                self.reconcile(endpoint("iam", 32010, path="/iam"))
+                self.assertEqual(self.cluster.effective_values()["ports"][name], listener)
+                self.assertEqual(json.loads(self.cluster.config["metadata"]["annotations"][ports.OWNED]), ["eva-h-32010"])
+                self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 443})
+
+    def test_shared_or_unknown_foreign_entrypoints_refuse_mutation(self):
+        for entry in (None, "", ",websecure", "websecure,", ["websecure"], "missing",
+                      "eva-h-32010", "websecure,eva-h-32010"):
+            with self.subTest(entry=entry):
+                router = self.shared_routing()
+                if entry is None:
+                    router["metadata"]["annotations"].pop(ports.ENTRY)
+                else:
+                    router["metadata"]["annotations"][ports.ENTRY] = entry
+                config = copy.deepcopy(self.cluster.config)
+                live = copy.deepcopy(self.cluster.live)
+                with self.assertRaises(ports.Unsafe):
+                    self.reconcile(endpoint("iam", 32010, path="/iam"))
+                self.assertEqual(self.cluster.config, config)
+                self.assertEqual(self.cluster.live, live)
+                self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def test_unscoped_crd_refuses_extra_listener(self):
+        for scope in (None, [], "websecure", ["websecure", ""], ["websecure", 123], ["missing"]):
+            with self.subTest(scope=scope):
+                router = self.shared_routing(router_kind="IngressRoute")
+                router["spec"]["entryPoints"] = scope
+                before = copy.deepcopy(self.cluster.config)
+                with self.assertRaises(ports.Unsafe):
+                    self.reconcile(endpoint("iam", 32010, path="/iam"))
+                self.assertEqual(self.cluster.config, before)
+
+    def test_foreign_redirects_preserved_during_http_only_eva_update(self):
+        self.shared_routing()
+        values = yaml.safe_load(self.cluster.config["spec"]["valuesContent"])
+        values["ports"]["web"]["http"] = {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}
+        values["additionalArguments"] = ["--log.level=INFO", "--entryPoints.web.http.redirections.entryPoint.to=websecure"]
+        self.cluster.config["spec"]["valuesContent"] = yaml.safe_dump(values)
+        before = copy.deepcopy(self.cluster.effective_values())
+        self.reconcile(endpoint("iam", 32010, path="/iam"))
+        self.assertEqual(self.cluster.effective_values(), before)
+
+    def test_foreign_router_protects_previously_owned_http_listener(self):
+        router = self.shared_routing()
+        router["metadata"]["annotations"][ports.ENTRY] = "eva-h-32011"
+        values = yaml.safe_load(self.cluster.config["spec"]["valuesContent"])
+        listener = {"port": 32011, "exposedPort": 32011, "protocol": "TCP", "expose": {"default": True},
+                    "http": {"redirections": {"entryPoint": {"to": "websecure", "scheme": "https"}}}}
+        values["ports"]["eva-h-32011"] = listener
+        self.cluster.config["spec"]["valuesContent"] = yaml.safe_dump(values)
+        self.cluster.config["metadata"]["annotations"][ports.OWNED] = '["eva-h-32010","eva-h-32011"]'
+        self.reconcile(endpoint("iam", 32010, path="/iam"))
+        self.assertEqual(self.cluster.effective_values()["ports"]["eva-h-32011"], listener)
+        self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {32010, 32011, 443})
+
+    def test_foreign_router_change_before_mutation_refuses_without_overwrite(self):
+        router = self.shared_routing(records=False)
+        before = copy.deepcopy(self.cluster.config)
+        snapshot = ports.snapshot
+
+        def changed_after_assessment(*args):
+            result = snapshot(*args)
+            router["metadata"]["annotations"][ports.ENTRY] = "eva-h-32010"
+            return result
+
+        with patch.object(ports, "snapshot", side_effect=changed_after_assessment):
+            with self.assertRaises(ports.Unsafe) as caught:
+                self.reconcile(endpoint("iam", 32010, path="/iam"))
+        self.assertIn("Unrelated Traefik routers changed", str(caught.exception.__cause__))
+        self.assertEqual(self.cluster.config, before)
+        self.assertEqual(router["metadata"]["annotations"][ports.ENTRY], "eva-h-32010")
+        self.assertFalse(any(call[:2] in (("kubectl", "patch"), ("kubectl", "create")) for call in self.cluster.calls))
+
+    def test_new_catchall_after_eva_router_patch_prevents_listener_mutation(self):
+        self.shared_routing()
+        app = next(obj for obj in self.cluster.live if obj["kind"] == "Ingress" and obj["metadata"]["namespace"] == "eva-app")
+        app["metadata"]["annotations"].pop(ports.ENTRY)
+        before = copy.deepcopy(self.cluster.config)
+        run = self.cluster.run
+        foreign = {"kind": "Ingress", "metadata": {"name": "new-catchall", "namespace": "external"}, "spec": {}}
+
+        def created_after_patch(args, stdin=None):
+            result = run(args, stdin)
+            if args[:3] == ["kubectl", "patch", "ingresses"]:
+                self.cluster.live.append(copy.deepcopy(foreign))
+            return result
+
+        with patch.object(self.cluster, "run", side_effect=created_after_patch):
+            with self.assertRaises(ports.Unsafe) as caught:
+                self.reconcile(endpoint("iam", 32010, path="/iam"))
+        self.assertIn("Unrelated Traefik routers changed", str(caught.exception.__cause__))
+        self.assertEqual(self.cluster.config, before)
+        self.assertIn(foreign, self.cluster.live)
+
+    def test_foreign_router_change_during_convergence_stops_without_rollback(self):
+        router = self.shared_routing(records=False)
+        get = self.cluster.get
+
+        def changed_after_listener_write(resource, namespace="kube-system", name=None, optional=False):
+            result = get(resource, namespace, name, optional)
+            if resource == ports.RESOURCE and self.cluster.config["metadata"]["resourceVersion"] != "1":
+                router["metadata"]["annotations"][ports.ENTRY] = "eva-h-32010"
+            return result
+
+        with patch.object(self.cluster, "get", side_effect=changed_after_listener_write):
+            with self.assertRaisesRegex(ports.Unsafe, "Unrelated Traefik routers changed"):
+                self.reconcile(endpoint("iam", 32010, path="/iam"))
+        self.assertEqual(router["metadata"]["annotations"][ports.ENTRY], "eva-h-32010")
+        self.assertNotEqual(self.cluster.config["metadata"]["resourceVersion"], "1")
 
     def test_invalid_entrypoint_ownership_refused_before_mutation(self):
         for recorded in ({}, ["web"], ["foreign"], [123], ["eva-h-invalid"]):

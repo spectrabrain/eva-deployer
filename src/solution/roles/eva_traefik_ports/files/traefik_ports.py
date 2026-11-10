@@ -197,8 +197,9 @@ def without_redirects(port, inherited, override):
 def managed_http_entries(selected, owned_entries, unrelated):
     entries = {item["entrypoint"] for item in selected.values() if item["scheme"] == "http"}
     if entries:
+        foreign = unrelated_entrypoints(unrelated) or set()
         # Non-exposed entrypoints still render static redirect arguments.
-        entries |= {name for name in owned_entries if name and re.fullmatch(r"eva-h-\d+", name)}
+        entries |= {name for name in owned_entries if name and re.fullmatch(r"eva-h-\d+", name) and name not in foreign}
         if not unrelated:
             entries.add("web")
     return entries
@@ -229,6 +230,34 @@ def eva_entrypoints(listener_ports):
                 and item.get("targetPort") in (None, name, number)):
             names.add(name)
     return names
+
+
+def unrelated_entrypoints(routers):
+    """Return explicit router scopes; None means an implicit/unknown catch-all."""
+    entries = set()
+    for router in routers:
+        if router.get("kind") == "Ingress":
+            raw = router.get("metadata", {}).get("annotations", {}).get(ENTRY)
+            if not isinstance(raw, str):
+                return None
+            names = [name.strip() for name in raw.split(",")]
+        elif router.get("kind") in ("IngressRoute", "IngressRouteTCP", "IngressRouteUDP"):
+            names = router.get("spec", {}).get("entryPoints")
+            if not isinstance(names, list):
+                return None
+        else:
+            return None
+        if not names or not all(isinstance(name, str) and name and name == name.strip() for name in names):
+            return None
+        entries.update(names)
+    return entries
+
+
+def recoverable_eva_entrypoints(listener_ports, unrelated):
+    foreign = unrelated_entrypoints(unrelated)
+    if foreign is None or not foreign <= listener_ports.keys():
+        return set()
+    return eva_entrypoints(listener_ports) - foreign
 
 
 def ownership_annotation(config, selected, recovered):
@@ -262,7 +291,10 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
         require(not item.get("hostPort") and not item.get("nodePort") and not item.get("http3", {}).get("enabled"), "Traefik hostPort/nodePort/HTTP3 overrides are unsupported")
         check_redirects(item)
     updated = copy.deepcopy(original)
-    owned_entries = owned_entrypoints(config) | (eva_entrypoints(ports) if not unrelated else set())
+    foreign = unrelated_entrypoints(unrelated)
+    scoped_unrelated = bool(unrelated) and foreign is not None and foreign <= ports.keys()
+    protected = foreign if scoped_unrelated else set()
+    owned_entries = (owned_entrypoints(config) | recoverable_eva_entrypoints(ports, unrelated)) - protected
     overrides = updated.setdefault("ports", {})
     selected = copy.deepcopy(endpoints)
     endpoint_list = list(selected.values())
@@ -274,14 +306,14 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
     for scheme, primary in (("http", "web"), ("https", "websecure")):
         wanted = sorted({item["port"] for item in selected.values() if item["scheme"] == scheme})
         current = port_number(ports[primary].get("exposedPort"))
-        if unrelated:
+        if unrelated and not scoped_unrelated:
             require(not wanted or wanted == [current], "Unrelated Traefik ingresses prevent relocation of shared public listeners")
         # Keep the old primary when it is still needed; otherwise use a stable minimum.
         # Never repurpose an existing listener while migrating live routers:
         # pre-HCC CAS patches must not temporarily route one release's port to
         # another. New ports use previously unbound, dedicated entrypoints.
-        primary_port = current if preserve_primary or current in wanted else (wanted[0] if wanted else current)
-        expose = (primary_port in wanted) or bool(unrelated)
+        primary_port = current if unrelated or preserve_primary or current in wanted else (wanted[0] if wanted else current)
+        expose = (primary_port in wanted) or (bool(unrelated) and enabled(ports[primary]))
         primary_override = overrides.setdefault(primary, {})
         primary_override["exposedPort"] = primary_port
         set_exposure(primary_override, expose, modern)
@@ -296,6 +328,8 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
             assigned[(scheme, number)] = name
     for item in selected.values():
         item["entrypoint"] = assigned[(item["scheme"], item["port"])]
+    require(not protected & {item["entrypoint"] for item in selected.values()},
+            "Unrelated Traefik router shares an EVA entrypoint; explicit router isolation is required")
     # Disable obsolete owned extra entrypoints, leaving foreign entries untouched.
     owned_names = {item["entrypoint"] for item in selected.values()}
     for name in owned_entries:
@@ -310,7 +344,7 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
                 require(not unrelated or name != "web", "Unrelated Traefik ingresses prevent clearing shared listener redirects")
                 without_redirects(item, inherited.get("ports", {}).get(name, {}), overrides.setdefault(name, {}))
             else:
-                require(has_https, "Existing redirects on unmanaged listeners must be managed externally")
+                require(has_https or scoped_unrelated, "Existing redirects on unmanaged listeners must be managed externally")
                 retained_redirects.add(name)
                 legacy = item.get("redirectTo")
                 targets = [legacy if isinstance(legacy, str) else (legacy or {}).get("port"),
@@ -326,7 +360,7 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
                 require(not unrelated or redirect[1] != "web", "Unrelated Traefik ingresses prevent clearing shared listener redirects")
                 continue
             if redirect:
-                require(has_https and redirect[1] in ports, "Traefik redirect argument uses an unmanaged listener")
+                require((has_https or scoped_unrelated) and redirect[1] in ports, "Traefik redirect argument uses an unmanaged listener")
                 retained_redirects.add(redirect[1])
                 if redirect[2].lower() == "to":
                     retained_redirects.update(name for name, item in ports.items()
@@ -353,8 +387,12 @@ def plan(defaults, chart, config, endpoints, unrelated, preserve_primary=False):
         container_port = item.get("port")
         for other_name, other in resulting["ports"].items():
             require(other_name == name or not container_port or container_port != other.get("port"), "Conflicting Traefik container entrypoint ports")
-    # An unmanaged catch-all would accept traffic on every new entrypoint.
-    require(not unrelated or not any(name.startswith("eva-") for name in expected), "Unrelated ingress may catch traffic on EVA entrypoints")
+    if scoped_unrelated:
+        require(all(resulting["ports"][name] == ports[name] for name in protected),
+                "Unrelated Traefik router listener configuration must remain unchanged")
+    else:
+        # An implicit/unknown catch-all would accept traffic on every new entrypoint.
+        require(not unrelated or not any(name.startswith("eva-") for name in expected), "Unrelated ingress may catch traffic on EVA entrypoints")
     return updated, selected, expected
 
 
@@ -455,6 +493,34 @@ def managed_router(ingress, prior, installed):
             "Existing EVA Ingress has an unknown explicit router TLS setting")
 
 
+def traefik_routers(cluster):
+    routers = []
+    for ingress in cluster.get("ingresses", None)["items"]:
+        annotations = ingress.get("metadata", {}).get("annotations", {})
+        if ingress.get("spec", {}).get("ingressClassName", annotations.get("kubernetes.io/ingress.class", "traefik")) == "traefik":
+            routers.append(ingress)
+    # Discover installed CRDs rather than treating an absent API as an empty list.
+    for group in ("traefik.io", "traefik.containo.us"):
+        resources = cluster.run(["kubectl", "api-resources", "--api-group=" + group, "-o", "name"]).splitlines()
+        for resource in resources:
+            if resource.split(".")[0] in ("ingressroutes", "ingressroutetcps", "ingressrouteudps"):
+                routers += cluster.get(resource, None)["items"]
+    return routers
+
+
+def router_identity(router):
+    meta = router.get("metadata", {})
+    return router.get("apiVersion"), router.get("kind"), meta.get("namespace"), meta.get("name")
+
+
+def verify_unrelated_routers(cluster, unrelated, originals):
+    managed = {router_identity(router) for router in originals.values()}
+    before = {router_identity(router): stable(router) for router in unrelated}
+    now = {router_identity(router): stable(router) for router in traefik_routers(cluster)
+           if router_identity(router) not in managed}
+    require(now == before, "Unrelated Traefik routers changed during listener reconciliation; stop and reassess")
+
+
 def discover(cluster, current, old_state, backup_root=None):
     """Verify installed endpoint facts; legacy missing router annotations are valid."""
     selected = {}
@@ -462,12 +528,11 @@ def discover(cluster, current, old_state, backup_root=None):
     originals = {}
     evidence = {}
     current_key = current["namespace"] + "/" + current["release"]
-    ingresses = cluster.get("ingresses", None)["items"]
-    for ingress in ingresses:
-        spec = ingress.get("spec", {})
-        annotations = ingress.get("metadata", {}).get("annotations", {})
-        if spec.get("ingressClassName", annotations.get("kubernetes.io/ingress.class", "traefik")) != "traefik":
+    for ingress in traefik_routers(cluster):
+        if ingress.get("kind") != "Ingress":
+            unrelated.append(copy.deepcopy(ingress))
             continue
+        annotations = ingress.get("metadata", {}).get("annotations", {})
         key = identity(ingress)
         namespace = ingress["metadata"]["namespace"]
         name = ingress["metadata"]["name"]
@@ -482,7 +547,7 @@ def discover(cluster, current, old_state, backup_root=None):
                  if bridge else endpoint(candidates + [ingress], component, namespace, release) if candidates else None)
         if not other:
             require(not is_current, "Existing current EVA Ingress cannot be verified from its installed public endpoint")
-            unrelated.append(ingress)
+            unrelated.append(copy.deepcopy(ingress))
             continue
         require(not is_current or key == current_key, "Current EVA Ingress has unknown Helm ownership")
         if not bridge:
@@ -496,12 +561,6 @@ def discover(cluster, current, old_state, backup_root=None):
         originals[key] = copy.deepcopy(ingress)
         evidence[key] = copy.deepcopy(candidates[0])
         selected[key] = other
-    # Discover installed CRDs rather than treating an absent API as an empty list.
-    for group in ("traefik.io", "traefik.containo.us"):
-        resources = cluster.run(["kubectl", "api-resources", "--api-group=" + group, "-o", "name"]).splitlines()
-        for resource in resources:
-            if resource.split(".")[0] in ("ingressroutes", "ingressroutetcps", "ingressrouteudps"):
-                unrelated += cluster.get(resource, None)["items"]
     selected[current_key] = current
     return selected, unrelated, originals, evidence
 
@@ -1015,7 +1074,7 @@ def reconcile(cluster, request, planned, defaults=None):
         evidence[legacy_key] = legacy["configmap"]
     values, selected, expected = plan(defaults, chart, config, selected, unrelated, preserve_primary=bool(originals) or bool(legacy))
     effective = merge(merge(defaults, yaml.safe_load(chart.get("spec", {}).get("valuesContent", "")) or {}), values)
-    recovered = eva_entrypoints(effective["ports"]) if not unrelated else set()
+    recovered = recoverable_eva_entrypoints(effective["ports"], unrelated)
     owned_entries = owned_entrypoints(config) | recovered
     ownership = ownership_annotation(config, selected, recovered)
     http_entries = managed_http_entries(selected, owned_entries, unrelated)
@@ -1053,6 +1112,7 @@ def reconcile(cluster, request, planned, defaults=None):
     backup = snapshot(request["backup_root"], chart, config, originals, legacy)
     receipt = read_receipt(backup, request["backup_root"]) if legacy else None
     try:
+        verify_unrelated_routers(cluster, unrelated, originals)
         verify_endpoint_maps(cluster, evidence)
         changed = False
         if legacy:
@@ -1082,6 +1142,7 @@ def reconcile(cluster, request, planned, defaults=None):
         before_chart = cluster.get(CHART, name="traefik")
         require(before_chart["metadata"]["resourceVersion"] == chart["metadata"]["resourceVersion"],
                 "Traefik HelmChart changed before listener mutation")
+        verify_unrelated_routers(cluster, unrelated, originals)
         config_changed, written_config = write_config(cluster, config, values, selected, backup, ownership, capture=bool(legacy))
         if legacy and config_changed:
             legacy["written_config"] = written_config
@@ -1094,7 +1155,7 @@ def reconcile(cluster, request, planned, defaults=None):
     try:
         result = converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
                         addresses, current_key, changed, backup, timeout,
-                        ownership, http_entries)
+                        ownership, http_entries, unrelated)
         if legacy:
             legacy["phase"] = "active"
             save_receipt(backup, receipt)
@@ -1131,7 +1192,7 @@ def recover_legacy_failure(cluster, receipt, backup, timeout, originals, selecte
 
 
 def converge(cluster, chart, values, selected, originals, evidence, expected, old_ports,
-             addresses, current_key, changed, backup, timeout, ownership, http_entries=()):
+             addresses, current_key, changed, backup, timeout, ownership, http_entries=(), unrelated=()):
     deadline = time.monotonic() + timeout
     while True:
         observed = cluster.get(RESOURCE, name="traefik")
@@ -1143,11 +1204,13 @@ def converge(cluster, chart, values, selected, originals, evidence, expected, ol
         require(chart_now.get("spec") == chart.get("spec"), "HelmChart spec changed during convergence")
         verify_routers(cluster, originals, selected)
         verify_endpoint_maps(cluster, evidence)
+        verify_unrelated_routers(cluster, unrelated, originals)
         conditions = chart_now.get("status", {}).get("conditions", [])
         require(not any(c.get("type") == "Failed" and c.get("status") == "True" for c in conditions), f"Traefik Helm controller failed; original backup: {backup}")
         if ready(cluster, expected, old_ports, addresses, http_entries):
             verify_routers(cluster, originals, selected)
             verify_endpoint_maps(cluster, evidence)
+            verify_unrelated_routers(cluster, unrelated, originals)
             return {"changed": changed, "isolated": True, "endpoint": selected[current_key], "backup": backup}
         require(time.monotonic() < deadline, f"Timeout waiting for exact Traefik Service/Deployment and ServiceLB hostPort release; original backup: {backup}")
         time.sleep(2)

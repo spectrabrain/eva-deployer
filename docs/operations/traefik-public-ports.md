@@ -100,7 +100,15 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
    알 수 없는 redirect schema나 다른 entrypoint 인자 재정의는 자동 변경 전에 중단한다.
 - 다른 서비스의 NodePort/LoadBalancer 포트, workload hostPort 또는 hostless 경로가 충돌하면
   중단한다. 무관한 Ingress/IngressRoute가 공유 listener를 사용하면 임의로 80/443을 옮기지 않는다.
+- 별도 Ingress의 `router.entrypoints` 또는 Traefik CRD의 `spec.entryPoints`가 모두 명시되어
+  App/IAM entrypoint와 겹치지 않으면 기존 EVA listener를 재사용하거나 전용 listener를 추가한다.
+  별도 라우터의 listener 설정·포트·노출·리다이렉트와 기존 기본 listener 노출은 보존한다.
+  예를 들어 Dock은 `websecure:443`, App/IAM은 `eva-h-32010:32010`인 상태에서 IAM만
+  업데이트하거나 App/IAM을 순차 업데이트해도 Dock의 443과 비활성 기본 HTTP 80을 유지한다.
+  entrypoint가 생략되었거나 알 수 없는 이름을 사용하면 전용 listener 처리를 중단한다.
+  별도 라우터가 App/IAM entrypoint를 직접 공유하는 경우에도 자동 변경하지 않는다.
 - Helm 이력 없는 Argo CD 전용 설치, 소유권 불일치, 작업 중 ConfigMap/Ingress/HCC 변경도 중단한다.
+  별도 Traefik 라우터의 변경·추가·삭제도 listener 반영 전과 controller 검증 중 다시 확인한다.
   기존 설정의 다른 필드는 보존하며 UID/resourceVersion 검사를 사용한다.
 - 전환 중 짧은 접속 중단이 있을 수 있다. 포트 관리와 router 변경이 일부 반영된 후 실패할 수도
   있다. 동시 운영자 변경을 덮어쓰지 않도록 **자동 rollback/무조건 재시도를 하지 않는다.** 오류에
@@ -140,7 +148,9 @@ IAM HTTP 32010 설치 시 해당 listener를 재사용하고 App의 HTTPS 443을
 복구한 추가 listener의 소유권을 다시 기록한다. 사용하지 않는 EVA listener는 비활성화하며
 HTTP 관리 listener의 리다이렉트도 기존 정책에 따라 정리한다.
 
-무관한 Ingress/IngressRoute가 있는 공유 환경에서는 기존 외부 라우터 보호 조건을 적용한다.
+무관한 Ingress/IngressRoute가 있는 공유 환경에서는 명시적인 entrypoint 분리를 확인한다.
+다른 라우터가 사용하지 않는 EVA 전용 listener는 소유권 기록이 없어도 복구할 수 있다.
+다른 라우터가 사용하는 listener는 복구·비활성화 대상으로 삼지 않는다.
 이름의 번호와 다른 실제 포트, UDP/다른 routing target, 실제 포트 충돌 등 설정 불일치는
 소유권 누락과 별도로 확인한다.
 

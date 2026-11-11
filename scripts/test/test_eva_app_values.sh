@@ -158,10 +158,34 @@ case "$1 $2" in
   "template eva-app")
     # Production DB preparation resolves the intended DB from the rendered
     # App container, including the Helm --set layer. Other mocks have no DB.
-    printf '%s\n' '{"kind":"Deployment","metadata":{"name":"eva-app"},"spec":{"template":{"spec":{"containers":[{"name":"eva-app","env":[{"name":"MYSQL_NAME","value":"eva_v3_0"}]}]}}}}'
+    python3 - "$@" <<'PY_RENDER'
+import json,sys,yaml
+args=sys.argv[1:]
+values={}
+def merge(target,source):
+  for k,v in source.items():
+    if isinstance(v,dict) and isinstance(target.get(k),dict): merge(target[k],v)
+    else: target[k]=v
+for i,arg in enumerate(args):
+  if arg=='-f':
+    with open(args[i+1]) as f: merge(values,yaml.safe_load(f) or {})
+  if arg=='--set' and args[i+1].startswith('imagePullSecrets.'):
+    key,value=args[i+1].split('=',1)
+    values.setdefault('imagePullSecrets',{})[key.split('.',1)[1]]=yaml.safe_load(value)
+pull=values.get('imagePullSecrets',{})
+refs=[]
+if pull.get('enabled',True):
+  name=pull.get('ExistingSecret') or (pull.get('nameOverride','eva-app-secret-regcred') if pull.get('create',True) else '')
+  if name: refs=[{'name':name}]
+print(json.dumps({'kind':'Deployment','metadata':{'name':'eva-app'},'spec':{'template':{'spec':{
+  'containers':[{'name':'eva-app','env':[{'name':'MYSQL_NAME','value':'eva_v3_0'}]}], 'imagePullSecrets':refs}}}}))
+PY_RENDER
     printf '%s\n' '---' '{"kind":"Deployment","metadata":{"name":"eva-app-mysql"}}'
     ;;
-  "upgrade --install") echo 'has been installed' ;;
+  "upgrade --install")
+    printf '1' >"${FAKE_APP_REPLICAS:?}"
+    echo 'has been installed'
+    ;;
   "get values") printf 'app:\n  installed: true\n' ;;
   *) exit 0 ;;
 esac
@@ -180,7 +204,11 @@ case "$1 $2" in
     if [[ "${FAKE_DEPLOYMENT_EXISTS:-false}" == true ]]; then
       case " $* " in
         *' -o jsonpath={.metadata.uid} '*) printf 'test-deployment-uid' ;;
-        *' -o json '*) printf '%s\n' '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"eva-app","namespace":"eva-app","uid":"test-deployment-uid"},"spec":{"replicas":1}}' ;;
+        *' -o json '*)
+          replicas=1
+          [[ ! -f "$FAKE_APP_REPLICAS" ]] || replicas="$(cat "$FAKE_APP_REPLICAS")"
+          printf '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"eva-app","namespace":"eva-app","uid":"test-deployment-uid","resourceVersion":"17"},"spec":{"replicas":%s,"selector":{"matchLabels":{"app.kubernetes.io/instance":"eva-app","component":"eva-app"}},"template":{"spec":{"imagePullSecrets":[{"name":"legacy-secret"},{"name":"ecr-registry"}]}}}}\n' "$replicas"
+          ;;
       esac
       exit 0
     fi
@@ -202,7 +230,11 @@ case "$1 $2" in
         printf 'eva-app-pod'
         ;;
       *' -o json '*)
-        printf '%s\n' '{"items":[{"metadata":{"name":"eva-app-pod","uid":"pod-1"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"eva-app","ready":true,"restartCount":0,"containerID":"container-1","state":{"running":{}}}]}}]}'
+        if [[ -f "$FAKE_APP_REPLICAS" && "$(cat "$FAKE_APP_REPLICAS")" == 0 ]]; then
+          printf '%s\n' '{"items":[]}'
+        else
+          printf '%s\n' '{"items":[{"metadata":{"name":"eva-app-pod","uid":"pod-1"},"status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],"containerStatuses":[{"name":"eva-app","ready":true,"restartCount":0,"containerID":"container-1","state":{"running":{}}}]}}]}'
+        fi
         ;;
       *)
         echo eva-app-pod
@@ -210,7 +242,17 @@ case "$1 $2" in
     esac
     ;;
   "rollout status") echo 'rollout complete' ;;
-  "patch deployment") echo patched ;;
+  "scale deployment")
+    for arg in "$@"; do
+      [[ "$arg" != --replicas=* ]] || printf '%s' "${arg#--replicas=}" >"${FAKE_APP_REPLICAS:?}"
+    done
+    echo scaled
+    ;;
+  "patch deployment")
+    [[ -f "$FAKE_APP_REPLICAS" && "$(cat "$FAKE_APP_REPLICAS")" == 0 ]] || { echo 'App template patched after startup' >&2; exit 1; }
+    cat >"${FAKE_APP_PULL_PATCH:?}"
+    echo patched
+    ;;
   *) exit 0 ;;
 esac
 EOF
@@ -270,6 +312,8 @@ run_app() {
   PATH="$root/bin:$PATH" \
     FAKE_HELM_LOG="$root/helm.log" \
     FAKE_KUBECTL_LOG="$root/kubectl.log" \
+    FAKE_APP_REPLICAS="$root/app-replicas" \
+    FAKE_APP_PULL_PATCH="$root/app-pull-patch.json" \
     ANSIBLE_ROLES_PATH="$REPO_ROOT/src/solution/roles" \
     "$ANSIBLE_PLAYBOOK" -i "$root/inventory.ini" "$root/playbook.yaml" \
       -e "eva_enabled_components=$components" \
@@ -571,6 +615,31 @@ grep -Fq 'wait --for=condition=Complete job/eva-app-tls-job -n eva-app --timeout
 delete_line="$(grep -n -F 'delete job eva-app-tls-job' "$root/kubectl.log" | head -1 | cut -d: -f1)"
 scale_line="$(grep -n -F 'scale deployment eva-app' "$root/kubectl.log" | head -1 | cut -d: -f1)"
 [[ "$delete_line" -lt "$scale_line" ]]
+python3 - "$root/app-pull-patch.json" "$root/kubectl.log" <<'PY'
+import json,sys
+from pathlib import Path
+patch=json.loads(Path(sys.argv[1]).read_text())
+assert patch['spec']['replicas']==0,patch
+assert patch['metadata']=={'uid':'test-deployment-uid','resourceVersion':'17'},patch
+assert patch['spec']['template']['spec']['imagePullSecrets']==[{'name':'ecr-registry'}],patch
+commands=Path(sys.argv[2]).read_text().splitlines()
+stopped=next(i for i,c in enumerate(commands) if c.startswith('wait --for=delete pod'))
+patched=next(i for i,c in enumerate(commands) if c.startswith('patch deployment'))
+assert stopped < patched,commands
+assert sum(c.startswith('patch deployment') for c in commands)==1,commands
+PY
+
+root="$(make_fixture custom-pull-reference)"
+printf '%s\n' 'localhost:' '  app:' '    sso:' '      baseUrl: https://workspace.example' '      adminClientSecret: workspace-secret' >"$root/workspace/site-values/app.yaml"
+printf '%s\n' 'app: {}' >"$root/cli.yaml"
+FAKE_DEPLOYMENT_EXISTS=true run_app "$root" 'app' 'imagePullSecrets.ExistingSecret=cli-pull-secret' >"$root/ansible.log" 2>&1
+python3 - "$root/app-pull-patch.json" <<'PY'
+import json,sys
+from pathlib import Path
+patch=json.loads(Path(sys.argv[1]).read_text())
+assert patch['spec']['replicas']==0,patch
+assert patch['spec']['template']['spec']['imagePullSecrets']==[{'name':'cli-pull-secret'}],patch
+PY
 
 root="$(make_fixture tls-job-disabled)"
 cat >"$root/workspace/site-values/app.yaml" <<'EOF'

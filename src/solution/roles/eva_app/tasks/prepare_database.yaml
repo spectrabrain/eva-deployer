@@ -10,6 +10,12 @@
     dest: "{{ eva_app_workdir }}/read_license_identity.py"
     mode: "0700"
 
+- name: Copy EVA App stopped-workload pull Secret reconciler
+  ansible.builtin.copy:
+    src: reconcile_pull_secrets.py
+    dest: "{{ eva_app_workdir }}/reconcile_pull_secrets.py"
+    mode: "0700"
+
 - name: Render exact EVA App target manifest for DB preparation
   no_log: true
   ansible.builtin.shell: >-

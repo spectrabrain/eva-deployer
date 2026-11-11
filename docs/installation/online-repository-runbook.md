@@ -404,6 +404,14 @@ NKS의 결과 확인·재시도도 기존 `eva check --verbose`, `eva status`, `
 Helm Values·App DB의 private 백업은 `backups` 아래에 저장합니다.
 설정이나 Values를 바꿨다면 새 `eva install --config`를 실행합니다.
 
+기존 App 업데이트는 복제본을 0으로 줄이고 기존 Pod 종료를 확인한 뒤 진행합니다.
+이때 최종 Helm 렌더 결과의 `imagePullSecrets` 참조로 기존 Deployment를 정리하고,
+Helm 설치 후에는 이 참조를 다시 패치하지 않습니다. App 기동 직후 Secret 참조 보정으로
+추가 rollout이 발생해 두 Pod의 startup 모델 등록이 겹치는 경로를 방지합니다.
+참조 정리 중 ReplicaSet이 생성되어도 이 단계의 App 복제본은 0입니다.
+여러 App 복제본이나 동시 모델 갱신 요청의 중복 방지는 App의 동기화·DB 제약에서 별도로
+보장해야 합니다.
+
 새 Release로 업데이트하기 전에는 같은 Guard로 기존 6개 Helm manifest를 점검할 수 있습니다.
 아래 명령은 Release를 Bastion에 풀고 Kubernetes 자원을 조회하며, 제품을 설치하거나 변경하지 않습니다.
 

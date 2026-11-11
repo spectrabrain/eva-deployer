@@ -104,6 +104,7 @@ jobs:
       - name: Test EVA App values contract
         run: |
           python3 scripts/test/test_eva_app_database_transition.py
+          python3 scripts/test/test_eva_app_pull_secret_reconciliation.py
           scripts/test/test_eva_app_values.sh
           scripts/test/test_eva_app_reconciliation.sh
 

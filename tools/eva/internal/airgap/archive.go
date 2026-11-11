@@ -18,6 +18,7 @@ import (
 	"time"
 
 	dockerreference "github.com/distribution/reference"
+	"github.com/klauspost/compress/zstd"
 
 	"eva-deployer/tools/eva/internal/remote"
 )
@@ -569,13 +570,13 @@ func validateDockerArchive(archivePath string, expected []string) error {
 			diffID, checked := layerDiffIDs[name]
 			if !checked {
 				diffID = "sha256:" + entry.digest
-				// containerd-backed Docker may export gzip-compressed OCI
+				// containerd-backed Docker may export gzip or zstd OCI
 				// blobs. Their content digest is not their uncompressed DiffID.
-				var magic [2]byte
-				if _, err := file.ReadAt(magic[:], entry.offset); err != nil {
+				var magic [4]byte
+				if _, err := file.ReadAt(magic[:], entry.offset); err != nil && err != io.EOF {
 					return err
 				}
-				if magic == [2]byte{0x1f, 0x8b} {
+				if magic[0] == 0x1f && magic[1] == 0x8b {
 					compressed, err := gzip.NewReader(io.NewSectionReader(file, entry.offset, entry.size))
 					if err != nil {
 						return fmt.Errorf("open compressed docker layer %q: %w", layer, err)
@@ -585,6 +586,20 @@ func validateDockerArchive(archivePath string, expected []string) error {
 					closeErr := compressed.Close()
 					if readErr != nil || closeErr != nil {
 						return fmt.Errorf("invalid compressed docker layer %q", layer)
+					}
+					diffID = "sha256:" + hex.EncodeToString(hash.Sum(nil))
+				} else if magic == [4]byte{0x28, 0xb5, 0x2f, 0xfd} ||
+					magic[0]&0xf0 == 0x50 && magic[1] == 0x2a && magic[2] == 0x4d && magic[3] == 0x18 {
+					compressed, err := zstd.NewReader(io.NewSectionReader(file, entry.offset, entry.size),
+						zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(128<<20))
+					if err != nil {
+						return fmt.Errorf("open zstd docker layer %q: %w", layer, err)
+					}
+					hash := sha256.New()
+					_, readErr := io.Copy(hash, compressed)
+					compressed.Close()
+					if readErr != nil {
+						return fmt.Errorf("invalid zstd docker layer %q: %w", layer, readErr)
 					}
 					diffID = "sha256:" + hex.EncodeToString(hash.Sum(nil))
 				}

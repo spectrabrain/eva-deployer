@@ -103,11 +103,17 @@ Docker의 containerd 기반 저장소에서 일부 단일 manifest가 `--platfor
 단일 manifest와 여러 플랫폼의 index를 따로 내보내 합칩니다. Index에는 플랫폼 선택을 유지하고,
 합친 archive의 태그·설정·레이어를 검증합니다. 로컬에 남아 있는 다른 테스트 이미지는
 자동으로 Bundle 대상에 추가하지 않습니다.
+OCI 레이어는 비압축·gzip·zstd 형식을 지원하며, 압축된 blob의 digest와 압축을 푼 레이어의
+`rootfs.diff_ids`를 각각 검증합니다.
 
 Docker가 성공으로 종료해도 config·레이어가 빠져 있으면 해당 export를 사용하지 않습니다.
-이 경우에는 관리형 ORAS와 준비 단계의 비공개 registry 인증으로 **같은 image digest**의
-원본 구성요소를 registry에서 직접 받습니다. 이 archive도 digest·태그·플랫폼·레이어 검증을
-통과해야 사용하며, 복구에 실패하면 Bundle을 저장하지 않습니다.
+그룹 검증에 실패하면 각 이미지를 로컬에서 따로 내보내 검증하고, 정상인 이미지는 그대로
+사용합니다. 개별 이미지도 검증에 실패한 경우에만 관리형 ORAS와 준비 단계의 비공개 registry
+인증으로 **같은 image digest**의 원본 구성요소를 registry에서 직접 받습니다.
+이 archive도 digest·태그·플랫폼·레이어 검증을 통과해야 사용하며, 복구에 실패하면 Bundle을
+저장하지 않습니다. 로그의 `toomanyrequests`는 해당 Registry의 다운로드 제한을 뜻합니다.
+실패 이미지의 출처와 복구 요청을 로그에서 확인한 뒤 해당 Registry의 제한·인증 상태를
+해결하고 재시도합니다.
 
 `prepare`는 Bundle을 검증한 뒤 최종 파일을 저장하고 위치·파일명·반입용 SHA-256을 표시합니다.
 사용자가 `eva`, Release가 `3.3.0`인 경우 출력 예시는 다음과 같습니다.

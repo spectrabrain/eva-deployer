@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
+
 	"eva-deployer/tools/eva/internal/remote"
 )
 
@@ -568,6 +570,52 @@ func TestValidateDockerArchiveCompressedOCILayers(t *testing.T) {
 	entries[2].body[len(entries[2].body)-1] ^= 0xff
 	if err := validateDockerArchive(archiveTestWriteTar(t, entries, false), []string{"example.test/eva:1"}); err == nil {
 		t.Fatal("accepted corrupt compressed OCI layer")
+	}
+}
+
+func TestValidateDockerArchiveZstdOCILayers(t *testing.T) {
+	for _, variant := range []string{"valid", "skippable prefix", "truncated", "checksum", "wrong diff id"} {
+		t.Run(variant, func(t *testing.T) {
+			entries := archiveTestDockerEntries(t)
+			writer, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			for _, i := range []int{2, 3} {
+				body := writer.EncodeAll(entries[i].body, nil)
+				if i == 2 {
+					switch variant {
+					case "skippable prefix":
+						body = append([]byte{0x50, 0x2a, 0x4d, 0x18, 0x01, 0, 0, 0, 0}, body...)
+					case "truncated":
+						body = body[:len(body)-1]
+					case "checksum":
+						body[len(body)-1] ^= 0xff
+					}
+				}
+				// Keep the compressed content digest valid, including for
+				// corrupt frames. The decoder and uncompressed DiffID checks
+				// must independently detect those failures.
+				entries[i] = archiveTestRegular("blobs/sha256/"+archiveTestDigest(body), body)
+			}
+			entries = archiveTestChangeManifest(t, entries, func(manifest []dockerSaveManifestEntry) {
+				manifest[0].Layers = []string{entries[2].header.Name, entries[3].header.Name}
+			})
+			if variant == "wrong diff id" {
+				entries = archiveTestChangeConfig(t, entries, func(config map[string]any) {
+					config["rootfs"].(map[string]any)["diff_ids"].([]any)[0] = "sha256:" + strings.Repeat("0", 64)
+				})
+			}
+			err = validateDockerArchive(archiveTestWriteTar(t, entries, false), []string{"example.test/eva:1"})
+			if variant == "valid" || variant == "skippable prefix" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil {
+				t.Fatal("accepted corrupt zstd content or incorrect uncompressed digest")
+			}
+		})
 	}
 }
 

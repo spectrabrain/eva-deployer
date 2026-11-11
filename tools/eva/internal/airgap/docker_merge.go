@@ -88,6 +88,12 @@ func mergeDockerExports(ctx context.Context, sources []string, destination strin
 						if err := json.Unmarshal(current["manifests"], &entries); err != nil || len(entries) == 0 {
 							return errors.New("empty or invalid OCI group descriptors")
 						}
+						// OCI layouts may omit the root index mediaType. Normalize
+						// that optional field before comparing local Docker and
+						// recovered registry exports.
+						if _, present := current["mediaType"]; !present {
+							current["mediaType"] = json.RawMessage(`"application/vnd.oci.image.index.v1+json"`)
+						}
 						delete(current, "manifests")
 						if index != nil {
 							old, _ := json.Marshal(index)

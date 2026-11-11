@@ -150,7 +150,7 @@ func saveDockerManifestGroups(ctx context.Context, run remote.ProcessRunner, pro
 			if err := os.Remove(part); err != nil {
 				return err
 			}
-			if err := saveRegistryImages(ctx, run, process, part, group.images, targets, private); err != nil {
+			if err := recoverDockerImageGroup(ctx, run, process, part, group.images, group.platform, targets, private); err != nil {
 				return err
 			}
 		}
@@ -160,4 +160,54 @@ func saveDockerManifestGroups(ctx context.Context, run remote.ProcessRunner, pro
 		return os.Rename(archives[0], archive)
 	}
 	return mergeDockerExports(ctx, archives, archive)
+}
+
+// A failed group does not establish that every image needs registry recovery.
+// Re-export each requested image locally, preserving index platform selection,
+// and contact its registry only if that individual export is incomplete. This
+// avoids re-pulling healthy cached images and exhausting public pull limits.
+func recoverDockerImageGroup(ctx context.Context, run remote.ProcessRunner, process remote.ProcessOptions, archive string, images []string, platform bool, targets map[string]string, private io.Writer) error {
+	if len(images) == 1 {
+		return saveRegistryImages(ctx, run, process, archive, images, targets, private)
+	}
+	work, err := os.MkdirTemp(filepath.Dir(archive), ".docker-image-exports-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+	var parts []string
+	for i, image := range images {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		part := filepath.Join(work, fmt.Sprintf("%d.tar", i))
+		process.Path = "docker"
+		process.Args = []string{"save", "--output", part}
+		if platform {
+			process.Args = append(process.Args, "--platform", "linux/amd64")
+		}
+		process.Args = append(process.Args, image)
+		process.Streams = remote.Streams{Stdout: io.Discard, Stderr: private}
+		fmt.Fprintf(private, "[INFO] checking individual Docker export: %s; platform selection=%t\n", image, platform)
+		err := run(ctx, process)
+		if err == nil {
+			err = validateDockerArchive(part, []string{image})
+		}
+		if err != nil {
+			fmt.Fprintf(private, "[ERROR] individual Docker export %s: %v\n", image, err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err := os.Remove(part); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if err := saveRegistryImages(ctx, run, process, part, []string{image}, targets, private); err != nil {
+				return err
+			}
+		} else {
+			fmt.Fprintf(private, "[INFO] using verified local image content: %s\n", image)
+		}
+		parts = append(parts, part)
+	}
+	return mergeDockerExports(ctx, parts, archive)
 }

@@ -84,6 +84,112 @@ func TestRecoverDockerArchiveFromExactRegistryTarget(t *testing.T) {
 	}
 }
 
+func TestRecoverDockerGroupDoesNotPullHealthyImages(t *testing.T) {
+	for _, brokenIndex := range []bool{false, true} {
+		t.Run(fmt.Sprintf("broken index=%t", brokenIndex), func(t *testing.T) {
+			images := []string{"example.test/dispatcher:1", "docker.n8n.io/n8nio/n8n:2.32.7", "example.test/index:1"}
+			_, root, recovered := registryTestLayout(t, images[2])
+			archive := filepath.Join(t.TempDir(), "images.tar")
+			var log bytes.Buffer
+			var copies []string
+			saves := 0
+			run := func(_ context.Context, process remote.ProcessOptions) error {
+				if process.Path == "/trusted/oras" {
+					pinned := process.Args[len(process.Args)-2]
+					copies = append(copies, pinned)
+					if pinned != "example.test/index@"+root.Digest {
+						return errors.New("public registry unauthenticated pull limit: healthy image must not be fetched")
+					}
+					layout := strings.TrimSuffix(process.Args[len(process.Args)-1], ":source")
+					for _, entry := range recovered {
+						if entry.header.Typeflag == tar.TypeReg {
+							archiveTestWriteFile(t, filepath.Join(layout, entry.header.Name), entry.body)
+						}
+					}
+					return nil
+				}
+				if process.Args[0] == "image" {
+					for i := range images {
+						mediaType := multiOCIIndex
+						if i == 0 {
+							mediaType = singleDockerManifest
+						}
+						fmt.Fprintf(process.Streams.Stdout, `{"os":"linux","architecture":"amd64","descriptor":{"mediaType":%q,"digest":%q}}`+"\n", mediaType, root.Digest)
+					}
+					return nil
+				}
+				saves++
+				if saves == 1 {
+					fmt.Fprintln(process.Streams.Stderr, platformTargetError)
+					return errors.New("platform-specific export failed")
+				}
+				selected := process.Args[3:]
+				platform := len(selected) > 1 && selected[0] == "--platform"
+				if platform {
+					if selected[1] != "linux/amd64" {
+						t.Fatal("wrong platform selected")
+					}
+					selected = selected[2:]
+				}
+				if platform == (len(selected) == 1 && selected[0] == images[0]) {
+					t.Fatalf("single/index platform selection lost: %q", process.Args)
+				}
+				entries := dockerMergeTestEntries(t, selected, true)
+				if len(selected) > 1 || brokenIndex && selected[0] == images[2] {
+					// The combined export fails validation, but n8n alone is
+					// complete. Only a genuinely broken individual image may
+					// reach the registry.
+					entries = entries[1:]
+				}
+				return os.WriteFile(process.Args[2], archiveTestTarBytes(t, entries), 0o600)
+			}
+			env := map[string]string{"EVA_MANAGED_IMAGE_EXPORT": "true", "EVA_ORAS_BINARY": "/trusted/oras", "DOCKER_CONFIG": "/private/auth"}
+			if err := saveDockerImages(context.Background(), run, remote.ProcessOptions{Env: env, Streams: remote.Streams{Stderr: &log}}, archive, images); err != nil {
+				t.Fatalf("selective recovery failed: %v\n%s", err, &log)
+			}
+			if err := validateDockerArchive(archive, images); err != nil {
+				t.Fatal(err)
+			}
+			wantCopies := 0
+			if brokenIndex {
+				wantCopies = 1
+			}
+			if len(copies) != wantCopies || saves != 5 {
+				t.Fatalf("unexpected exports=%d registry copies=%q", saves, copies)
+			}
+		})
+	}
+}
+
+func TestRecoverDockerGroupFailureCleansParts(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled=%t", cancelled), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var log bytes.Buffer
+			run := func(_ context.Context, process remote.ProcessOptions) error {
+				if cancelled {
+					cancel()
+				}
+				fmt.Fprintln(process.Streams.Stderr, "private-credential")
+				return errors.New("private-credential")
+			}
+			root := t.TempDir()
+			archive := filepath.Join(root, "images.tar")
+			image := "example.test/broken:1"
+			env := map[string]string{"EVA_ORAS_BINARY": "/trusted/oras"}
+			err := recoverDockerImageGroup(ctx, run, remote.ProcessOptions{Env: env}, archive, []string{image, "example.test/unused:1"}, true, map[string]string{image: "sha256:" + strings.Repeat("a", 64)}, &log)
+			if err == nil || strings.Contains(err.Error(), "private-credential") || cancelled && !errors.Is(err, context.Canceled) {
+				t.Fatalf("failed/cancelled recovery exposed diagnostics or succeeded: %v", err)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("failed recovery retained staging: %v %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestArchiveRegistryLayoutRejectsIncompleteAndChangedContent(t *testing.T) {
 	for _, failure := range []string{"missing config", "changed layer", "wrong architecture", "invalid digest", "wrong size", "cancelled"} {
 		t.Run(failure, func(t *testing.T) {

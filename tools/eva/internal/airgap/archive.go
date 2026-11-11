@@ -17,13 +17,16 @@ import (
 	"syscall"
 	"time"
 
+	dockerreference "github.com/distribution/reference"
+	"github.com/klauspost/compress/zstd"
+
 	"eva-deployer/tools/eva/internal/remote"
 )
 
 const archiveJSONLimit = 16 << 20
 
-// buildOfflineArchive joins the exported runtime and the download cache without
-// following links or transporting host ownership, extended attributes or secrets.
+// buildOfflineArchive joins the exported Runtime and managed download assets
+// without following links or transporting host ownership or extended attributes.
 // A failed build never leaves a partially usable destination behind.
 func buildOfflineArchive(runtimeArchive, cacheRoot, destination string) (resultErr error) {
 	if runtimeArchive == "" || cacheRoot == "" || destination == "" {
@@ -110,16 +113,8 @@ func buildOfflineArchive(runtimeArchive, cacheRoot, destination string) (resultE
 			}
 			return filepath.SkipDir
 		}
-		if err := rejectArchiveCredentialName(name); err != nil {
+		if err := validateOfflineCachePath(name, info.IsDir()); err != nil {
 			return err
-		}
-		top, _, nested := strings.Cut(name, "/")
-		if !offlineCacheDirectory(top) {
-			if nested || info.IsDir() || top != "manifest.txt" && top != "airgap-preparation.yaml" {
-				return fmt.Errorf("unsupported cache entry %q", name)
-			}
-		} else if !nested && !info.IsDir() {
-			return fmt.Errorf("cache category %q must be a directory", name)
 		}
 		return writeOfflineCacheEntry(tw, full, "out/cache/"+name, root, cacheRoot, info)
 	}); err != nil {
@@ -153,17 +148,21 @@ func safeArchiveName(name string) (string, error) {
 	return path.Clean(name), nil
 }
 
-func rejectArchiveCredentialName(name string) error {
-	for _, part := range strings.Split(strings.ToLower(name), "/") {
-		switch part {
-		case ".aws", ".docker", ".ssh", "credentials", "secrets", "workspace", "aws_key.ini":
-			return fmt.Errorf("credential/workspace path %q is forbidden", name)
+// Like Remote payloads, cache membership is determined by the managed asset
+// roots, not credential-like words or extensions inside product-owned assets.
+// Host credentials and workspaces live outside these roots. Rendered Helm
+// Secrets are generated work, so they must never be transported or restored.
+func validateOfflineCachePath(name string, directory bool) error {
+	if name == "images/rendered" || strings.HasPrefix(name, "images/rendered/") {
+		return fmt.Errorf("rendered Helm workspace is not an offline asset: %q", name)
+	}
+	top, _, nested := strings.Cut(name, "/")
+	if !offlineCacheDirectory(top) {
+		if nested || directory || top != "manifest.txt" && top != "airgap-preparation.yaml" {
+			return fmt.Errorf("unsupported cache entry %q", name)
 		}
-		if strings.HasSuffix(part, ".key") || strings.HasSuffix(part, ".pem") ||
-			strings.HasPrefix(part, "id_rsa") || strings.HasPrefix(part, "id_ed25519") ||
-			strings.HasPrefix(part, ".env") {
-			return fmt.Errorf("credential path %q is forbidden", name)
-		}
+	} else if !nested && !directory {
+		return fmt.Errorf("cache category %q must be a directory", name)
 	}
 	return nil
 }
@@ -264,13 +263,7 @@ func copyOfflineRuntime(tw *tar.Writer, archive string) error {
 			return err
 		}
 		directory := header.Typeflag == tar.TypeDir
-		if name != "runtime" && !strings.HasPrefix(name, "runtime/") || name == "runtime" && !directory {
-			return fmt.Errorf("entry outside runtime: %q", header.Name)
-		}
-		// The exporter accepts only managed Runtime categories. Python's
-		// bundled certifi CA certificates are public package data, not TLS keys.
-		publicCA := strings.HasPrefix(name, "runtime/venv/") && strings.Contains(name, "/site-packages/") && strings.HasSuffix(name, "/certifi/cacert.pem")
-		if err := rejectArchiveCredentialName(name); err != nil && !publicCA {
+		if err := remote.ValidateRuntimeArchivePath(name, directory); err != nil {
 			return err
 		}
 		if _, exists := entries[name]; exists {
@@ -567,13 +560,13 @@ func validateDockerArchive(archivePath string, expected []string) error {
 			diffID, checked := layerDiffIDs[name]
 			if !checked {
 				diffID = "sha256:" + entry.digest
-				// containerd-backed Docker may export gzip-compressed OCI
+				// containerd-backed Docker may export gzip or zstd OCI
 				// blobs. Their content digest is not their uncompressed DiffID.
-				var magic [2]byte
-				if _, err := file.ReadAt(magic[:], entry.offset); err != nil {
+				var magic [4]byte
+				if _, err := file.ReadAt(magic[:], entry.offset); err != nil && err != io.EOF {
 					return err
 				}
-				if magic == [2]byte{0x1f, 0x8b} {
+				if magic[0] == 0x1f && magic[1] == 0x8b {
 					compressed, err := gzip.NewReader(io.NewSectionReader(file, entry.offset, entry.size))
 					if err != nil {
 						return fmt.Errorf("open compressed docker layer %q: %w", layer, err)
@@ -583,6 +576,20 @@ func validateDockerArchive(archivePath string, expected []string) error {
 					closeErr := compressed.Close()
 					if readErr != nil || closeErr != nil {
 						return fmt.Errorf("invalid compressed docker layer %q", layer)
+					}
+					diffID = "sha256:" + hex.EncodeToString(hash.Sum(nil))
+				} else if magic == [4]byte{0x28, 0xb5, 0x2f, 0xfd} ||
+					magic[0]&0xf0 == 0x50 && magic[1] == 0x2a && magic[2] == 0x4d && magic[3] == 0x18 {
+					compressed, err := zstd.NewReader(io.NewSectionReader(file, entry.offset, entry.size),
+						zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(128<<20))
+					if err != nil {
+						return fmt.Errorf("open zstd docker layer %q: %w", layer, err)
+					}
+					hash := sha256.New()
+					_, readErr := io.Copy(hash, compressed)
+					compressed.Close()
+					if readErr != nil {
+						return fmt.Errorf("invalid zstd docker layer %q: %w", layer, readErr)
 					}
 					diffID = "sha256:" + hex.EncodeToString(hash.Sum(nil))
 				}
@@ -596,15 +603,30 @@ func validateDockerArchive(archivePath string, expected []string) error {
 			}
 		}
 		for _, tag := range image.RepoTags {
-			tags[tag] = true
+			key, err := dockerImageReferenceKey(tag)
+			if err != nil {
+				return fmt.Errorf("invalid docker-save tag %q: %w", tag, err)
+			}
+			tags[key] = true
 		}
 	}
 	for _, reference := range expected {
-		if reference == "" || !tags[reference] {
+		key, err := dockerImageReferenceKey(reference)
+		if err != nil || !tags[key] {
 			return fmt.Errorf("docker-save archive is missing expected tag %q", reference)
 		}
 	}
 	return nil
+}
+
+// Docker save may use familiar names even when pull used a fully qualified
+// Docker Hub reference. Normalize aliases without relaxing registry/tag identity.
+func dockerImageReferenceKey(value string) (string, error) {
+	named, err := dockerreference.ParseNormalizedNamed(value)
+	if err != nil {
+		return "", err
+	}
+	return dockerreference.TagNameOnly(named).String(), nil
 }
 
 func dockerConfigFilenameDigest(name string) string {

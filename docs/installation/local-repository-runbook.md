@@ -23,25 +23,24 @@ Base Release 압축을 풀고 포함된 installer로 EVA Tool을 설치한 뒤, 
 
 `prepare`가 필요한 도구와 자산을 확인하며, 부족한 항목이 있으면 중단합니다.
 Runtime이 없으면 준비 서버에 온라인으로 설치하므로 APT/pip 변경이 가능한 서버를 사용합니다.
-AWS 인증은 `/var/lib/eva/credentials/aws_key.ini`를 재사용하고, 사용할 수 없으면 터미널에서
-숨김 입력으로 받습니다. 비대화형 실행은 해당 파일을 미리 준비합니다.
+`sudo eva airgap prepare`는 저장된 AWS 인증을 검증하고, 인증이 없거나 검증에 실패하면
+AWS Access Key ID, AWS Secret Access Key와 Region을 입력받습니다. Secret은 화면에 표시하지
+않으며, Region의 기본값은 `ap-northeast-2`입니다. 검증된 인증은
+`/var/lib/eva/credentials/aws_key.ini`에 자동 저장해 다음 실행에서 재사용합니다.
+비대화형 실행은 해당 파일을 미리 준비합니다.
 
 ### 준비 서버의 Tool 설치와 Release 검증
 
-준비할 `eva-base-release-<version>.zip` 하나를 사용자 홈에 둡니다.
-아래 `<version>`을 전달받은 ZIP 파일명의 버전으로 바꿉니다.
+전달받은 `eva-base-release-*.zip` 하나를 사용자 홈에 둡니다.
 기존 `eva-base-release` 폴더가 있다면 별도 보관한 뒤 새 폴더에 풉니다.
 
 ```bash
-(
-  set -e
-  cd "$HOME"
-  unzip -q 'eva-base-release-<version>.zip' -d eva-base-release
-  cd eva-base-release
-  sudo bash ./eva-tool-installer.sh
-  sudo eva verify
-  eva airgap prepare --help
-)
+cd "$HOME"
+unzip -q eva-base-release-*.zip -d eva-base-release
+cd eva-base-release
+sudo bash ./eva-tool-installer.sh
+sudo eva verify
+eva airgap prepare --help
 ```
 
 installer는 Release를 검증하고 **Current Release**로 등록합니다. 이후 명령은 해당 Release를
@@ -91,6 +90,30 @@ Bundle은 `sudo`를 실행한 원래 사용자 홈에
 `eva-airgap-bundle_<version>_<os>_<arch>.tar.gz`로 저장하며 해당 사용자가 복사할 수 있게
 소유권을 맞춥니다. 기존 파일은 덮어쓰지 않습니다.
 중단·실패하면 원인을 해결한 뒤 처음부터 다시 실행하고, 검증된 최종 Bundle만 반입합니다.
+
+다운로드와 Docker 이미지 내보내기의 상세 출력은
+`/var/log/eva/airgap-prepare/prepare-*/`의 비공개 로그에 저장합니다.
+실패 메시지에 표시된 `inspect private log:` 경로를 `sudo tail -n 80 '<로그 경로>'`로 확인합니다.
+로그는 실패 후에도 남으며 Bundle에 포함되지 않습니다. 인증 정보가 포함될 수 있으므로
+공유할 때에는 필요한 오류 부분만 골라 인증 정보를 제거합니다.
+상세 로그 경로를 출력하지 않는 기존 Tool은 이 기능을 제공하지 않습니다.
+
+Docker의 containerd 기반 저장소에서 일부 단일 manifest가 `--platform linux/amd64` 내보내기를
+거부할 수 있습니다. Tool은 요청된 이미지의 OS·아키텍처·manifest 형식을 확인한 뒤,
+단일 manifest와 여러 플랫폼의 index를 따로 내보내 합칩니다. Index에는 플랫폼 선택을 유지하고,
+합친 archive의 태그·설정·레이어를 검증합니다. 로컬에 남아 있는 다른 테스트 이미지는
+자동으로 Bundle 대상에 추가하지 않습니다.
+OCI 레이어는 비압축·gzip·zstd 형식을 지원하며, 압축된 blob의 digest와 압축을 푼 레이어의
+`rootfs.diff_ids`를 각각 검증합니다.
+
+Docker가 성공으로 종료해도 config·레이어가 빠져 있으면 해당 export를 사용하지 않습니다.
+그룹 검증에 실패하면 각 이미지를 로컬에서 따로 내보내 검증하고, 정상인 이미지는 그대로
+사용합니다. 개별 이미지도 검증에 실패한 경우에만 관리형 ORAS와 준비 단계의 비공개 registry
+인증으로 **같은 image digest**의 원본 구성요소를 registry에서 직접 받습니다.
+이 archive도 digest·태그·플랫폼·레이어 검증을 통과해야 사용하며, 복구에 실패하면 Bundle을
+저장하지 않습니다. 로그의 `toomanyrequests`는 해당 Registry의 다운로드 제한을 뜻합니다.
+실패 이미지의 출처와 복구 요청을 로그에서 확인한 뒤 해당 Registry의 제한·인증 상태를
+해결하고 재시도합니다.
 
 `prepare`는 Bundle을 검증한 뒤 최종 파일을 저장하고 위치·파일명·반입용 SHA-256을 표시합니다.
 사용자가 `eva`, Release가 `3.3.0`인 경우 출력 예시는 다음과 같습니다.

@@ -469,11 +469,13 @@ print('private-agent-fixture-DO-NOT-PRINT')
 
 class AgentPreparationTests(unittest.TestCase):
     def test_install_and_preparation_use_the_same_release_profiles(self):
-        for version, expected, managed in [
-                ('3.3.0', PROFILE_BASE, False),
-                ('3.3.0', NCP_PROFILE_BASE, True),
-                ('3.2.0', 'https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/3.2.0', False),
-                ('3.3.0', 'https://profiles.test/custom', False)]:
+        for version, values_version, expected, managed in [
+                ('3.3.0', None, PROFILE_BASE, False),
+                ('3.3.0', None, NCP_PROFILE_BASE, True),
+                ('3.3.1', '3.3.0', PROFILE_BASE, False),
+                ('3.3.1', '3.3.0', NCP_PROFILE_BASE, True),
+                ('3.2.0', None, 'https://raw.githubusercontent.com/mellerikat/eva-agent/chartmuseum/release/3.2.0', False),
+                ('3.3.1', '3.3.0', 'https://profiles.test/custom', False)]:
             with self.subTest(version=version, expected=expected), tempfile.TemporaryDirectory() as temporary:
                 work = Path(temporary)
                 variables = {
@@ -486,6 +488,8 @@ class AgentPreparationTests(unittest.TestCase):
                     'eva_agent_offline_dir': str(work / 'cache/eva-agent'),
                     'ansible_facts': {'env': {'HOME': str(work)}},
                 }
+                if values_version:
+                    variables['eva_agent_values_version'] = values_version
                 if expected.endswith('/custom'):
                     variables['eva_agent_chartmuseum_base_url'] = expected
                 for filename in ['dependencies.yaml', 'agent.yaml']:
@@ -505,8 +509,8 @@ class AgentPreparationTests(unittest.TestCase):
         for managed in [False,True]:
             with self.subTest(managed=managed),tempfile.TemporaryDirectory() as directory:
                 work=Path(directory)
-                variables={'eva_managed_cluster':managed,'eva_agent_deploy_version':'3.3.0',
-                    'eva_agent_vllm_chart_version':'3.3.0','qdrant_chart_version':'1.18.2','eva_agent_vllm_profile':'L40sx1',
+                variables={'eva_managed_cluster':managed,'eva_agent_deploy_version':'3.3.1',
+                    'eva_agent_vllm_chart_version':'3.3.1','eva_agent_values_version':'3.3.0','qdrant_chart_version':'1.18.2','eva_agent_vllm_profile':'L40sx1',
                     'eva_cache_root':str(work/'cache'),'eva_site_deploy_root':str(work/'deploy'),
                     'eva_agent_cache_root':str(work/'cache'),'eva_agent_offline_dir':str(work/'cache/eva-agent'),
                     'ansible_facts':{'env':{'HOME':str(work)}}}
@@ -521,7 +525,7 @@ class AgentPreparationTests(unittest.TestCase):
         names = {'Set EVA Agent dependency defaults', 'Resolve EVA Agent Release values layout',
                  'Validate EVA Agent Release values layout', 'Resolve EVA Agent Release values files'}
         tasks = [t for t in yaml.safe_load((ROLE / 'tasks/dependencies.yaml').read_text()) if t.get('name') in names]
-        for version, suffix in [('3.1.0', ''), ('3.3.0', '.docker')]:
+        for version, suffix in [('3.1.0', ''), ('3.3.0', '.docker'), ('3.3.1', '.docker')]:
             for mode in ['online_repository', 'local_repository']:
                 with self.subTest(version=version, mode=mode), tempfile.TemporaryDirectory() as directory:
                     work = Path(directory)
@@ -572,6 +576,7 @@ class AgentPreparationTests(unittest.TestCase):
             environment = dict(os.environ, PATH=str(work / 'bin') + ':' + os.environ['PATH'], VERSIONS_QUIET='1',
                                EVA_CACHE_ROOT=str(work / 'cache'), AWS_LOG=str(work / 'aws.log'))
             for version, bucket, trees in [('3.3.0', 'spectrabrain-eva-agent', ['vllm']),
+                                           ('3.3.1', 'spectrabrain-eva-agent', ['vllm']),
                                            ('3.2.0', 's3-an2-mellerikat-release-eva-agent', ['agent', 'vllm'])]:
                 with self.subTest(version=version):
                     environment['EVA_AGENT_RELEASE'] = version
@@ -582,7 +587,7 @@ class AgentPreparationTests(unittest.TestCase):
                     for tree in trees:
                         self.assertTrue(any(f's3://{bucket}/{tree}/hf' in line for line in lines))
                     manifest = (work / 'cache/models/manifest.txt').read_text()
-                    self.assertIn('agent_models_required: ' + ('false' if version == '3.3.0' else 'true'), manifest)
+                    self.assertIn('agent_models_required: ' + ('true' if version == '3.2.0' else 'false'), manifest)
                     (work / 'aws.log').unlink()
             result = run(['bash', '-c', 'source scripts/lib/load_versions.sh; VERSIONS_QUIET=1 load_deploy_versions; '
                           'eva_agent_source release 3.3.0; eva_agent_source image 3.3.0; eva_agent_source chart 3.2.0'], cwd=ROOT)
@@ -645,8 +650,8 @@ class AgentPublishedChartsTests(unittest.TestCase):
         cls.assets = Path(os.environ.get('EVA_AGENT_TEST_ASSETS', cls.work / 'assets'))
         cls.assets.mkdir(exist_ok=True)
         charts = {
-            'eva-agent-3.3.0.tgz': 'b54ffc0f9b66f9794c90a59098f5e396b8de3442ce6121813208b26acfff196f',
-            'eva-agent-vllm-3.3.0.tgz': '0fbaf274a0665d08acca5161b141f405e12280d4675b077f8d84ae0127eb06b4',
+            'eva-agent-3.3.1.tgz': '0d6cbbfb695ae4ebdbd4fc7723ccad4293ec784062b5d43ccfc45bd80752f31d',
+            'eva-agent-vllm-3.3.1.tgz': '6f0cda0534a90191fdd1e3dc3ac169146dd4d35260f9956ef1364ba202e95448',
             'qdrant-1.18.2.tgz': '7ccdd09343a4b6f6546309e2d0ca31f8034f83883fd9362388d19b2a74fdcea0',
             'eva-agent-init-1.0.0.tgz': '86c08134d39888156285a23e78e2e2fbc26b88955d01db5543f424c349553169',
         }
@@ -687,7 +692,7 @@ class AgentPublishedChartsTests(unittest.TestCase):
                 destination.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, destination / filename)
             for (component, filename), data in self.raw_profiles.items():
-                destination = cache / 'eva-agent/release/3.3.0' / component
+                destination = cache / 'eva-agent/release/3.3.1' / component
                 destination.mkdir(parents=True, exist_ok=True)
                 (destination / filename).write_bytes(data)
             docker = work / 'bin/docker'
@@ -716,8 +721,8 @@ class AgentPublishedChartsTests(unittest.TestCase):
                     output = run(['bash', str(ROOT / 'scripts/download/download_eva_images.sh')], env=environment)
                     self.assertEqual(output.returncode, 0, output.stdout + output.stderr)
                     images = (cache / 'images/images-all.txt').read_text().splitlines()
-                    self.assertIn(ECR + ':3.3.0', images)
-                    self.assertFalse(any(image.startswith(ECR + ':') and image != ECR + ':3.3.0' for image in images))
+                    self.assertIn(ECR + ':3.3.1', images)
+                    self.assertFalse(any(image.startswith(ECR + ':') and image != ECR + ':3.3.1' for image in images))
                     self.assertIn('vllm/vllm-openai:v0.21.0', images)
                     self.assertIn('lmcache/lmstack-router:v0.1.10', images)
                     self.assertEqual(ORAS_IMAGE in images, source == 'harbor')
@@ -756,7 +761,7 @@ class AgentPublishedChartsTests(unittest.TestCase):
                         'repository_mode': mode, 'airgap_mode': remote, 'eva_agent_models_required': False,
                         'harbor_url': REGISTRY,
                         'eva_agent_image_repository': REGISTRY + '/custom/eva-agent' if remote else ECR,
-                        'eva_agent_image_tag': '3.3.0', 'eva_agent_nfs_share_path': '/data/share/eva-agent',
+                        'eva_agent_image_tag': '3.3.1', 'eva_agent_nfs_share_path': '/data/share/eva-agent',
                         'eva_agent_vllm_profile_values': profile_values,
                         'eva_agent_vllm_image_repository': REGISTRY + '/custom/vllm-openai' if remote else 'vllm/vllm-openai',
                         'eva_agent_vllm_image_tag': 'v0.21.0',
@@ -769,14 +774,14 @@ class AgentPublishedChartsTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     agent_base = self.work / 'agent-base.yaml'
                     agent_base.write_text(yaml.safe_dump(self.profiles['eva-agent', 'values-k3s.harbor.yaml' if remote else 'values-k3s.ecr.yaml']))
-                    output = run([self.helm, 'template', 'eva-agent', str(self.charts['eva-agent-3.3.0.tgz']), '-n', 'eva-agent',
+                    output = run([self.helm, 'template', 'eva-agent', str(self.charts['eva-agent-3.3.1.tgz']), '-n', 'eva-agent',
                                   '-f', str(agent_base), '-f', str(self.work / 'agent.yaml'), '--set', 'awsCredentialsSecretName=custom-aws'])
                     self.assertEqual(output.returncode, 0, output.stderr)
                     resources = list(yaml.safe_load_all(output.stdout))
                     self.assertFalse(any(item['kind'] in ['PersistentVolume', 'PersistentVolumeClaim'] for item in resources))
                     deployment = next(item for item in resources if item['kind'] == 'Deployment')
                     pod = deployment['spec']['template']['spec']
-                    self.assertEqual(pod['containers'][0]['image'], variables['eva_agent_image_repository'] + ':3.3.0')
+                    self.assertEqual(pod['containers'][0]['image'], variables['eva_agent_image_repository'] + ':3.3.1')
                     environment = {item['name']: item.get('value') for item in pod['containers'][0]['env']}
                     self.assertEqual(environment['VISION_ML_BASE_URL'], 'http://eva-vision.eva-vision:8000')
                     self.assertEqual(environment['MODEL_CATALOG_FILE'], 'config/model_catalog.json')
@@ -787,7 +792,7 @@ class AgentPublishedChartsTests(unittest.TestCase):
                     else:
                         self.assertIn('custom-aws', output.stdout)
                         self.assertIn('pre-install,pre-upgrade', output.stdout)
-                    output = run([self.helm, 'template', 'eva-agent-vllm', str(self.charts['eva-agent-vllm-3.3.0.tgz']),
+                    output = run([self.helm, 'template', 'eva-agent-vllm', str(self.charts['eva-agent-vllm-3.3.1.tgz']),
                                   '-n', 'eva-agent', '-f', str(self.work / 'vllm.yaml')])
                     self.assertEqual(output.returncode, 0, output.stderr)
                     resources = list(yaml.safe_load_all(output.stdout))
@@ -834,10 +839,10 @@ class AgentPublishedChartsTests(unittest.TestCase):
                 variables={'eva_managed_cluster':managed,'eva_agent_workspace_chart_values':workspace,
                            'eva_agent_cli_values_override':cli,'eva_agent_values_secret_stat':{'stat':{'exists':False}},
                            'eva_agent_generated_values_raw':{'results':[{'content':base64.b64encode(yaml.safe_dump(value).encode()).decode()}
-                             for value in [base,{'image':{'repository':ECR,'tag':'3.3.0'}}]]}}
+                             for value in [base,{'image':{'repository':ECR,'tag':'3.3.1'}}]]}}
                 result=ansible(self.work,selected,variables)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-                rendered=run([self.helm,'template','eva-agent',str(self.charts['eva-agent-3.3.0.tgz']),
+                rendered=run([self.helm,'template','eva-agent',str(self.charts['eva-agent-3.3.1.tgz']),
                               '-n','eva-agent','-f',str(self.work/'agent-effective.yaml')])
                 self.assertEqual(rendered.returncode,0,rendered.stderr)
                 deployment=next(doc for doc in yaml.safe_load_all(rendered.stdout) if doc['kind']=='Deployment')
@@ -864,7 +869,7 @@ class AgentPublishedChartsTests(unittest.TestCase):
                         'sharedPvcStorage':{'mode':'dynamic','storageClass':'nks-nas'}}}
                 result=ansible(self.work,selected,variables)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
-                rendered=run([self.helm,'template','eva-agent-vllm',str(self.charts['eva-agent-vllm-3.3.0.tgz']),
+                rendered=run([self.helm,'template','eva-agent-vllm',str(self.charts['eva-agent-vllm-3.3.1.tgz']),
                               '-n','eva-agent','-f',str(self.work/'nks-vllm.yaml')])
                 self.assertEqual(rendered.returncode,0,rendered.stderr)
                 docs=list(yaml.safe_load_all(rendered.stdout))
@@ -988,7 +993,7 @@ else: raise AssertionError('unexpected command: '+str(args))
                 target = directory / filename
                 target.write_text(yaml.safe_dump(self.profiles['eva-agent-qdrant', filename], sort_keys=False))
                 variables = {
-                    'eva_agent_deploy_version': '3.3.0',
+                    'eva_agent_deploy_version': '3.3.1',
                     'repository_registry': REGISTRY, 'repository_project': 'custom',
                     'airgap_mode': source == 'harbor', 'eva_agent_workdir': str(self.work),
                     'eva_agent_qdrant_snapshot_source': 'harbor' if source == 'harbor' else 'local_pv',

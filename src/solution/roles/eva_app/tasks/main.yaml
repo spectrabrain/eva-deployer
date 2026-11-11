@@ -1087,6 +1087,29 @@
 
 - name: Install EVA App and restore prior replicas if Helm fails
   block:
+    - name: Reconcile EVA App pull Secret references while existing App is stopped
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ eva_app_workdir }}/reconcile_pull_secrets.py"
+          - --namespace
+          - "{{ eva_app_namespace }}"
+          - --release
+          - "{{ eva_app_name }}"
+          - --expected-uid
+          - "{{ eva_app_preinstall_deployment_uid }}"
+          - --manifest
+          - "{{ eva_app_workdir }}/db-target-manifest.yaml"
+      register: eva_app_pull_secret_reconciliation
+      changed_when: >-
+        ((eva_app_pull_secret_reconciliation.stdout | from_json).changed | bool)
+        if eva_app_pull_secret_reconciliation.rc == 0 else false
+      when:
+        - not ansible_check_mode
+        - eva_app_deployment_exists.rc == 0
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
     - name: Preserve EVA App database identity and legacy local users before upgrade
       ansible.builtin.command:
         argv:
@@ -1268,28 +1291,6 @@
   delegate_to: localhost
   become: false
   when: not ansible_check_mode
-
-- name: Ensure EVA App deployment uses ecr-registry imagePullSecret (online only)
-  vars:
-    eva_app_selected_pull_secret: >-
-      {{ (eva_app_effective_values.imagePullSecrets.ExistingSecret | default('', true)
-         or (eva_app_effective_values.imagePullSecrets.nameOverride | default('', true))
-         or (eva_app_name ~ '-secret-regcred'))
-         if (eva_managed_cluster | default(false) | bool) else 'ecr-registry' }}
-  ansible.builtin.command:
-    argv: [kubectl, patch, deployment, "{{ eva_app_name }}", -n, "{{ eva_app_namespace }}",
-           --type=merge, --patch-file=/dev/stdin]
-    stdin: >-
-      {{ {'spec': {'template': {'spec': {'imagePullSecrets': [{'name': eva_app_selected_pull_secret}]}}}} | to_json }}
-  register: eva_app_patch_pullsecret
-  changed_when: "'patched' in eva_app_patch_pullsecret.stdout"
-  when:
-    - not ansible_check_mode
-    - repository_mode in ['online_repository', 'cloud_repository']
-    - not (eva_managed_cluster | default(false) | bool) or (eva_app_effective_values.imagePullSecrets.enabled | default(true) | bool)
-    - not (eva_managed_cluster | default(false) | bool) or (eva_app_effective_values.imagePullSecrets.create | default(true) | bool) or (eva_app_effective_values.imagePullSecrets.ExistingSecret | default('', true) | length > 0)
-  environment:
-    KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
 - name: Wait for EVA App deployment rollout
   ansible.builtin.command: >-

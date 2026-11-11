@@ -172,7 +172,7 @@ func TestLocalPrepareOfflineAndExistingHarbor(t *testing.T) {
 func TestLocalCacheFailureDoesNotPublishPartialContents(t *testing.T) {
 	for _, kind := range []string{"traversal", "symlink", "gzip-checksum"} {
 		t.Run(kind, func(t *testing.T) {
-			entry := archiveTestRegular("out/cache/file.txt", []byte("cache"))
+			entry := archiveTestRegular("out/cache/models/file.txt", []byte("cache"))
 			if kind == "traversal" {
 				entry.header.Name = "out/cache/../../escape.txt"
 			}

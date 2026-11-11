@@ -111,6 +111,7 @@ load_deploy_versions() {
     EVA_AGENT_CHART_VERSION
     EVA_AGENT_IMAGE_TAG
     EVA_AGENT_VLLM_CHART_VERSION
+    EVA_AGENT_VALUES_VERSION
     EVA_AGENT_INIT_CHART_VERSION
     EVA_IAM_CHART_VERSION
     QDRANT_CHART_VERSION
@@ -131,6 +132,7 @@ load_deploy_versions() {
     [EVA_AGENT_CHART_VERSION]="eva_agent_chart_version"
     [EVA_AGENT_IMAGE_TAG]="eva_agent_image_tag"
     [EVA_AGENT_VLLM_CHART_VERSION]="eva_agent_vllm_chart_version"
+    [EVA_AGENT_VALUES_VERSION]="eva_agent_values_version"
     [EVA_AGENT_INIT_CHART_VERSION]="eva_agent_init_chart_version"
     [EVA_IAM_CHART_VERSION]="eva_iam_chart_version"
     [QDRANT_CHART_VERSION]="qdrant_chart_version"

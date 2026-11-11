@@ -12,6 +12,7 @@
     airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
     eva_agent_namespace: "{{ eva_agent_namespace | default('eva-agent') }}"
     eva_agent_deploy_version: "{{ eva_agent_deploy_version | mandatory }}"
+    eva_agent_values_version: "{{ eva_agent_values_version | default(eva_agent_deploy_version) }}"
     eva_agent_workdir: "{{ eva_agent_workdir | default('/opt/eva-agent/' ~ eva_agent_deploy_version) }}"
     eva_agent_deploy_values_dir: "{{ eva_agent_deploy_values_dir | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/agent') }}"
     eva_agent_kubeconfig: "{{ eva_agent_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
@@ -23,11 +24,11 @@
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/'
-           ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
+           ~ (((eva_agent_values_version | default(eva_agent_deploy_version)) is version('3.3.0', '>='))
               | ternary(('spectrabrain/eva-agent-chart/chartmuseum' if (eva_managed_cluster | default(false) | bool)
                          else 'spectrabrain/eva-agent-chart/develop'),
                         'mellerikat/eva-agent/chartmuseum'))
-           ~ '/release/' ~ eva_agent_deploy_version) }}
+           ~ '/release/' ~ (eva_agent_values_version | default(eva_agent_deploy_version))) }}
     eva_agent_image_tag: "{{ eva_agent_image_tag | default('') }}"
     eva_agent_offline_dir: "{{ eva_agent_offline_dir | default(eva_agent_cache_root ~ '/eva-agent') }}"
     eva_agent_offline_chart_tgz: "{{ eva_agent_offline_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-' ~ eva_agent_chart_version ~ '.tgz') }}"

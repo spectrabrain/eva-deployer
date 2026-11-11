@@ -58,7 +58,8 @@ EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (s
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:?missing KUSTOMIZE_VERSION (set in src/infra/version.yaml)}"
 
 EVA_AGENT_CHART_BASE="${EVA_AGENT_CHART_BASE:-$(eva_agent_source chart "$EVA_AGENT_RELEASE")}"
-EVA_AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE:-$(eva_agent_source release "$EVA_AGENT_RELEASE")}"
+EVA_AGENT_VALUES_VERSION="${EVA_AGENT_VALUES_VERSION:-$EVA_AGENT_RELEASE}"
+EVA_AGENT_RELEASE_BASE="${EVA_AGENT_RELEASE_BASE:-$(eva_agent_source release "$EVA_AGENT_VALUES_VERSION")}"
 EVA_AGENT_REPOSITORY_RAW_BASE="${EVA_AGENT_REPOSITORY_RAW_BASE:-$(eva_agent_source scripts "$EVA_AGENT_RELEASE")}"
 EVA_AGENT_SOURCE_NAME="$(eva_agent_source image "$EVA_AGENT_RELEASE")"
 
@@ -536,7 +537,8 @@ eva_agent_vllm_chart: ${EVA_AGENT_VLLM_CHART_VERSION}
 eva_agent_init_chart: ${EVA_AGENT_INIT_CHART_VERSION}
 eva_iam_chart: ${EVA_IAM_CHART_VERSION}
 qdrant_chart: ${QDRANT_CHART_VERSION}
-eva_agent_release_values: ${EVA_AGENT_RELEASE}
+eva_agent_release: ${EVA_AGENT_RELEASE}
+eva_agent_release_values: ${EVA_AGENT_VALUES_VERSION}
 kustomize: ${KUSTOMIZE_VERSION}
 
 Files:

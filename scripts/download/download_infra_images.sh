@@ -44,7 +44,9 @@ while IFS= read -r image; do
   fi
 done < "$IMAGE_DIR/infra-images-all.txt"
 
-if [[ -n "${K3S_PAUSE_IMAGE:-}" || -f "$IMAGE_DIR/infra-images-pulled.txt" ]]; then
+# Airgap preparation exports and validates both image archives in the Tool.
+# Standalone/Remote downloads retain their existing pause-image export.
+if [[ "${EVA_MANAGED_IMAGE_EXPORT:-false}" != true ]]; then
   pause_image="${K3S_PAUSE_IMAGE:-rancher/mirrored-pause:3.6}"
   if grep -Fxq "$pause_image" "$IMAGE_DIR/infra-images-pulled.txt"; then
     echo "[save] k3s pause image -> $IMAGE_DIR/k3s-images.tar"

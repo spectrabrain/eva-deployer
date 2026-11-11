@@ -5,10 +5,12 @@ eva_app_chart_version: 3.3.0
 eva_vision_deploy_version: 3.3.0
 eva_vision_chart_version: 3.3.0
 eva_vision_image_tag: 3.3.0
-eva_agent_deploy_version: 3.3.0
-eva_agent_chart_version: 3.3.0
-eva_agent_image_tag: 3.3.0
-eva_agent_vllm_chart_version: 3.3.0
+eva_agent_deploy_version: 3.3.1
+eva_agent_chart_version: 3.3.1
+eva_agent_image_tag: 3.3.1
+eva_agent_vllm_chart_version: 3.3.1
+# The 3.3.1 hotfix reuses the published 3.3.0 installation profiles.
+eva_agent_values_version: 3.3.0
 eva_agent_init_chart_version: 1.0.0
 qdrant_chart_version: 1.18.2
 n8n_image: docker.n8n.io/n8nio/n8n:2.32.7

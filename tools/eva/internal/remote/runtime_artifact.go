@@ -462,7 +462,7 @@ func runtimeEntries(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if !runtimeAllowedPath(relative) ||
+		if ValidateRuntimeArchivePath("runtime/"+filepath.ToSlash(relative), info.IsDir()) != nil ||
 			(!info.IsDir() &&
 				!info.Mode().IsRegular() &&
 				info.Mode()&os.ModeSymlink == 0) {
@@ -627,6 +627,33 @@ func runtimeAllowedPath(relative string) bool {
 		strings.HasPrefix(relative, "collections/")
 }
 
+// ValidateRuntimeArchivePath is shared by Remote and Airgap packaging. Runtime
+// membership comes from its managed code roots; library resource names such as
+// credentials, secrets, workspace and *.pem do not identify host credentials.
+func ValidateRuntimeArchivePath(name string, directory bool) error {
+	name = strings.TrimSuffix(name, "/")
+	if name == "" || strings.ContainsAny(name, "\\:\x00\r\n") || path.Clean(name) != name {
+		return fmt.Errorf("unsafe Runtime archive path %q", name)
+	}
+	if name == "runtime" {
+		if directory {
+			return nil
+		}
+		return errors.New("Runtime archive root must be a directory")
+	}
+	relative, ok := strings.CutPrefix(name, "runtime/")
+	if !ok || !runtimeAllowedPath(relative) {
+		return fmt.Errorf("entry outside managed Runtime roots: %q", name)
+	}
+	if relative == "runtime.yaml" && directory {
+		return errors.New("Runtime descriptor must be a regular file")
+	}
+	if (relative == "bin" || relative == "venv" || relative == "collections") && !directory {
+		return fmt.Errorf("Runtime category must be a directory: %q", name)
+	}
+	return nil
+}
+
 func validateRuntimeArchive(archive, descriptorDigest string) error {
 	file, err := os.Open(archive)
 	if err != nil {
@@ -650,7 +677,8 @@ func validateRuntimeArchive(archive, descriptorDigest string) error {
 			return err
 		}
 		name := strings.TrimSuffix(header.Name, "/")
-		if (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeDir) || !safeRuntimeArchiveName(name) || seen[name] {
+		if (header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeDir) ||
+			ValidateRuntimeArchivePath(name, header.Typeflag == tar.TypeDir) != nil || seen[name] {
 			return errors.New("unsafe Runtime archive entry")
 		}
 		seen[name] = true
@@ -670,16 +698,4 @@ func validateRuntimeArchive(archive, descriptorDigest string) error {
 		return errors.New("Runtime archive descriptor missing")
 	}
 	return nil
-}
-
-func safeRuntimeArchiveName(name string) bool {
-	if name == "runtime" {
-		return true
-	}
-	if !strings.HasPrefix(name, "runtime/") || strings.Contains(name, "..") || strings.HasPrefix(name, "/") {
-		return false
-	}
-	return runtimeAllowedPath(
-		strings.TrimPrefix(name, "runtime/"),
-	)
 }

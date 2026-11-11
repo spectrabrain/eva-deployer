@@ -16,7 +16,10 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
+
 	"eva-deployer/tools/eva/internal/remote"
+	managedruntime "eva-deployer/tools/eva/internal/runtime"
 )
 
 func archiveTestVisionCache(t *testing.T, cache string) {
@@ -278,8 +281,8 @@ func TestBuildOfflineArchiveRejectsUnsafeCache(t *testing.T) {
 			}
 		}},
 	}
-	for _, credential := range []string{".aws/config", ".docker/config.json", ".ssh/config", "credentials/file", "secrets/data", "workspace/site.yaml", "aws_key.ini", "server.key", "CERT.PEM", "id_rsa.pub", "id_ed25519_backup", ".env", ".env.production", ".environment"} {
-		name := "models/nested/" + credential
+	for _, credential := range []string{".aws/config", ".docker/config.json", ".ssh/config", "credentials/file", "secrets/data", "workspace/site.yaml", "aws_key.ini", "server.key", "CERT.PEM", "id_rsa.pub", "id_ed25519_backup", ".env", ".env.production"} {
+		name := credential
 		tests = append(tests, struct {
 			name  string
 			setup func(*testing.T, string)
@@ -316,8 +319,25 @@ func TestBuildOfflineArchiveRejectsUnsafeRuntime(t *testing.T) {
 		{"fifo", []archiveTestEntry{{header: tar.Header{Name: "runtime/pipe", Typeflag: tar.TypeFifo}}}},
 		{"device", []archiveTestEntry{{header: tar.Header{Name: "runtime/device", Typeflag: tar.TypeChar}}}},
 		{"credential", []archiveTestEntry{archiveTestRegular("runtime/.ssh/id_rsa", []byte("bad"))}},
-		{"duplicate", []archiveTestEntry{archiveTestRegular("runtime/file", nil), archiveTestRegular("runtime/./file", nil)}},
-		{"file parent", []archiveTestEntry{archiveTestRegular("runtime/parent/child", nil), archiveTestRegular("runtime/parent", nil)}},
+		{"duplicate", []archiveTestEntry{archiveTestRegular("runtime/bin/file", nil), archiveTestRegular("runtime/bin/./file", nil)}},
+		{"file parent", []archiveTestEntry{archiveTestRegular("runtime/venv/parent/child", nil), archiveTestRegular("runtime/venv/parent", nil)}},
+		{"category is file", []archiveTestEntry{archiveTestRegular("runtime/bin", nil)}},
+		{"descriptor is directory", []archiveTestEntry{{header: tar.Header{Name: "runtime/runtime.yaml/", Typeflag: tar.TypeDir}}}},
+		{"nested traversal", []archiveTestEntry{archiveTestRegular("runtime/venv/../../.ssh/id_rsa", nil)}},
+	}
+	for _, name := range []string{
+		"runtime/credentials/aws.ini",
+		"runtime/.aws/credentials",
+		"runtime/.docker/config.json",
+		"runtime/workspace/site.yaml",
+		"runtime/aws_key.ini",
+		"runtime/venv-backup/file",
+		"runtime/collections-backup/file",
+	} {
+		tests = append(tests, struct {
+			name    string
+			entries []archiveTestEntry
+		}{name, []archiveTestEntry{archiveTestRegular(name, []byte("private"))}})
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -331,6 +351,148 @@ func TestBuildOfflineArchiveRejectsUnsafeRuntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildOfflineArchiveBundledDockerCredentialModule(t *testing.T) {
+	for _, root := range []string{
+		"runtime/venv/lib/python3.12/site-packages/",
+		"runtime/venv/lib/python3.13/site-packages/",
+		"runtime/collections/",
+	} {
+		t.Run(root, func(t *testing.T) {
+			packageRoot := root + "ansible_collections/community/docker/plugins/module_utils/_api/credentials"
+			entries := []archiveTestEntry{{header: tar.Header{Name: packageRoot + "/", Typeflag: tar.TypeDir, Mode: 0o755}}}
+			for _, module := range []string{"constants.py", "errors.py", "store.py", "utils.py"} {
+				entries = append(entries, archiveTestRegular(packageRoot+"/"+module, []byte("# installed Python source\n")))
+			}
+			output := filepath.Join(t.TempDir(), "offline.tar.gz")
+			if err := buildOfflineArchive(archiveTestWriteTar(t, entries, true), t.TempDir(), output); err != nil {
+				t.Fatal(err)
+			}
+			actual := archiveTestReadOffline(t, output)
+			for _, entry := range entries {
+				got, ok := actual[entry.header.Name]
+				if !ok || !bytes.Equal(got.body, entry.body) || got.header.Typeflag != entry.header.Typeflag {
+					t.Fatalf("bundled module changed or missing: %s", entry.header.Name)
+				}
+			}
+		})
+	}
+}
+
+// Exercise the exporter, Bundle writer, Runtime bootstrap and Local cache
+// reader together. Product resources must survive every stage regardless of
+// names that previously triggered the global credential heuristic.
+func TestBuildOfflineArchiveAllowsManagedAssetNames(t *testing.T) {
+	runtimeRoot := serviceTestRuntime(t)
+	runtimeFiles := []string{
+		"venv/lib/python3.12/site-packages/another_package/credentials/providers/data.json",
+		"venv/lib/python3.13/site-packages/another_package/secrets/schema.json",
+		"venv/lib/python3.14/site-packages/another_package/workspace/session.py",
+		"venv/lib/python3.12/site-packages/another_package/certs/public.pem",
+		"collections/ansible_collections/community/example/plugins/module_utils/credentials/store.py",
+		"collections/ansible_collections/community/example/plugins/module_utils/secrets/config.yaml",
+		"bin/credentials-helper",
+	}
+	cache := t.TempDir()
+	cacheFiles := []string{
+		"eva-agent/release/3.3.1/eva-agent/values-secret.yaml",
+		"eva-agent/release/3.3.1/eva-agent/secrets/schema.json",
+		"models/agent/hf/workspace/tokenizer.json",
+		"tools/certificates/public.pem",
+		"tools/key-template/example.key",
+		"eva-app/config/.env.example",
+	}
+	for _, name := range runtimeFiles {
+		archiveTestWriteFile(t, filepath.Join(runtimeRoot, name), []byte("installed Runtime asset: "+name))
+	}
+	for _, name := range cacheFiles {
+		archiveTestWriteFile(t, filepath.Join(cache, name), []byte("managed cache asset: "+name))
+	}
+	work := t.TempDir()
+	runtimeArchive := filepath.Join(work, "runtime.tar.gz")
+	if err := remote.ExportRuntimeArchive(runtimeRoot, runtimeArchive); err != nil {
+		t.Fatal(err)
+	}
+	offline := filepath.Join(work, "offline.tar.gz")
+	if err := buildOfflineArchive(runtimeArchive, cache, offline); err != nil {
+		t.Fatal(err)
+	}
+	sourceEntries, actualEntries := archiveTestReadOffline(t, runtimeArchive), archiveTestReadOffline(t, offline)
+	for name, entry := range sourceEntries {
+		actual, ok := actualEntries[name]
+		if !ok || actual.header.Typeflag != entry.header.Typeflag || !bytes.Equal(actual.body, entry.body) {
+			t.Fatalf("exported Runtime entry changed or missing: %s", name)
+		}
+	}
+	restoredRuntime := filepath.Join(work, "restored-runtime")
+	if _, err := managedruntime.BootstrapOffline(offline, restoredRuntime); err != nil {
+		t.Fatal(err)
+	}
+	restoredCache := t.TempDir()
+	compressed, err := os.ReadFile(offline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := extractLocalCache(offline, restoredCache, archiveTestDigest(compressed)); err != nil {
+		t.Fatal(err)
+	}
+	for _, tree := range []struct {
+		source, restored string
+		files            []string
+	}{{runtimeRoot, restoredRuntime, runtimeFiles}, {cache, restoredCache, cacheFiles}} {
+		for _, name := range tree.files {
+			original, err := os.ReadFile(filepath.Join(tree.source, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual, err := os.ReadFile(filepath.Join(tree.restored, name))
+			if err != nil || !bytes.Equal(original, actual) {
+				t.Fatalf("restored asset changed or missing: %s: %v", name, err)
+			}
+		}
+	}
+}
+
+func TestExtractLocalCacheRejectsUnapprovedRoots(t *testing.T) {
+	for _, name := range []string{".aws/credentials", ".docker/config.json", "credentials/aws_key.ini", "workspace/site.yaml", "images/rendered/secrets/secret.yaml", "models", "manifest.txt/"} {
+		t.Run(name, func(t *testing.T) {
+			entry := archiveTestRegular("out/cache/"+name, []byte("not an asset"))
+			if strings.HasSuffix(name, "/") {
+				entry.header.Typeflag, entry.header.Size, entry.body = tar.TypeDir, 0, nil
+			}
+			archive := archiveTestWriteTar(t, []archiveTestEntry{entry}, true)
+			compressed, err := os.ReadFile(archive)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := extractLocalCache(archive, t.TempDir(), archiveTestDigest(compressed)); err == nil {
+				t.Fatal("Local reader accepted an entry the Bundle writer forbids")
+			}
+		})
+	}
+}
+
+// Opt-in packaging check of a real managed Runtime. It does not download
+// assets, contact registries, install tools or change the source Runtime.
+func TestBuildOfflineArchiveRealRuntime(t *testing.T) {
+	root := os.Getenv("EVA_TEST_RUNTIME_ROOT")
+	if root == "" {
+		t.Skip("set EVA_TEST_RUNTIME_ROOT to verify real Runtime packaging")
+	}
+	work := t.TempDir()
+	runtimeArchive := filepath.Join(work, "runtime.tar.gz")
+	if err := remote.ExportRuntimeArchive(root, runtimeArchive); err != nil {
+		t.Fatal(err)
+	}
+	offline := filepath.Join(work, "offline.tar.gz")
+	if err := buildOfflineArchive(runtimeArchive, t.TempDir(), offline); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managedruntime.BootstrapOffline(offline, filepath.Join(work, "restored")); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("managed Runtime export, Bundle packaging and offline restoration passed")
 }
 
 func TestBuildOfflineArchiveRejectsLateGzipFailure(t *testing.T) {
@@ -568,6 +730,81 @@ func TestValidateDockerArchiveCompressedOCILayers(t *testing.T) {
 	entries[2].body[len(entries[2].body)-1] ^= 0xff
 	if err := validateDockerArchive(archiveTestWriteTar(t, entries, false), []string{"example.test/eva:1"}); err == nil {
 		t.Fatal("accepted corrupt compressed OCI layer")
+	}
+}
+
+func TestValidateDockerArchiveZstdOCILayers(t *testing.T) {
+	for _, variant := range []string{"valid", "skippable prefix", "truncated", "checksum", "wrong diff id"} {
+		t.Run(variant, func(t *testing.T) {
+			entries := archiveTestDockerEntries(t)
+			writer, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writer.Close()
+			for _, i := range []int{2, 3} {
+				body := writer.EncodeAll(entries[i].body, nil)
+				if i == 2 {
+					switch variant {
+					case "skippable prefix":
+						body = append([]byte{0x50, 0x2a, 0x4d, 0x18, 0x01, 0, 0, 0, 0}, body...)
+					case "truncated":
+						body = body[:len(body)-1]
+					case "checksum":
+						body[len(body)-1] ^= 0xff
+					}
+				}
+				// Keep the compressed content digest valid, including for
+				// corrupt frames. The decoder and uncompressed DiffID checks
+				// must independently detect those failures.
+				entries[i] = archiveTestRegular("blobs/sha256/"+archiveTestDigest(body), body)
+			}
+			entries = archiveTestChangeManifest(t, entries, func(manifest []dockerSaveManifestEntry) {
+				manifest[0].Layers = []string{entries[2].header.Name, entries[3].header.Name}
+			})
+			if variant == "wrong diff id" {
+				entries = archiveTestChangeConfig(t, entries, func(config map[string]any) {
+					config["rootfs"].(map[string]any)["diff_ids"].([]any)[0] = "sha256:" + strings.Repeat("0", 64)
+				})
+			}
+			err = validateDockerArchive(archiveTestWriteTar(t, entries, false), []string{"example.test/eva:1"})
+			if variant == "valid" || variant == "skippable prefix" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil {
+				t.Fatal("accepted corrupt zstd content or incorrect uncompressed digest")
+			}
+		})
+	}
+}
+
+func TestValidateDockerArchiveImageReferenceAliases(t *testing.T) {
+	for _, tc := range []struct {
+		tag, expected string
+		accepted      bool
+	}{
+		{"busybox:latest", "docker.io/library/busybox:latest", true},
+		{"docker.io/library/busybox:latest", "busybox", true},
+		{"busybox:latest", "index.docker.io/library/busybox:latest", true},
+		{"qdrant/qdrant:v1.18.2", "docker.io/qdrant/qdrant:v1.18.2", true},
+		{"registry.test:5000/team/image:1", "registry.test:5000/team/image:1", true},
+		{"busybox:latest", "registry.test/library/busybox:latest", false},
+		{"busybox:latest", "docker.io/other/busybox:latest", false},
+		{"busybox:latest", "busybox:old", false},
+		{"registry.test:5000/team/image:1", "registry.test:5001/team/image:1", false},
+		{"busybox:latest", "", false},
+		{"invalid reference", "busybox:latest", false},
+	} {
+		t.Run(tc.tag+"/"+tc.expected, func(t *testing.T) {
+			entries := archiveTestChangeManifest(t, archiveTestDockerEntries(t), func(manifest []dockerSaveManifestEntry) {
+				manifest[0].RepoTags = []string{tc.tag}
+			})
+			err := validateDockerArchive(archiveTestWriteTar(t, entries, false), []string{tc.expected})
+			if (err == nil) != tc.accepted {
+				t.Fatalf("tag=%q expected=%q accepted=%t err=%v", tc.tag, tc.expected, tc.accepted, err)
+			}
+		})
 	}
 }
 

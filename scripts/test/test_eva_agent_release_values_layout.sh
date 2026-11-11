@@ -19,7 +19,7 @@ fail() {
 # shellcheck source=scripts/lib/load_versions.sh
 source "$REPO_ROOT/scripts/lib/load_versions.sh"
 
-for case in 3.1.0:legacy 3.0.4:legacy 3.2.0:source-split 3.2.1:source-split 3.3.0:source-split v3.2.0:source-split 4.0.0:source-split; do
+for case in 3.1.0:legacy 3.0.4:legacy 3.2.0:source-split 3.2.1:source-split 3.3.0:source-split 3.3.1:source-split v3.2.0:source-split 4.0.0:source-split; do
   version="${case%%:*}"
   expected="${case#*:}"
   [[ "$(eva_agent_values_layout "$version")" == "$expected" ]] || fail "layout for $version is not $expected"
@@ -86,11 +86,12 @@ STUB
 chmod +x "$stub_bin/curl" "$stub_bin/sudo"
 
 run_required_check() {
-  local release="$1" missing="$2" log="$TMP_ROOT/required-$1.log" release_base
-  release_base="$(eva_agent_source release "$release")"
+  local release="$1" missing="$2" log="$TMP_ROOT/required-$1.log" release_base values_version="${3:-$1}"
+  release_base="$(eva_agent_source release "$values_version")"
   : >"$log"
   if PATH="$stub_bin:$PATH" STUB_LOG="$log" STUB_MISSING="$missing" \
-    EVA_AGENT_RELEASE="$release" EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
+    EVA_AGENT_RELEASE="$release" EVA_AGENT_VALUES_VERSION="$values_version" \
+    EVA_AGENT_CHART_VERSION="$release" EVA_AGENT_VLLM_CHART_VERSION="$release" EVA_AGENT_QDRANT_SNAPSHOT_SOURCE=harbor \
     EVA_CACHE_ROOT="$TMP_ROOT/cache-$release" VERSIONS_QUIET=1 \
     bash "$REPO_ROOT/scripts/download/download_offline_assets.sh" >"$log.out" 2>&1; then
     fail "prepare-offline-assets accepted a missing required asset for $release"
@@ -111,6 +112,13 @@ stable_required="$(run_required_check 3.3.0 install_eva_agent_dependencies.sh)"
 for chart in eva-agent eva-agent-vllm; do
   grep -Fxq "https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/$chart-3.3.0.tgz" \
     "$TMP_ROOT/required-3.3.0.log" || fail "stable $chart chart is missing from preparation"
+done
+hotfix_required="$(run_required_check 3.3.1 install_eva_agent_dependencies.sh 3.3.0)"
+[[ "$(required_values <<<"$hotfix_required")" == "$expected_split" ]] || fail "3.3.1 reused Values differ"
+grep -Fq '/develop/release/3.3.0/eva-agent/values-k3s.ecr.yaml' "$TMP_ROOT/required-3.3.1.log" || fail "3.3.1 does not reuse the pinned 3.3.0 Values"
+for chart in eva-agent eva-agent-vllm; do
+  grep -Fxq "https://raw.githubusercontent.com/spectrabrain/eva-agent-chart/chartmuseum/$chart-3.3.1.tgz" \
+    "$TMP_ROOT/required-3.3.1.log" || fail "3.3.1 $chart chart is missing from preparation"
 done
 legacy_required="$(run_required_check 3.1.0 install_eva_agent_dependencies.sh)"
 [[ "$(required_values <<<"$legacy_required")" == "$expected_legacy" ]] || fail "3.1.0 required Agent values differ"

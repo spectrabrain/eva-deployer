@@ -28,6 +28,7 @@
     airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
     eva_agent_namespace: "{{ eva_agent_namespace | default('eva-agent') }}"
     eva_agent_deploy_version: "{{ eva_agent_deploy_version | mandatory }}"
+    eva_agent_values_version: "{{ eva_agent_values_version | default(eva_agent_deploy_version) }}"
     eva_agent_models_required: "{{ eva_agent_models_required | default(eva_agent_deploy_version is version('3.3.0', '<')) }}"
     eva_agent_init_chart_version: "{{ eva_agent_init_chart_version | default('1.0.0') }}"
     eva_agent_chart_repository_url: >-
@@ -77,11 +78,11 @@
     eva_agent_chartmuseum_base_url: >-
       {{ eva_agent_chartmuseum_base_url
          | default('https://raw.githubusercontent.com/'
-           ~ ((eva_agent_deploy_version is version('3.3.0', '>='))
+           ~ (((eva_agent_values_version | default(eva_agent_deploy_version)) is version('3.3.0', '>='))
               | ternary(('spectrabrain/eva-agent-chart/chartmuseum' if (eva_managed_cluster | default(false) | bool)
                          else 'spectrabrain/eva-agent-chart/develop'),
                         'mellerikat/eva-agent/chartmuseum'))
-           ~ '/release/' ~ eva_agent_deploy_version) }}
+           ~ '/release/' ~ (eva_agent_values_version | default(eva_agent_deploy_version))) }}
     eva_agent_offline_release_dir: "{{ eva_agent_offline_release_dir | default(eva_agent_offline_dir ~ '/release/' ~ eva_agent_deploy_version) }}"
     eva_agent_offline_qdrant_chart_tgz: "{{ eva_agent_offline_qdrant_chart_tgz | default(eva_agent_cache_root ~ '/qdrant/qdrant-' ~ (eva_agent_qdrant_chart_version | default(qdrant_chart_version)) ~ '.tgz') }}"
     eva_agent_offline_vllm_chart_tgz: "{{ eva_agent_offline_vllm_chart_tgz | default(eva_agent_offline_dir ~ '/eva-agent-vllm-' ~ eva_agent_vllm_chart_version ~ '.tgz') }}"

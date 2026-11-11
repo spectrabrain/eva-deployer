@@ -19,6 +19,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"eva-deployer/tools/eva/internal/remote"
+	managedruntime "eva-deployer/tools/eva/internal/runtime"
 )
 
 func archiveTestVisionCache(t *testing.T, cache string) {
@@ -321,6 +322,36 @@ func TestBuildOfflineArchiveRejectsUnsafeRuntime(t *testing.T) {
 		{"duplicate", []archiveTestEntry{archiveTestRegular("runtime/file", nil), archiveTestRegular("runtime/./file", nil)}},
 		{"file parent", []archiveTestEntry{archiveTestRegular("runtime/parent/child", nil), archiveTestRegular("runtime/parent", nil)}},
 	}
+	for _, name := range []string{
+		"runtime/credentials/aws.ini",
+		"runtime/venv/lib/python3.12/site-packages/credentials/aws.ini",
+		"runtime/venv/lib/python3.12/site-packages/ansible_collections/community/docker/plugins/module_utils/_api/credentials/aws.ini",
+		"runtime/venv/lib/python3.12/site-packages/ansible_collections/community/docker/plugins/module_utils/_api/credentials/.env.py",
+		"runtime/venv/lib/python3.12/site-packages/ansible_collections/community/docker/plugins/module_utils/_api/credentials/server.key",
+		"runtime/venv/lib/python3.12/site-packages/ansible_collections/community/docker/plugins/module_utils/_api/credentials/secrets/token.py",
+		"runtime/collections/ansible_collections/community/docker/plugins/module_utils/_api/credentials/aws.ini",
+		"runtime/venv/workspace/lib/python3.12/site-packages/certifi/cacert.pem",
+		"runtime/venv/lib/python3.12/site-packages/.ssh/certifi/cacert.pem",
+		"runtime/venv/lib/python3.12/site-packages/certifi/server.pem",
+	} {
+		tests = append(tests, struct {
+			name    string
+			entries []archiveTestEntry
+		}{name, []archiveTestEntry{archiveTestRegular(name, []byte("private"))}})
+	}
+	for _, name := range []string{
+		"runtime/venv/lib/python3.12/site-packages/ansible_collections/community/docker/plugins/module_utils/_api/credentials",
+		"runtime/venv/lib/python3.12/site-packages/certifi/cacert.pem",
+	} {
+		entry := archiveTestRegular(name, nil)
+		if strings.HasSuffix(name, ".pem") {
+			entry.header.Typeflag = tar.TypeDir
+		}
+		tests = append(tests, struct {
+			name    string
+			entries []archiveTestEntry
+		}{"wrong entry type " + name, []archiveTestEntry{entry}})
+	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			destination := filepath.Join(t.TempDir(), "offline.tar.gz")
@@ -333,6 +364,55 @@ func TestBuildOfflineArchiveRejectsUnsafeRuntime(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildOfflineArchiveBundledDockerCredentialModule(t *testing.T) {
+	for _, root := range []string{
+		"runtime/venv/lib/python3.12/site-packages/",
+		"runtime/venv/lib/python3.13/site-packages/",
+		"runtime/collections/",
+	} {
+		t.Run(root, func(t *testing.T) {
+			packageRoot := root + "ansible_collections/community/docker/plugins/module_utils/_api/credentials"
+			entries := []archiveTestEntry{{header: tar.Header{Name: packageRoot + "/", Typeflag: tar.TypeDir, Mode: 0o755}}}
+			for _, module := range []string{"constants.py", "errors.py", "store.py", "utils.py"} {
+				entries = append(entries, archiveTestRegular(packageRoot+"/"+module, []byte("# installed Python source\n")))
+			}
+			output := filepath.Join(t.TempDir(), "offline.tar.gz")
+			if err := buildOfflineArchive(archiveTestWriteTar(t, entries, true), t.TempDir(), output); err != nil {
+				t.Fatal(err)
+			}
+			actual := archiveTestReadOffline(t, output)
+			for _, entry := range entries {
+				got, ok := actual[entry.header.Name]
+				if !ok || !bytes.Equal(got.body, entry.body) || got.header.Typeflag != entry.header.Typeflag {
+					t.Fatalf("bundled module changed or missing: %s", entry.header.Name)
+				}
+			}
+		})
+	}
+}
+
+// Opt-in packaging check of a real managed Runtime. It does not download
+// assets, contact registries, install tools or change the source Runtime.
+func TestBuildOfflineArchiveRealRuntime(t *testing.T) {
+	root := os.Getenv("EVA_TEST_RUNTIME_ROOT")
+	if root == "" {
+		t.Skip("set EVA_TEST_RUNTIME_ROOT to verify real Runtime packaging")
+	}
+	work := t.TempDir()
+	runtimeArchive := filepath.Join(work, "runtime.tar.gz")
+	if err := remote.ExportRuntimeArchive(root, runtimeArchive); err != nil {
+		t.Fatal(err)
+	}
+	offline := filepath.Join(work, "offline.tar.gz")
+	if err := buildOfflineArchive(runtimeArchive, t.TempDir(), offline); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managedruntime.BootstrapOffline(offline, filepath.Join(work, "restored")); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("managed Runtime export, Bundle packaging and offline restoration passed")
 }
 
 func TestBuildOfflineArchiveRejectsLateGzipFailure(t *testing.T) {

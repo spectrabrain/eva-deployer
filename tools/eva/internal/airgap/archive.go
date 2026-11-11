@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -171,6 +172,30 @@ func rejectArchiveCredentialName(name string) error {
 	return nil
 }
 
+var runtimeSitePackagesPath = regexp.MustCompile(`^runtime/venv/lib/python3\.[0-9]+/site-packages/(.+)$`)
+
+// These are installed Python package assets, not host authentication files.
+// Keep exceptions tied to their exact package roots and file types: a stored
+// credential inside a library directory must still stop Bundle publication.
+func bundledRuntimeCredentialName(name string, directory bool) bool {
+	packagePath := ""
+	if match := runtimeSitePackagesPath.FindStringSubmatch(name); match != nil {
+		packagePath = match[1]
+		if packagePath == "certifi/cacert.pem" || packagePath == "pip/_vendor/certifi/cacert.pem" {
+			return !directory
+		}
+	} else if relative, ok := strings.CutPrefix(name, "runtime/collections/"); ok {
+		packagePath = relative
+	}
+	const dockerCredentials = "ansible_collections/community/docker/plugins/module_utils/_api/credentials"
+	if packagePath == dockerCredentials {
+		return directory
+	}
+	module, ok := strings.CutPrefix(packagePath, dockerCredentials+"/")
+	return ok && !directory && !strings.Contains(module, "/") &&
+		strings.HasSuffix(module, ".py") && rejectArchiveCredentialName(module) == nil
+}
+
 func checkArchiveSource(info os.FileInfo) error {
 	if !info.IsDir() && !info.Mode().IsRegular() {
 		return errors.New("links and special files are forbidden")
@@ -270,10 +295,7 @@ func copyOfflineRuntime(tw *tar.Writer, archive string) error {
 		if name != "runtime" && !strings.HasPrefix(name, "runtime/") || name == "runtime" && !directory {
 			return fmt.Errorf("entry outside runtime: %q", header.Name)
 		}
-		// The exporter accepts only managed Runtime categories. Python's
-		// bundled certifi CA certificates are public package data, not TLS keys.
-		publicCA := strings.HasPrefix(name, "runtime/venv/") && strings.Contains(name, "/site-packages/") && strings.HasSuffix(name, "/certifi/cacert.pem")
-		if err := rejectArchiveCredentialName(name); err != nil && !publicCA {
+		if err := rejectArchiveCredentialName(name); err != nil && !bundledRuntimeCredentialName(name, directory) {
 			return err
 		}
 		if _, exists := entries[name]; exists {

@@ -81,6 +81,12 @@ func serviceTestRuntime(t *testing.T) string {
 	}
 	archiveTestWriteFile(t, filepath.Join(root, "runtime.yaml"), serviceTestYAML(t, descriptor))
 	archiveTestWriteFile(t, filepath.Join(root, "collections/ansible_collections/ansible/posix/MANIFEST.json"), []byte("{}\n"))
+	// Real pinned Ansible has a credentials Python package, and pip bundles
+	// public certifi certificates. Exercise both through the complete pipeline.
+	for _, module := range []string{"constants.py", "errors.py", "store.py", "utils.py"} {
+		archiveTestWriteFile(t, filepath.Join(root, "venv/lib/python3.12/site-packages/ansible_collections/community/docker/plugins/module_utils/_api/credentials", module), []byte("# bundled Docker credential helper\n"))
+	}
+	archiveTestWriteFile(t, filepath.Join(root, "venv/lib/python3.12/site-packages/pip/_vendor/certifi/cacert.pem"), []byte("public CA\n"))
 	if _, err := managedruntime.Resolve(root); err != nil {
 		t.Fatalf("synthetic Runtime must pass production Resolve without executing tools: %v", err)
 	}

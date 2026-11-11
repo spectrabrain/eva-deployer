@@ -145,7 +145,7 @@ func extractLocalCache(offline, destination, expectedDigest string) error {
 			return fmt.Errorf("duplicate or reserved Local cache entry: %s", name)
 		}
 		seen[relative] = true
-		if err := rejectArchiveCredentialName(name); err != nil {
+		if err := validateOfflineCachePath(relative, header.Typeflag == tar.TypeDir); err != nil {
 			return err
 		}
 		target := filepath.Join(destination, filepath.FromSlash(relative))

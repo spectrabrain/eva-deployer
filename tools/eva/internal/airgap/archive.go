@@ -13,7 +13,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -26,8 +25,8 @@ import (
 
 const archiveJSONLimit = 16 << 20
 
-// buildOfflineArchive joins the exported runtime and the download cache without
-// following links or transporting host ownership, extended attributes or secrets.
+// buildOfflineArchive joins the exported Runtime and managed download assets
+// without following links or transporting host ownership or extended attributes.
 // A failed build never leaves a partially usable destination behind.
 func buildOfflineArchive(runtimeArchive, cacheRoot, destination string) (resultErr error) {
 	if runtimeArchive == "" || cacheRoot == "" || destination == "" {
@@ -114,16 +113,8 @@ func buildOfflineArchive(runtimeArchive, cacheRoot, destination string) (resultE
 			}
 			return filepath.SkipDir
 		}
-		if err := rejectArchiveCredentialName(name); err != nil {
+		if err := validateOfflineCachePath(name, info.IsDir()); err != nil {
 			return err
-		}
-		top, _, nested := strings.Cut(name, "/")
-		if !offlineCacheDirectory(top) {
-			if nested || info.IsDir() || top != "manifest.txt" && top != "airgap-preparation.yaml" {
-				return fmt.Errorf("unsupported cache entry %q", name)
-			}
-		} else if !nested && !info.IsDir() {
-			return fmt.Errorf("cache category %q must be a directory", name)
 		}
 		return writeOfflineCacheEntry(tw, full, "out/cache/"+name, root, cacheRoot, info)
 	}); err != nil {
@@ -157,43 +148,23 @@ func safeArchiveName(name string) (string, error) {
 	return path.Clean(name), nil
 }
 
-func rejectArchiveCredentialName(name string) error {
-	for _, part := range strings.Split(strings.ToLower(name), "/") {
-		switch part {
-		case ".aws", ".docker", ".ssh", "credentials", "secrets", "workspace", "aws_key.ini":
-			return fmt.Errorf("credential/workspace path %q is forbidden", name)
+// Like Remote payloads, cache membership is determined by the managed asset
+// roots, not credential-like words or extensions inside product-owned assets.
+// Host credentials and workspaces live outside these roots. Rendered Helm
+// Secrets are generated work, so they must never be transported or restored.
+func validateOfflineCachePath(name string, directory bool) error {
+	if name == "images/rendered" || strings.HasPrefix(name, "images/rendered/") {
+		return fmt.Errorf("rendered Helm workspace is not an offline asset: %q", name)
+	}
+	top, _, nested := strings.Cut(name, "/")
+	if !offlineCacheDirectory(top) {
+		if nested || directory || top != "manifest.txt" && top != "airgap-preparation.yaml" {
+			return fmt.Errorf("unsupported cache entry %q", name)
 		}
-		if strings.HasSuffix(part, ".key") || strings.HasSuffix(part, ".pem") ||
-			strings.HasPrefix(part, "id_rsa") || strings.HasPrefix(part, "id_ed25519") ||
-			strings.HasPrefix(part, ".env") {
-			return fmt.Errorf("credential path %q is forbidden", name)
-		}
+	} else if !nested && !directory {
+		return fmt.Errorf("cache category %q must be a directory", name)
 	}
 	return nil
-}
-
-var runtimeSitePackagesPath = regexp.MustCompile(`^runtime/venv/lib/python3\.[0-9]+/site-packages/(.+)$`)
-
-// These are installed Python package assets, not host authentication files.
-// Keep exceptions tied to their exact package roots and file types: a stored
-// credential inside a library directory must still stop Bundle publication.
-func bundledRuntimeCredentialName(name string, directory bool) bool {
-	packagePath := ""
-	if match := runtimeSitePackagesPath.FindStringSubmatch(name); match != nil {
-		packagePath = match[1]
-		if packagePath == "certifi/cacert.pem" || packagePath == "pip/_vendor/certifi/cacert.pem" {
-			return !directory
-		}
-	} else if relative, ok := strings.CutPrefix(name, "runtime/collections/"); ok {
-		packagePath = relative
-	}
-	const dockerCredentials = "ansible_collections/community/docker/plugins/module_utils/_api/credentials"
-	if packagePath == dockerCredentials {
-		return directory
-	}
-	module, ok := strings.CutPrefix(packagePath, dockerCredentials+"/")
-	return ok && !directory && !strings.Contains(module, "/") &&
-		strings.HasSuffix(module, ".py") && rejectArchiveCredentialName(module) == nil
 }
 
 func checkArchiveSource(info os.FileInfo) error {
@@ -292,10 +263,7 @@ func copyOfflineRuntime(tw *tar.Writer, archive string) error {
 			return err
 		}
 		directory := header.Typeflag == tar.TypeDir
-		if name != "runtime" && !strings.HasPrefix(name, "runtime/") || name == "runtime" && !directory {
-			return fmt.Errorf("entry outside runtime: %q", header.Name)
-		}
-		if err := rejectArchiveCredentialName(name); err != nil && !bundledRuntimeCredentialName(name, directory) {
+		if err := remote.ValidateRuntimeArchivePath(name, directory); err != nil {
 			return err
 		}
 		if _, exists := entries[name]; exists {

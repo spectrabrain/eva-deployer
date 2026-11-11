@@ -926,8 +926,8 @@ func TestServicePrepareLegacyDockerExportsBothArchives(t *testing.T) {
 	}
 }
 
-func TestServicePrepareRejectsUnsafeCacheCredentials(t *testing.T) {
-	for _, name := range []string{"aws_key.ini", "tools/credentials/aws.ini", "harbor/.docker/config.json", "tools/server.key", "tools/.env", "images/.aws/credentials"} {
+func TestServicePrepareRejectsUnapprovedCredentialRoots(t *testing.T) {
+	for _, name := range []string{"aws_key.ini", "credentials/aws.ini", ".docker/config.json", ".ssh/id_rsa", ".env", "workspace/site.yaml"} {
 		t.Run(name, func(t *testing.T) {
 			f := newServiceTestFixture(t)
 			f.afterStep = func(step, cache string) {

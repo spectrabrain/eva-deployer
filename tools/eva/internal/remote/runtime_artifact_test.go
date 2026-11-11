@@ -10,7 +10,46 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	managedruntime "eva-deployer/tools/eva/internal/runtime"
 )
+
+func TestRuntimeArtifactPreservesManagedLibraryResources(t *testing.T) {
+	resolved := writeOriginalRelease(t, false)
+	mustWrite(t, filepath.Join(resolved.Root, "checksums.sha256"), "release checksums\n")
+	identity, err := BuildPreparationIdentity(resolved, "harbor.example.internal:32080", "eva")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := writeRuntimeFixture(t)
+	files := []string{
+		"venv/lib/python3.12/site-packages/package/credentials/provider/data.json",
+		"venv/lib/python3.13/site-packages/package/secrets/schema.json",
+		"venv/lib/python3.14/site-packages/package/workspace/session.py",
+		"venv/lib/python3.12/site-packages/package/certificates/public.pem",
+		"collections/ansible_collections/community/example/plugins/module_utils/credentials/store.py",
+	}
+	for _, name := range files {
+		mustWrite(t, filepath.Join(runtimeRoot, name), "installed library resource: "+name)
+	}
+	artifact, err := BuildRuntimeArtifact(t.TempDir(), identity, runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRuntimeArtifact(artifact.Directory, identity); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(t.TempDir(), "runtime")
+	if _, err := managedruntime.BootstrapOffline(filepath.Join(artifact.Directory, artifact.Manifest.Runtime.Archive), restored); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range files {
+		actual, err := os.ReadFile(filepath.Join(restored, name))
+		if err != nil || string(actual) != "installed library resource: "+name {
+			t.Fatalf("library resource changed or missing: %s: %v", name, err)
+		}
+	}
+}
 
 func TestRuntimeArtifactBuildLoadAndBootstrapTarget(t *testing.T) {
 	resolved := writeOriginalRelease(t, false)

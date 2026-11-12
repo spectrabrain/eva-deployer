@@ -147,6 +147,80 @@ func Resolve(input string) (Resolved, error) {
 	return Resolved{Root: root, MetadataPath: metadataPath, Metadata: metadata, Prepared: prepared}, nil
 }
 
+// ResolveWithVerifiedManifest resolves a Release directory whose
+// checksums.sha256 the caller has already checked against the files on disk
+// (eva-tool-installer runs `sha256sum --check --strict checksums.sha256` once,
+// before anything else). Artifacts such as eva-offline can be tens of GB, so
+// this applies the structural Resolve checks without reading them again:
+// every release.yaml digest must instead equal its checksums.sha256 entry,
+// which binds the already verified bytes to release.yaml. Callers that have
+// not verified the manifest themselves must use Resolve.
+func ResolveWithVerifiedManifest(input string) (Resolved, error) {
+	if input == "" {
+		input = "."
+	}
+	root, err := filepath.Abs(input)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("resolve release path: %w", err)
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		return Resolved{}, fmt.Errorf("read release path %s: %w", root, err)
+	}
+	if !info.IsDir() {
+		return Resolved{}, errors.New("release input must be a directory containing release.yaml and checksums.sha256")
+	}
+	metadataPath := filepath.Join(root, "release.yaml")
+	metadata, err := loadMetadata(metadataPath)
+	if err != nil {
+		return Resolved{}, err
+	}
+	prepared, err := hasPreparedMarker(root)
+	if err != nil {
+		return Resolved{}, err
+	}
+	if prepared {
+		// Resolve never hashes prepared Releases either.
+		if err := validatePrepared(root, metadata); err != nil {
+			return Resolved{}, err
+		}
+	} else if err := validateAgainstManifest(root, metadata); err != nil {
+		return Resolved{}, err
+	}
+	return Resolved{Root: root, MetadataPath: metadataPath, Metadata: metadata, Prepared: prepared}, nil
+}
+
+func validateAgainstManifest(root string, metadata Metadata) error {
+	if err := validateMetadata(metadata); err != nil {
+		return err
+	}
+	manifest, err := readChecksumManifest(filepath.Join(root, "checksums.sha256"))
+	if err != nil {
+		return fmt.Errorf("read Release checksum manifest: %w", err)
+	}
+	for _, artifact := range metadata.Artifacts {
+		path, err := artifactPath(root, artifact.File)
+		if err != nil {
+			return fmt.Errorf("artifact %q: %w", artifact.Name, err)
+		}
+		digest, ok := manifest[artifact.File]
+		if !ok {
+			return fmt.Errorf("artifact %q: checksums.sha256 has no entry for %s", artifact.Name, artifact.File)
+		}
+		if !strings.EqualFold(digest, artifact.SHA256) {
+			return fmt.Errorf("artifact %q: release.yaml digest does not match checksums.sha256", artifact.Name)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("artifact %q: read artifact file %s: %w", artifact.Name, path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("artifact %q: %s is not a regular file", artifact.Name, path)
+		}
+	}
+	return nil
+}
+
 func Prepare(resolved Resolved, installRoot string) (Prepared, error) {
 	if resolved.Prepared {
 		return Prepared{Root: resolved.Root, Metadata: resolved.Metadata}, nil

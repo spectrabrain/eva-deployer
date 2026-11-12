@@ -265,6 +265,8 @@ func TestInstallerOptionsAndSourceProtection(t *testing.T) {
 	}
 	if _, err := LoadInstaller(path, ""); err == nil {
 		t.Fatal("publicly readable installer config accepted")
+	} else if want := "has permissions 0644 (-rw-r--r--)"; !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "fix: chmod 600 "+path) {
+		t.Fatalf("permission error must show the mode and remediation for %s: %v", path, err)
 	}
 	link := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.Symlink(path, link); err != nil {
@@ -406,5 +408,13 @@ func TestInstallerInventoryWithAnsible(t *testing.T) {
 	vars := inventory.Meta.Hostvars["node-a"]
 	if vars["ansible_become"] != true || vars["ansible_become_password"] != "001234" || vars["ansible_password"] != "literal ' quotes # and spaces" {
 		t.Fatal("Ansible inventory changed variable values/types")
+	}
+}
+
+func TestInstallerPermissionErrorQuotesUnsafePaths(t *testing.T) {
+	err := installerPermissionError("/home/eva/my config's.yaml", 0o664)
+	want := "installer config /home/eva/my config's.yaml has permissions 0664 (-rw-rw-r--)"
+	if !strings.Contains(err.Error(), want) || !strings.HasSuffix(err.Error(), `fix: chmod 600 '/home/eva/my config'"'"'s.yaml'`) {
+		t.Fatalf("permission error = %q", err)
 	}
 }

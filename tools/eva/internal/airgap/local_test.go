@@ -244,6 +244,79 @@ func TestLocalCacheIsolationAndReuse(t *testing.T) {
 	}
 }
 
+func TestLocalCacheReuseChecksLayoutWithoutRehashing(t *testing.T) {
+	source, _ := localTestBundle(t)
+	prepared, err := release.Prepare(source, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := MaterializeLocalCache(source, prepared.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "models/agent/hf/model.bin")
+	original, err := os.ReadFile(target)
+	if err != nil || len(original) == 0 {
+		t.Fatalf("fixture cache file: %q %v", original, err)
+	}
+	contents, err := os.ReadFile(filepath.Join(root, localCacheReceipt))
+	if err != nil || !strings.Contains(string(contents), "size: ") {
+		t.Fatalf("cache receipt must record file sizes: %s %v", contents, err)
+	}
+
+	// Content was hashed during extraction; reuse must not read it again.
+	sameSize := bytes.Repeat([]byte("x"), len(original))
+	archiveTestWriteFile(t, target, sameSize)
+	if _, err := MaterializeLocalCache(source, prepared.Root); err != nil {
+		t.Fatalf("reuse re-hashed cache content: %v", err)
+	}
+
+	archiveTestWriteFile(t, target, append(sameSize, 'x'))
+	if _, err := MaterializeLocalCache(source, prepared.Root); err == nil {
+		t.Fatal("cache file with a changed size reused")
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeLocalCache(source, prepared.Root); err == nil {
+		t.Fatal("cache with a missing file reused")
+	}
+}
+
+func TestLocalCacheReuseAcceptsReceiptWithoutSizes(t *testing.T) {
+	source, _ := localTestBundle(t)
+	prepared, err := release.Prepare(source, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := MaterializeLocalCache(source, prepared.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, localCacheReceipt)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt cacheReceipt
+	if err := yaml.Unmarshal(contents, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	for index := range receipt.Files {
+		receipt.Files[index].Size = nil
+	}
+	legacy, err := yaml.Marshal(receipt)
+	if err != nil || strings.Contains(string(legacy), "size:") {
+		t.Fatalf("legacy receipt fixture: %s %v", legacy, err)
+	}
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MaterializeLocalCache(source, prepared.Root); err != nil {
+		t.Fatalf("cache from an older receipt rejected: %v", err)
+	}
+}
+
 func TestLocalDirectoryRejectsSymlinkBeforeCreatingChildren(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {

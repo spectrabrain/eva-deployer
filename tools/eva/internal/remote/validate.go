@@ -330,12 +330,19 @@ func ValidateOfflineAssets(root string) error {
 	return nil
 }
 
+// MissingImagesError carries only validated image references, so callers can
+// identify failed downloads without exposing upstream authentication diagnostics.
+type MissingImagesError struct {
+	ListName string
+	Images   []string
+}
+
+func (err *MissingImagesError) Error() string {
+	return fmt.Sprintf("image download is incomplete (%s): %s", err.ListName, strings.Join(err.Images, ", "))
+}
+
 func ValidateImageLists(root, allName, pulledName, missingName string) error {
 	all, err := imageList(root, filepath.Join("images", allName), true)
-	if err != nil {
-		return err
-	}
-	pulled, err := imageList(root, filepath.Join("images", pulledName), true)
 	if err != nil {
 		return err
 	}
@@ -344,7 +351,11 @@ func ValidateImageLists(root, allName, pulledName, missingName string) error {
 		return err
 	}
 	if len(missing) != 0 {
-		return errors.New("image missing list is not empty")
+		return &MissingImagesError{ListName: missingName, Images: missing}
+	}
+	pulled, err := imageList(root, filepath.Join("images", pulledName), true)
+	if err != nil {
+		return err
 	}
 	if !sameStrings(all, pulled) {
 		return errors.New("all and pulled image lists differ")

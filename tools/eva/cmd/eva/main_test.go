@@ -374,6 +374,12 @@ func TestInternalRegisterCurrentReleaseUsesManagedReceipt(t *testing.T) {
 	if err := run([]string{"internal", "validate-replaceable-current-release"}); err == nil {
 		t.Fatal("validate-replaceable-current-release accepted a missing --release")
 	}
+	if err := run([]string{"internal", "verify-installer-release", "--release", releaseRoot}); err != nil {
+		t.Fatalf("verify installer Release: %v", err)
+	}
+	if err := run([]string{"internal", "verify-installer-release"}); err == nil {
+		t.Fatal("verify-installer-release accepted a missing --release")
+	}
 	backup := filepath.Join(t.TempDir(), "current.yaml")
 	contents, err := os.ReadFile(defaultCurrentReleaseReceiptPath)
 	if err != nil {
@@ -498,7 +504,11 @@ artifacts:
 	if err := os.WriteFile(filepath.Join(root, "release.yaml"), []byte(metadata), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "checksums.sha256"), []byte("release checksums\n"), 0o600); err != nil {
+	manifest := ""
+	for _, name := range []string{"eva-tool.tar.gz", "eva-tool-installer.sh", "eva-infra.tar.gz", "eva-solution.tar.gz", "eva-offline.tar.gz"} {
+		manifest += fmt.Sprintf("%x  %s\n", sha256.Sum256([]byte(files[name])), name)
+	}
+	if err := os.WriteFile(filepath.Join(root, "checksums.sha256"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return root

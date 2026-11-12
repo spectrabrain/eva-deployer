@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+source "$REPO_ROOT/scripts/lib/docker_pull.sh"
 EVA_CACHE_ROOT="${EVA_CACHE_ROOT:-$REPO_ROOT/out/cache}"
 IMAGE_DIR="$EVA_CACHE_ROOT/images"
 
@@ -37,12 +38,18 @@ sort -u "$IMAGE_DIR/infra-images-all.txt" -o "$IMAGE_DIR/infra-images-all.txt"
 while IFS= read -r image; do
   [[ -z "$image" ]] && continue
   echo "[pull] $image"
-  if $DOCKER_CMD pull --platform "${PULL_PLATFORM:-linux/amd64}" "$image"; then
+  if eva_docker_pull_image "$image" --platform "${PULL_PLATFORM:-linux/amd64}"; then
     echo "$image" >> "$IMAGE_DIR/infra-images-pulled.txt"
   else
     echo "$image" >> "$IMAGE_DIR/infra-images-missing.txt"
   fi
 done < "$IMAGE_DIR/infra-images-all.txt"
+
+if [[ -s "$IMAGE_DIR/infra-images-missing.txt" ]]; then
+  echo "[ERROR] infra image download is incomplete; missing images:" >&2
+  sed 's/^/  /' "$IMAGE_DIR/infra-images-missing.txt" >&2
+  exit 1
+fi
 
 # Airgap preparation exports and validates both image archives in the Tool.
 # Standalone/Remote downloads retain their existing pause-image export.

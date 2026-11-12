@@ -149,7 +149,10 @@ func readVisionFile(name string, nonempty bool) ([]byte, error) {
 	return data, nil
 }
 
-func scanVisionFiles(directory, relative string) ([]visionFile, error) {
+// scanVisionFiles lists every file below directory. With hashContents false it
+// records only sizes; the caller supplies digests from an already verified
+// manifest instead of reading model weights again.
+func scanVisionFiles(directory, relative string, hashContents bool) ([]visionFile, error) {
 	if err := visionDirectory(directory); err != nil {
 		return nil, err
 	}
@@ -168,11 +171,19 @@ func scanVisionFiles(directory, relative string) ([]visionFile, error) {
 			key = relative + "/" + key
 		}
 		if entry.IsDir() {
-			children, err := scanVisionFiles(full, key)
+			children, err := scanVisionFiles(full, key, hashContents)
 			if err != nil {
 				return nil, err
 			}
 			files = append(files, children...)
+			continue
+		}
+		if !hashContents {
+			info, err := os.Lstat(full)
+			if err != nil || !visionRegular(info, true) {
+				return nil, errors.New("expected a safe regular Vision file")
+			}
+			files = append(files, visionFile{Path: key, Size: info.Size()})
 			continue
 		}
 		file, err := openVisionFile(full, true)
@@ -265,7 +276,20 @@ func ValidateVisionModels(cacheRoot string) error {
 	return err
 }
 
+// ValidateVisionModelsLayout is ValidateVisionModels for a cache whose file
+// contents were already verified, such as a Local cache extracted from a
+// digest-checked eva-offline. It checks the exact selection, schema, file list
+// and sizes against manifest.json but does not re-hash model weights.
+func ValidateVisionModelsLayout(cacheRoot string) error {
+	_, err := validateVisionModelsWith(cacheRoot, false)
+	return err
+}
+
 func validateVisionModels(cacheRoot string) (string, error) {
+	return validateVisionModelsWith(cacheRoot, true)
+}
+
+func validateVisionModelsWith(cacheRoot string, hashContents bool) (string, error) {
 	names, err := visionModelSelection()
 	if err != nil {
 		return "", err
@@ -316,10 +340,27 @@ func validateVisionModels(cacheRoot string) (string, error) {
 			return "", errors.New("Vision cache does not match exact model selection")
 		}
 	}
+	recorded := map[string]string{}
+	if !hashContents {
+		var manifest visionManifest
+		// A malformed manifest leaves digests empty and fails the comparison below.
+		if json.Unmarshal(data, &manifest) == nil {
+			for _, model := range manifest.Models {
+				for _, file := range model.Files {
+					recorded[model.Name+"\x00"+file.Path] = file.SHA256
+				}
+			}
+		}
+	}
 	for _, name := range names {
-		files, err := scanVisionFiles(filepath.Join(modelDir, name), "")
+		files, err := scanVisionFiles(filepath.Join(modelDir, name), "", hashContents)
 		if err != nil {
 			return "", err
+		}
+		if !hashContents {
+			for index := range files {
+				files[index].SHA256 = recorded[name+"\x00"+files[index].Path]
+			}
 		}
 		actual.Models = append(actual.Models, visionModel{Name: name, Files: files})
 	}

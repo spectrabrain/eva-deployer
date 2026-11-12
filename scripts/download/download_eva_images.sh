@@ -9,6 +9,7 @@ RENDER_DIR="$IMAGE_DIR/rendered"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 source "$REPO_ROOT/scripts/lib/load_versions.sh"
+source "$REPO_ROOT/scripts/lib/docker_pull.sh"
 load_deploy_versions
 
 EVA_AGENT_RELEASE="${EVA_AGENT_RELEASE:?missing EVA_AGENT_RELEASE (set in src/solution/version.yaml)}"
@@ -195,7 +196,7 @@ while IFS= read -r image; do
   if [[ "$PULL_SOURCE_IMAGES" == "true" ]]; then
     echo "[pull] $image"
     image_available=false
-    if $DOCKER_CMD pull "${pull_args[@]}" "$image"; then
+    if eva_docker_pull_image "$image" "${pull_args[@]}"; then
       image_available=true
     fi
   else
@@ -215,6 +216,11 @@ done < "$IMAGE_DIR/images-all.txt"
 pulled_count="$(wc -l < "$IMAGE_DIR/images-pulled.txt" | tr -d ' ')"
 missing_count="$(wc -l < "$IMAGE_DIR/images-missing.txt" | tr -d ' ')"
 echo "[info] pulled=$pulled_count missing=$missing_count"
+if (( missing_count > 0 )); then
+  echo "[ERROR] product image download is incomplete; missing images:" >&2
+  sed 's/^/  /' "$IMAGE_DIR/images-missing.txt" >&2
+  exit 1
+fi
 
 # 받은 이미지가 실제로 쓸 수 있는 상태인지 확인합니다. Architecture 가 비어 있으면
 # 플랫폼이 해석되지 않은 index 만 있는 것이고, docker save 결과가 대상 서버에서 깨집니다.

@@ -126,6 +126,7 @@ remote_backend_paths=(
   scripts/download/download_qdrant_snapshots.sh
   scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
+  scripts/lib/docker_pull.sh
   scripts/lib/vision_models.py
   scripts/lib/docker_registry_auth.py
   scripts/publish/push_images_to_repository.sh
@@ -152,6 +153,7 @@ remote_backend_shell_paths=(
   scripts/download/download_qdrant_snapshots.sh
   scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
+  scripts/lib/docker_pull.sh
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
   scripts/publish/push_vision_models_to_harbor.sh

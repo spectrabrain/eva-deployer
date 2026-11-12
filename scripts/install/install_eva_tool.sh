@@ -83,6 +83,11 @@ if ! awk '
   echo "[error] checksums.sha256 has an unsafe or invalid entry" >&2
   exit 1
 fi
+# This is the only pass that reads every Release file. Airgap artifacts such as
+# eva-offline can be tens of GB, so every later Release check (verify and the
+# receipt commands) trusts this manifest and compares release.yaml digests to
+# it instead of hashing the artifacts again.
+echo "[info] verifying Release checksums; large Airgap artifacts can take several minutes"
 if ! (cd "$release_root" && sha256sum --check --strict checksums.sha256 >/dev/null); then
   echo "[error] Release checksum verification failed" >&2
   exit 1
@@ -499,7 +504,7 @@ if [[ "$staged_tool_version" != "$release_version" ]]; then
   echo "[error] EVA Tool version $staged_tool_version does not match Release version $release_version" >&2
   exit 1
 fi
-if ! "$staging_dir/bin/eva" verify "$release_root" >/dev/null; then
+if ! "$staging_dir/bin/eva" internal verify-installer-release --release "$release_root" >/dev/null; then
   echo "[error] EVA Tool could not validate its installer Release" >&2
   exit 1
 fi

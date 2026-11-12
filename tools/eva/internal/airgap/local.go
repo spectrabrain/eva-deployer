@@ -62,7 +62,7 @@ func NewLocalService() LocalService {
 			return runProcess(ctx, remote.ProcessOptions{Path: "docker", Args: []string{"compose", "version"}, Env: localEnvironment(), Streams: remote.Streams{Stdout: io.Discard, Stderr: io.Discard}}) == nil
 		},
 		ValidateNewRegistry: validateNewLocalRegistry,
-		ValidateAssets:      validateAssets,
+		ValidateAssets:      validateLocalAssets,
 	}
 }
 

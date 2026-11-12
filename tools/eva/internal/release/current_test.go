@@ -384,3 +384,133 @@ func writeTestFile(t *testing.T, path, contents string) {
 		t.Fatal(err)
 	}
 }
+
+func TestResolveWithVerifiedManifestBindsReleaseMetadataToManifest(t *testing.T) {
+	root := currentTestRelease(t)
+	resolved, err := ResolveWithVerifiedManifest(root)
+	if err != nil {
+		t.Fatalf("valid Release rejected: %v", err)
+	}
+	full, err := Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Root != full.Root || resolved.Metadata.Version != full.Metadata.Version || len(resolved.Metadata.Artifacts) != len(full.Metadata.Artifacts) {
+		t.Fatalf("manifest resolve = %#v, full resolve = %#v", resolved, full)
+	}
+
+	cases := map[string]func(t *testing.T, root string){
+		"manifest digest differs from release.yaml": func(t *testing.T, root string) {
+			writeTestFile(t, filepath.Join(root, "checksums.sha256"),
+				checksum("tool")+"  eva-tool.tar.gz\n"+checksum("other infra")+"  eva-infra.tar.gz\n"+checksum("solution")+"  eva-solution.tar.gz\n")
+		},
+		"manifest has no entry for an artifact": func(t *testing.T, root string) {
+			writeTestFile(t, filepath.Join(root, "checksums.sha256"),
+				checksum("tool")+"  eva-tool.tar.gz\n"+checksum("solution")+"  eva-solution.tar.gz\n")
+		},
+		"manifest is missing": func(t *testing.T, root string) {
+			if err := os.Remove(filepath.Join(root, "checksums.sha256")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"artifact file is missing": func(t *testing.T, root string) {
+			if err := os.Remove(filepath.Join(root, "eva-infra.tar.gz")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"artifact is a directory": func(t *testing.T, root string) {
+			path := filepath.Join(root, "eva-infra.tar.gz")
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o750); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := currentTestRelease(t)
+			mutate(t, root)
+			if _, err := ResolveWithVerifiedManifest(root); err == nil {
+				t.Fatal("ResolveWithVerifiedManifest accepted an inconsistent Release")
+			}
+		})
+	}
+}
+
+func TestVerifiedManifestReceiptLifecycle(t *testing.T) {
+	root := t.TempDir()
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.96", "tool ci.96")
+	resolved, err := ResolveWithVerifiedManifest(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(t.TempDir(), "releases", "current.yaml")
+	if err := WriteCurrentReceiptWithVerifiedManifest(receiptPath, resolved, "eva-tool-installer", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// The receipt is interchangeable with one written after a full Resolve.
+	receipt, loaded, err := LoadCurrentRelease(receiptPath)
+	if err != nil || loaded.Root != root || receipt.ReleaseVersion != "0.1.0-ci.96" {
+		t.Fatalf("full load of manifest-written receipt = %#v, %#v, %v", receipt, loaded, err)
+	}
+	if _, _, err := LoadCurrentRelease(receiptPath); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "current.yaml")
+	contents, err := os.ReadFile(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, backup, string(contents))
+
+	// Same-path upgrade and its rollback keep the identity policy.
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.98", "tool ci.98")
+	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, root); err != nil {
+		t.Fatalf("same-path upgrade rejected: %v", err)
+	}
+	if err := RestoreCurrentReceiptWithVerifiedManifest(receiptPath, backup, root); err != nil {
+		t.Fatalf("same-path rollback rejected: %v", err)
+	}
+	writeVersionedCurrentTestRelease(t, root, "0.1.0-ci.96", "rebuilt tool ci.96")
+	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, root); err == nil {
+		t.Fatal("same version with a different identity was accepted")
+	}
+	if _, _, err := LoadCurrentRelease(receiptPath); err == nil {
+		t.Fatal("receipt identity drift was accepted")
+	}
+}
+
+func TestRegisteredCurrentReleaseIsNotRehashedButStillChecked(t *testing.T) {
+	oldRoot := t.TempDir()
+	newRoot := t.TempDir()
+	writeVersionedCurrentTestRelease(t, oldRoot, "0.1.0-ci.96", "tool ci.96")
+	writeVersionedCurrentTestRelease(t, newRoot, "0.1.0-ci.98", "tool ci.98")
+	receiptPath := filepath.Join(t.TempDir(), "current.yaml")
+	writeCurrentTestReceipt(t, receiptPath, oldRoot)
+
+	// Artifacts were fully verified at registration; later commands do not
+	// read them again, so same-size content changes are outside this check.
+	writeTestFile(t, filepath.Join(oldRoot, "eva-infra.tar.gz"), "infra 0.1.0-ci.XX")
+	if _, err := Select(SelectionOptions{ReceiptPath: receiptPath}); err != nil {
+		t.Fatalf("registered Release was re-hashed on selection: %v", err)
+	}
+	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, newRoot); err != nil {
+		t.Fatalf("switch from a registered Release root rejected: %v", err)
+	}
+	// An explicit, unregistered Release path is still fully verified.
+	if _, err := Select(SelectionOptions{Explicit: oldRoot, ReceiptPath: receiptPath}); err == nil {
+		t.Fatal("explicit Release selection skipped artifact verification")
+	}
+
+	if err := os.Remove(filepath.Join(oldRoot, "eva-infra.tar.gz")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Select(SelectionOptions{ReceiptPath: receiptPath}); err == nil {
+		t.Fatal("registered Release with a missing artifact was selected")
+	}
+	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, newRoot); err == nil {
+		t.Fatal("switch accepted a receipt whose own Release lost an artifact")
+	}
+}

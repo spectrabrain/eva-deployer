@@ -132,6 +132,7 @@ jobs:
           python3 scripts/test/test_eva_agent_release.py
           python3 scripts/test/test_existing_cluster_flow.py
           python3 scripts/test/test_n8n_remote.py
+          python3 scripts/test/test_docker_pull.py
           scripts/test/test_eva_component_values.sh
           scripts/test/test_eva_agent_dependency_defaults.sh
           scripts/test/test_eva_agent_reinstall_wait.sh

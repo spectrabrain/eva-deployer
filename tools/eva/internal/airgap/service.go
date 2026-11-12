@@ -210,12 +210,29 @@ func (service Service) Prepare(ctx context.Context, options Options) (string, er
 		if runErr != nil {
 			fmt.Fprintf(log, "\n[ERROR] backend execution failed: %v\n", runErr)
 		}
+		var imageErr error
+		switch step {
+		case "scripts/download/download_eva_images.sh":
+			imageErr = remote.ValidateImageLists(cache, "images-all.txt", "images-pulled.txt", "images-missing.txt")
+		case "scripts/download/download_infra_images.sh":
+			imageErr = remote.ValidateImageLists(cache, "infra-images-all.txt", "infra-images-pulled.txt", "infra-images-missing.txt")
+		}
+		if imageErr != nil {
+			fmt.Fprintf(log, "\n[ERROR] image download validation: %v\n", imageErr)
+		}
 		closeErr := log.Close()
 		if runErr != nil {
+			var missing *remote.MissingImagesError
+			if errors.As(imageErr, &missing) {
+				return "", fmt.Errorf("Airgap preparation stopped at %s: %w; inspect private log: %s; no Bundle was published", filepath.Base(step), missing, logPath)
+			}
 			return "", fmt.Errorf("Airgap preparation stopped at %s; inspect private log: %s; no Bundle was published", filepath.Base(step), logPath)
 		}
 		if closeErr != nil {
 			return "", fmt.Errorf("close private Airgap step log: %w", closeErr)
+		}
+		if imageErr != nil {
+			return "", fmt.Errorf("Airgap preparation stopped at %s: %w; inspect private log: %s; no Bundle was published", filepath.Base(step), imageErr, logPath)
 		}
 	}
 	if err := service.ValidateAssets(cache); err != nil {
@@ -428,14 +445,25 @@ func vllmValuesFile(catalog, profile string) (string, error) {
 }
 
 func validateAssets(cache string) error {
-	for _, validate := range []func(string) error{remote.ValidateOfflineAssets, remote.ValidateModels, remote.ValidateQdrantSnapshots, remote.ValidateVisionModels} {
+	return validateAssetsWith(cache, remote.ValidateVisionModels)
+}
+
+// validateLocalAssets checks a Local cache extracted on the target. Every file
+// was hashed while it was extracted from the digest-checked eva-offline, so
+// Vision model weights are matched to their manifest by layout and size only.
+func validateLocalAssets(cache string) error {
+	return validateAssetsWith(cache, remote.ValidateVisionModelsLayout)
+}
+
+func validateAssetsWith(cache string, validateVision func(string) error) error {
+	for _, validate := range []func(string) error{remote.ValidateOfflineAssets, remote.ValidateModels, remote.ValidateQdrantSnapshots, validateVision} {
 		if err := validate(cache); err != nil {
 			return err
 		}
 	}
 	for _, prefix := range []string{"", "infra-"} {
 		if err := remote.ValidateImageLists(cache, prefix+"images-all.txt", prefix+"images-pulled.txt", prefix+"images-missing.txt"); err != nil {
-			return err
+			return fmt.Errorf("%simages: %w", prefix, err)
 		}
 	}
 	for _, pattern := range []string{"python-debs/*.deb", "harbor/harbor-offline-installer-*.tgz", "nvidia/nvidia-driver-repo.tar.gz", "nvidia/nvidia-driver-repo.manifest.txt", "eva-iam/*.tgz", "eva-agent/eva-agent-init-*.tgz", "eva-agent/eva-agent-vllm-*.tgz", "qdrant/*.tgz", "k3s/k3s-airgap-images-amd64.tar.zst"} {

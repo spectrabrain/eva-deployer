@@ -198,6 +198,9 @@ func run(args []string) error {
 
 // runInternal contains installer-only commands. They are deliberately absent
 // from normal help because receipt lifecycle is owned by eva-tool-installer.
+// The installer verifies checksums.sha256 over the whole Release once before
+// calling them, so Release commands below use ResolveWithVerifiedManifest and
+// never re-hash multi-GB artifacts such as eva-offline.
 func runInternal(args []string) error {
 	if len(args) == 0 {
 		return errors.New("internal command is required")
@@ -225,19 +228,25 @@ func runInternal(args []string) error {
 		return fmt.Errorf("unexpected internal arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	switch args[0] {
+	case "verify-installer-release":
+		if *releaseRoot == "" || *selectedBy != "" || *backup != "" {
+			return errors.New("internal verify-installer-release requires only --release")
+		}
+		_, err := release.ResolveWithVerifiedManifest(*releaseRoot)
+		return err
 	case "register-current-release":
 		if *releaseRoot == "" || *selectedBy == "" || *backup != "" {
 			return errors.New("internal register-current-release requires --release and --selected-by")
 		}
-		resolved, err := release.Resolve(*releaseRoot)
+		resolved, err := release.ResolveWithVerifiedManifest(*releaseRoot)
 		if err != nil {
 			return err
 		}
 		receiptPath := internalCurrentReceiptPath()
-		if err := release.WriteCurrentReceipt(receiptPath, resolved, *selectedBy, currentReleaseNow()); err != nil {
+		if err := release.WriteCurrentReceiptWithVerifiedManifest(receiptPath, resolved, *selectedBy, currentReleaseNow()); err != nil {
 			return err
 		}
-		_, loaded, err := release.LoadCurrentRelease(receiptPath)
+		_, loaded, err := release.LoadCurrentReleaseWithVerifiedManifest(receiptPath)
 		if err != nil {
 			return fmt.Errorf("verify registered Current Release: %w", err)
 		}
@@ -249,12 +258,12 @@ func runInternal(args []string) error {
 		if *selectedBy != "" || *backup != "" {
 			return errors.New("internal validate-current-release accepts only optional --release")
 		}
-		_, loaded, err := release.LoadCurrentRelease(internalCurrentReceiptPath())
+		_, loaded, err := release.LoadCurrentReleaseWithVerifiedManifest(internalCurrentReceiptPath())
 		if err != nil {
 			return err
 		}
 		if *releaseRoot != "" {
-			expected, err := release.Resolve(*releaseRoot)
+			expected, err := release.ResolveWithVerifiedManifest(*releaseRoot)
 			if err != nil {
 				return err
 			}
@@ -267,13 +276,13 @@ func runInternal(args []string) error {
 		if *releaseRoot == "" || *selectedBy != "" || *backup != "" {
 			return errors.New("internal validate-replaceable-current-release requires only --release")
 		}
-		_, err := release.ValidateReplaceableCurrentReceipt(internalCurrentReceiptPath(), *releaseRoot)
+		_, err := release.ValidateReplaceableCurrentReceiptWithVerifiedManifest(internalCurrentReceiptPath(), *releaseRoot)
 		return err
 	case "restore-current-release":
 		if *backup == "" || *releaseRoot == "" || *selectedBy != "" {
 			return errors.New("internal restore-current-release requires --backup and --release")
 		}
-		return release.RestoreCurrentReceipt(internalCurrentReceiptPath(), *backup, *releaseRoot)
+		return release.RestoreCurrentReceiptWithVerifiedManifest(internalCurrentReceiptPath(), *backup, *releaseRoot)
 	case "clear-current-release":
 		if *releaseRoot != "" || *selectedBy != "" || *backup != "" {
 			return errors.New("internal clear-current-release accepts no options")

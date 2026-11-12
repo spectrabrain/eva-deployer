@@ -46,6 +46,27 @@ type InstallerTarget struct {
 	Values     map[string]map[string]any `yaml:"values,omitempty"`
 }
 
+// installerPermissionError names the file, its current mode and the exact
+// remediation, so an operator can fix a config created by an upload, copy or
+// editor (umask 0644/0664) without guessing which file or mode is wrong.
+func installerPermissionError(path string, mode fs.FileMode) error {
+	display := path
+	if absolute, err := filepath.Abs(path); err == nil {
+		display = absolute
+	}
+	return fmt.Errorf("installer config %s has permissions %04o (%s); it may contain credentials, so only its owner may read or write it (0600)\n  fix: chmod 600 %s",
+		display, mode, mode, shellQuoteIfNeeded(display))
+}
+
+var shellSafePath = regexp.MustCompile(`^[A-Za-z0-9_./~+:@%=,-]+$`)
+
+func shellQuoteIfNeeded(value string) string {
+	if shellSafePath.MatchString(value) {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
 // LoadInstaller validates without writing anything. Decoder diagnostics are
 // deliberately not echoed: YAML type errors can contain credential values.
 func LoadInstaller(path, requestedSiteID string) (Installer, error) {
@@ -57,7 +78,7 @@ func LoadInstaller(path, requestedSiteID string) (Installer, error) {
 		return Installer{}, errors.New("installer config must be a regular non-symlink file")
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return Installer{}, errors.New("installer config may contain credentials; restrict its permissions to 0600 (chmod 600)")
+		return Installer{}, installerPermissionError(path, info.Mode().Perm())
 	}
 	if info.Size() > maxInstallerBytes {
 		return Installer{}, errors.New("installer config exceeds the 8 MiB limit")

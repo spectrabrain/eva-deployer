@@ -35,6 +35,7 @@ remote_backend_paths=(
   scripts/download/download_qdrant_snapshots.sh
   scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
+  scripts/lib/docker_pull.sh
   scripts/lib/vision_models.py
   scripts/lib/docker_registry_auth.py
   scripts/publish/push_images_to_repository.sh
@@ -61,6 +62,7 @@ remote_backend_shell_paths=(
   scripts/download/download_qdrant_snapshots.sh
   scripts/download/download_vision_models.sh
   scripts/lib/load_versions.sh
+  scripts/lib/docker_pull.sh
   scripts/publish/push_images_to_repository.sh
   scripts/publish/push_qdrant_snapshots_to_harbor.sh
   scripts/publish/push_vision_models_to_harbor.sh
@@ -423,6 +425,13 @@ old_identity="$(same_receipt_field release_identity)"
 extract_same_path "$new_release_root"
 printf 'tampered\n' >> "$same_root/eva-infra_${new_version}.tar.gz"
 expect_same_path_rejected "a Release with a checksum mismatch"
+
+# Files still match checksums.sha256, so only the Tool's manifest binding of
+# release.yaml can reject this; the installer must not hash artifacts again.
+extract_same_path "$new_release_root"
+same_infra_digest="$(sha256sum "$same_root/eva-infra_${new_version}.tar.gz" | awk '{print $1}')"
+sed -i "s/$same_infra_digest/$(printf 'other infra\n' | sha256sum | awk '{print $1}')/" "$same_root/release.yaml"
+expect_same_path_rejected "release.yaml digests that disagree with checksums.sha256"
 
 extract_same_path "$release_root"
 printf '# rebuilt with different contents\n' >> "$same_root/release.yaml"

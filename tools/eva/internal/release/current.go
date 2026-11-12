@@ -62,11 +62,26 @@ func ReleaseIdentity(resolved Resolved) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// resolveFunc establishes trust in a Release root. Resolve re-hashes every
+// artifact; ResolveWithVerifiedManifest is for eva-tool-installer, which has
+// already verified checksums.sha256 over the whole Release once.
+type resolveFunc func(string) (Resolved, error)
+
 func WriteCurrentReceipt(path string, resolved Resolved, selectedBy string, now time.Time) error {
+	return writeCurrentReceipt(path, resolved, selectedBy, now, Resolve)
+}
+
+// WriteCurrentReceiptWithVerifiedManifest is WriteCurrentReceipt for a caller
+// that has already verified checksums.sha256; see ResolveWithVerifiedManifest.
+func WriteCurrentReceiptWithVerifiedManifest(path string, resolved Resolved, selectedBy string, now time.Time) error {
+	return writeCurrentReceipt(path, resolved, selectedBy, now, ResolveWithVerifiedManifest)
+}
+
+func writeCurrentReceipt(path string, resolved Resolved, selectedBy string, now time.Time, resolve resolveFunc) error {
 	if err := validateCurrentRoot(resolved.Root); err != nil {
 		return err
 	}
-	validated, err := Resolve(resolved.Root)
+	validated, err := resolve(resolved.Root)
 	if err != nil {
 		return fmt.Errorf("validate Current Release before writing receipt: %w", err)
 	}
@@ -99,6 +114,17 @@ func WriteCurrentReceipt(path string, resolved Resolved, selectedBy string, now 
 // different identity is rejected, because that is content drift rather than
 // an upgrade.
 func ValidateReplaceableCurrentReceipt(path, targetRoot string) (CurrentReceipt, error) {
+	return validateReplaceableCurrentReceipt(path, targetRoot, Resolve)
+}
+
+// ValidateReplaceableCurrentReceiptWithVerifiedManifest trusts the installer's
+// checksums.sha256 verification for targetRoot only. A receipt naming another
+// root still requires that other Release to pass a full Resolve.
+func ValidateReplaceableCurrentReceiptWithVerifiedManifest(path, targetRoot string) (CurrentReceipt, error) {
+	return validateReplaceableCurrentReceipt(path, targetRoot, ResolveWithVerifiedManifest)
+}
+
+func validateReplaceableCurrentReceipt(path, targetRoot string, resolveTarget resolveFunc) (CurrentReceipt, error) {
 	receipt, err := LoadCurrentReceipt(path)
 	if err != nil {
 		return CurrentReceipt{}, err
@@ -106,12 +132,12 @@ func ValidateReplaceableCurrentReceipt(path, targetRoot string) (CurrentReceipt,
 	if err := validateCurrentRoot(targetRoot); err != nil {
 		return CurrentReceipt{}, err
 	}
-	target, err := Resolve(targetRoot)
+	target, err := resolveTarget(targetRoot)
 	if err != nil {
 		return CurrentReceipt{}, fmt.Errorf("validate installer Release: %w", err)
 	}
 	if receipt.ReleaseRoot != target.Root {
-		if _, err := resolveCurrent(receipt); err != nil {
+		if _, err := resolveCurrent(receipt, Resolve); err != nil {
 			return CurrentReceipt{}, fmt.Errorf("validate existing Current Release: %w", err)
 		}
 		return receipt, nil
@@ -134,7 +160,17 @@ func ValidateReplaceableCurrentReceipt(path, targetRoot string) (CurrentReceipt,
 // backup is checked with the same replacement policy the installer applied
 // before the transaction, so a same-path upgrade can still roll back.
 func RestoreCurrentReceipt(path, backupPath, targetRoot string) error {
-	if _, err := ValidateReplaceableCurrentReceipt(backupPath, targetRoot); err != nil {
+	return restoreCurrentReceipt(path, backupPath, targetRoot, Resolve)
+}
+
+// RestoreCurrentReceiptWithVerifiedManifest is RestoreCurrentReceipt with the
+// target trust policy of ValidateReplaceableCurrentReceiptWithVerifiedManifest.
+func RestoreCurrentReceiptWithVerifiedManifest(path, backupPath, targetRoot string) error {
+	return restoreCurrentReceipt(path, backupPath, targetRoot, ResolveWithVerifiedManifest)
+}
+
+func restoreCurrentReceipt(path, backupPath, targetRoot string, resolveTarget resolveFunc) error {
+	if _, err := validateReplaceableCurrentReceipt(backupPath, targetRoot, resolveTarget); err != nil {
 		return fmt.Errorf("validate Current Release receipt backup: %w", err)
 	}
 	contents, err := os.ReadFile(backupPath)
@@ -168,11 +204,21 @@ func ClearCurrentReceipt(path string) error {
 
 // LoadCurrentRelease verifies both the receipt and the Release it names.
 func LoadCurrentRelease(path string) (CurrentReceipt, Resolved, error) {
+	return loadCurrentRelease(path, Resolve)
+}
+
+// LoadCurrentReleaseWithVerifiedManifest is LoadCurrentRelease for a caller
+// that has already verified the named Release's checksums.sha256.
+func LoadCurrentReleaseWithVerifiedManifest(path string) (CurrentReceipt, Resolved, error) {
+	return loadCurrentRelease(path, ResolveWithVerifiedManifest)
+}
+
+func loadCurrentRelease(path string, resolve resolveFunc) (CurrentReceipt, Resolved, error) {
 	receipt, err := LoadCurrentReceipt(path)
 	if err != nil {
 		return CurrentReceipt{}, Resolved{}, err
 	}
-	resolved, err := resolveCurrent(receipt)
+	resolved, err := resolveCurrent(receipt, resolve)
 	if err != nil {
 		return CurrentReceipt{}, Resolved{}, err
 	}
@@ -270,7 +316,7 @@ func Select(options SelectionOptions) (Selected, error) {
 	}
 	receipt, err := LoadCurrentReceipt(options.ReceiptPath)
 	if err == nil {
-		resolved, err := resolveCurrent(receipt)
+		resolved, err := resolveCurrent(receipt, Resolve)
 		if err != nil {
 			return Selected{}, fmt.Errorf("validate current Release receipt: %w", err)
 		}
@@ -293,11 +339,11 @@ func resolveSelectionInput(input, inboxRoot string) (Resolved, error) {
 	return Resolve(input)
 }
 
-func resolveCurrent(receipt CurrentReceipt) (Resolved, error) {
+func resolveCurrent(receipt CurrentReceipt, resolve resolveFunc) (Resolved, error) {
 	if err := validateCurrentRoot(receipt.ReleaseRoot); err != nil {
 		return Resolved{}, err
 	}
-	resolved, err := Resolve(receipt.ReleaseRoot)
+	resolved, err := resolve(receipt.ReleaseRoot)
 	if err != nil {
 		return Resolved{}, err
 	}

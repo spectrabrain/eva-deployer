@@ -759,6 +759,64 @@ func TestServicePrepareStopsAtUnresolvableBackend(t *testing.T) {
 	}
 }
 
+func TestServicePrepareStopsAtIncompleteImageDownload(t *testing.T) {
+	for _, step := range []string{"scripts/download/download_eva_images.sh", "scripts/download/download_infra_images.sh"} {
+		for _, backendFailed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/failed=%t", filepath.Base(step), backendFailed), func(t *testing.T) {
+				f := newServiceTestFixture(t)
+				original := f.service.Run
+				image := "registry.suse.com/bci/bci-base:latest"
+				secret := f.options.AWSCredential.SecretAccessKey
+				f.service.Run = func(ctx context.Context, options remote.ProcessOptions) error {
+					if err := original(ctx, options); err != nil {
+						return err
+					}
+					if filepath.Base(options.Path) != filepath.Base(step) {
+						return nil
+					}
+					prefix := ""
+					if strings.Contains(step, "infra_images") {
+						prefix = "infra-"
+					}
+					for name, contents := range map[string]string{
+						prefix + "images-all.txt":     image + "\n",
+						prefix + "images-pulled.txt":  "",
+						prefix + "images-missing.txt": image + "\n",
+					} {
+						archiveTestWriteFile(t, filepath.Join(options.Env["EVA_CACHE_ROOT"], "images", name), []byte(contents))
+					}
+					fmt.Fprintln(options.Streams.Stderr, "upstream private diagnostic: "+secret)
+					if backendFailed {
+						return errors.New("upstream private failure: " + secret)
+					}
+					return nil
+				}
+				result, err := f.service.Prepare(context.Background(), f.options)
+				if err == nil || result != "" || !strings.Contains(err.Error(), image) ||
+					!strings.Contains(err.Error(), filepath.Base(step)) || strings.Contains(err.Error(), secret) {
+					t.Fatalf("incomplete download was accepted or diagnosed incorrectly: %q, %v", result, err)
+				}
+				var missing *remote.MissingImagesError
+				if !errors.As(err, &missing) || len(missing.Images) != 1 || missing.Images[0] != image {
+					t.Fatal("failed image was lost when no images had been pulled")
+				}
+				if filepath.Base(f.calls[len(f.calls)-1].Path) != filepath.Base(step) || f.validations != 0 || f.exports != 0 {
+					t.Fatal("failed image download reached later downloads or export")
+				}
+				logs, err := filepath.Glob(filepath.Join(f.service.LogRoot, "prepare-*", filepath.Base(step)+".log"))
+				if err != nil || len(logs) != 1 {
+					t.Fatalf("failed download log is missing: %v, %v", logs, err)
+				}
+				contents, err := os.ReadFile(logs[0])
+				if err != nil || !strings.Contains(string(contents), secret) || !strings.Contains(string(contents), image) {
+					t.Fatalf("private diagnostics did not survive failed preparation: %v", err)
+				}
+				f.assertClean()
+			})
+		}
+	}
+}
+
 func TestServicePrepareRejectsIncompleteAssets(t *testing.T) {
 	for _, relative := range []string{
 		"manifest.txt", "apt/debs/a.deb", "docker/debs/a.deb", "nvidia/container-toolkit-debs/a.deb", "tools/oras",

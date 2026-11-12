@@ -445,7 +445,18 @@ func vllmValuesFile(catalog, profile string) (string, error) {
 }
 
 func validateAssets(cache string) error {
-	for _, validate := range []func(string) error{remote.ValidateOfflineAssets, remote.ValidateModels, remote.ValidateQdrantSnapshots, remote.ValidateVisionModels} {
+	return validateAssetsWith(cache, remote.ValidateVisionModels)
+}
+
+// validateLocalAssets checks a Local cache extracted on the target. Every file
+// was hashed while it was extracted from the digest-checked eva-offline, so
+// Vision model weights are matched to their manifest by layout and size only.
+func validateLocalAssets(cache string) error {
+	return validateAssetsWith(cache, remote.ValidateVisionModelsLayout)
+}
+
+func validateAssetsWith(cache string, validateVision func(string) error) error {
+	for _, validate := range []func(string) error{remote.ValidateOfflineAssets, remote.ValidateModels, remote.ValidateQdrantSnapshots, validateVision} {
 		if err := validate(cache); err != nil {
 			return err
 		}

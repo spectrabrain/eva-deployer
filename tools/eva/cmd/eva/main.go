@@ -246,7 +246,7 @@ func runInternal(args []string) error {
 		if err := release.WriteCurrentReceiptWithVerifiedManifest(receiptPath, resolved, *selectedBy, currentReleaseNow()); err != nil {
 			return err
 		}
-		_, loaded, err := release.LoadCurrentReleaseWithVerifiedManifest(receiptPath)
+		_, loaded, err := release.LoadCurrentRelease(receiptPath)
 		if err != nil {
 			return fmt.Errorf("verify registered Current Release: %w", err)
 		}
@@ -258,7 +258,7 @@ func runInternal(args []string) error {
 		if *selectedBy != "" || *backup != "" {
 			return errors.New("internal validate-current-release accepts only optional --release")
 		}
-		_, loaded, err := release.LoadCurrentReleaseWithVerifiedManifest(internalCurrentReceiptPath())
+		_, loaded, err := release.LoadCurrentRelease(internalCurrentReceiptPath())
 		if err != nil {
 			return err
 		}

@@ -50,9 +50,10 @@ sudo bash ./eva-tool-installer.sh
 sudo eva verify
 ```
 
-installer는 Tool archive와 Base Release checksum을 검증하고, 실행한 Release를
-Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에서도 이 Base Release의
-무결성을 확인합니다. 다른 Release를 확인할 때만 `sudo eva verify --release <path-or-version>`를
+installer는 Tool archive와 Base Release checksum을 한 번 전체 검증하고, 실행한 Release를
+Current Release로 등록합니다. 따라서 `sudo eva verify`는 새 shell에서도 이 등록된 Release의
+구성·식별 정보(release.yaml·checksums.sha256)를 다시 해싱 없이 확인합니다. 등록되지 않은 다른
+Release를 확인할 때만 `sudo eva verify --release <path-or-version>`를
 명시합니다. 아래 Main preparation/verify/install도 인자 없이 같은 Current Release를
 사용합니다. 다른 Release가 필요한 경우에만 해당 Remote 명령에 `RELEASE_PATH`를 명시합니다.
 

@@ -21,6 +21,8 @@ const localCacheReceipt = ".eva-airgap-cache.yaml"
 type cacheFile struct {
 	Path   string `yaml:"path"`
 	SHA256 string `yaml:"sha256"`
+	// Size is absent in receipts written before reuse stopped re-hashing.
+	Size *int64 `yaml:"size,omitempty"`
 }
 
 type cacheReceipt struct {
@@ -163,7 +165,7 @@ func extractLocalCache(offline, destination, expectedDigest string) error {
 			return err
 		}
 		hash := sha256.New()
-		_, copyErr := io.Copy(io.MultiWriter(output, hash), reader)
+		size, copyErr := io.Copy(io.MultiWriter(output, hash), reader)
 		closeErr := output.Close()
 		if copyErr != nil {
 			return copyErr
@@ -171,7 +173,7 @@ func extractLocalCache(offline, destination, expectedDigest string) error {
 		if closeErr != nil {
 			return closeErr
 		}
-		receipt.Files = append(receipt.Files, cacheFile{Path: relative, SHA256: hex.EncodeToString(hash.Sum(nil))})
+		receipt.Files = append(receipt.Files, cacheFile{Path: relative, SHA256: hex.EncodeToString(hash.Sum(nil)), Size: &size})
 	}
 	if _, err := io.Copy(io.Discard, compressed); err != nil {
 		return err
@@ -192,6 +194,11 @@ func extractLocalCache(offline, destination, expectedDigest string) error {
 	return os.WriteFile(filepath.Join(destination, localCacheReceipt), contents, 0o600)
 }
 
+// validateLocalCache decides whether an existing cache can be reused. Its
+// content was verified once while it was extracted (the eva-offline digest and
+// every file's SHA-256 are recorded in the receipt), so reuse only checks that
+// the receipt belongs to this Bundle and that every recorded file is still a
+// regular file of the recorded size. It never re-reads the multi-GB cache.
 func validateLocalCache(root, offlineDigest string) error {
 	if err := localDirectory(root); err != nil {
 		return err
@@ -217,18 +224,15 @@ func validateLocalCache(root, offlineDigest string) error {
 		if err := localDirectory(filepath.Dir(target)); err != nil {
 			return err
 		}
-		input, err := openArchiveSource(target, nil)
+		info, err := os.Lstat(target)
 		if err != nil {
-			return err
+			return fmt.Errorf("Local cache file is missing: %s", name)
 		}
-		hash := sha256.New()
-		_, copyErr := io.Copy(hash, input)
-		input.Close()
-		if copyErr != nil {
-			return copyErr
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("Local cache file is not a regular file: %s", name)
 		}
-		if hex.EncodeToString(hash.Sum(nil)) != entry.SHA256 {
-			return fmt.Errorf("Local cache checksum mismatch: %s", name)
+		if entry.Size != nil && info.Size() != *entry.Size {
+			return fmt.Errorf("Local cache file size changed: %s", name)
 		}
 	}
 	return nil

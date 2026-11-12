@@ -62,9 +62,9 @@ func ReleaseIdentity(resolved Resolved) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-// resolveFunc establishes trust in a Release root. Resolve re-hashes every
-// artifact; ResolveWithVerifiedManifest is for eva-tool-installer, which has
-// already verified checksums.sha256 over the whole Release once.
+// resolveFunc establishes trust in a Release root that is about to be
+// registered. Resolve hashes every artifact; ResolveWithVerifiedManifest is
+// for eva-tool-installer, which has already verified checksums.sha256 once.
 type resolveFunc func(string) (Resolved, error)
 
 func WriteCurrentReceipt(path string, resolved Resolved, selectedBy string, now time.Time) error {
@@ -118,8 +118,8 @@ func ValidateReplaceableCurrentReceipt(path, targetRoot string) (CurrentReceipt,
 }
 
 // ValidateReplaceableCurrentReceiptWithVerifiedManifest trusts the installer's
-// checksums.sha256 verification for targetRoot only. A receipt naming another
-// root still requires that other Release to pass a full Resolve.
+// checksums.sha256 verification for targetRoot. A receipt naming another root
+// is checked like any registered Current Release (see resolveCurrent).
 func ValidateReplaceableCurrentReceiptWithVerifiedManifest(path, targetRoot string) (CurrentReceipt, error) {
 	return validateReplaceableCurrentReceipt(path, targetRoot, ResolveWithVerifiedManifest)
 }
@@ -137,7 +137,7 @@ func validateReplaceableCurrentReceipt(path, targetRoot string, resolveTarget re
 		return CurrentReceipt{}, fmt.Errorf("validate installer Release: %w", err)
 	}
 	if receipt.ReleaseRoot != target.Root {
-		if _, err := resolveCurrent(receipt, Resolve); err != nil {
+		if _, err := resolveCurrent(receipt); err != nil {
 			return CurrentReceipt{}, fmt.Errorf("validate existing Current Release: %w", err)
 		}
 		return receipt, nil
@@ -202,23 +202,14 @@ func ClearCurrentReceipt(path string) error {
 	return nil
 }
 
-// LoadCurrentRelease verifies both the receipt and the Release it names.
+// LoadCurrentRelease validates the receipt and the registered Release it names
+// without re-hashing artifacts; see resolveCurrent.
 func LoadCurrentRelease(path string) (CurrentReceipt, Resolved, error) {
-	return loadCurrentRelease(path, Resolve)
-}
-
-// LoadCurrentReleaseWithVerifiedManifest is LoadCurrentRelease for a caller
-// that has already verified the named Release's checksums.sha256.
-func LoadCurrentReleaseWithVerifiedManifest(path string) (CurrentReceipt, Resolved, error) {
-	return loadCurrentRelease(path, ResolveWithVerifiedManifest)
-}
-
-func loadCurrentRelease(path string, resolve resolveFunc) (CurrentReceipt, Resolved, error) {
 	receipt, err := LoadCurrentReceipt(path)
 	if err != nil {
 		return CurrentReceipt{}, Resolved{}, err
 	}
-	resolved, err := resolveCurrent(receipt, resolve)
+	resolved, err := resolveCurrent(receipt)
 	if err != nil {
 		return CurrentReceipt{}, Resolved{}, err
 	}
@@ -316,7 +307,7 @@ func Select(options SelectionOptions) (Selected, error) {
 	}
 	receipt, err := LoadCurrentReceipt(options.ReceiptPath)
 	if err == nil {
-		resolved, err := resolveCurrent(receipt, Resolve)
+		resolved, err := resolveCurrent(receipt)
 		if err != nil {
 			return Selected{}, fmt.Errorf("validate current Release receipt: %w", err)
 		}
@@ -339,11 +330,16 @@ func resolveSelectionInput(input, inboxRoot string) (Resolved, error) {
 	return Resolve(input)
 }
 
-func resolveCurrent(receipt CurrentReceipt, resolve resolveFunc) (Resolved, error) {
+// resolveCurrent trusts the full verification done once when the Release was
+// registered (eva-tool-installer's checksums.sha256 pass, or Resolve in
+// WriteCurrentReceipt). Every later command only re-checks structure, the
+// release.yaml/checksums.sha256 binding and the receipt identity, so a
+// multi-GB eva-offline artifact is not read again on each eva invocation.
+func resolveCurrent(receipt CurrentReceipt) (Resolved, error) {
 	if err := validateCurrentRoot(receipt.ReleaseRoot); err != nil {
 		return Resolved{}, err
 	}
-	resolved, err := resolve(receipt.ReleaseRoot)
+	resolved, err := ResolveWithVerifiedManifest(receipt.ReleaseRoot)
 	if err != nil {
 		return Resolved{}, err
 	}

@@ -286,8 +286,9 @@ Vision 모델은 이후 `eva install`의 Vision 단계에서 게시하고 서비
 기존 Harbor의 설정과 데이터를 재사용하며, 필요한 자산은 Bundle에서 가져옵니다.
 
 `[OK] Local preparation completed`를 확인한 뒤 설치를 진행합니다.
-재실행 시 같은 Bundle의 캐시는 checksum 검증 후 재사용합니다. 다른 Bundle의 캐시나 손상된
-캐시는 덮어쓰지 않으므로 오류 내용을 확인하고 조치합니다.
+캐시 파일의 checksum은 처음 풀 때 한 번 검증합니다. 재실행이나 `eva preflight gpu`·`eva install`은
+같은 Bundle의 캐시를 파일 목록·크기만 확인하고 다시 해싱하지 않고 재사용합니다. 다른 Bundle의 캐시나
+파일이 빠지거나 크기가 바뀐 캐시는 덮어쓰지 않으므로 오류 내용을 확인하고 조치합니다.
 외부 IAM·Redis 접근, GPU, 인증서의 실제 유효성은 대상 환경에서 확인합니다.
 
 ### GPU preflight
@@ -369,7 +370,7 @@ sudo eva inspect logs --tail 200
 
 | 상황 | 다음 조치 |
 | --- | --- |
-| `local prepare` 실패 | 터미널의 실패 단계와 원인을 확인하고 같은 준비 명령 재실행; 기존 캐시 checksum 오류는 준비 담당자가 확인 |
+| `local prepare` 실패 | 터미널의 실패 단계와 원인을 확인하고 같은 준비 명령 재실행; 기존 캐시 파일 누락·크기 불일치 오류는 준비 담당자가 확인 |
 | cache·Chart·모델 누락 또는 OS 패키지 불일치 | 준비 담당자가 대상 환경에 맞는 Bundle을 다시 준비·검증 |
 | image pull 실패 | Harbor 주소·인증·적재 태그와 node/Pod 접근 확인 |
 | Vision 모델 준비 실패 | 캐시 무결성·모델 선택, Harbor 접근·게시 권한과 Vision 단계 로그 확인 |

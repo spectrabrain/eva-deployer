@@ -95,6 +95,22 @@ func TestValidateVisionModelsExactSafeCache(t *testing.T) {
 	}
 }
 
+func TestValidateVisionModelsLayoutSkipsContentHashing(t *testing.T) {
+	root := t.TempDir()
+	writeVisionFixture(t, root, nil)
+	if err := ValidateVisionModelsLayout(root); err != nil {
+		t.Fatalf("valid Vision cache rejected by layout validation: %v", err)
+	}
+	model := filepath.Join(root, "vision-models/model_dir/Owl-v2/weights/model.bin")
+	mustWrite(t, model, "Tiny model Owl-v2\n")
+	if err := ValidateVisionModelsLayout(root); err != nil {
+		t.Fatalf("layout validation re-hashed model content: %v", err)
+	}
+	if err := ValidateVisionModels(root); err == nil {
+		t.Fatal("full validation missed a same-size content change")
+	}
+}
+
 func TestValidateVisionModelsRejectsUnsafeOrMismatchedCaches(t *testing.T) {
 	model := "vision-models/model_dir/Owl-v2/weights/model.bin"
 	for _, tc := range []struct {
@@ -191,6 +207,10 @@ func TestValidateVisionModelsRejectsUnsafeOrMismatchedCaches(t *testing.T) {
 			if err := ValidateVisionModels(root); err == nil {
 				t.Fatal("invalid Vision cache accepted")
 			}
+			// Only content hashing can see a same-size change; layout checks the rest.
+			if err := ValidateVisionModelsLayout(root); err == nil && tc.name != "same size corruption" {
+				t.Fatal("invalid Vision cache accepted by layout validation")
+			}
 		})
 	}
 	for _, name := range []string{".aws/credentials", "credentials.json", ".cache/asset", ".env.prod", "aws_key.ini", "harbor.yml", "model.lock", "model.incomplete", "tls.key", "tls.pem", "tls.p12", ".netrc", "id_rsa", "bad name.bin"} {
@@ -200,6 +220,9 @@ func TestValidateVisionModelsRejectsUnsafeOrMismatchedCaches(t *testing.T) {
 			mustWrite(t, filepath.Join(root, "vision-models/model_dir/Owl-v2", name), "private")
 			if err := ValidateVisionModels(root); err == nil {
 				t.Fatal("unsafe file name accepted")
+			}
+			if err := ValidateVisionModelsLayout(root); err == nil {
+				t.Fatal("unsafe file name accepted by layout validation")
 			}
 		})
 	}
@@ -221,6 +244,10 @@ func TestValidateVisionModelsRejectsUnsafeOrMismatchedCaches(t *testing.T) {
 			})
 			if err := ValidateVisionModels(root); err == nil {
 				t.Fatal("invalid file metadata accepted")
+			}
+			// Layout validation takes digests from the manifest it trusts.
+			if err := ValidateVisionModelsLayout(root); err == nil && tc.key != "sha256" {
+				t.Fatal("invalid file metadata accepted by layout validation")
 			}
 		})
 	}

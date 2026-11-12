@@ -455,7 +455,7 @@ func TestVerifiedManifestReceiptLifecycle(t *testing.T) {
 	if err != nil || loaded.Root != root || receipt.ReleaseVersion != "0.1.0-ci.96" {
 		t.Fatalf("full load of manifest-written receipt = %#v, %#v, %v", receipt, loaded, err)
 	}
-	if _, _, err := LoadCurrentReleaseWithVerifiedManifest(receiptPath); err != nil {
+	if _, _, err := LoadCurrentRelease(receiptPath); err != nil {
 		t.Fatal(err)
 	}
 	backup := filepath.Join(t.TempDir(), "current.yaml")
@@ -477,24 +477,40 @@ func TestVerifiedManifestReceiptLifecycle(t *testing.T) {
 	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, root); err == nil {
 		t.Fatal("same version with a different identity was accepted")
 	}
-	if _, _, err := LoadCurrentReleaseWithVerifiedManifest(receiptPath); err == nil {
+	if _, _, err := LoadCurrentRelease(receiptPath); err == nil {
 		t.Fatal("receipt identity drift was accepted")
 	}
 }
 
-func TestVerifiedManifestReplaceStillFullyValidatesOtherRoot(t *testing.T) {
+func TestRegisteredCurrentReleaseIsNotRehashedButStillChecked(t *testing.T) {
 	oldRoot := t.TempDir()
 	newRoot := t.TempDir()
 	writeVersionedCurrentTestRelease(t, oldRoot, "0.1.0-ci.96", "tool ci.96")
 	writeVersionedCurrentTestRelease(t, newRoot, "0.1.0-ci.98", "tool ci.98")
 	receiptPath := filepath.Join(t.TempDir(), "current.yaml")
 	writeCurrentTestReceipt(t, receiptPath, oldRoot)
-	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, newRoot); err != nil {
-		t.Fatalf("switch from a valid Release root rejected: %v", err)
+
+	// Artifacts were fully verified at registration; later commands do not
+	// read them again, so same-size content changes are outside this check.
+	writeTestFile(t, filepath.Join(oldRoot, "eva-infra.tar.gz"), "infra 0.1.0-ci.XX")
+	if _, err := Select(SelectionOptions{ReceiptPath: receiptPath}); err != nil {
+		t.Fatalf("registered Release was re-hashed on selection: %v", err)
 	}
-	// The installer only verified newRoot, so the old root is fully re-hashed.
-	writeTestFile(t, filepath.Join(oldRoot, "eva-infra.tar.gz"), "tampered")
+	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, newRoot); err != nil {
+		t.Fatalf("switch from a registered Release root rejected: %v", err)
+	}
+	// An explicit, unregistered Release path is still fully verified.
+	if _, err := Select(SelectionOptions{Explicit: oldRoot, ReceiptPath: receiptPath}); err == nil {
+		t.Fatal("explicit Release selection skipped artifact verification")
+	}
+
+	if err := os.Remove(filepath.Join(oldRoot, "eva-infra.tar.gz")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Select(SelectionOptions{ReceiptPath: receiptPath}); err == nil {
+		t.Fatal("registered Release with a missing artifact was selected")
+	}
 	if _, err := ValidateReplaceableCurrentReceiptWithVerifiedManifest(receiptPath, newRoot); err == nil {
-		t.Fatal("switch accepted a receipt whose own Release has a corrupted artifact")
+		t.Fatal("switch accepted a receipt whose own Release lost an artifact")
 	}
 }

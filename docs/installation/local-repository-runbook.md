@@ -138,6 +138,55 @@ AWS 인증과 고객 설치 설정·TLS 개인 키는 Bundle에 포함하지 않
 | 설치 담당자 | Local 설치 서버 | 3~8절의 환경 확인·Tool 설치·설정·Local 준비·설치·결과 확인 |
 | 운영 담당자 | Local 설치 서버 및 기존 Harbor 서버 | Harbor 주소와 기존 인증, 서비스 주소·인증서·라이선스·데이터 보존 조건 인계 |
 
+### Airgap Bundle 파일 구조
+
+`eva airgap prepare`가 생성하는 Bundle은 **Base Release와 오프라인 설치 자산**을 함께 포함합니다.
+압축 내부 최상위 구조는 다음과 같습니다. `<version>`은 실제 Release 버전입니다.
+
+```text
+eva-airgap-bundle_<version>_linux_amd64.tar.gz
+├── README.md
+├── release.yaml                         # 버전·플랫폼·구성 파일·SHA-256
+├── checksums.sha256                     # 파일별 무결성 검증
+├── eva-tool-installer.sh                # Tool 설치 스크립트
+├── eva-tool_<version>_linux_amd64.tar.gz # EVA CLI
+├── eva-infra_<version>.tar.gz           # 인프라 설치 코드
+├── eva-solution_<version>.tar.gz        # EVA 서비스 설치 코드
+└── eva-offline_<version>_linux_amd64.tar.gz
+                                        # Runtime·패키지·차트·이미지·모델
+```
+
+오프라인 자산 압축파일의 주요 구성은 다음과 같습니다. 세부 파일명·버전은 Release에 따라 달라집니다.
+
+```text
+runtime/                         # Ansible·Helm 등 관리형 실행 환경
+out/cache/
+├── airgap-preparation.yaml       # 선택한 GPU profile·드라이버 등 준비 정보
+├── manifest.txt
+├── apt/                         # OS 의존 패키지
+├── docker/                      # Docker 설치 패키지
+├── nvidia/                      # 드라이버·Container Toolkit
+├── python-debs/                 # Python venv 관련 패키지
+├── wheels/                      # Python 패키지
+├── aws/ · cuda/ · helm/          # 설치 도구·바이너리
+├── k3s/ · k8s/ · nfs/ · tools/
+├── eva-app/ · eva-iam/           # 컴포넌트별 차트·Values 등
+├── eva-agent/ · eva-vision/ · qdrant/
+├── images/
+│   ├── eva-images.tar            # 제품·보조 서비스·인프라 이미지
+│   ├── k3s-images.tar
+│   └── airgap-images.txt
+├── models/                      # Agent 모델
+├── vision-models/               # Vision 모델
+├── qdrant-snapshots/             # Qdrant 초기 데이터
+├── harbor/                      # Harbor 설치 파일
+└── display_mode_selector/        # 옵션으로 지정한 추가 자산
+```
+
+vLLM 이미지는 1절에서 선택한 GPU profile 기준으로 포함됩니다. AWS 인증·고객 설치 설정·TLS 개인 키와
+기존 운영 데이터·DB 백업은 포함하지 않습니다. 캐시와 Runtime은 6절의 `eva local prepare`가 자동 배치하므로
+내부 압축파일을 수동으로 풀거나 파일을 따로 옮길 필요가 없습니다.
+
 ## 3. [Local 설치 서버] 설치 전 확인
 
 | 항목 | 진행 조건 |

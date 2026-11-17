@@ -16,6 +16,7 @@ import (
 
 	"eva-deployer/tools/eva/internal/release"
 	"eva-deployer/tools/eva/internal/remote"
+	managedruntime "eva-deployer/tools/eva/internal/runtime"
 	"eva-deployer/tools/eva/internal/workspace"
 	"gopkg.in/yaml.v3"
 )
@@ -357,5 +358,68 @@ func TestLocalPrepareRequiresApprovalAndLocalTarget(t *testing.T) {
 	input.Targets["server-a"] = workspace.InstallerTarget{Ansible: map[string]any{"ansible_connection": "ssh"}}
 	if _, err := service.Prepare(context.Background(), LocalOptions{Config: input, Yes: true}); err == nil {
 		t.Fatal("SSH controller prepared itself")
+	}
+}
+
+func TestEnsureLocalRuntimePreservesExistingContents(t *testing.T) {
+	source, valid := localTestBundle(t)
+	offline := ""
+	for _, artifact := range source.Metadata.Artifacts {
+		if artifact.Name == "eva-offline" {
+			offline = filepath.Join(source.Root, artifact.File)
+		}
+	}
+	if offline == "" {
+		t.Fatal("fixture offline payload is missing")
+	}
+	for _, kind := range []string{"absent", "empty", "valid", "nonempty", "file", "symlink", "broken-symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "runtime")
+			switch kind {
+			case "valid":
+				root = valid
+			case "empty", "nonempty":
+				if err := os.Mkdir(root, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "nonempty" {
+					archiveTestWriteFile(t, filepath.Join(root, "preserve.txt"), []byte("keep"))
+				}
+			case "file":
+				archiveTestWriteFile(t, root, []byte("keep"))
+			case "symlink", "broken-symlink":
+				target := filepath.Join(t.TempDir(), "missing")
+				if kind == "symlink" {
+					target = t.TempDir()
+				}
+				if err := os.Symlink(target, root); err != nil {
+					t.Fatal(err)
+				}
+			}
+			payload := offline
+			if kind == "valid" {
+				payload = "/must-not-read-an-offline-payload"
+			}
+			_, err := ensureLocalRuntime(payload, root)
+			wantSuccess := kind == "absent" || kind == "empty" || kind == "valid"
+			if (err == nil) != wantSuccess {
+				t.Fatalf("ensure runtime: %v", err)
+			}
+			if wantSuccess {
+				if _, err := managedruntime.Resolve(root); err != nil {
+					t.Fatal(err)
+				}
+			} else if kind == "nonempty" {
+				if contents, _ := os.ReadFile(filepath.Join(root, "preserve.txt")); string(contents) != "keep" {
+					t.Fatal("invalid nonempty Runtime was modified")
+				}
+			} else if kind == "file" {
+				if contents, _ := os.ReadFile(root); string(contents) != "keep" {
+					t.Fatal("existing file was modified")
+				}
+			} else if info, err := os.Lstat(root); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatal("existing symlink was modified")
+			}
+		})
 	}
 }

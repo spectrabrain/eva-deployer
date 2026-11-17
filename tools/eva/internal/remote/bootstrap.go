@@ -29,6 +29,7 @@ type BootstrapService struct {
 	EnsureRegistryTransport  func(context.Context, string) error
 	ProbeManagedHarbor       func(context.Context, HarborReceipt, time.Duration) error
 	RecoverManagedHarbor     func(context.Context, HarborReceipt) error
+	RecoverLocalHarbor       func(context.Context, string, string) (bool, error)
 	EnsureHarbor             func(context.Context, string, string, bool) (HarborReceipt, error)
 	CheckHarbor              func(context.Context, HarborReceipt) error
 	Login                    func(context.Context, string, string, string) error
@@ -51,6 +52,7 @@ func NewBootstrapService() BootstrapService {
 		EnsureRegistryTransport:  ensureManagedRegistryTransport,
 		ProbeManagedHarbor:       waitForManagedHarborAPI,
 		RecoverManagedHarbor:     recoverManagedHarbor,
+		RecoverLocalHarbor:       recoverLocalHarbor,
 		EnsureHarbor:             ensureManagedHarbor,
 		CheckHarbor:              checkManagedHarbor,
 		Login:                    dockerLogin,
@@ -348,7 +350,7 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 			}
 			original := existing
 			if s.DetectExistingHarbor != nil {
-				protocol, present, err := s.DetectExistingHarbor(ctx, existing.Registry, options.Protocol)
+				protocol, present, err := s.detectHarbor(ctx, existing.Registry, options.Protocol)
 				if err != nil {
 					return HarborReceipt{}, fmt.Errorf("inspect existing Harbor: %w", err)
 				}
@@ -455,7 +457,7 @@ func (s BootstrapService) Bootstrap(ctx context.Context, options BootstrapOption
 	// Detect before Docker transport changes or Compose installation. A k3s
 	// NodePort does not appear in docker ps or require a listening host socket.
 	if s.DetectExistingHarbor != nil {
-		protocol, present, err := s.DetectExistingHarbor(ctx, options.Registry, options.Protocol)
+		protocol, present, err := s.detectHarbor(ctx, options.Registry, options.Protocol)
 		if err != nil {
 			return HarborReceipt{}, fmt.Errorf("inspect existing Harbor without modifying it: %w", err)
 		}
@@ -551,9 +553,52 @@ func (s BootstrapService) prepareExternalTransport(ctx context.Context, receipt 
 		}
 		if s.ProbeManagedHarbor != nil {
 			if err := s.ProbeManagedHarbor(ctx, receipt, time.Minute); err != nil {
+				if s.RecoverLocalHarbor != nil {
+					recovered, recoveryErr := s.RecoverLocalHarbor(ctx, receipt.Registry, receipt.Protocol)
+					if recoveryErr != nil {
+						return fmt.Errorf("recover existing local Harbor after Docker transport preparation: %w", recoveryErr)
+					}
+					if recovered {
+						if probeErr := s.ProbeManagedHarbor(ctx, receipt, 3*time.Minute); probeErr != nil {
+							return fmt.Errorf("wait for recovered existing Harbor: %w", probeErr)
+						}
+						return nil
+					}
+				}
 				return fmt.Errorf("wait for existing Harbor after Docker transport preparation: %w", err)
 			}
 		}
 	}
 	return nil
+}
+
+// A retry may find the same logger-related start failure before endpoint
+// detection. Recover only that narrowly identified local deployment, then
+// repeat normal health/protocol detection rather than replacing the Harbor.
+func (s BootstrapService) detectHarbor(ctx context.Context, registry, protocol string) (string, bool, error) {
+	selected, present, err := s.DetectExistingHarbor(ctx, registry, protocol)
+	if (present && err == nil) || s.RecoverLocalHarbor == nil || ctx.Err() != nil {
+		return selected, present, err
+	}
+	recovered, recoveryErr := s.RecoverLocalHarbor(ctx, registry, protocol)
+	if recoveryErr != nil {
+		return "", false, fmt.Errorf("recover existing local Harbor: %w", recoveryErr)
+	}
+	if !recovered {
+		return selected, present, err
+	}
+	probeProtocol := protocol
+	if probeProtocol == "" {
+		probeProtocol = "http"
+	}
+	if s.ProbeManagedHarbor != nil {
+		if err := s.ProbeManagedHarbor(ctx, HarborReceipt{Registry: registry, Protocol: probeProtocol}, 3*time.Minute); err != nil {
+			return "", false, fmt.Errorf("wait for recovered existing Harbor: %w", err)
+		}
+	}
+	selected, present, err = s.DetectExistingHarbor(ctx, registry, protocol)
+	if err != nil {
+		return selected, present, fmt.Errorf("recovered Harbor did not pass health detection: %w", err)
+	}
+	return selected, present, nil
 }

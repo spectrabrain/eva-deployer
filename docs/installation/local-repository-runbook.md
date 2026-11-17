@@ -334,6 +334,15 @@ Bundle의 이미지를 적재·게시합니다. Agent를 선택하면 Qdrant sna
 Vision 모델은 이후 `eva install`의 Vision 단계에서 게시하고 서비스 캐시에 배치합니다.
 기존 Harbor의 설정과 데이터를 재사용하며, 필요한 자산은 Bundle에서 가져옵니다.
 
+Runtime 경로가 없거나 빈 디렉터리이면 Bundle로 자동 구성합니다. 비어 있지 않은 Runtime이
+유효하지 않으면 기존 내용을 보존하고 중단하므로, 내용을 삭제하지 말고 검증 오류를 확인합니다.
+
+HTTP Harbor 주소를 Docker 전송 설정에 추가할 때는 Docker가 재시작될 수 있으므로 승인된
+작업 시간에 실행합니다. 같은 서버의 기존 Compose Harbor에서 로컬 syslog `1514` 연결 오류로
+기동에 실패한 컨테이너는 로그 수집기 연결을 확인한 뒤 기존 컨테이너만 자동으로 시작합니다.
+재생성·재설치하지 않으며, 의도적으로 중지한 컨테이너·다른 서버의 Harbor·k3s Harbor는
+이 자동복구 대상이 아닙니다. 대상이나 오류를 안전하게 식별하지 못하면 변경하지 않고 중단합니다.
+
 `[OK] Local preparation completed`를 확인한 뒤 설치를 진행합니다.
 캐시 파일의 checksum은 처음 풀 때 한 번 검증합니다. 재실행이나 `eva preflight gpu`·`eva install`은
 같은 Bundle의 캐시를 파일 목록·크기만 확인하고 다시 해싱하지 않고 재사용합니다. 다른 Bundle의 캐시나
@@ -389,6 +398,11 @@ Release를 바꾸면 새 Bundle의 Tool 설치·검증부터 진행하고 `eva l
 Agent/Vision/App을 선택하면 Config가 자동 포함되며, n8n을 선택하면 마지막에 설치합니다.
 Workspace와 component별 Values는 내부에서 생성합니다.
 IAM/App 재설치 시 workload 재시작에 따른 일시 중단이 발생할 수 있습니다.
+
+Agent 재설치 시 기존 Deployment를 0개로 축소하고 종료를 기다립니다. 소유 관계가 확인된
+`Succeeded` Pod는 자동 정리하므로 필요한 Pod 로그는 재설치 전에 보관합니다.
+실행 중·삭제 중이거나 finalizer가 있는 Pod를 강제 삭제하지 않으며 PVC·PV는 삭제하지 않습니다.
+종료 대기나 안전정리에 실패하면 남은 Pod와 관리 주체를 확인하고, 대기를 건너뛰지 않습니다.
 
 ## 8. [Local 설치 서버] 결과 확인과 인계
 

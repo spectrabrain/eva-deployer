@@ -352,11 +352,21 @@ func localPreflight(context.Context) error {
 }
 
 func ensureLocalRuntime(offline, root string) (managedruntime.Resolved, error) {
+	if root == "" {
+		root = managedruntime.DefaultRoot
+	}
 	if resolved, err := managedruntime.Resolve(root); err == nil {
 		return resolved, nil
 	}
-	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
-		return managedruntime.Resolved{}, errors.New("existing Runtime is invalid; it was not replaced")
+	if info, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		// The Tool installer can leave an empty placeholder. Remove only an
+		// empty, real directory; Remove refuses a concurrently populated one.
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return managedruntime.Resolved{}, errors.New("existing Runtime is invalid; it was not replaced")
+		}
+		if err := os.Remove(root); err != nil {
+			return managedruntime.Resolved{}, errors.New("existing Runtime is invalid or not empty; it was not replaced; inspect it with eva runtime validate")
+		}
 	}
 	return managedruntime.BootstrapOffline(offline, root)
 }

@@ -3,6 +3,7 @@ package remote
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -486,6 +487,92 @@ func TestBootstrapRecoversUnavailableHarborOnlyWhenDeploymentMatches(t *testing.
 			after, _ := os.ReadFile(path)
 			if string(before) != string(after) {
 				t.Fatal("unavailable endpoint replaced the stored receipt")
+			}
+		})
+	}
+}
+
+func TestExternalHarborTransportRecoveryRechecksReadiness(t *testing.T) {
+	for _, kind := range []string{"recovered", "ineligible", "recovery-error", "still-unready", "https", "healthy"} {
+		t.Run(kind, func(t *testing.T) {
+			var calls []string
+			receipt := testReceipt()
+			receipt.ManagedBy = "external"
+			if kind == "https" {
+				receipt.Protocol = "https"
+			}
+			service := BootstrapService{
+				EnsureRegistryTransport: func(context.Context, string) error { calls = append(calls, "transport"); return nil },
+				ProbeManagedHarbor: func(_ context.Context, actual HarborReceipt, timeout time.Duration) error {
+					if actual != receipt {
+						t.Fatal("probe endpoint changed")
+					}
+					if timeout == time.Minute {
+						calls = append(calls, "initial-probe")
+						if kind == "healthy" {
+							return nil
+						}
+						return context.DeadlineExceeded
+					}
+					calls = append(calls, "recovered-probe")
+					if timeout != 3*time.Minute || kind == "still-unready" {
+						return context.DeadlineExceeded
+					}
+					return nil
+				},
+				RecoverLocalHarbor: func(_ context.Context, registry, protocol string) (bool, error) {
+					calls = append(calls, "recover")
+					if registry != receipt.Registry || protocol != receipt.Protocol {
+						t.Fatal("recovery endpoint changed")
+					}
+					if kind == "recovery-error" {
+						return false, errors.New("logger is unavailable")
+					}
+					return kind != "ineligible", nil
+				},
+			}
+			err := service.prepareExternalTransport(context.Background(), receipt)
+			wantSuccess := kind == "recovered" || kind == "https" || kind == "healthy"
+			if (err == nil) != wantSuccess {
+				t.Fatalf("transport error: %v", err)
+			}
+			want := "transport,initial-probe,recover"
+			if kind == "recovered" || kind == "still-unready" {
+				want += ",recovered-probe"
+			} else if kind == "https" {
+				want = ""
+			} else if kind == "healthy" {
+				want = "transport,initial-probe"
+			}
+			if strings.Join(calls, ",") != want {
+				t.Fatalf("recovery calls=%v want=%s", calls, want)
+			}
+		})
+	}
+}
+
+func TestDetectHarborRetriesHealthOnlyAfterSafeRecovery(t *testing.T) {
+	for _, eligible := range []bool{false, true} {
+		t.Run(fmt.Sprintf("eligible=%t", eligible), func(t *testing.T) {
+			detections, probes := 0, 0
+			service := BootstrapService{
+				DetectExistingHarbor: func(context.Context, string, string) (string, bool, error) {
+					detections++
+					if detections == 1 {
+						return "", false, errors.New("existing Harbor is unhealthy")
+					}
+					return "http", true, nil
+				},
+				RecoverLocalHarbor: func(context.Context, string, string) (bool, error) { return eligible, nil },
+				ProbeManagedHarbor: func(context.Context, HarborReceipt, time.Duration) error { probes++; return nil },
+			}
+			protocol, present, err := service.detectHarbor(context.Background(), "127.0.0.1:32080", "")
+			if eligible {
+				if err != nil || !present || protocol != "http" || detections != 2 || probes != 1 {
+					t.Fatalf("recovered detection=%s %v %v, attempts=%d probes=%d", protocol, present, err, detections, probes)
+				}
+			} else if err == nil || present || detections != 1 || probes != 0 {
+				t.Fatal("ineligible deployment was reclassified or recovered")
 			}
 		})
 	}

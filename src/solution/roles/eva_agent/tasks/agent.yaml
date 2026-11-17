@@ -398,6 +398,25 @@
   environment:
     KUBECONFIG: "{{ eva_agent_kubeconfig }}"
 
+- name: Clean up completed EVA Agent deployment pods before reinstall
+  when:
+    - not ansible_check_mode
+    - eva_agent_deployment_exists.rc == 0
+  block:
+    - name: Copy completed EVA Agent Pod cleanup helper
+      ansible.builtin.copy:
+        src: cleanup_completed_pods.py
+        dest: "{{ eva_agent_workdir }}/cleanup_completed_pods.py"
+        mode: '0700'
+
+    - name: Delete only verified completed EVA Agent deployment pods
+      ansible.builtin.command:
+        argv: [python3, "{{ eva_agent_workdir }}/cleanup_completed_pods.py", --namespace, "{{ eva_agent_namespace }}"]
+      environment:
+        KUBECONFIG: "{{ eva_agent_kubeconfig }}"
+      register: eva_agent_completed_cleanup
+      changed_when: eva_agent_completed_cleanup.rc == 0 and (eva_agent_completed_cleanup.stdout | from_json).changed
+
 - name: Wait until EVA Agent deployment pods are terminated before reinstall
   ansible.builtin.command: >-
     kubectl wait --for=delete pod

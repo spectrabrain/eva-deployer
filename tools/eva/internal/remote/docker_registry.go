@@ -357,7 +357,8 @@ func waitForManagedHarborAPI(
 		response, err := client.Do(request)
 		if err == nil {
 			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
+			if response.StatusCode == http.StatusOK &&
+				checkHarborHealth(ctx, client, receipt.Protocol+"://"+receipt.Registry) == nil {
 				return nil
 			}
 		}
@@ -367,7 +368,7 @@ func waitForManagedHarborAPI(
 			return ctx.Err()
 		case <-deadline.C:
 			return errors.New(
-				"Managed Harbor did not become ready after Docker restart",
+				"Harbor API did not become ready at the configured endpoint; inspect the existing containers and their start errors",
 			)
 		case <-ticker.C:
 		}
@@ -395,17 +396,22 @@ func recoverManagedHarbor(
 		return err
 	}
 
-	command := exec.CommandContext(
-		ctx,
-		"docker",
-		"compose",
-		"--file",
-		composePath,
-		"up",
-		"-d",
-	)
-	if err := command.Run(); err != nil {
-		return errors.New("Managed Harbor compose recovery failed")
+	recovered, err := recoverLocalHarbor(ctx, receipt.Registry, receipt.Protocol)
+	if err != nil {
+		return err
+	}
+	if !recovered {
+		command := exec.CommandContext(
+			ctx,
+			"docker",
+			"compose",
+			"--file",
+			composePath,
+			"start",
+		)
+		if err := command.Run(); err != nil {
+			return errors.New("Managed Harbor compose recovery failed; existing containers were not replaced")
+		}
 	}
 
 	if err := waitForManagedHarborAPI(

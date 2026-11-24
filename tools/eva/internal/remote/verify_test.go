@@ -113,7 +113,7 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 			t.Fatal(err)
 		}
 	}
-	for _, relative := range []string{"cache/manifest.txt", "cache/apt/debs/manifest.txt", "cache/apt/debs/a.deb", "cache/docker/debs/manifest.txt", "cache/docker/debs/a.deb", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/nvidia/container-toolkit-debs/a.deb", "cache/tools/oras", "cache/k3s/k3s-v1-linux-amd64", "cache/eva-app/app.tgz", "cache/eva-vision/vision.tgz", "cache/eva-agent/agent.tgz", "cache/eva-agent/release/v1/plugins/eva-agent-qdrant/post-renderer.sh", "cache/eva-agent/release/v1/plugins/eva-agent-qdrant/plugin.yaml"} {
+	for _, relative := range []string{"cache/manifest.txt", "cache/apt/debs/manifest.txt", "cache/apt/debs/a.deb", "cache/docker/debs/manifest.txt", "cache/docker/debs/a.deb", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/nvidia/container-toolkit-debs/a.deb", "cache/tools/oras", "cache/k3s/k3s-v1-linux-amd64", "cache/eva-app/app.tgz", "cache/eva-vision/vision.tgz", "cache/eva-dock/eva-dock-3.4.0.tgz", "cache/eva-agent/agent.tgz", "cache/eva-agent/release/v1/plugins/eva-agent-qdrant/post-renderer.sh", "cache/eva-agent/release/v1/plugins/eva-agent-qdrant/plugin.yaml"} {
 		write(relative, "data\n")
 	}
 	write("cache/images/images-all.txt", "source/product:1\ndocker.n8n.io/n8nio/n8n:2.32.7\n")

@@ -171,6 +171,9 @@ func steps(components map[string]bool) []Step {
 	if components["app"] {
 		steps = append(steps, Step{Component: "app", Playbook: "src/solution/playbooks/site_eva_app.yaml"})
 	}
+	if components["dock"] {
+		steps = append(steps, Step{Component: "dock", Playbook: "src/solution/playbooks/site_eva_dock.yaml"})
+	}
 	if components["n8n"] {
 		steps = append(steps, Step{Component: "n8n", Playbook: "src/solution/playbooks/site_n8n.yaml"})
 	}

@@ -369,7 +369,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--request", action="append", help="Private role render request; repeat to check prepared inputs")
-    mode.add_argument("--installed", nargs="+", choices=["iam", "app", "agent", "vision", "vllm", "qdrant"],
+    mode.add_argument("--installed", nargs="+", choices=["iam", "app", "agent", "vision", "dock", "vllm", "qdrant"],
                       help="Check existing Helm manifests without changing Kubernetes resources")
     args = p.parse_args()
     cache = {}

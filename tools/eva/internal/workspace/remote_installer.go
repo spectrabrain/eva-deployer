@@ -31,7 +31,7 @@ func InstallerFromWorkspace(resolved Resolved) (Installer, error) {
 		if identity == "" {
 			identity = name
 		}
-		for _, component := range []string{"iam", "app", "agent", "vision"} {
+		for _, component := range []string{"iam", "app", "agent", "vision", "dock"} {
 			if !input.Components[component] || target.Components != nil && !target.Components[component] {
 				continue
 			}

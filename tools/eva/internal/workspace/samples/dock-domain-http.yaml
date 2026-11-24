@@ -1,0 +1,12 @@
+# EVA-Dock: Dock 전용 도메인 + HTTP. ex) http://dock.eva.com/
+# Dock은 / 와 /api 를 사용하므로 App과 경로를 나눌 수 없습니다. App/IAM과 다른 도메인을 사용합니다.
+dock:
+  ingress:
+    host: "<DOCK_HOST>"  # 필수: scheme, port, path 없는 Dock 도메인. DNS가 이 서버를 가리켜야 합니다. ex) dock.eva.com
+    tls:
+      enabled: false  # HTTP: Ingress TLS 및 TLS Secret Job을 사용하지 않습니다.
+      create: false
+  config:
+    dockPublicUrl: "http://<DOCK_HOST>"  # 필수: 브라우저·EVA 웹훅이 접근할 Dock 외부 주소. ex) http://dock.eva.com
+  secrets:
+    dockAccessPassword: "<DOCK_ACCESS_PASSWORD>"  # 필수: Dock 로그인 비밀번호. ex) Demo-Dock-Only!42 (예시 전용). 업데이트 시에도 기존 값을 그대로 입력합니다.

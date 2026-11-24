@@ -1673,6 +1673,7 @@ func checkComponents(document plan.Document) []health.Component {
 		"agent":  "eva-agent",
 		"vision": "eva-vision",
 		"app":    "eva-app",
+		"dock":   "eva-dock",
 		"n8n":    "n8n",
 	}
 	components := make([]health.Component, 0, len(document.Steps))

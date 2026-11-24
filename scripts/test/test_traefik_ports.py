@@ -87,6 +87,7 @@ def objects(component="app", number=32010, secure=False, host="10.159.56.197", p
     name = "eva-" + component
     data = ({"BACKEND_HOST": host, "BACKEND_PUBLIC_PORT": str(number), "BACKEND_SECURE": str(secure).lower(),
              "BACKEND_SECURE_PORT": str(number), "BACKEND_PORT": "9999"} if component == "app" else
+            {"DOCK_PUBLIC_URL": f"{'https' if secure else 'http'}://{host}:{number}"} if component == "dock" else
             {"ISSUER": f"{'https' if secure else 'http'}://{host}:{number}/realms/eva-iam"})
     ingress = {"kind": "Ingress", "apiVersion": "networking.k8s.io/v1", "metadata": {"name": name, "namespace": name,
                "uid": name + "-uid", "resourceVersion": "1", "labels": {"app.kubernetes.io/managed-by": "Helm"},
@@ -749,6 +750,42 @@ class TraefikPortsTests(unittest.TestCase):
                 self.reconcile()
         self.assertEqual(self.cluster.config["metadata"]["annotations"][ports.OWNED], "[]")
         self.assertTrue(list((self.directory / "backups").glob("before-*.json")))
+
+    def test_dock_gets_dedicated_listener_next_to_shared_app_and_iam(self):
+        for secure in (False, True):
+            with self.subTest(secure=secure):
+                self.cluster = FakeCluster(self.directory)
+                default_port = 443 if secure else 80
+                app = self.reconcile(endpoint("app", default_port, secure))
+                self.cluster.install(ports.isolate(objects("app", default_port, secure), app["endpoint"]))
+                iam = self.reconcile(endpoint("iam", default_port, secure, path="/iam"))
+                self.cluster.install(ports.isolate(objects("iam", default_port, secure, path="/iam"), iam["endpoint"]))
+                dock = self.reconcile(endpoint("dock", 32020, secure))
+                self.assertEqual(dock["endpoint"]["component"], "dock")
+                self.assertEqual(dock["endpoint"]["entrypoint"], f"eva-{'s' if secure else 'h'}-32020")
+                self.assertEqual({item["port"] for item in self.cluster.state_ports().values()}, {default_port, 32020})
+                self.cluster.install(ports.isolate(objects("dock", 32020, secure), dock["endpoint"]))
+                # App/IAM re-installs recognise the installed Dock endpoint and keep its listener.
+                self.assertFalse(self.reconcile(endpoint("app", default_port, secure))["changed"])
+                self.assertFalse(self.reconcile(endpoint("dock", 32020, secure))["changed"])
+                state = json.loads(self.cluster.config["metadata"]["annotations"][ports.STATE])
+                self.assertEqual(state["eva-dock/eva-dock"]["port"], 32020)
+
+    def test_dock_root_path_cannot_share_app_public_port(self):
+        app = self.reconcile(endpoint("app", 32010))
+        self.cluster.install(ports.isolate(objects("app", 32010), app["endpoint"]))
+        with self.assertRaisesRegex(ports.Unsafe, "conflicting public port/path"):
+            self.reconcile(endpoint("dock", 32010))
+
+    def test_dock_domain_or_missing_public_url_is_not_managed(self):
+        manifest = objects("dock", 32020, True)
+        manifest[0]["data"]["DOCK_PUBLIC_URL"] = "https://dock.example.com"
+        self.assertIsNone(ports.endpoint(manifest, "dock", "eva-dock", "eva-dock"))
+        manifest[0]["data"]["DOCK_PUBLIC_URL"] = ""
+        self.assertIsNone(ports.endpoint(manifest, "dock", "eva-dock", "eva-dock"))
+        manifest[0]["data"]["DOCK_PUBLIC_URL"] = "https://10.159.56.197:32020/dock"
+        with self.assertRaisesRegex(ports.Unsafe, "Invalid rendered Dock"):
+            ports.endpoint(manifest, "dock", "eva-dock", "eva-dock")
 
     def test_shared_port_different_paths_allowed_same_paths_rejected(self):
         selected = {"app": endpoint(path="/app"), "iam": endpoint("iam", 32010, path="/iam")}

@@ -114,6 +114,8 @@ load_deploy_versions() {
     EVA_AGENT_VALUES_VERSION
     EVA_AGENT_INIT_CHART_VERSION
     EVA_IAM_CHART_VERSION
+    EVA_DOCK_CHART_VERSION
+    EVA_DOCK_IMAGE_TAG
     QDRANT_CHART_VERSION
     KUSTOMIZE_VERSION
     K3S_DEFAULT_VERSION
@@ -135,6 +137,8 @@ load_deploy_versions() {
     [EVA_AGENT_VALUES_VERSION]="eva_agent_values_version"
     [EVA_AGENT_INIT_CHART_VERSION]="eva_agent_init_chart_version"
     [EVA_IAM_CHART_VERSION]="eva_iam_chart_version"
+    [EVA_DOCK_CHART_VERSION]="eva_dock_chart_version"
+    [EVA_DOCK_IMAGE_TAG]="eva_dock_image_tag"
     [QDRANT_CHART_VERSION]="qdrant_chart_version"
     [KUSTOMIZE_VERSION]="kustomize_version"
     [K3S_DEFAULT_VERSION]="k3s_default_version"

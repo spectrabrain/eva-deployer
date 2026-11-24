@@ -55,6 +55,7 @@ EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_
 EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in src/solution/version.yaml)}"
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in src/solution/version.yaml)}"
 EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_DOCK_CHART_VERSION="${EVA_DOCK_CHART_VERSION:?missing EVA_DOCK_CHART_VERSION (set in src/solution/version.yaml)}"
 KUSTOMIZE_VERSION="${KUSTOMIZE_VERSION:?missing KUSTOMIZE_VERSION (set in src/infra/version.yaml)}"
 
 EVA_AGENT_CHART_BASE="${EVA_AGENT_CHART_BASE:-$(eva_agent_source chart "$EVA_AGENT_RELEASE")}"
@@ -75,7 +76,7 @@ echo "[info] EVA Agent values layout=${EVA_AGENT_VALUES_LAYOUT}"
 K3S_DEFAULT_VERSION="${K3S_DEFAULT_VERSION:?missing K3S_DEFAULT_VERSION (set in src/infra/version.yaml)}"
 ORAS_VERSION="${ORAS_VERSION:-1.3.3}"
 
-mkdir -p "$EVA_CACHE_ROOT"/{aws,apt,docker,nvidia,cuda,helm,k3s,k8s,nfs,eva-app,eva-vision,eva-agent,eva-iam,qdrant,tools,images}
+mkdir -p "$EVA_CACHE_ROOT"/{aws,apt,docker,nvidia,cuda,helm,k3s,k8s,nfs,eva-app,eva-vision,eva-agent,eva-iam,eva-dock,qdrant,tools,images}
 mkdir -p "$EVA_CACHE_ROOT/docker/debs"
 mkdir -p "$EVA_CACHE_ROOT/apt/debs"
 mkdir -p "$EVA_CACHE_ROOT/nvidia/container-toolkit-debs"
@@ -460,11 +461,14 @@ if [[ -n "${HELM_VER}" ]]; then
   fetch "https://get.helm.sh/helm-${HELM_VER}-linux-arm64.tar.gz.sha256" "$EVA_CACHE_ROOT/helm/helm-${HELM_VER}-linux-arm64.tar.gz.sha256"
 fi
 
-# EVA App / Vision / Agent / IAM charts
+# EVA App / Vision / Agent / IAM / Dock charts
 EVA_APP_CHART_BASE="${EVA_APP_CHART_BASE:-$(eva_product_chart_base app "$EVA_APP_CHART_VERSION")}"
 EVA_IAM_CHART_BASE="${EVA_IAM_CHART_BASE:-$(eva_product_chart_base iam "$EVA_IAM_CHART_VERSION")}"
+# EVA-Dock 은 GitHub Pages 가 아니라 저장소 main 브랜치의 raw 경로에 tgz 를 게시합니다.
+EVA_DOCK_CHART_BASE="${EVA_DOCK_CHART_BASE:-https://raw.githubusercontent.com/spectrabrain/eva-dock-chart/main}"
 fetch "$EVA_APP_CHART_BASE/eva-app-${EVA_APP_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-app/eva-app-${EVA_APP_CHART_VERSION}.tgz"
 fetch "$EVA_IAM_CHART_BASE/eva-iam-${EVA_IAM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
+fetch "${EVA_DOCK_CHART_BASE%/}/eva-dock-${EVA_DOCK_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-dock/eva-dock-${EVA_DOCK_CHART_VERSION}.tgz"
 fetch "$(eva_vision_source chart "$EVA_VISION_CHART_VERSION")/eva-vision-${EVA_VISION_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-vision/eva-vision-${EVA_VISION_CHART_VERSION}.tgz"
 fetch "${EVA_AGENT_CHART_BASE}/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-${EVA_AGENT_CHART_VERSION}.tgz"
 fetch "${EVA_AGENT_CHART_BASE}/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz" "$EVA_CACHE_ROOT/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERSION}.tgz"
@@ -536,6 +540,7 @@ eva_agent_chart: ${EVA_AGENT_CHART_VERSION}
 eva_agent_vllm_chart: ${EVA_AGENT_VLLM_CHART_VERSION}
 eva_agent_init_chart: ${EVA_AGENT_INIT_CHART_VERSION}
 eva_iam_chart: ${EVA_IAM_CHART_VERSION}
+eva_dock_chart: ${EVA_DOCK_CHART_VERSION}
 qdrant_chart: ${QDRANT_CHART_VERSION}
 eva_agent_release: ${EVA_AGENT_RELEASE}
 eva_agent_release_values: ${EVA_AGENT_VALUES_VERSION}

@@ -185,6 +185,7 @@ components:
   agent: true
   vision: true
   app: true
+  dock: false
   n8n: false
 targets:
   server-a:
@@ -274,6 +275,7 @@ components:
   agent: false
   vision: false
   app: false
+  dock: false
   n8n: true
 targets:
   server-a:

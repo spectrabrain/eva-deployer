@@ -159,7 +159,7 @@ func TestBuildOfflineArchivePortableCache(t *testing.T) {
 	// No other filename is rewritten, even if it happens to contain a host path.
 	archiveTestWriteFile(t, filepath.Join(root, "models/config.json"), []byte(root))
 	archiveTestWriteFile(t, filepath.Join(root, "images/rendered/secrets/secret.yaml"), []byte("kind: Secret\ndata: private\n"))
-	for _, category := range []string{"aws", "apt", "docker", "nvidia", "cuda", "helm", "k3s", "k8s", "nfs", "eva-app", "eva-vision", "eva-agent", "eva-iam", "qdrant", "tools", "images", "display_mode_selector", "models", "python-debs", "wheels"} {
+	for _, category := range []string{"aws", "apt", "docker", "nvidia", "cuda", "helm", "k3s", "k8s", "nfs", "eva-app", "eva-vision", "eva-agent", "eva-iam", "eva-dock", "qdrant", "tools", "images", "display_mode_selector", "models", "python-debs", "wheels"} {
 		archiveTestWriteFile(t, filepath.Join(root, category, "asset.bin"), []byte(category))
 	}
 	if err := os.Chmod(filepath.Join(root, "tools/asset.bin"), 0o755); err != nil {

@@ -37,6 +37,8 @@ TLS = "traefik.ingress.kubernetes.io/router.tls"
 RESOURCE = "helmchartconfigs.helm.cattle.io"
 CHART = "helmcharts.helm.cattle.io"
 LEGACY = "eva.spectrabrain.com/legacy-app-nodeport"
+# Rendered endpoint ConfigMap key that names each component's public URL.
+ENDPOINT_KEYS = {"app": "BACKEND_HOST", "iam": "ISSUER", "dock": "DOCK_PUBLIC_URL"}
 LEGACY_ENDPOINT_KEYS = frozenset({"BACKEND_HOST", "BACKEND_PORT", "BACKEND_PUBLIC_PORT",
                                   "BACKEND_SECURE", "BACKEND_SECURE_PORT"})
 
@@ -78,7 +80,8 @@ def endpoint(objects, component, namespace, release):
     ingresses = [obj for obj in objects if obj.get("kind") == "Ingress"]
     if not ingresses:
         return None
-    key = "BACKEND_HOST" if component == "app" else "ISSUER"
+    require(component in ENDPOINT_KEYS, "Unsupported public listener component")
+    key = ENDPOINT_KEYS[component]
     maps = [obj.get("data", {}) for obj in objects if obj.get("kind") == "ConfigMap" and key in obj.get("data", {})]
     require(len(maps) == 1, "Cannot uniquely resolve public endpoint from rendered ConfigMap")
     data = maps[0]
@@ -90,6 +93,15 @@ def endpoint(objects, component, namespace, release):
         require(secure in ("true", "false"), "Invalid rendered BACKEND_SECURE")
         scheme = "https" if secure == "true" else "http"
         public_port = data.get("BACKEND_SECURE_PORT" if scheme == "https" else "BACKEND_PUBLIC_PORT")
+    elif component == "dock":
+        # Dock serves / and /api; its public port comes only from DOCK_PUBLIC_URL.
+        url = urlsplit(str(data["DOCK_PUBLIC_URL"] or ""))
+        host, scheme = url.hostname, url.scheme
+        if not host or not is_ip(host):
+            return None
+        require(scheme in ("http", "https") and not url.username and not url.password
+                and url.path in ("", "/") and not url.query and not url.fragment, "Invalid rendered Dock DOCK_PUBLIC_URL")
+        public_port = url.port or (443 if scheme == "https" else 80)
     else:
         url = urlsplit(data["ISSUER"])
         host, scheme = url.hostname, url.scheme
@@ -540,8 +552,9 @@ def discover(cluster, current, old_state, backup_root=None):
         is_current = namespace == current["namespace"] and name == current["ingress"]
         objects = cluster.get("configmaps", namespace)["items"]
         candidates = [obj for obj in objects if obj.get("metadata", {}).get("name") in (name, name + "-env")]
-        component = "app" if any("BACKEND_HOST" in obj.get("data", {}) for obj in candidates) else "iam"
-        candidates = [obj for obj in candidates if ("BACKEND_HOST" if component == "app" else "ISSUER") in obj.get("data", {})]
+        component = next((name for name in ("app", "dock")
+                          if any(ENDPOINT_KEYS[name] in obj.get("data", {}) for obj in candidates)), "iam")
+        candidates = [obj for obj in candidates if ENDPOINT_KEYS[component] in obj.get("data", {})]
         bridge = bool(annotations.get(LEGACY))
         other = (verified_installed(cluster, ingress, candidates, component, namespace, release, backup_root)
                  if bridge else endpoint(candidates + [ingress], component, namespace, release) if candidates else None)

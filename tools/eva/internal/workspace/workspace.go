@@ -153,6 +153,7 @@ func (resolved Resolved) AnsibleExtraVars() []string {
 			"eva_cluster_kubeconfig="+kubeconfig,
 			"eva_agent_kubeconfig="+kubeconfig, "eva_app_kubeconfig="+kubeconfig,
 			"eva_vision_kubeconfig="+kubeconfig, "eva_iam_kubeconfig="+kubeconfig,
+			"eva_dock_kubeconfig="+kubeconfig,
 			"precondition_argocd_kubeconfig_override="+kubeconfig)
 	}
 	return values
@@ -274,7 +275,7 @@ func validateConfig(config Config, requestedSiteID string) error {
 			return errors.New("deployment.environment must be kubernetes or nks")
 		}
 		if deployment.Kubeconfig == "" || NormalizeRepositoryMode(config.Repository.Mode) != "online" || config.Components["infra"] || config.Components["n8n"] {
-			return errors.New("existing Kubernetes requires deployment.kubeconfig, Online supply and Solution only (iam/app/agent/vision)")
+			return errors.New("existing Kubernetes requires deployment.kubeconfig, Online supply and Solution only (iam/app/agent/vision/dock)")
 		}
 	}
 	if config.Site.ID == "" {
@@ -350,7 +351,7 @@ func validateRegistry(registry string) error {
 
 func validComponent(component string) bool {
 	switch component {
-	case "infra", "iam", "agent", "vision", "app", "n8n":
+	case "infra", "iam", "agent", "vision", "app", "dock", "n8n":
 		return true
 	default:
 		return false

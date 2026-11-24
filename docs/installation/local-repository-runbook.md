@@ -171,6 +171,7 @@ out/cache/
 ├── aws/ · cuda/ · helm/          # 설치 도구·바이너리
 ├── k3s/ · k8s/ · nfs/ · tools/
 ├── eva-app/ · eva-iam/           # 컴포넌트별 차트·Values 등
+├── eva-dock/                     # EVA-Dock 차트
 ├── eva-agent/ · eva-vision/ · qdrant/
 ├── images/
 │   ├── eva-images.tar            # 제품·보조 서비스·인프라 이미지

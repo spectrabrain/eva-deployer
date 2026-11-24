@@ -68,7 +68,7 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 				}
 				answers += scope + "\n"
 				if scope == "2" {
-					answers += "2\n1\n1\n1\n3\n" // HTTPS/shared/co-install/Agent+Vision/other GPU
+					answers += "2\n1\n1\n1\n3\n2\n" // HTTPS/shared/co-install/Agent+Vision/other GPU/no Dock
 				}
 				input, messages, path := configureTest(t, answers)
 				if input.Repository.Mode != mode || (input.Credentials.AWS != nil) != (mode == "online") {
@@ -111,7 +111,7 @@ func TestInstallConfigureLocalRepositoryModes(t *testing.T) {
 
 func TestInstallConfigureOnlineHTTP(t *testing.T) {
 	// Online/current server/Solution/HTTP/IP/IAM+App/no Agent or Vision.
-	input, messages, _ := configureTest(t, "1\n1\n2\n1\n3\n1\n4\n")
+	input, messages, _ := configureTest(t, "1\n1\n2\n1\n3\n1\n4\n2\n")
 	target := input.Targets["server-a"]
 	components := effectiveTargetComponents(input, "server-a")
 	if input.Repository.Mode != "online" || target.Ansible["ansible_connection"] != "local" ||
@@ -140,7 +140,7 @@ func TestInstallConfigureOnlineHTTP(t *testing.T) {
 
 func TestInstallConfigureNKSUsesTheSameSolutionScaffold(t *testing.T) {
 	// Online/Bastion/NKS/default connection paths/Solution only/HTTPS/separate/IAM+App/no extras.
-	input, messages, path := configureTest(t, "1\n2\n2\n\n\n\n3\n2\n2\n1\n4\n")
+	input, messages, path := configureTest(t, "1\n2\n2\n\n\n\n3\n2\n2\n1\n4\n2\n")
 	target := input.Targets["controller"]
 	if input.Deployment == nil || input.Deployment.Environment != "nks" || input.Components["infra"] || !input.Components["iam"] || !input.Components["app"] || input.Components["agent"] {
 		t.Fatal("NKS must use one controller with the selected Solution components")
@@ -184,14 +184,14 @@ func TestInstallConfigureNKSUsesTheSameSolutionScaffold(t *testing.T) {
 }
 
 func TestInstallConfigureNKSExplicitReleaseIsPreserved(t *testing.T) {
-	input, _, _ := configureTest(t, "1\n2\n2\n\n\n/actual/nks-release\n3\n2\n2\n1\n4\n")
+	input, _, _ := configureTest(t, "1\n2\n2\n\n\n/actual/nks-release\n3\n2\n2\n1\n4\n2\n")
 	if input.Deployment.Release != "/actual/nks-release" {
 		t.Fatal("NKS must preserve the installer's explicit Release selection")
 	}
 }
 
 func TestInstallConfigureNKSAddsDependencyAndVisionInputsToSelectedComponents(t *testing.T) {
-	input, _, _ := configureTest(t, "1\n2\n2\n\n\n\n3\n2\n2\n1\n1\n")
+	input, _, _ := configureTest(t, "1\n2\n2\n\n\n\n3\n2\n2\n1\n1\n2\n")
 	values := input.Targets["controller"].Values
 	if !input.Components["agent"] || !input.Components["vision"] {
 		t.Fatal("NKS must retain the existing Agent/Vision selection")
@@ -210,7 +210,7 @@ func TestInstallConfigureNKSAddsDependencyAndVisionInputsToSelectedComponents(t 
 }
 
 func TestInstallConfigureServerSolutionOnly(t *testing.T) {
-	input, _, _ := configureTest(t, "1\n1\n3\n1\n2\n1\n4\n")
+	input, _, _ := configureTest(t, "1\n1\n3\n1\n2\n1\n4\n2\n")
 	if input.Deployment != nil || input.Components["infra"] || !input.Components["app"] || !input.Components["iam"] {
 		t.Fatal("Solution only must not turn an On-premise server into an NKS controller")
 	}
@@ -242,9 +242,9 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 		"1", "2", "1", // Online + Bastion + On-premise
 		"infra-a", "192.0.2.10", "eva", "1", "1", // Infra-only, add another
 		"iam-app", "192.0.2.11", "eva", "2", // don't reuse Infra-only
-		"2", "2", "3", "1", "1", "3", "1", // Solution/HTTPS/IP/co-install/Agent+Vision/other GPU/add
+		"2", "2", "3", "1", "1", "3", "2", "1", // Solution/HTTPS/IP/co-install/Agent+Vision/other GPU/no Dock/add
 		"external-app", "192.0.2.12", "eva", "2", // different solution
-		"2", "1", "2", "2", "4", "2", // Solution/HTTP/separate/external/no extras/done
+		"2", "1", "2", "2", "4", "2", "2", // Solution/HTTP/separate/external/no extras/no Dock/done
 	}, "\n") + "\n"
 	secrets := []string{"001 # ssh ' first", "private-second", "private-third"}
 	input, messages, path := configureTest(t, answers, secrets...)
@@ -327,7 +327,7 @@ func TestInstallConfigureMixedBastionTargets(t *testing.T) {
 }
 
 func TestInstallConfigureReusesOptionsNotConnections(t *testing.T) {
-	answers := "1\n2\n1\nfirst\n192.0.2.10\neva\n2\n2\n1\n1\n4\n1\nsecond\n192.0.2.11\n\n1\n2\n"
+	answers := "1\n2\n1\nfirst\n192.0.2.10\neva\n2\n2\n1\n1\n4\n2\n1\nsecond\n192.0.2.11\n\n1\n2\n"
 	input, messages, _ := configureTest(t, answers, "first-private", "second-private")
 	first, second := input.Targets["first"], input.Targets["second"]
 	if !reflect.DeepEqual(first.Components, second.Components) || second.Ansible["ansible_host"] != "192.0.2.11" || second.Ansible["ansible_password"] != "second-private" {
@@ -451,5 +451,74 @@ func TestInstallConfigureOutputOverride(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), shellQuoteConfigurePath(path)) {
 		t.Fatal("completion command must shell-quote spaces and apostrophes")
+	}
+}
+
+func dockValues(t *testing.T, input workspace.Installer, name string) map[string]any {
+	t.Helper()
+	values := input.Targets[name].Values["dock"]
+	if values == nil || !effectiveTargetComponents(input, name)["dock"] {
+		t.Fatal("Dock selection must enable the component and scaffold its Values")
+	}
+	return values
+}
+
+func TestInstallConfigureDockOnSharedIPUsesDedicatedPort(t *testing.T) {
+	// Online/current server/Solution/HTTPS/IP/IAM+App/no extras/Dock/default protocol.
+	input, messages, path := configureTest(t, "1\n1\n2\n2\n3\n1\n4\n1\n\n")
+	dock := dockValues(t, input, "server-a")
+	ingress := dock["ingress"].(map[string]any)
+	tls := ingress["tls"].(map[string]any)
+	if ingress["host"] != "<TARGET_IP>" || tls["enabled"] != true || tls["hostPath"] != "<TLS_CERT_DIRECTORY>" {
+		t.Fatal("IP Dock must reuse the target IP and the App certificate directory input")
+	}
+	if dock["config"].(map[string]any)["dockPublicUrl"] != "https://<TARGET_IP>:32020" {
+		t.Fatal("IP Dock must use its own public port next to App /")
+	}
+	if dock["secrets"].(map[string]any)["dockAccessPassword"] != "<DOCK_ACCESS_PASSWORD>" {
+		t.Fatal("Dock access password must be a required input")
+	}
+	for _, text := range []string{"EVA-Dock 접속 프로토콜", "전용 포트 32020", "Dock=https"} {
+		if !strings.Contains(messages, text) {
+			t.Fatalf("Dock configure output is missing %q", text)
+		}
+	}
+	if _, err := workspace.LoadInstaller(path, ""); err == nil || !strings.Contains(err.Error(), "dock.secrets.dockAccessPassword") {
+		t.Fatal("Dock placeholders must be reported before installation")
+	}
+}
+
+func TestInstallConfigureDockDomainCanUseItsOwnProtocol(t *testing.T) {
+	// Online/current server/Solution/HTTPS/shared domain/IAM+App/no extras/Dock/HTTP.
+	input, messages, _ := configureTest(t, "1\n1\n2\n2\n1\n1\n4\n1\n1\n")
+	dock := dockValues(t, input, "server-a")
+	ingress := dock["ingress"].(map[string]any)
+	if ingress["host"] != "<DOCK_HOST>" || ingress["tls"].(map[string]any)["enabled"] != false {
+		t.Fatal("domain Dock must request its own domain and follow the Dock protocol")
+	}
+	if dock["config"].(map[string]any)["dockPublicUrl"] != "http://<DOCK_HOST>" {
+		t.Fatal("domain Dock must use the default port of its own domain")
+	}
+	if input.Targets["server-a"].Values["app"]["app"].(map[string]any)["backendSecure"] != true {
+		t.Fatal("the Dock protocol must not change the App protocol")
+	}
+	if !strings.Contains(messages, "전용 도메인(DOCK_HOST)") {
+		t.Fatal("domain Dock guidance is missing")
+	}
+}
+
+func TestInstallConfigureNKSDockUsesClusterScaffold(t *testing.T) {
+	input, messages, _ := configureTest(t, "1\n2\n2\n\n\n\n3\n2\n2\n1\n4\n1\n")
+	dock := dockValues(t, input, "controller")
+	if dock["ingress"].(map[string]any)["enabled"] != false || dock["persistence"].(map[string]any)["type"] != "pvc" ||
+		dock["imagePullSecret"].(map[string]any)["authType"] != "secret" ||
+		dock["config"].(map[string]any)["dockPublicUrl"] != "<DOCK_PUBLIC_URL>" {
+		t.Fatal("NKS Dock must use cluster storage, Secret credentials and the Cloud LB URL")
+	}
+	if _, exists := dock["ingress"].(map[string]any)["tls"].(map[string]any)["hostPath"]; exists {
+		t.Fatal("NKS Dock must not request a node certificate directory")
+	}
+	if strings.Contains(messages, "EVA-Dock 접속 프로토콜") {
+		t.Fatal("NKS Dock takes its public URL from the Cloud LB, not a protocol question")
 	}
 }

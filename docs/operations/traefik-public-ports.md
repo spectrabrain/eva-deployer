@@ -3,6 +3,11 @@
 App/IAM Ingress의 공개 포트는 k3s `kube-system/traefik`의 listener 설정과 함께 확인한다.
 Online/Remote/Local 공통이며, 아래에서는 설정 조회와 Deployer의 포트 정합화 절차를 설명한다.
 
+EVA-Dock도 같은 정합화 대상이다. Dock은 렌더링된 ConfigMap의 `DOCK_PUBLIC_URL`에서 공개
+scheme·IP·포트를 읽으며(App은 `BACKEND_*`, IAM은 `ISSUER`), `/`와 `/api`를 쓰므로 IP 접속에서는
+App과 다른 공개 포트(기본 `32020`)를 사용한다. 아래 App/IAM 설명은 Dock에도 같이 적용된다.
+자세한 설정은 [EVA-Dock](eva-dock.md)을 참고한다.
+
 ## `web`·`websecure` 설정 위치
 
 `web`과 `websecure`는 Traefik의 entrypoint 이름이다. 설정은 다음 순서로 병합된다.
@@ -105,6 +110,8 @@ App Service에 `32010/TCP`가 있어도 타입이 `ClusterIP`이면 노드의 32
   별도 라우터의 listener 설정·포트·노출·리다이렉트와 기존 기본 listener 노출은 보존한다.
   예를 들어 Dock은 `websecure:443`, App/IAM은 `eva-h-32010:32010`인 상태에서 IAM만
   업데이트하거나 App/IAM을 순차 업데이트해도 Dock의 443과 비활성 기본 HTTP 80을 유지한다.
+  `DOCK_PUBLIC_URL`이 IP를 가리키는 Helm 설치 Dock은 별도 라우터가 아니라 EVA endpoint로 인식해
+  같은 방식으로 listener를 보존한다.
   entrypoint가 생략되었거나 알 수 없는 이름을 사용하면 전용 listener 처리를 중단한다.
   별도 라우터가 App/IAM entrypoint를 직접 공유하는 경우에도 자동 변경하지 않는다.
 - Helm 이력 없는 Argo CD 전용 설치, 소유권 불일치, 작업 중 ConfigMap/Ingress/HCC 변경도 중단한다.

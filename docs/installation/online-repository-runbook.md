@@ -104,6 +104,8 @@ eva install configure
    kubeconfig·context·Base Release 경로를 지정하며 worker SSH 정보는 입력하지 않습니다.
 5. **Infra만 / Infra + Solution / Solution만**을 선택합니다. NKS는 **Solution만**을 사용합니다.
 6. 기존과 같이 HTTP/HTTPS → 동일/별도 도메인/IP → IAM+App/외부 IAM → Agent/Vision을 선택합니다.
+   이어서 EVA-Dock 설치 여부(기본 설치)와 Dock 접속 프로토콜을 선택합니다. IP 접속의 Dock은 App과
+   같은 IP의 전용 포트 `32020`, 도메인 접속은 Dock 전용 도메인을 사용합니다([EVA-Dock](../operations/eva-dock.md)).
 7. SSH 서버는 다음 타겟을 추가하거나 등록을 마칩니다. NKS는 로컬 controller 하나를 사용합니다.
 8. 생성 파일을 열어 site·AWS·license·주소·SSO·스토리지 등 Values를 실제 환경에 맞게 채웁니다.
 
@@ -144,6 +146,7 @@ components:
   agent: true
   vision: true
   app: true
+  dock: false # eva install configure에서 Dock을 선택하면 true와 values.dock 틀이 생성됩니다.
   n8n: false
 credentials:
   aws:

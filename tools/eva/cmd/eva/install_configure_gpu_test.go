@@ -18,7 +18,7 @@ func TestInstallConfigurePRO6000MIGSelection(t *testing.T) {
 				if mode != "3" {
 					answers += "1\n"
 				}
-				answers += "3\n1\n3\n1\n1\n" + selection + "\n"
+				answers += "3\n1\n3\n1\n1\n" + selection + "\n2\n" // no Dock
 				input, messages, path := configureTest(t, answers)
 				value, exists := input.Targets["server-a"].Ansible["eva_gpu_mig_enabled"]
 				if exists != (selection != "3") || exists && value != (selection == "2") {
@@ -56,7 +56,7 @@ func TestInstallConfigurePRO6000MIGSelection(t *testing.T) {
 }
 
 func TestInstallConfigureReusesPRO6000SelectionAcrossTargets(t *testing.T) {
-	answers := "1\n2\n1\nfirst\n192.0.2.10\neva\n3\n1\n3\n1\n1\n1\n1\nsecond\n192.0.2.11\n\n1\n2\n"
+	answers := "1\n2\n1\nfirst\n192.0.2.10\neva\n3\n1\n3\n1\n1\n1\n2\n1\nsecond\n192.0.2.11\n\n1\n2\n"
 	input, messages, _ := configureTest(t, answers, "first-private", "second-private")
 	for _, name := range []string{"first", "second"} {
 		if input.Targets[name].Ansible["eva_gpu_mig_enabled"] != false {

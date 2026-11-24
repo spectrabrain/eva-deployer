@@ -316,7 +316,7 @@ func ValidateOfflineAssets(root string) error {
 			return err
 		}
 	}
-	for _, pattern := range []string{"eva-app/*.tgz", "eva-vision/*.tgz", "eva-agent/*.tgz", "eva-agent/release/*/plugins/eva-agent-qdrant/post-renderer.sh", "eva-agent/release/*/plugins/eva-agent-qdrant/plugin.yaml"} {
+	for _, pattern := range []string{"eva-app/*.tgz", "eva-vision/*.tgz", "eva-agent/*.tgz", "eva-dock/*.tgz", "eva-agent/release/*/plugins/eva-agent-qdrant/post-renderer.sh", "eva-agent/release/*/plugins/eva-agent-qdrant/plugin.yaml"} {
 		matches, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil || len(matches) == 0 {
 			return fmt.Errorf("required offline asset is missing: %s", pattern)

@@ -123,7 +123,7 @@ sudo eva inspect config --site customer-a --config-root /custom/config/customer-
 | `resolved` (기본) | 설치 후 `helm get values --all`로 수집한 계산값 | `resolved-values.yaml` |
 | `effective` | Deployer가 병합한 Helm 입력. CLI `--set`은 아직 포함하지 않음 | `effective-input-values.yaml` |
 | `defaults` | Chart에서 추출한 기본 Values | `chart-defaults.yaml` |
-| `override` | Deployer가 렌더링한 k3s override | `<component>-k3s-override.yaml`; IAM은 `eva-iam-k3s-override.yaml` |
+| `override` | Deployer가 렌더링한 k3s override | `<component>-k3s-override.yaml`; IAM은 `eva-iam-k3s-override.yaml`, Dock은 `dock-k3s-override.yaml` |
 | `sources` | Config, Workspace, CLI 등의 사용 여부와 산출물 경로 | `values-sources.yaml` |
 
 ```bash
@@ -358,7 +358,7 @@ Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 �
 	준비 서버의 도구·대상 kernel·저장공간 조건은 Local Runbook을 따른다.
 - AWS credential은 `/var/lib/eva/credentials/aws_key.ini`를 재사용하고 STS로 검증한다. 없으면
 	대화형 숨김 입력을 사용하며 CLI Secret 옵션은 없다. 비대화형은 승인된 credential 파일이 필요하다.
-- Infra/App/IAM/Agent/Vision 패키지·Chart·helper, n8n 이미지, 모델, Harbor Qdrant snapshot,
+- Infra/App/IAM/Agent/Vision/Dock 패키지·Chart·helper, n8n 이미지, 모델, Harbor Qdrant snapshot,
 	Harbor offline installer도 준비한다. 기존 유효 Runtime은 재사용하며 없으면 **온라인 bootstrap의
 	APT/pip 호스트 변경**을 `--yes`로 승인한다. 손상된 Runtime은 먼저 복구한다.
 - Docker/AWS 설치, Harbor 배포·이미지/snapshot 게시, GPU driver 설치·MIG 전환, Docker daemon

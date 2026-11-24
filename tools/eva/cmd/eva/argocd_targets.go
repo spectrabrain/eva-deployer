@@ -70,7 +70,7 @@ func argoCDTargets(document plan.Document) ([]argoCDTarget, bool, error) {
 	}
 	var names []string
 	for name, target := range input.Targets {
-		for _, component := range []string{"iam", "app", "agent", "vision", "n8n"} {
+		for _, component := range []string{"iam", "app", "agent", "vision", "dock", "n8n"} {
 			if input.Components[component] && (target.Components == nil || target.Components[component]) {
 				names = append(names, name)
 				break

@@ -31,6 +31,7 @@ var expectedPlaybooks = map[string]string{
 	"agent":        "src/solution/playbooks/site_eva_agent.yaml",
 	"vision":       "src/solution/playbooks/site_eva_vision.yaml",
 	"app":          "src/solution/playbooks/site_eva_app.yaml",
+	"dock":         "src/solution/playbooks/site_eva_dock.yaml",
 	"n8n":          "src/solution/playbooks/site_n8n.yaml",
 }
 
@@ -330,7 +331,7 @@ func overrideVars(record operation.Record, document plan.Document) (map[string]s
 
 func overrideComponent(component string) bool {
 	switch component {
-	case "iam", "app", "agent", "vision":
+	case "iam", "app", "agent", "vision", "dock":
 		return true
 	default:
 		return false

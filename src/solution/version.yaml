@@ -15,3 +15,5 @@ eva_agent_init_chart_version: 1.0.0
 qdrant_chart_version: 1.18.2
 n8n_image: docker.n8n.io/n8nio/n8n:2.32.7
 eva_iam_chart_version: 3.3.1
+eva_dock_chart_version: 3.4.0
+eva_dock_image_tag: 3.4.0-rc1

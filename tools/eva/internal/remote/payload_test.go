@@ -62,6 +62,9 @@ func TestBuildTargetPayloadAllowsProductOwnedNames(
 		"cache/eva-agent/release/3.2.0/" +
 			"eva-agent/private-values.yaml": "privateValues: placeholder\n",
 		"cache/models/agent/hf/tokenizer.json": "{\"model\": \"tokenizer\"}\n",
+		// Remote targets install product charts from the payload, not Harbor.
+		"cache/eva-iam/eva-iam-3.3.1.tgz":   "synthetic iam chart\n",
+		"cache/eva-dock/eva-dock-3.4.0.tgz": "synthetic dock chart\n",
 	}
 
 	for relative, contents := range productFiles {

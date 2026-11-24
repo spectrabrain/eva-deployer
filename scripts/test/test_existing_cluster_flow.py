@@ -655,6 +655,27 @@ class SharedFlowTests(unittest.TestCase):
         self.assertTrue(images)
         self.assertTrue(all("imageTag=3.3.0-custom" in c["args"] for c in images))
 
+    def test_dock_seeds_chart_fullname_pull_secret_and_checks_catalog_image_tag(self):
+        self.incoming()
+        catalog=yaml.safe_load((ROOT/"src/solution/version.yaml").read_text())
+        (self.workspace/"site-values/dock.yaml").write_text(yaml.safe_dump({"controller":{
+            "image":{"repository":NEW+"eva-dock"}, "persistence":{"type":"pvc"}}}))
+        self.variables.update(eva_enabled_components="dock", eva_online_component="dock", eva_online_action="prepare",
+                              eva_versions_file=str(ROOT/"src/solution/version.yaml"),
+                              eva_online_input_values={"image":{"repository":NEW+"eva-dock"},
+                                                       "imagePullSecret":{"enabled":True, "create":True}})
+        p=self.root/"dock-credentials.yaml"
+        p.write_text(yaml.safe_dump([{"hosts":"all","connection":"local", "vars_files":[str(ROOT/"src/playbook-vars.yaml")],
+            "pre_tasks":[{"ansible.builtin.import_tasks":str(ROOT/"src/playbook-preflight.yaml")}],
+            "tasks":[{"ansible.builtin.include_tasks":str(ROOT/"src/solution/roles/eva_cluster_context/tasks/online_credentials.yaml")}]}]))
+        self.execute(p)
+        state=json.loads((self.root/"state.json").read_text())
+        # The Dock chart names its managed pull Secret after the chart fullname.
+        self.assertEqual(state["pull_secret"]["metadata"]["name"],"eva-dock-eva-dock-ecr-regcred")
+        images=[c for c in self.calls() if c["tool"]=="aws" and "batch-get-image" in c["args"]]
+        self.assertTrue(images)
+        self.assertTrue(all("imageTag="+catalog["eva_dock_image_tag"] in c["args"] for c in images))
+
     def test_shared_iam_handoff_is_written_privately_by_kubeconfig_owner_without_sudo(self):
         state_root=self.root/"private-state"
         handoff=state_root/"nks-test"/"controller"/"iam-to-app.yaml"

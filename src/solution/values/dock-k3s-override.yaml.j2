@@ -1,0 +1,50 @@
+# Rendered helm override for eva-dock on k3s (base: chart values.yaml).
+# Driven by eva_dock_* ansible variables — see roles/eva_dock/tasks/main.yaml for defaults.
+# Installer targets.<alias>.values.dock is applied after this file and wins.
+#
+# Keys here must match the chart's schema. Check after a chart bump:
+#   helm show values eva-dock/eva-dock --version <version>
+image:
+  repository: "{{ eva_dock_image_repository }}"
+  tag: "{{ eva_dock_image_tag }}"
+  pullPolicy: "{{ (repository_mode in ['online_repository', 'cloud_repository']) | ternary('Always', 'IfNotPresent') }}"
+
+# Online: the chart creates and refreshes its own ECR pull Secret.
+# Remote/Local: images come from Harbor, so no registry credential is rendered.
+imagePullSecret:
+  enabled: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
+  create: {{ (repository_mode in ['online_repository', 'cloud_repository']) | lower }}
+  account: "{{ eva_dock_ecr_account }}"
+  region: "ap-northeast-2"
+  authType: "{{ eva_dock_image_pull_auth_type }}"
+  hostPath: "{{ eva_dock_image_pull_host_path }}"
+  awsCredentialsSecret: "{{ eva_dock_image_pull_secret_name }}"
+
+ingress:
+  enabled: true
+  className: traefik
+  # Domain or IP without scheme/port/path. IP values render a hostless rule.
+  host: "{{ eva_dock_host }}"
+  path: /
+  pathType: Prefix
+  tls:
+    secretName: "{{ eva_dock_tls_secret_name }}"
+    authType: hostPath
+    hostPath: "{{ eva_dock_tls_host_path }}"
+    certFile: tls.crt
+    keyFile: tls.key
+{% if airgap_mode | bool %}
+    job:
+      kubectlImage:
+        repository: "{{ eva_dock_kubectl_image_repository }}"
+{% endif %}
+
+persistence:
+  enabled: true
+  type: hostPath
+  hostPath:
+    path: "{{ eva_dock_persistence_host_path }}"
+
+config:
+  # EVA event-recipient webhooks and the Traefik listener use this URL.
+  dockPublicUrl: "{{ eva_dock_public_url }}"

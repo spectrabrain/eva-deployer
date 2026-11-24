@@ -199,6 +199,7 @@ func runInstallConfigure(args []string, input io.Reader, output io.Writer, home,
 			if choice == "1" {
 				target.Solution, target.IAM, target.Protocol, target.Address = previous.Solution, previous.IAM, previous.Protocol, previous.Address
 				target.Agent, target.Vision = previous.Agent, previous.Vision
+				target.Dock, target.DockProtocol = previous.Dock, previous.DockProtocol
 				target.SolutionOnly = previous.SolutionOnly
 				if enabled, exists := previous.Ansible["eva_gpu_mig_enabled"]; exists {
 					target.Ansible["eva_gpu_mig_enabled"] = enabled
@@ -382,8 +383,40 @@ func (prompt configurePrompts) solution(target *workspace.ConfigureTarget) error
 			target.Ansible["eva_gpu_mig_enabled"] = choice == "2"
 		}
 	}
-	if target.Address == "ip" && target.Protocol == "https" && target.Deployment == nil {
+	if err := prompt.dock(target); err != nil {
+		return err
+	}
+	if target.Address == "ip" && (target.Protocol == "https" || target.Dock && target.DockProtocol == "https") && target.Deployment == nil {
 		fmt.Fprintln(prompt.output, "IP 직접 HTTPS는 해당 IP SAN을 포함한 인증서를 타겟에 준비해야 합니다.")
+	}
+	return nil
+}
+
+func (prompt configurePrompts) dock(target *workspace.ConfigureTarget) error {
+	choice, err := prompt.choice("EVA-Dock (여러 EVA 알림·Live 관제 화면)\n  1) 설치\n  2) 설치 안 함", "1", "1", "2")
+	if err != nil {
+		return err
+	}
+	target.Dock = choice == "1"
+	target.DockProtocol = ""
+	if !target.Dock {
+		return nil
+	}
+	target.DockProtocol = target.Protocol
+	if target.Deployment != nil {
+		fmt.Fprintln(prompt.output, "NKS의 Dock은 Cloud LB 주소를 config.dockPublicUrl에 직접 입력합니다.")
+		return nil
+	}
+	fallback := map[string]string{"http": "1", "https": "2"}[target.Protocol]
+	choice, err = prompt.choice("EVA-Dock 접속 프로토콜\n  1) HTTP — 암호화되지 않는 격리 검증 환경\n  2) HTTPS — 인증서 필요, 권장", fallback, "1", "2")
+	if err != nil {
+		return err
+	}
+	target.DockProtocol = map[string]string{"1": "http", "2": "https"}[choice]
+	if target.Address == "ip" {
+		fmt.Fprintln(prompt.output, "Dock은 / 와 /api를 사용하므로 App과 같은 IP의 전용 포트 32020으로 공개합니다 (config.dockPublicUrl에서 변경).")
+	} else {
+		fmt.Fprintln(prompt.output, "Dock은 / 와 /api를 사용하므로 App/IAM과 다른 전용 도메인(DOCK_HOST)이 필요합니다.")
 	}
 	return nil
 }
@@ -397,6 +430,11 @@ func configureTargetSummary(target workspace.ConfigureTarget) string {
 		scope = "Solution만"
 	}
 	summary := fmt.Sprintf("%s / %s / %s / IAM=%s / Agent=%t / Vision=%t", scope, target.Protocol, target.Address, target.IAM, target.Agent, target.Vision)
+	if target.Dock {
+		summary += fmt.Sprintf(" / Dock=%s", target.DockProtocol)
+	} else {
+		summary += " / Dock=false"
+	}
 	if enabled, exists := target.Ansible["eva_gpu_mig_enabled"]; exists {
 		summary += fmt.Sprintf(" / PRO6000 MIG=%t", enabled)
 	}

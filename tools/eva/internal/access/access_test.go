@@ -184,3 +184,29 @@ func assertURL(t *testing.T, endpoints []Endpoint, name, expected string) {
 	}
 	t.Fatalf("missing %s URL %q in %#v", name, expected, endpoints)
 }
+
+func TestDockPublicURLFromDeployedValuesAndLiveConfigMap(t *testing.T) {
+	document := fixturePlan(t)
+	document.Steps = []plan.Step{{Component: "app"}, {Component: "dock"}}
+	writeFixture(t, filepath.Join(document.Workspace, "inventory/host_vars/server-a.yaml"), "ansible_connection: local\nansible_host: 10.186.0.75\n")
+	writeFixture(t, valuesPath(document, "10.186.0.75", "app"), "app:\n  backendHost: 10.186.0.75\n  backendSecure: true\n  backendSecurePort: 443\ningress:\n  path: /\n")
+	// A Cloud LB Dock keeps chart Ingress off but still publishes DOCK_PUBLIC_URL.
+	writeFixture(t, valuesPath(document, "10.186.0.75", "dock"), "config:\n  dockPublicUrl: https://10.186.0.75:32020\ningress:\n  enabled: false\nsecrets:\n  dockAccessPassword: private-test-password\n")
+	endpoints := Discover(document, Options{})
+	assertURL(t, endpoints, "Dock", "https://10.186.0.75:32020/")
+	var output bytes.Buffer
+	Print(&output, endpoints)
+	if strings.Contains(output.String(), "private-test-password") || strings.Index(output.String(), "App:") > strings.Index(output.String(), "Dock:") {
+		t.Fatalf("unexpected Dock output: %s", output.String())
+	}
+
+	live := fixturePlan(t)
+	live.Steps = []plan.Step{{Component: "dock"}}
+	endpoints = Discover(live, Options{PreferLive: true, Run: func(name string, args ...string) health.CommandResult {
+		if !strings.Contains(strings.Join(args, " "), "-n eva-dock") {
+			t.Fatalf("unexpected Dock namespace: %v", args)
+		}
+		return health.CommandResult{Output: `{"items":[{"kind":"ConfigMap","data":{"DOCK_PUBLIC_URL":"http://dock.example.com","DOCK_PORT":"18080"}}]}`}
+	}})
+	assertURL(t, endpoints, "Dock", "http://dock.example.com/")
+}

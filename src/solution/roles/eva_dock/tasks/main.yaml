@@ -211,6 +211,24 @@
       dockPublicUrl 의 scheme 은 ingress.tls.enabled 와 일치해야 하며 path 를 포함하지 않습니다.
       현재 ingress.host={{ eva_dock_effective_host }}, dockPublicUrl={{ eva_dock_public_url }}
 
+# The Ingress host routes requests while DOCK_PUBLIC_URL is the browser/webhook
+# address and the source of the Traefik public port, so both must name one host.
+- name: Require the EVA Dock public URL to use the Ingress host
+  vars:
+    eva_dock_url_host: "{{ (eva_dock_public_url | urlsplit('hostname') | default('', true)) | lower }}"
+    eva_dock_ingress_host: "{{ eva_dock_effective_host | regex_replace('^\\[|\\]$', '') | lower }}"
+  ansible.builtin.assert:
+    that:
+      - eva_dock_url_host == eva_dock_ingress_host
+    fail_msg: >-
+      config.dockPublicUrl 의 host({{ eva_dock_url_host }})가 ingress.host({{ eva_dock_ingress_host }})와 다릅니다.
+      브라우저와 EVA 웹훅은 dockPublicUrl 로 접속하고 Traefik 은 ingress.host 로 라우팅하므로 같은 도메인/IP를 넣으세요.
+      NAT·외부 LB 뒤처럼 의도적으로 다르면 -e eva_dock_allow_public_host_mismatch=true 로 통과시킬 수 있습니다.
+  when:
+    - eva_dock_effective_ingress_enabled | bool
+    - eva_dock_public_url | length > 0
+    - not (eva_dock_allow_public_host_mismatch | default(false) | bool)
+
 - name: Require an EVA Dock access password
   ansible.builtin.assert:
     that:

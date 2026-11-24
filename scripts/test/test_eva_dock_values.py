@@ -204,6 +204,20 @@ class DockRoleTests(unittest.TestCase):
         self.assertEqual(self.kind(manifest, "Ingress")[0]["spec"]["rules"][0]["host"], "dock.example.com")
         self.assertIsNone(traefik_ports.endpoint(manifest, "dock", "eva-dock", "eva-dock"))
 
+    def test_public_host_mismatch_can_be_explicitly_allowed(self):
+        self.run_role({
+            "ingress": {"host": "10.0.0.5", "tls": {"enabled": False, "create": False}},
+            "config": {"dockPublicUrl": "http://DOCK.example.com:32020"},
+            "secrets": {"dockAccessPassword": "fixture-dock-password"},
+        }, {"eva_dock_allow_public_host_mismatch": True})
+        self.assertEqual(self.kind(self.manifest(), "ConfigMap")[0]["data"]["DOCK_PUBLIC_URL"], "http://DOCK.example.com:32020")
+        # Host comparison ignores case, so an equal host in another case passes without opt-out.
+        self.run_role({
+            "ingress": {"host": "dock.example.com", "tls": {"enabled": False, "create": False}},
+            "config": {"dockPublicUrl": "http://DOCK.example.com"},
+            "secrets": {"dockAccessPassword": "fixture-dock-password"},
+        })
+
     def test_invalid_inputs_stop_before_helm_changes(self):
         for values, message in (
             ({"ingress": {"host": "192.0.2.10"}}, "EVA Dock 접속 비밀번호가 없습니다"),
@@ -212,6 +226,8 @@ class DockRoleTests(unittest.TestCase):
             ({"ingress": {"host": "192.0.2.10", "tls": {"enabled": True}}, "config": {"dockPublicUrl": "http://192.0.2.10:32020"},
               "secrets": {"dockAccessPassword": "fixture-dock-password"}}, "EVA Dock 공개 주소가 올바르지 않습니다"),
             ({"unknownKey": True, "secrets": {"dockAccessPassword": "fixture-dock-password"}}, "모르는 최상위 키"),
+            ({"ingress": {"host": "192.0.2.10"}, "config": {"dockPublicUrl": "http://192.0.2.11:32020"},
+              "secrets": {"dockAccessPassword": "fixture-dock-password"}}, "ingress.host(192.0.2.10)와 다릅니다"),
         ):
             with self.subTest(message=message):
                 output = self.run_role(values, succeeds=False)

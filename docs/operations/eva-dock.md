@@ -55,6 +55,12 @@ targets:
 - `ingress.host`에는 scheme·port·path 없이 도메인 또는 IP만 넣는다. IP는 hostless Ingress로 렌더링된다.
 - 포트는 `config.dockPublicUrl`에서 정한다. 비워 두면 Ingress host와 TLS 설정으로 만들며, IP일 때는
   `:32020`을 붙인다. scheme은 `ingress.tls.enabled`와 같아야 하고 path는 넣지 않는다.
+- 브라우저와 EVA 웹훅은 `config.dockPublicUrl`로 접속하고 Traefik은 `ingress.host`로 라우팅한다.
+  Kubernetes Ingress에는 포트가 없으므로 공개 포트는 `dockPublicUrl`에만 쓰며, Deployer가 이 포트로
+  Traefik listener를 만든다. 두 값의 host가 다르면 설치 전에 중단한다(대소문자 무시). NAT·외부 LB 뒤처럼
+  의도적으로 다르면 target `ansible`에 `eva_dock_allow_public_host_mismatch: true`를 지정한다.
+- Dock은 하위 경로(예: `/dock`)를 지원하지 않는다. 앱이 `/api`·`/assets`를 루트 기준 절대 경로로 호출하므로
+  IP 접속은 전용 포트, 도메인 접속은 전용 도메인으로 분리한다.
 - `secrets.dockAccessPassword`(또는 미리 만든 `secrets.existingSecret`)가 없으면 설치 전에 중단한다.
   Helm upgrade는 이전 Values를 재사용하지 않으므로 **업데이트할 때도 기존 비밀번호를 그대로 입력**한다.
 - 그 밖의 키(`config.liveEnabled`, `config.streamingEnabled`, `persistence.hostPath.path`, `resources` 등)는
@@ -100,9 +106,11 @@ SSE·MJPEG 스트림이 끊기지 않도록 LB의 idle timeout을 충분히 길�
 
 ## 확인
 
+`eva install`이 성공하면 App·IAM·Harbor와 함께 **Dock** 접속 주소(`dockPublicUrl`)를 Access URLs에
+표시한다. `eva check`는 설치된 Dock ConfigMap의 `DOCK_PUBLIC_URL`을 읽어 같은 주소를 표시한다.
+
 ```bash
-sudo eva status                 # Access URLs의 Dock 주소
-sudo eva check                  # eva-dock workload 상태
+sudo eva check                  # eva-dock workload 상태와 Access URLs의 Dock 주소(dockPublicUrl)
 sudo eva inspect values --component dock
 ```
 

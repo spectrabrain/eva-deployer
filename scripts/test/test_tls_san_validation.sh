@@ -246,9 +246,12 @@ def add_case(name, settings, selected=None, expected=(), failure=None):
   for component, (host, ingress, cert) in settings.items():
     cert_dir = case / component / "certs"
     values = {"ingress": ingress}
-    values["config" if component == "iam" else "app"] = {
-      "host" if component == "iam" else "backendHost": host
-    }
+    if component == "dock":
+      ingress["host"] = host
+    else:
+      values["config" if component == "iam" else "app"] = {
+        "host" if component == "iam" else "backendHost": host
+      }
     # No certificate directory exists in skip/missing cases. Even stat/SAN
     # results must stay empty, so a silently ignored failed read cannot pass.
     ingress.setdefault("tls", {})["hostPath"] = str(cert_dir)
@@ -336,6 +339,24 @@ add_case("mixed-app-https-iam-http", {
   "app": ("192.0.2.10", {"tls": {"enabled": True}}, "ip"),
   "iam": ("ingress.example.test", {"tls": {"enabled": False, "create": True}}, None),
 }, expected=("App",))
+for kind, host in (("ip", "192.0.2.10"), ("dns", "ingress.example.test")):
+  add_case(f"dock-http-{kind}", {
+    "dock": (host, {"tls": {"enabled": False, "create": False}}, None)
+  })
+  add_case(f"dock-https-{kind}", {
+    "dock": (host, {"tls": {"enabled": True, "create": True, "authType": "hostPath"}}, kind)
+  }, expected=("Dock",))
+# The Dock chart defaults to HTTP; tls.create follows tls.enabled when omitted.
+add_case("dock-defaults", {"dock": ("192.0.2.10", {}, None)})
+add_case("dock-https-defaults", {"dock": ("192.0.2.10", {"tls": {"enabled": True}}, "ip")}, expected=("Dock",))
+add_case("dock-not-selected", {
+  "dock": ("192.0.2.10", {"tls": {"enabled": True, "create": True}}, None)
+}, selected="agent")
+add_case("mixed-iam-app-dock-https", {
+  "iam": ("192.0.2.10", {"tls": {"enabled": True}}, "ip"),
+  "app": ("192.0.2.10", {"tls": {"enabled": True}}, "ip"),
+  "dock": ("192.0.2.10", {"tls": {"enabled": True}}, "ip"),
+}, expected=("IAM", "App", "Dock"))
 for kind, host in (("ip", "192.0.2.10"), ("dns", "ingress.example.test")):
   add_case(f"https-{kind}-missing-cert", {
     "app": (host, {"tls": {"enabled": True}}, None)

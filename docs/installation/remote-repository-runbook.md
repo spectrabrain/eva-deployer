@@ -177,7 +177,7 @@ site:
   id: customer-a
 repository:
   mode: remote
-  registry: harbor.example.com:32080
+  registry: "<HARBOR_HOST>:32080" # 필수: Main Harbor의 도달 가능한 IP/도메인. ex) harbor.example.com:32080
   project: eva
 components:
   infra: true
@@ -185,7 +185,7 @@ components:
   agent: true
   vision: true
   app: true
-  dock: false
+  dock: true # EVA-Dock. 설치하지 않으면 false로 두고 values.dock을 제거합니다.
   n8n: false
 targets:
   server-a:
@@ -201,7 +201,7 @@ targets:
     values:
       iam:
         config:
-          host: iam.example.com
+          host: "<IAM_HOST>" # 필수: scheme, port, path 없는 IAM 도메인. ex) iam.example.com
         keycloak:
           realmConfig:
             substitutions:
@@ -211,12 +211,12 @@ targets:
               password: "<REALM_ADMIN_PASSWORD>" # 필수: realm 관리자 비밀번호
             evaApp:
               redirectUris:
-                - "https://app.example.com/*"
+                - "https://<APP_HOST>/*" # 필수: IAM이 아니라 App 도메인. ex) https://app.example.com/*
         ingress:
           tls:
             enabled: true
             create: true
-            hostPath: /etc/eva/certs
+            hostPath: "<IAM_TLS_CERT_DIRECTORY>" # 필수: IAM_HOST SAN 인증서 tls.crt + tls.key. ex) /etc/eva/iam-certs
         redis:
           tls:
             enabled: true # HTTPS 구성에 맞춰 IAM Redis TLS도 사용합니다.
@@ -228,9 +228,9 @@ targets:
           tls:
             enabled: true
             create: true
-            hostPath: /etc/eva/certs
+            hostPath: "<APP_TLS_CERT_DIRECTORY>" # 필수: APP_HOST SAN 인증서 tls.crt + tls.key. ex) /etc/eva/app-certs
         app:
-          backendHost: app.example.com
+          backendHost: "<APP_HOST>" # 필수: App 도메인. ex) app.example.com
           backendSecure: true
           backendSecurePort: 443
           license:
@@ -238,7 +238,23 @@ targets:
             product_code: "<LICENSE_PRODUCT_CODE>" # 필수: 발급된 라이선스와 일치하는 제품 코드. ex) eva-dev 또는 eva-prod
             api_key: "<LICENSE_API_KEY>" # 필수: 발급된 API key
             shared_key: "<LICENSE_SHARED_KEY>" # 필수: 발급된 shared key
+      dock:
+        ingress:
+          host: "<DOCK_HOST>" # 필수: scheme, port, path 없는 Dock 전용 도메인. ex) dock.example.com
+          tls:
+            enabled: true
+            create: true
+            hostPath: "<DOCK_TLS_CERT_DIRECTORY>" # 필수: DOCK_HOST SAN 인증서 tls.crt + tls.key. ex) /etc/eva/dock-certs
+        config:
+          dockPublicUrl: "https://<DOCK_HOST>" # 필수: 브라우저·EVA 웹훅이 접근할 Dock 외부 주소. ex) https://dock.example.com
+        secrets:
+          dockAccessPassword: "<DOCK_ACCESS_PASSWORD>" # 필수: Dock 로그인 비밀번호. 업데이트 시에도 같은 값 입력
 ```
+
+`values.dock`은 EVA-Dock을 선택한 경우의 틀입니다. Dock은 `/`와 `/api`를 사용하므로 도메인 접속에서는
+App/IAM과 다른 전용 도메인을 사용합니다. IP 직접 접속에서는 `ingress.host`에 App과 같은 IP를 넣고
+`dockPublicUrl`을 `https://<IP>:32020`처럼 전용 포트로 지정합니다. Dock 이미지와 chart는
+Main Harbor와 Release 자산에서 받습니다. 자세한 내용은 [EVA-Dock](../operations/eva-dock.md)을 참고합니다.
 
 TLS certificate/key는 target의 `hostPath`에 별도로 준비합니다. `targets`는 inventory alias별
 mapping이며, SSH 접속 주소는 `ansible_host`에 지정합니다. SSH private key의 상대 경로는 설정 파일 기준입니다.

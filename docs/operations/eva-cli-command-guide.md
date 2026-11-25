@@ -408,6 +408,17 @@ Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 �
 Harbor 설치 방식과 HTTP/HTTPS는 bootstrap이 자동 확인한다. 기존 Harbor는 재사용하고,
 저장된 인증이 유효하지 않으면 같은 명령 안에서 게시 계정을 입력받는다. 별도 `docker login`은 필요하지 않다.
 `remote verify`는 준비 자산을 검증하며 실제 타겟 서비스는 설치 후 `eva check`로 확인한다.
+`remote prepare`와 `remote verify`는 성공하면 이번 준비가 Harbor에 게시한 이미지·Qdrant snapshot·Vision
+모델 참조를 정렬해 `Harbor artifacts prepared: count=N` 아래에 표시한다. 목록은 준비 증적(게시 mapping
+보고서)에서 읽으므로 같은 Harbor project의 다른 저장소는 포함하지 않으며, Harbor를 다시 조회하지 않는다.
+
+```text
+[INFO] Harbor artifacts prepared: count=38
+  10.159.56.124:32080/eva/aws-cli:2.33.8
+  10.159.56.124:32080/eva/eva-app:3.3.0
+  10.159.56.124:32080/eva/eva-dock:3.4.0-rc1
+  ...
+```
 `status`·`retry`·`apply`는 Main의 설치 작업을 대상으로 한다. 타겟별 Values·Config·Helm 백업은 타겟에서 조회한다.
 
 개별 Target 관리와 전달만 필요할 때 다음 명령을 사용할 수 있다.

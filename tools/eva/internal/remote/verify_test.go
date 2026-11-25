@@ -26,6 +26,24 @@ func TestVerifyValidatesCompletedPreparationWithoutMutation(t *testing.T) {
 	if !sameStrings(result.Categories, []string{"release", "runtime-packages", "product-images", "infra-images", "models", "qdrant-snapshots", "vision-models"}) {
 		t.Fatalf("verification categories = %v", result.Categories)
 	}
+	// Only references this preparation published, sorted, Dock included.
+	want := []string{"harbor.example.internal:32080/eva/eva-dock:3.4.0-rc1", "harbor.example.internal:32080/eva/infra:1", "harbor.example.internal:32080/eva/n8n:2.32.7", "harbor.example.internal:32080/eva/product:1", "harbor.example.internal:32080/eva/qdrant-snapshots:tag"}
+	names, err := visionModelSelection()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		want = append(want, identity.RepositoryRegistry+"/"+identity.RepositoryProject+"/"+strings.ToLower(name)+":latest")
+	}
+	sort.Strings(want)
+	if !sameStrings(result.Artifacts, want) {
+		t.Fatalf("published artifacts = %v, want %v", result.Artifacts, want)
+	}
+	var output strings.Builder
+	PrintPublishedRepositoryArtifacts(&output, result.Artifacts)
+	if !strings.HasPrefix(output.String(), fmt.Sprintf("[INFO] Harbor artifacts prepared: count=%d\n  harbor.example.internal:32080/eva/dartf-light:latest\n", len(want))) {
+		t.Fatalf("published artifact output = %q", output.String())
+	}
 	after := preparationFingerprint(t, root)
 	if before != after {
 		t.Fatalf("Verify() mutated preparation tree\nbefore=%s\nafter=%s", before, after)
@@ -116,14 +134,14 @@ func writeCompletedPreparation(t *testing.T) (string, release.Resolved, Preparat
 	for _, relative := range []string{"cache/manifest.txt", "cache/apt/debs/manifest.txt", "cache/apt/debs/a.deb", "cache/docker/debs/manifest.txt", "cache/docker/debs/a.deb", "cache/nvidia/container-toolkit-debs/manifest.txt", "cache/nvidia/container-toolkit-debs/a.deb", "cache/tools/oras", "cache/k3s/k3s-v1-linux-amd64", "cache/eva-app/app.tgz", "cache/eva-vision/vision.tgz", "cache/eva-dock/eva-dock-3.4.0.tgz", "cache/eva-agent/agent.tgz", "cache/eva-agent/release/v1/plugins/eva-agent-qdrant/post-renderer.sh", "cache/eva-agent/release/v1/plugins/eva-agent-qdrant/plugin.yaml"} {
 		write(relative, "data\n")
 	}
-	write("cache/images/images-all.txt", "source/product:1\ndocker.n8n.io/n8nio/n8n:2.32.7\n")
-	write("cache/images/images-pulled.txt", "source/product:1\ndocker.n8n.io/n8nio/n8n:2.32.7\n")
+	write("cache/images/images-all.txt", "source/product:1\ndocker.n8n.io/n8nio/n8n:2.32.7\nsource/eva-dock:3.4.0-rc1\n")
+	write("cache/images/images-pulled.txt", "source/product:1\ndocker.n8n.io/n8nio/n8n:2.32.7\nsource/eva-dock:3.4.0-rc1\n")
 	write("cache/images/rendered/n8n.yaml", "image: docker.n8n.io/n8nio/n8n:2.32.7\n")
 	write("cache/images/images-missing.txt", "")
 	write("cache/images/infra-images-all.txt", "source/infra:1\n")
 	write("cache/images/infra-images-pulled.txt", "source/infra:1\n")
 	write("cache/images/infra-images-missing.txt", "")
-	write("reports/repository-mapping-product.txt", "source/product:1 harbor.example.internal:32080/eva/product:1\ndocker.n8n.io/n8nio/n8n:2.32.7 harbor.example.internal:32080/eva/n8n:2.32.7\n")
+	write("reports/repository-mapping-product.txt", "source/product:1 harbor.example.internal:32080/eva/product:1\ndocker.n8n.io/n8nio/n8n:2.32.7 harbor.example.internal:32080/eva/n8n:2.32.7\nsource/eva-dock:3.4.0-rc1 harbor.example.internal:32080/eva/eva-dock:3.4.0-rc1\n")
 	write("reports/repository-mapping-infra.txt", "source/infra:1 harbor.example.internal:32080/eva/infra:1\n")
 	write("cache/models/agent/hf/model.bin", "agent\n")
 	write("cache/models/vllm/hf/model.bin", "vllm\n")
@@ -370,5 +388,20 @@ func TestCompletedPreparationStillRejectsDamagedArtifactEvidence(t *testing.T) {
 				t.Fatal("damaged payload evidence was accepted")
 			}
 		})
+	}
+}
+
+func TestPreparedArtifactListUsesOnlyValidatedPublishEvidence(t *testing.T) {
+	root, _, _ := writeCompletedPreparation(t)
+	var output strings.Builder
+	if err := printPreparedArtifacts(&output, root); err != nil {
+		t.Fatalf("printPreparedArtifacts() error = %v", err)
+	}
+	if !strings.Contains(output.String(), "\n  harbor.example.internal:32080/eva/eva-dock:3.4.0-rc1\n") || strings.Contains(output.String(), "source/") {
+		t.Fatalf("prepare must list published Harbor targets, not sources: %q", output.String())
+	}
+	mustWrite(t, filepath.Join(root, "reports/repository-mapping-infra.txt"), "source/infra:1\n")
+	if _, err := PublishedRepositoryArtifacts(root); err == nil {
+		t.Fatal("a malformed mapping line must not be reported as published")
 	}
 }

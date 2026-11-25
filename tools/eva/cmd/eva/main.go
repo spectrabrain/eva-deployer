@@ -840,6 +840,7 @@ func runRemoteVerify(args []string) error {
 	fmt.Printf("[INFO] release=%s\n", result.ReleaseVersion)
 	fmt.Printf("[INFO] repository=%s/%s\n", result.Registry, result.Project)
 	fmt.Printf("[INFO] manifest=%s\n", result.ManifestPath)
+	remote.PrintPublishedRepositoryArtifacts(os.Stdout, result.Artifacts)
 	return nil
 }
 

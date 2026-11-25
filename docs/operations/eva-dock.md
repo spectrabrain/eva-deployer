@@ -22,6 +22,19 @@ Dock은 EVA App의 기존 API와 event-recipient 웹훅을 사용하므로 App �
 기본값은 **설치**이며, 설치하면 Dock 접속 프로토콜(HTTP/HTTPS)을 따로 고른다. 기본값은 App/IAM에
 선택한 프로토콜이다. NKS는 Cloud LB 주소를 직접 입력하므로 프로토콜을 묻지 않는다.
 
+생성된 `values.dock.config`에는 Dock 화면 메뉴 기본값이 chart와 같게 표시된다. configure는 이 값을 묻지
+않으므로 필요하면 `eva-install.yaml`에서 직접 바꾼다. 설치 후 변경도 같은 값을 고친 뒤
+`eva install --component dock`으로 적용한다.
+
+| 키 | 기본값 | 화면 |
+| --- | --- | --- |
+| `dashboardEnabled` | `true` | DASHBOARD |
+| `liveEnabled` | `false` | LIVE(탐지 알림 이력) |
+| `streamingEnabled` | `false` | STREAMING(카메라 실시간 MJPEG 영상) |
+
+STREAMING은 Dock이 EVA 서버의 카메라 영상을 중계하므로 EVA 서버당 동시 영상 수를
+`config.livePerEva`(기본 16)로 제한한다.
+
 Dock은 `/`와 `/api` 경로를 사용하므로 App(`/`)과 경로로 나눌 수 없다. 주소 구성에 따라 다음과 같이
 분리한다.
 
@@ -48,6 +61,9 @@ targets:
             hostPath: "/etc/eva/certs" # tls.crt + tls.key, IP SAN 포함. App HTTPS와 같은 디렉터리 재사용 가능
         config:
           dockPublicUrl: "https://192.0.2.10:32020"
+          dashboardEnabled: true
+          liveEnabled: false      # LIVE 메뉴. 사용하려면 true
+          streamingEnabled: false # STREAMING 메뉴. 사용하려면 true
         secrets:
           dockAccessPassword: "<DOCK_ACCESS_PASSWORD>" # 필수
 ```
@@ -63,7 +79,7 @@ targets:
   IP 접속은 전용 포트, 도메인 접속은 전용 도메인으로 분리한다.
 - `secrets.dockAccessPassword`(또는 미리 만든 `secrets.existingSecret`)가 없으면 설치 전에 중단한다.
   Helm upgrade는 이전 Values를 재사용하지 않으므로 **업데이트할 때도 기존 비밀번호를 그대로 입력**한다.
-- 그 밖의 키(`config.liveEnabled`, `config.streamingEnabled`, `persistence.hostPath.path`, `resources` 등)는
+- 그 밖의 키(`config.livePerEva`, `config.dashboardEnabled`, `persistence.hostPath.path`, `resources` 등)는
   chart Values 그대로 `values.dock`에 쓴다. chart에 없는 최상위 키는 설치 전에 거부한다.
 
 ## Deployer가 적용하는 기본값

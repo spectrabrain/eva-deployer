@@ -460,6 +460,10 @@ func dockValues(t *testing.T, input workspace.Installer, name string) map[string
 	if values == nil || !effectiveTargetComponents(input, name)["dock"] {
 		t.Fatal("Dock selection must enable the component and scaffold its Values")
 	}
+	config := values["config"].(map[string]any)
+	if config["dashboardEnabled"] != true || config["liveEnabled"] != false || config["streamingEnabled"] != false {
+		t.Fatal("Dock scaffold must show the chart menu defaults (DASHBOARD on, LIVE/STREAMING off)")
+	}
 	return values
 }
 

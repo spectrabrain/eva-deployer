@@ -8,5 +8,8 @@ dock:
       create: false
   config:
     dockPublicUrl: "http://<DOCK_HOST>"  # 필수: 브라우저·EVA 웹훅이 접근할 Dock 외부 주소. ex) http://dock.eva.com
+    dashboardEnabled: true  # DASHBOARD 메뉴
+    liveEnabled: false  # LIVE 메뉴(탐지 알림 이력). 사용하려면 true
+    streamingEnabled: false  # STREAMING 메뉴(카메라 실시간 MJPEG 영상). 사용하려면 true. EVA 서버당 동시 영상 수는 config.livePerEva(기본 16)
   secrets:
     dockAccessPassword: "<DOCK_ACCESS_PASSWORD>"  # 필수: Dock 로그인 비밀번호. ex) Demo-Dock-Only!42 (예시 전용). 업데이트 시에도 기존 값을 그대로 입력합니다.

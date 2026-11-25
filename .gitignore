@@ -28,6 +28,14 @@ out/state/*
 !out/state/.gitkeep
 out/dist/*
 !out/dist/.gitkeep
+# Local workspace inputs/outputs (inventory, credentials, site values, exports).
+# Only the bundled samples and placeholders are tracked.
+workspace/*
+!workspace/credentials/
+!workspace/inventory/
+!workspace/site-values/
+workspace/credentials/*
+!workspace/credentials/*.sample
 workspace/inventory/*
 !workspace/inventory/.gitkeep
 !workspace/inventory/*.sample

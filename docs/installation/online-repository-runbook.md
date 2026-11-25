@@ -218,6 +218,9 @@ targets:
             hostPath: "<DOCK_TLS_CERT_DIRECTORY>" # 필수: DOCK_HOST SAN 인증서 tls.crt + tls.key. ex) /etc/eva/dock-certs
         config:
           dockPublicUrl: "https://<DOCK_HOST>" # 필수: 브라우저·EVA 웹훅이 접근할 Dock 외부 주소. ex) https://dock.example.com
+          dashboardEnabled: true # DASHBOARD 메뉴
+          liveEnabled: false # LIVE 메뉴(탐지 알림 이력). 사용하려면 true
+          streamingEnabled: false # STREAMING 메뉴(카메라 실시간 영상). 사용하려면 true
         secrets:
           dockAccessPassword: "<DOCK_ACCESS_PASSWORD>" # 필수: Dock 로그인 비밀번호. 업데이트 시에도 같은 값 입력
 ```

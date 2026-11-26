@@ -92,15 +92,38 @@
         [ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" = "install ok installed" ]
       }
 
-      # airgap 에서는 apt 가 참조할 리포지토리가 없어 의존성 해결에 실패합니다. dpkg 로 직접
-      # 설치하되, 1차는 전부 한 번에 넘겨 dpkg 가 설치 순서를 계산하게 합니다.
-      dpkg -i "${base_offline_debs[@]}" || true
+      # 이미 같은(또는 더 새) 버전이 설치된 패키지는 다시 dpkg -i 하지 않습니다. 재설치해도
+      # postinst 가 실행되어 rpcbind/nfs-server 같은 서비스를 재시작하고, 사용 중인 NFS
+      # 서버가 재시작에 실패하면(예: rpc.nfsd errno 12) hard 마운트를 쓰는 vLLM pod 와
+      # 그 마운트를 보는 명령이 무기한 멈춥니다. 더 새 버전을 번들 버전으로 내리지도 않습니다.
+      deb_needs_install() {
+        local name version arch query installed
+        name="$(dpkg-deb -f "$1" Package 2>/dev/null)" || return 0
+        version="$(dpkg-deb -f "$1" Version 2>/dev/null)" || return 0
+        arch="$(dpkg-deb -f "$1" Architecture 2>/dev/null)" || return 0
+        query="$name"
+        [ "$arch" = "all" ] || query="$name:$arch"
+        installed="$(dpkg-query -W -f='${Status}|${Version}' "$query" 2>/dev/null)" || return 0
+        [ "${installed%%|*}" = "install ok installed" ] || return 0
+        ! dpkg --compare-versions "${installed#*|}" ge "$version"
+      }
 
-      # 2차: 1차에서 의존성 순서 때문에 밀린 것만 개별 재시도합니다.
+      pending_debs=()
       for deb in "${base_offline_debs[@]}"; do
-        name="$(dpkg-deb -f "$deb" Package 2>/dev/null)" || continue
-        pkg_installed "$name" || dpkg -i "$deb" || true
+        deb_needs_install "$deb" && pending_debs+=("$deb")
       done
+      echo "[info] 설치 필요 ${#pending_debs[@]} 개 (나머지는 같은 버전 이상 설치됨)"
+
+      if [ "${#pending_debs[@]}" -gt 0 ]; then
+        # airgap 에서는 apt 가 참조할 리포지토리가 없어 의존성 해결에 실패합니다. dpkg 로 직접
+        # 설치하되, 1차는 전부 한 번에 넘겨 dpkg 가 설치 순서를 계산하게 합니다.
+        dpkg -i "${pending_debs[@]}" || true
+
+        # 2차: 1차에서 의존성 순서 때문에 밀린 것만 개별 재시도합니다.
+        for deb in "${pending_debs[@]}"; do
+          deb_needs_install "$deb" && { dpkg -i "$deb" || true; }
+        done
+      fi
 
       # || true 로 실패를 넘겼으니 결과는 반드시 확인해야 합니다. 여기서 멈추지 않으면
       # nfs role 이나 한참 뒤 단계에서 엉뚱한 에러로 드러납니다.
@@ -125,7 +148,7 @@
     EVA_BASE_REQUIRED_PACKAGES: "{{ base_required_packages | join(' ') }}"
   become: true
   register: base_offline_install
-  changed_when: true
+  changed_when: "'설치 필요 0 개' not in base_offline_install.stdout"
   when:
     - airgap_mode | default(false) | bool
     - not ansible_check_mode

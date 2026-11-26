@@ -138,9 +138,12 @@
   failed_when: false
   when: not ansible_check_mode
 
+# Report only. Plain df stats every mount and blocks forever on an unresponsive
+# NFS/CIFS mount, hanging the whole install; -l skips remote filesystems without
+# touching them and timeout bounds any other stuck (e.g. FUSE) mount.
 - name: Read disk usage
   ansible.builtin.command:
-    cmd: df -h
+    cmd: timeout --kill-after=5 30 df -h -l
   register: infra_df_cmd
   changed_when: false
   failed_when: false

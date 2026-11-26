@@ -19,7 +19,7 @@ Main bootstrap과 Target 설치는 Docker, k3s, NVIDIA runtime 및 호스트 영
 | [Target] 네트워크 | Main Harbor 및 Main SSH 경로만 사용; 외부 인터넷은 사용하지 않음 |
 | 권한 | Main과 Target에서 `sudo eva ...`를 실행할 수 있는 사용자 |
 
-Main은 EVA Managed Runtime, 이미지 게시용 Docker, Harbor와 private `eva` project(`public: false`)를 준비합니다.
+Main은 EVA Managed Runtime, 이미지 게시용 Docker, Harbor와 public `eva` project를 준비합니다.
 신규 Main의 Harbor는 Docker Compose와 HTTP endpoint로 구성합니다.
 기존 k3s 또는 별도 방식으로 운영하는 Harbor도 재사용할 수 있습니다.
 Target에는 Main의 Runtime, package/model payload 및 Harbor image를 사용해 EVA를
@@ -92,8 +92,11 @@ sudo eva remote bootstrap \
 HTTP/HTTPS를 자동 확인하며 정상 HTTP endpoint가 있으면 우선 사용하므로,
 기존 Harbor도 같은 명령으로 진행합니다.
 
-bootstrap은 private `eva` project(`public: false`), 이미지·OCI artifact 게시 권한과 인증을
-준비·검증하고 연결 설정을 저장합니다. 기존 데이터와 artifact는 보존합니다.
+bootstrap은 `eva` project, 이미지·OCI artifact 게시 권한과 인증을 준비·검증하고 연결 설정을
+저장합니다. 기존 데이터와 artifact는 보존합니다. project가 없으면 **public**으로 만들어 Target이
+pull 인증 없이 이미지를 받게 하고, 이미 있는 project의 public/private 설정은 바꾸지 않습니다.
+project를 private으로 운영하면 각 Target `ansible`에 `repository_username`/`repository_password`를
+지정합니다.
 HTTP 연결 설정이 추가되면 Main Docker가 재시작될 수 있습니다.
 Main k3s의 Helm Harbor가 HTTPS만 제공하면 기존 차트·버전·Values와 영속 데이터를 유지하면서
 같은 NodePort를 HTTP로 전환합니다. 기존 설정은
@@ -169,6 +172,32 @@ SSH 비밀번호는 sudo에도 사용하며, passwordless sudo라면 생성 파�
 `--output`은 새 `0600` 파일만 생성합니다. `<...>` 입력을 모두 채우거나 해당 선택 항목을
 제거하기 전에는 검증에 실패합니다.
 
+### Harbor `eva` project 공개 설정 확인
+
+Target이 Main Harbor에서 이미지를 받을 때 pull 계정이 필요한지는 `eva` project의 공개 설정으로 정해집니다.
+bootstrap이 새로 만든 project는 public이고, 기존 project는 운영자가 정한 설정을 그대로 사용합니다.
+설치 설정을 작성하기 전에 Main에서 확인합니다. Harbor 주소와 프로토콜은 bootstrap receipt에 있습니다.
+
+```bash
+sudo cat /var/lib/eva/preparation/main/harbor.yaml   # registry, project, protocol 확인
+
+# Harbor 관리자 계정으로 확인합니다. 비밀번호는 프롬프트로 입력합니다.
+curl -s -u admin "http://<HARBOR_REGISTRY>/api/v2.0/projects/eva" | grep -o '"public":"[a-z]*"'
+```
+
+| 결과 | 의미 | 설치 설정 |
+| --- | --- | --- |
+| `"public":"true"` | 인증 없이 pull 가능 | `repository_username`/`repository_password` 줄을 삭제 |
+| `"public":"false"` | private, pull 계정 필요 | 각 Target `ansible`에 두 값을 지정 |
+
+HTTPS Harbor는 `https://`를 사용하고, 사설 인증서면 `-k`를 추가합니다. 아무것도 출력되지 않으면 관리자
+계정이나 주소가 맞지 않거나 project가 없는 것이므로 `curl -s -u admin ".../api/v2.0/projects/eva"`의 원문 응답을
+확인합니다. Harbor UI에서는 **Projects → eva → Configuration → Public**에서 같은 설정을 보고 바꿀 수 있습니다.
+
+`eva install configure`는 두 값을 생성하지 않으므로 private project이면 생성된 `eva-install.yaml`에 직접
+추가합니다. Target에 이미 같은 Harbor의 `registries.yaml` 인증이 있으면 생략할 수 있습니다. 설정 없이 private
+project로 설치하면 Target Pod가 `ImagePullBackOff`로 멈추고, IAM 단계에서는 Helm hook timeout으로 실패합니다.
+
 다음은 다른 도메인 + HTTPS 예시입니다. 동일 주소 틀은 IAM `/iam`, App `/`를 사용합니다.
 
 ```yaml
@@ -196,8 +225,9 @@ targets:
       ansible_password: "<SSH_PASSWORD>"
       ansible_become: true
       ansible_become_password: "<SUDO_PASSWORD>" # 필수: 대상 sudo 비밀번호
+      # Harbor eva project가 private일 때만 필요합니다(기본 public이면 두 줄 삭제).
       repository_username: "<HARBOR_PULL_USERNAME>"
-      repository_password: "<HARBOR_PULL_PASSWORD>" # Target에 기존 registry 인증이 없을 때 필요
+      repository_password: "<HARBOR_PULL_PASSWORD>"
     values:
       iam:
         config:
@@ -308,12 +338,13 @@ targets:
       n8n_public_host: "<TARGET_IP>"
       n8n_node_port: 30678
       repository_protocol: http
+      # Harbor eva project가 private일 때만 필요합니다.
       repository_username: "<HARBOR_PULL_USERNAME>"
       repository_password: "<HARBOR_PULL_PASSWORD>"
 ```
 
-n8n 설정은 `targets.server-a.ansible`에 둡니다. 기존 Target `registries.yaml`에
-해당 Harbor 인증이 있거나 n8n namespace에 사용할 pull Secret이 있으면 계정 입력을
+n8n 설정은 `targets.server-a.ansible`에 둡니다. Harbor `eva` project가 public이거나(기본), 기존 Target
+`registries.yaml`에 해당 Harbor 인증이 있거나 n8n namespace에 사용할 pull Secret이 있으면 계정 입력을
 생략할 수 있습니다. Secret 이름을 지정할 때는 `n8n_image_pull_secret_name`을 사용합니다.
 기존 Secret은 덮어쓰지 않으므로 인증 만료 시 운영자가 갱신합니다.
 

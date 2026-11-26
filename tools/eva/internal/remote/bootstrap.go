@@ -63,7 +63,7 @@ func NewBootstrapService() BootstrapService {
 		OwnsManagedHarbor:        ownsManagedHarbor,
 		EnsurePublishingDocker:   ensurePublishingDocker,
 		ReadCredential:           readHarborDockerCredential,
-		EnsurePublication:        ensureHarborPublication,
+		EnsurePublication:        EnsureHarborPublication,
 		EnsureExistingHarborHTTP: ensureExistingHarborHTTP,
 	}
 }

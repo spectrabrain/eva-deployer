@@ -542,7 +542,7 @@ status="$(curl -sS -o "$tmp_response" -w '%{http_code}' \
   -u "admin:${HARBOR_ADMIN_PASSWORD}" \
   -H 'Content-Type: application/json' \
   -X POST "$HARBOR_URL/api/v2.0/projects" \
-  -d "{\"project_name\":\"${HARBOR_PROJECT}\",\"public\":false,\"metadata\":{\"public\":\"false\"}}")"
+  -d "{\"project_name\":\"${HARBOR_PROJECT}\",\"public\":true,\"metadata\":{\"public\":\"true\"}}")"
 
 if [[ "$status" == "201" || "$status" == "409" ]]; then
   echo "[project] ready: $HARBOR_PROJECT"

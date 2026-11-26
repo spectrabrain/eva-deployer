@@ -50,6 +50,9 @@ func runReleasePrune(args []string, output io.Writer) error {
 	} else {
 		fmt.Fprintln(output, "[INFO] current release: none registered")
 	}
+	for _, warning := range plan.Warnings {
+		fmt.Fprintf(output, "[WARN] %s\n", warning)
+	}
 	for _, entry := range plan.Keep {
 		fmt.Fprintf(output, "[KEEP]   %-24s %-20s %s (%s)\n", entry.Version, entry.Location.Label, entry.Path, strings.Join(entry.Reasons, ", "))
 	}

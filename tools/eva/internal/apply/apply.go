@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"eva-deployer/tools/eva/internal/argocd"
@@ -156,6 +158,19 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 		return record, fmt.Errorf("close Ansible internal log: %w", err)
 	}
 
+	// Taken before the record says running, so a running record without a
+	// held lock always means the process died before recording a result.
+	runLock, err := operation.AcquireRunLock(options.StateRoot, record.ID)
+	if err != nil {
+		return record, err
+	}
+	defer runLock.Release()
+	// Ctrl+C, kill, or an SSH disconnect must still end in a recorded failed
+	// result (retryable) instead of a record left running forever.
+	interrupts := make(chan os.Signal, 1)
+	signal.Notify(interrupts, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(interrupts)
+
 	startedAt := options.Now().UTC()
 	record.Status = operation.Running
 	record.StartedAt = startedAt
@@ -167,6 +182,11 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 
 	result := operation.Result{Status: operation.Running, StartedAt: startedAt}
 	for _, step := range document.Steps {
+		select {
+		case received := <-interrupts:
+			return finish(options, record, result, operation.Failed, fmt.Errorf("interrupted by %s before component %q", received, step.Component))
+		default:
+		}
 		stepStartedAt := options.Now().UTC()
 		args := ansibleArgs(inventory, filepath.Join(releaseRoot, step.Playbook), document.AnsibleExtraVars, overrideVars[step.Component])
 		if step.Component == "app" && handoffVars != "" {
@@ -186,7 +206,8 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 		output := io.MultiWriter(options.Stdout, combinedLog)
 		command.Stdout = output
 		command.Stderr = io.MultiWriter(options.Stderr, combinedLog)
-		err := command.Run()
+		command.ExtraFiles = []*os.File{runLock.File()}
+		received, err := runInterruptible(command, interrupts)
 		stepResult := operation.StepResult{
 			Component:   step.Component,
 			Playbook:    step.Playbook,
@@ -195,6 +216,9 @@ func Execute(options Options, record operation.Record) (operation.Record, error)
 			ExitCode:    exitCode(err),
 		}
 		result.Steps = append(result.Steps, stepResult)
+		if received != nil {
+			return finish(options, record, result, operation.Failed, fmt.Errorf("apply component %q interrupted by %s", step.Component, received))
+		}
 		if err != nil {
 			return finish(options, record, result, operation.Failed, fmt.Errorf("apply component %q: %w", step.Component, err))
 		}
@@ -262,6 +286,27 @@ func preflight(runtimeRoot string, document plan.Document) (runtime.Resolved, st
 		}
 	}
 	return resolvedRuntime, inventory, releaseRoot, nil
+}
+
+// runInterruptible runs command, forwarding a termination signal to it (it
+// may not share the terminal's process group) and reporting the signal so the
+// caller records the step as interrupted once the child has exited.
+func runInterruptible(command *exec.Cmd, interrupts <-chan os.Signal) (os.Signal, error) {
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	var received os.Signal
+	for {
+		select {
+		case err := <-done:
+			return received, err
+		case signal := <-interrupts:
+			received = signal
+			_ = command.Process.Signal(signal)
+		}
+	}
 }
 
 func finish(options Options, record operation.Record, result operation.Result, status string, applyErr error) (operation.Record, error) {

@@ -64,6 +64,7 @@ type Plan struct {
 	Protected map[string][]string
 	Keep      []Entry
 	Delete    []Entry
+	Warnings  []string
 }
 
 func (p Plan) DeleteBytes() int64 {
@@ -114,7 +115,22 @@ func Build(options Options) (Plan, error) {
 		record := &records[index]
 		switch record.Status {
 		case operation.Running:
-			return Plan{}, fmt.Errorf("operation %s is running; prune after it finishes", record.ID)
+			liveness, err := operationLiveness(options.OperationRoot, *record)
+			if err != nil {
+				return Plan{}, err
+			}
+			switch liveness {
+			case operation.LivenessActive:
+				return Plan{}, fmt.Errorf("operation %s is running; prune after it finishes", record.ID)
+			case operation.LivenessInterrupted:
+				plan.Warnings = append(plan.Warnings, fmt.Sprintf("operation %s is recorded as running but its process has exited (interrupted); its release %s is kept", record.ID, record.ReleaseVersion))
+				protect(record.ReleaseVersion, "interrupted operation "+record.ID)
+			default:
+				// Written by a tool without a run lock: cannot tell whether it
+				// is still alive, so keep everything it may be using.
+				plan.Warnings = append(plan.Warnings, fmt.Sprintf("operation %s is recorded as running by an older eva without a run lock; if it is no longer running (e.g. stopped with Ctrl+C) this is safe, and its release %s is kept", record.ID, record.ReleaseVersion))
+				protect(record.ReleaseVersion, "running operation "+record.ID)
+			}
 		case operation.Planned:
 			protect(record.ReleaseVersion, "planned operation "+record.ID)
 		}
@@ -225,6 +241,13 @@ func readCurrentReceipt(path string) (release.CurrentReceipt, bool, error) {
 		return release.CurrentReceipt{}, false, fmt.Errorf("current release receipt %s has no release_version or release_root", path)
 	}
 	return receipt, true, nil
+}
+
+func operationLiveness(root string, record operation.Record) (string, error) {
+	if root == "" {
+		root = operation.DefaultRoot
+	}
+	return operation.RunLiveness(root, record)
 }
 
 func listOperations(root string) ([]operation.Record, error) {

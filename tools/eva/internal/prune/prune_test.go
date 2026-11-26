@@ -174,10 +174,16 @@ func TestBuildRefusesWhenUnsure(t *testing.T) {
 		t.Fatal("keep 0 accepted")
 	}
 
-	writeOperation(t, f, "20261120T000000Z-site-00000001", operation.Running, "3.4.0", time.Now())
-	if _, err := Build(f.options(1)); err == nil || !strings.Contains(err.Error(), "running") {
-		t.Fatalf("running operation not refused: %v", err)
+	const running = "20261120T000000Z-site-00000001"
+	writeOperation(t, f, running, operation.Running, "3.1.0", time.Now())
+	lock, err := operation.AcquireRunLock(f.operation, running)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err := Build(f.options(1)); err == nil || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("active operation not refused: %v", err)
+	}
+	lock.Release()
 	if err := os.RemoveAll(f.operation); err != nil {
 		t.Fatal(err)
 	}
@@ -226,5 +232,39 @@ func TestExecuteRefusesUnexpectedPaths(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Fatalf("outside removed: %v", err)
+	}
+}
+
+func TestBuildKeepsVersionOfInterruptedOrLegacyRunningOperation(t *testing.T) {
+	for _, withLock := range []bool{true, false} {
+		f := newFixture(t)
+		for _, version := range []string{"3.1.0", "3.2.0", "3.3.0"} {
+			mkdirFile(t, filepath.Join(f.install, version), 1)
+		}
+		const id = "20261120T000000Z-site-00000001"
+		writeOperation(t, f, id, operation.Running, "3.1.0", time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+		writeOperation(t, f, "20261121T000000Z-site-00000002", operation.Succeeded, "3.2.0", time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC))
+		if withLock {
+			// The process that held it has exited (Ctrl+C) and released it.
+			lock, err := operation.AcquireRunLock(f.operation, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lock.Release()
+		}
+		plan, err := Build(f.options(1))
+		if err != nil {
+			t.Fatalf("withLock=%v: %v", withLock, err)
+		}
+		if len(plan.Delete) != 0 || len(plan.Warnings) != 1 {
+			t.Fatalf("withLock=%v: delete=%v warnings=%v", withLock, versionsOf(plan.Delete), plan.Warnings)
+		}
+		want := "running by an older eva"
+		if withLock {
+			want = "interrupted"
+		}
+		if !strings.Contains(plan.Warnings[0], want) {
+			t.Fatalf("withLock=%v: warning %q", withLock, plan.Warnings[0])
+		}
 	}
 }

@@ -241,6 +241,10 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva backup show ... --latest` | 한 release의 최신 백업 메타데이터·경로; Values 원문 제외 | 조회 |
 | `eva backup values --path DIR` | SHA-256 확인 후 선택한 백업 Values 원문 출력 | 민감정보 조회 |
 
+설치 중 Ctrl+C·`kill`·SSH 끊김으로 중단하면 진행 중인 Ansible 단계를 멈추고 작업을 `failed`로 기록하므로
+`eva retry`로 다시 실행할 수 있다. 실행 중인 작업은 작업 디렉터리의 `run.lock`을 잡고 있어, 기록이 `running`으로
+남아도 실제 실행 여부를 구분할 수 있다.
+
 일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Online/Remote/Local → Online/Remote 현재 서버/SSH 설치 →
 타겟별 Infra만/Infra + Solution/Solution만·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
 Online에서 Bastion을 선택하면 On-premise / Cloud(NKS)를 추가로 선택한다. NKS는 같은 Values 틀을 채우고
@@ -340,7 +344,9 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 
 - 다음 버전은 항상 남긴다: Current Release(`/var/lib/eva/releases/current.yaml`), 가장 최근 작업, 마지막으로
   성공한 작업, `planned` 작업이 사용한 버전, 그리고 버전 순으로 최신 `--keep`개(기본 2, 최소 1).
-- 실행 중(`running`)인 작업이 있거나 Current Release·작업 기록을 읽을 수 없으면 아무것도 지우지 않고 중단한다.
+- 실제로 실행 중인 작업이 있거나 Current Release·작업 기록을 읽을 수 없으면 아무것도 지우지 않고 중단한다.
+  작업 기록은 `running`이지만 프로세스가 이미 끝난 경우(Ctrl+C, SSH 끊김, 이전 Tool로 실행한 작업)는
+  `[WARN]`으로 알리고 그 작업의 버전을 남긴 채 정리한다.
 - 기본 실행은 남길 항목(`[KEEP]`과 이유)과 지울 항목(`[DELETE]`과 크기)만 표시한다. `--yes`를 주면 지운다.
 - 지운 버전을 사용한 과거 작업의 `eva retry`/`apply`/`inspect`는 더 이상 쓸 수 없다. `eva status` 조회는 유지된다.
 - 버전과 무관한 공유 상태는 건드리지 않는다: Remote cache(`/var/lib/eva/cache/remote`), Runtime·Tool, Harbor와

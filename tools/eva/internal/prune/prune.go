@@ -110,7 +110,10 @@ func Build(options Options) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	var latest, lastSucceeded *operation.Record
+	// Per site: Main drives several sites (and Online/Remote modes) from one
+	// operation history, and each site's cluster runs its own version.
+	latest := map[string]*operation.Record{}
+	lastSucceeded := map[string]*operation.Record{}
 	for index := range records {
 		record := &records[index]
 		switch record.Status {
@@ -134,18 +137,18 @@ func Build(options Options) (Plan, error) {
 		case operation.Planned:
 			protect(record.ReleaseVersion, "planned operation "+record.ID)
 		}
-		if latest == nil || record.UpdatedAt.After(latest.UpdatedAt) {
-			latest = record
+		if current := latest[record.SiteID]; current == nil || record.UpdatedAt.After(current.UpdatedAt) {
+			latest[record.SiteID] = record
 		}
-		if record.Status == operation.Succeeded && (lastSucceeded == nil || record.UpdatedAt.After(lastSucceeded.UpdatedAt)) {
-			lastSucceeded = record
+		if current := lastSucceeded[record.SiteID]; record.Status == operation.Succeeded && (current == nil || record.UpdatedAt.After(current.UpdatedAt)) {
+			lastSucceeded[record.SiteID] = record
 		}
 	}
-	if latest != nil {
-		protect(latest.ReleaseVersion, "latest operation "+latest.ID)
+	for _, site := range sortedSites(latest) {
+		protect(latest[site].ReleaseVersion, "latest "+site+" operation "+latest[site].ID)
 	}
-	if lastSucceeded != nil {
-		protect(lastSucceeded.ReleaseVersion, "last succeeded operation "+lastSucceeded.ID)
+	for _, site := range sortedSites(lastSucceeded) {
+		protect(lastSucceeded[site].ReleaseVersion, "last succeeded "+site+" operation "+lastSucceeded[site].ID)
 	}
 
 	entries := []Entry{}
@@ -241,6 +244,15 @@ func readCurrentReceipt(path string) (release.CurrentReceipt, bool, error) {
 		return release.CurrentReceipt{}, false, fmt.Errorf("current release receipt %s has no release_version or release_root", path)
 	}
 	return receipt, true, nil
+}
+
+func sortedSites(records map[string]*operation.Record) []string {
+	sites := make([]string, 0, len(records))
+	for site := range records {
+		sites = append(sites, site)
+	}
+	sort.Strings(sites)
+	return sites
 }
 
 func operationLiveness(root string, record operation.Record) (string, error) {

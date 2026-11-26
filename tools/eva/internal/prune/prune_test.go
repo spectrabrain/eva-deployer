@@ -73,7 +73,7 @@ func writeOperation(t *testing.T, f fixture, id, status, version string, updated
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	record := operation.Record{ID: id, Status: status, CreatedAt: updated, UpdatedAt: updated, SiteID: "site", ReleaseVersion: version, PlanPath: filepath.Join(directory, "plan.yaml")}
+	record := operation.Record{ID: id, Status: status, CreatedAt: updated, UpdatedAt: updated, SiteID: siteOf(id), ReleaseVersion: version, PlanPath: filepath.Join(directory, "plan.yaml")}
 	contents, err := yaml.Marshal(record)
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +81,11 @@ func writeOperation(t *testing.T, f fixture, id, status, version string, updated
 	if err := os.WriteFile(filepath.Join(directory, "operation.yaml"), contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// siteOf extracts <site> from "<timestamp>-<site>-<8hex>".
+func siteOf(id string) string {
+	return id[len("20261120T000000Z-") : len(id)-len("-00000000")]
 }
 
 func versionsOf(entries []Entry) []string {
@@ -122,7 +127,7 @@ func TestBuildProtectsCurrentOperationsAndNewest(t *testing.T) {
 	if got := versionsOf(plan.Keep); !slices.Equal(got, wantKeep) {
 		t.Fatalf("keep = %v, want %v", got, wantKeep)
 	}
-	if reasons := strings.Join(plan.Keep[2].Reasons, ","); !strings.Contains(reasons, "last succeeded operation") {
+	if reasons := strings.Join(plan.Keep[2].Reasons, ","); !strings.Contains(reasons, "last succeeded site operation") {
 		t.Fatalf("3.3.0 reasons = %s", reasons)
 	}
 	if plan.DeleteBytes() != 10+5+7+10+5 {
@@ -265,6 +270,32 @@ func TestBuildKeepsVersionOfInterruptedOrLegacyRunningOperation(t *testing.T) {
 		}
 		if !strings.Contains(plan.Warnings[0], want) {
 			t.Fatalf("withLock=%v: warning %q", withLock, plan.Warnings[0])
+		}
+	}
+}
+
+func TestBuildProtectsLastSucceededVersionPerSite(t *testing.T) {
+	f := newFixture(t)
+	for _, version := range []string{"3.3.0-beta.20", "3.3.0-beta.25", "3.4.0-alpha.02", "3.4.0-alpha.03"} {
+		mkdirFile(t, filepath.Join(f.payload, version), 1)
+	}
+	day := func(n int) time.Time { return time.Date(2026, 10, n, 0, 0, 0, 0, time.UTC) }
+	// lg-mg runs beta.25 (last success), then failed upgrades; another site
+	// succeeded later with a version that has no directory here.
+	writeOperation(t, f, "20261027T000000Z-lg-mg-00000001", operation.Succeeded, "3.3.0-beta.25", day(27))
+	writeOperation(t, f, "20261106T000000Z-crosscheck-online-c-00000002", operation.Succeeded, "3.3.0", day(30))
+	writeOperation(t, f, "20261125T000000Z-lg-mg-00000003", operation.Failed, "3.4.0-alpha.03", day(31))
+
+	plan, err := Build(f.options(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := versionsOf(plan.Delete); !slices.Equal(got, []string{"artifacts-remote/3.4.0-alpha.02", "artifacts-remote/3.3.0-beta.20"}) {
+		t.Fatalf("delete = %v", got)
+	}
+	for _, entry := range plan.Keep {
+		if entry.Version == "3.3.0-beta.25" && !strings.Contains(strings.Join(entry.Reasons, ","), "last succeeded lg-mg operation") {
+			t.Fatalf("beta.25 reasons = %v", entry.Reasons)
 		}
 	}
 }

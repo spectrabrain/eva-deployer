@@ -317,6 +317,7 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 | `eva release env [--release PATH \| PATH]` | Release 환경변수 표시 |
 | `eva release prepare --release PATH [--install-root PATH]` | 검증 Release를 실행 소스로 추출 |
 | `eva release import-airgap --bundle PATH [--artifact-root PATH]` | Airgap Bundle 검증·반입 |
+| `sudo eva release prune [--keep N] [--yes]` | 오래된 버전별 Release·Remote payload 디렉터리 정리; 기본은 목록만 표시 |
 | `eva workspace validate --config FILE` | 단일 설정 검증; Workspace 생성 없음 |
 | `eva workspace validate --site ID \| --workspace PATH` | Site 입력 검증 |
 | `eva workspace show --site ID \| --workspace PATH` | Workspace 경로·모드·component 표시 |
@@ -326,6 +327,29 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 현재 Git tag나 S3 위치로 Release를 자동 다운로드하는 일반 명령은 제공하지 않는다.
 `--release-root`는 inspect 전용 진단 입력이고 install의 `--release`와 의미가 다르다.
 `release prepare`는 Infra·Solution 실행 소스만 추출하며 `eva-offline`의 `out/cache`는 배치하지 않는다.
+
+`release prune`은 Main과 Remote 타겟에 버전별로 쌓이는 다음 디렉터리를 정리한다. 이 디렉터리들은 설치 후에도
+자동으로 지워지지 않는다.
+
+| 위치 | 서버 |
+| --- | --- |
+| `/var/lib/eva/inbox/releases/<version>` | 타겟(전달된 원본 Release) |
+| `/opt/eva/releases/<version>` | 타겟·Main(실행 소스와 `out/work`) |
+| `/var/lib/eva/artifacts/remote/<version>` | 타겟(풀어 둔 payload cache) |
+| `/var/lib/eva/preparation/remote/<version>` | Main(준비 증적·payload·Runtime artifact) |
+
+- 다음 버전은 항상 남긴다: Current Release(`/var/lib/eva/releases/current.yaml`), 가장 최근 작업, 마지막으로
+  성공한 작업, `planned` 작업이 사용한 버전, 그리고 버전 순으로 최신 `--keep`개(기본 2, 최소 1).
+- 실행 중(`running`)인 작업이 있거나 Current Release·작업 기록을 읽을 수 없으면 아무것도 지우지 않고 중단한다.
+- 기본 실행은 남길 항목(`[KEEP]`과 이유)과 지울 항목(`[DELETE]`과 크기)만 표시한다. `--yes`를 주면 지운다.
+- 지운 버전을 사용한 과거 작업의 `eva retry`/`apply`/`inspect`는 더 이상 쓸 수 없다. `eva status` 조회는 유지된다.
+- 버전과 무관한 공유 상태는 건드리지 않는다: Remote cache(`/var/lib/eva/cache/remote`), Runtime·Tool, Harbor와
+  게시된 이미지, Workspace, credential, Helm Values·DB 백업, 작업 기록·로그.
+
+```bash
+sudo eva release prune             # 정리 대상 확인(삭제 안 함)
+sudo eva release prune --yes       # 확인한 [DELETE] 항목 삭제
+```
 Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 이미지·snapshot을 준비한다.
 최초 반입과 Tool 설치는 [Local Runbook](../installation/local-repository-runbook.md)을 따른다.
 

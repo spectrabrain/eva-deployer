@@ -3,6 +3,7 @@
 import base64
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -132,15 +133,48 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             helper.prepare_transport(self.request)
 
-    def test_existing_secret_is_reused_without_changes(self):
-        docker_config = {'auths': {REGISTRY: {'auth': 'operator-managed'}, 'other.test': {'auth': 'other'}}}
-        secret = {'type': 'kubernetes.io/dockerconfigjson', 'data': {
-            '.dockerconfigjson': base64.b64encode(json.dumps(docker_config).encode()).decode()}}
+    @staticmethod
+    def pull_secret(auths):
+        return {'type': 'kubernetes.io/dockerconfigjson', 'data': {
+            '.dockerconfigjson': base64.b64encode(json.dumps({'auths': auths}).encode()).decode()}}
+
+    def test_existing_secret_for_registry_is_kept_without_credentials(self):
+        self.request['config'] = {}
+        secret = self.pull_secret({REGISTRY: {'auth': 'operator-managed'}, 'other.test': {'auth': 'other'}})
         before = copy.deepcopy(secret)
         with patch.object(helper, 'kubectl', return_value=secret) as command:
             self.assertFalse(helper.prepare_secret(self.request))
             self.assertEqual(command.call_count, 1)
         self.assertEqual(before, secret)
+
+    def test_identical_secret_is_not_rewritten(self):
+        encoded = base64.b64encode(('pull-user:' + PASSWORD).encode()).decode()
+        with patch.object(helper, 'kubectl', return_value=self.pull_secret({REGISTRY: {'auth': encoded}})) as command:
+            self.assertFalse(helper.prepare_secret(self.request))
+            self.assertEqual(command.call_count, 1)
+
+    def test_secret_for_another_harbor_is_replaced(self):
+        helper.NOTICES.clear()
+        stale = self.pull_secret({'old-harbor.test:32080': {'auth': 'old'}})
+        with patch.object(helper, 'kubectl', side_effect=[stale, {}, {}]) as command:
+            self.assertTrue(helper.prepare_secret(self.request))
+        calls = command.call_args_list
+        self.assertEqual(calls[1].args, ('-n', 'n8n', 'delete', 'secret', 'eva-harbor-pull', '--ignore-not-found'))
+        created = calls[2].kwargs['document']
+        self.assertEqual(set(json.loads(created['stringData']['.dockerconfigjson'])['auths']), {REGISTRY})
+        self.assertEqual(created['metadata']['labels'], {'app.kubernetes.io/managed-by': 'eva-deployer'})
+        self.assertEqual(helper.NOTICES, ['Replaced pull Secret n8n/eva-harbor-pull with credentials for ' + REGISTRY])
+        self.assertNotIn(PASSWORD, ' '.join(helper.NOTICES))
+
+    def test_secret_for_another_harbor_is_removed_for_public_project(self):
+        helper.NOTICES.clear()
+        self.request['config'] = {}
+        stale = self.pull_secret({'old-harbor.test:32080': {'auth': 'old'}})
+        with patch.object(helper, 'kubectl', side_effect=[stale, {}]) as command:
+            self.assertTrue(helper.prepare_secret(self.request))
+        self.assertEqual(command.call_count, 2)
+        self.assertEqual(command.call_args.args[2:4], ('delete', 'secret'))
+        self.assertIn('Removed pull Secret n8n/eva-harbor-pull', helper.NOTICES[0])
 
     def test_secret_uses_exact_target_auth_and_private_stdin(self):
         with patch.object(helper, 'kubectl', side_effect=[{}, {}]) as command:
@@ -152,14 +186,25 @@ class RegistryTests(unittest.TestCase):
             self.assertNotIn(PASSWORD, ' '.join(command.call_args.args))
 
     def test_incompatible_secret_and_partial_credentials_are_rejected(self):
-        with patch.object(helper, 'kubectl', return_value={'type': 'Opaque'}):
-            with self.assertRaises(ValueError):
+        with patch.object(helper, 'kubectl', return_value={'type': 'Opaque'}) as command:
+            with self.assertRaisesRegex(helper.HelperError, 'n8n/eva-harbor-pull exists with type'):
                 helper.prepare_secret(self.request)
+            self.assertEqual(command.call_count, 1)  # never deleted
         self.request['config'] = {}
         self.request['username'] = 'only-user'
         with patch.object(helper, 'kubectl', return_value={}):
             with self.assertRaises(ValueError):
                 helper.prepare_secret(self.request)
+
+    def test_failure_reason_is_reported_without_credentials(self):
+        request = copy.deepcopy(self.request)
+        request['config']['mirrors'] = {REGISTRY: {'endpoint': ['https://' + REGISTRY]}}
+        stderr = io.StringIO()
+        with patch.object(sys, 'stdin', io.StringIO(json.dumps(request))), patch.object(sys, 'stderr', stderr), \
+                patch.object(helper, 'kubectl', return_value={}):
+            self.assertEqual(helper.main(), 1)
+        self.assertIn('registries.yaml mirror for ' + REGISTRY + ' uses https://' + REGISTRY, stderr.getvalue())
+        self.assertNotIn(PASSWORD, stderr.getvalue())
 
     def test_no_credentials_can_use_public_or_active_node_auth(self):
         self.request['config'] = {}

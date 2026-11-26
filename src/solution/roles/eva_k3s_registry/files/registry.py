@@ -13,6 +13,14 @@ import subprocess
 import sys
 import tomllib
 
+MANAGED_LABELS = {'app.kubernetes.io/managed-by': 'eva-deployer'}
+# Non-secret operator notices (Secret replaced/removed), shown by the role.
+NOTICES = []
+
+
+class HelperError(ValueError):
+    """A failure whose message names only hosts, paths and Secret names."""
+
 
 def kubectl(*args, document=None):
     result = subprocess.run(
@@ -20,7 +28,8 @@ def kubectl(*args, document=None):
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
     )
     if result.returncode:
-        raise ValueError('Kubernetes registry credential operation failed')
+        # kubectl stderr may echo Secret data; report only the verb.
+        raise HelperError('kubectl ' + ' '.join(arg for arg in args[:4] if not arg.startswith('-')) + ' failed')
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 
@@ -31,7 +40,7 @@ def endpoint_root(value):
 def selected_endpoint(request):
     registry = request['registry']
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?', registry):
-        raise ValueError('Invalid registry host')
+        raise HelperError('Invalid registry host')
     config = request.get('config') or {}
     endpoints = config.get('mirrors', {}).get(registry, {}).get('endpoint', [])
     protocol = request.get('protocol')
@@ -39,9 +48,10 @@ def selected_endpoint(request):
         protocol = next((value.split('://')[0] for value in endpoints
                          if endpoint_root(value) in ('http://' + registry, 'https://' + registry)), 'http')
     if protocol not in ('http', 'https'):
-        raise ValueError('Invalid registry protocol')
+        raise HelperError('Invalid registry protocol')
     if endpoints and protocol + '://' + registry not in [endpoint_root(value) for value in endpoints]:
-        raise ValueError('Existing registry mirror uses a different endpoint or protocol')
+        raise HelperError('registries.yaml mirror for ' + registry + ' uses ' + ', '.join(endpoints)
+                          + ', not ' + protocol + '://' + registry + '; check repository_protocol')
     return protocol + '://' + registry
 
 
@@ -58,19 +68,19 @@ def prepare_transport(request):
     ) if key in plugins), {})
     root = Path(registry_config.get('config_path', ''))
     if not root.is_absolute() or '..' in root.parts or not root.is_dir():
-        raise ValueError('Active containerd registry config_path is unavailable')
+        raise HelperError('Active containerd registry config_path is unavailable')
     directory = root / request['registry']
     if directory.is_symlink():
-        raise ValueError('Registry directory must not be a symlink')
+        raise HelperError('Registry directory must not be a symlink')
     directory.mkdir(mode=0o755, exist_ok=True)
     hosts = directory / 'hosts.toml'
     if hosts.is_symlink():
-        raise ValueError('Registry hosts.toml must not be a symlink')
+        raise HelperError('Registry hosts.toml must not be a symlink')
     if hosts.exists():
         current = tomllib.loads(hosts.read_text())
         matching_hosts = [host for url, host in current.get('host', {}).items() if endpoint_root(url) == endpoint]
         if not any({'pull', 'resolve'}.issubset(host.get('capabilities', [])) for host in matching_hosts) and endpoint_root(current.get('server', '')) != endpoint:
-            raise ValueError('Existing registry hosts.toml has conflicting transport')
+            raise HelperError(str(hosts) + ' does not use ' + endpoint + ' for pull')
         return False
     # Exclusive creation preserves a concurrent operator change.
     with hosts.open('x') as stream:
@@ -81,34 +91,67 @@ def prepare_transport(request):
     return True
 
 
-def prepare_secret(request):
-    namespace, name, registry = request['namespace'], request['secret'], request['registry']
-    existing = kubectl('-n', namespace, 'get', 'secret', name, '--ignore-not-found', '-o', 'json')
-    if existing:
-        if existing.get('type') != 'kubernetes.io/dockerconfigjson':
-            raise ValueError('Existing pull Secret has an incompatible type')
-        config = json.loads(base64.b64decode(existing['data']['.dockerconfigjson']))
-        if not any(key in config.get('auths', {}) for key in (registry, 'http://' + registry, 'https://' + registry)):
-            raise ValueError('Existing pull Secret does not match this registry')
-        return False
-    auth = (request.get('config') or {}).get('configs', {}).get(registry, {}).get('auth', {})
+def registry_credentials(request):
+    auth = (request.get('config') or {}).get('configs', {}).get(request['registry'], {}).get('auth', {})
     username, password = request.get('username'), request.get('password')
     if bool(username) != bool(password):
-        raise ValueError('Explicit registry credentials must be a complete pair')
+        raise HelperError('Explicit registry credentials must be a complete pair '
+                          '(repository_username and repository_password)')
     if not username:
         username, password = auth.get('username'), auth.get('password')
     if bool(username) != bool(password):
-        raise ValueError('Registry username and password must both be provided')
+        raise HelperError('registries.yaml auth for ' + request['registry'] + ' must have both username and password')
+    return username, password
+
+
+def prepare_secret(request):
+    """Keep the namespace pull Secret pointed at the selected Harbor.
+
+    The Secret only carries Harbor pull access for workloads this installation
+    manages, so it is always rewritten for the selected registry: a Secret left
+    from another Harbor (a moved Main, a former Local Harbor) would otherwise
+    block every later installation. Installing against the old Harbor again
+    rewrites it back the same way.
+    """
+    namespace, name, registry = request['namespace'], request['secret'], request['registry']
+    username, password = registry_credentials(request)
+    existing = kubectl('-n', namespace, 'get', 'secret', name, '--ignore-not-found', '-o', 'json')
+    if existing and existing.get('type') != 'kubernetes.io/dockerconfigjson':
+        # Same name but not a registry Secret: something else owns it.
+        raise HelperError(f'Secret {namespace}/{name} exists with type {existing.get("type")!r}, '
+                          'not kubernetes.io/dockerconfigjson; rename it or set a different pull Secret name')
+    current = {}
+    if existing:
+        try:
+            current = json.loads(base64.b64decode(existing.get('data', {}).get('.dockerconfigjson', '')))
+        except Exception:
+            current = {}
+    matches = any(key in current.get('auths', {}) for key in (registry, 'http://' + registry, 'https://' + registry))
+
     if not username:
-        # Public projects and active node credentials can pull without a Secret.
-        # The subsequent Always-pull Pod verifies access before deployment.
-        return False
+        if not existing or matches:
+            # Public projects and active node credentials can pull without a
+            # Secret; an existing Secret for this registry stays as it is.
+            # The subsequent Always-pull Pod verifies access before deployment.
+            return False
+        # Stale Secret for another Harbor and nothing to replace it with.
+        kubectl('-n', namespace, 'delete', 'secret', name, '--ignore-not-found')
+        NOTICES.append(f'Removed pull Secret {namespace}/{name} that was not for {registry}')
+        return True
+
     encoded = base64.b64encode((username + ':' + password).encode()).decode()
+    desired = {'auths': {registry: {'auth': encoded}}}
+    if current == desired:
+        return False
+    if existing:
+        kubectl('-n', namespace, 'delete', 'secret', name, '--ignore-not-found')
     kubectl('create', '-f', '-', '-o', 'json', document={
         'apiVersion': 'v1', 'kind': 'Secret', 'type': 'kubernetes.io/dockerconfigjson',
-        'metadata': {'name': name, 'namespace': namespace},
-        'stringData': {'.dockerconfigjson': json.dumps({'auths': {registry: {'auth': encoded}}})},
+        'metadata': {'name': name, 'namespace': namespace, 'labels': MANAGED_LABELS},
+        'stringData': {'.dockerconfigjson': json.dumps(desired)},
     })
+    if existing:
+        NOTICES.append(f'Replaced pull Secret {namespace}/{name} with credentials for {registry}')
     return True
 
 
@@ -119,10 +162,14 @@ def main():
         selected_endpoint(request)
         secret_changed = prepare_secret(request)
         transport_changed = prepare_transport(request)
-        print(json.dumps({'changed': secret_changed or transport_changed, 'endpoint': selected_endpoint(request)}))
-    except Exception:
+        print(json.dumps({'changed': secret_changed or transport_changed, 'endpoint': selected_endpoint(request),
+                          'notices': NOTICES}))
+    except HelperError as error:
+        print('Target Harbor pull preparation failed: ' + str(error), file=sys.stderr)
+        return 1
+    except Exception as error:
         # Subprocess diagnostics and parsed credential data must never escape.
-        print('Target Harbor transport or pull credential preparation failed', file=sys.stderr)
+        print('Target Harbor pull preparation failed: ' + type(error).__name__, file=sys.stderr)
         return 1
     return 0
 

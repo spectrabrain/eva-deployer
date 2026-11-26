@@ -39,6 +39,13 @@
       register: eva_registry_result
       changed_when: (eva_registry_result.stdout | from_json).changed
 
+    # Notices name only Secrets and registries (never credentials).
+    - name: Report replaced or removed namespace pull Secret
+      no_log: false
+      ansible.builtin.debug:
+        msg: "{{ (eva_registry_result.stdout | from_json).notices }}"
+      when: (eva_registry_result.stdout | from_json).notices | default([]) | length > 0
+
     # k3s regenerates certs.d from registries.yaml on restart. Record the new
     # mirror too so the dynamic hosts.toml remains effective after reboot.
     - name: Persist a missing Harbor mirror while preserving existing registries
@@ -56,10 +63,11 @@
       ansible.builtin.fail:
         msg: >-
           Cannot prepare Harbor image pulls for {{ repository_registry }} on this target.
+          {{ (eva_registry_result | default({})).stderr | default('') }}
           Check repository_protocol, the running containerd registry config_path,
           and namespace pull credentials (an existing imagePullSecret, matching
           registries.yaml auth, or repository_username/repository_password).
-          Existing registry configuration and credentials are preserved; k3s was not restarted.
+          Existing registry configuration is preserved; k3s was not restarted.
   always:
     - name: Clear transient target registry credentials
       ansible.builtin.set_fact:

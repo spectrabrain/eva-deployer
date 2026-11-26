@@ -91,15 +91,17 @@
       register: eva_vision_model_secret
       changed_when: false
 
-    - name: Validate existing EVA Vision model Secret data
+    - name: Validate existing Online EVA Vision model Secret data
       ansible.builtin.assert:
         that:
           - eva_vision_model_secret.stdout | from_json is mapping
           - (eva_vision_model_secret.stdout | from_json).get('data') is mapping
         fail_msg: "The selected Vision model Secret must contain credential data."
-      when: eva_vision_model_secret.stdout | length > 0
+      when:
+        - eva_vision_runtime_values.modelSource.type == 's3'
+        - eva_vision_model_secret.stdout | length > 0
 
-    - name: Validate existing EVA Vision model Secret keys
+    - name: Validate existing Online EVA Vision model Secret keys
       ansible.builtin.assert:
         that:
           - (eva_vision_model_secret.stdout | from_json).data[item] | default('') | length > 0
@@ -107,13 +109,13 @@
           - eva_vision_runtime_values.modelSource.type != 'harbor' or (eva_vision_model_secret.stdout | from_json).data[item] | b64decode | trim | length > 0
         fail_msg: "The selected Vision model Secret must contain both nonempty credential keys."
       loop: "{{ eva_vision_model_secret_keys }}"
-      when: eva_vision_model_secret.stdout | length > 0
-
-    - name: Create missing EVA Vision Harbor model Secret from target infra credentials
-      ansible.builtin.include_tasks: harbor_model_secret.yaml
       when:
-        - eva_vision_runtime_values.modelSource.type == 'harbor'
-        - eva_vision_model_secret.stdout | length == 0
+        - eva_vision_runtime_values.modelSource.type == 's3'
+        - eva_vision_model_secret.stdout | length > 0
+
+    - name: Reconcile EVA Vision model Secret with the selected Harbor
+      ansible.builtin.include_tasks: harbor_model_secret.yaml
+      when: eva_vision_runtime_values.modelSource.type == 'harbor'
 
     - name: Create missing Online EVA Vision S3 Secret safely
       when:
@@ -191,6 +193,13 @@
     - name: Clear transient Vision model Secret response
       ansible.builtin.set_fact:
         eva_vision_model_secret: {}
+
+- name: Save reconciled EVA Vision runtime Values
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_vision_runtime_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_vision_runtime_values_file }}"
+    mode: "0600"
 
 # Remote Harbor is already seeded; never require weights or publisher tools there.
 - name: Publish Local EVA Vision models to selected Harbor

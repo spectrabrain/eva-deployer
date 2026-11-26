@@ -149,7 +149,9 @@ Main에는 모델 S3의 list/read와 Vision 이미지 ECR pull 권한이 필요�
 **모델 게시가 기존 배포에 영향을 줄 수 있으므로 변경 승인을 확인합니다.**
 Target의 Pod는 Main Harbor에서 모델을 받아 영구 캐시에 저장하고 서비스를 준비합니다.
 Target은 S3에 접근하지 않으며 AWS credential이나 별도 weights 파일 전송이 필요하지 않습니다.
-인증은 기존 EVA Infra의 Harbor 설정을 재사용하며 수동 Secret 생성이나 추가 설치 명령은 필요하지 않습니다.
+모델 인증은 설치 설정의 현재 Harbor 계정 또는 Target의 동일 Harbor 인증을 사용하며 기존 모델 Secret을
+정합화합니다. 계정 없이 public Harbor를 사용하면 선택된 이전 모델 Secret과 인증 참조를 자동 제거합니다.
+수동 Secret 생성이나 삭제는 필요하지 않습니다.
 첫 실행은 오래 걸릴 수 있으므로 다운로드·압축 해제와 영구 캐시를 위한 디스크 공간을 확보합니다.
 **재시도·upgrade 시 모델 PVC를 삭제하지 않습니다.**
 기본 모델을 사용하며, 승인된 custom 모델이 필요할 때만 준비와 설치의 모델 선택·설정을 일치시킵니다.

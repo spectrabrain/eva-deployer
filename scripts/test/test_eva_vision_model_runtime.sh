@@ -29,6 +29,7 @@ role = root / "src/solution/roles/eva_vision"
 ansible = os.environ.get("ANSIBLE_PLAYBOOK", str(root / ".venv/bin/ansible-playbook"))
 environment = Environment(undefined=StrictUndefined)
 environment.filters.update(bool=bool, to_json=json.dumps,
+                           quote=shlex.quote,
                            ternary=lambda value, yes, no: yes if value else no)
 environment.tests["version"] = version_compare
 values_template = environment.from_string((root / "src/solution/values/vision-k3s-override.yaml.j2").read_text())
@@ -70,22 +71,40 @@ elif args[:2] == ["apply", "-f"]:
     assert args == ["apply", "-f", "-"], args
     assert yaml.safe_load(sys.stdin.read())["kind"] == "Namespace"
     print("namespace/eva-vision created")
-elif args == ["create", "-f", "-"]:
+elif args in (["create", "-f", "-"], ["replace", "-f", "-"]):
     data = json.load(sys.stdin)
     assert data["apiVersion"] == "v1" and data["kind"] == "Secret" and data["type"] == "Opaque"
-    assert data["metadata"] == {"name": os.environ["EXPECTED_SECRET"], "namespace": "eva-vision"}
+    expected_metadata = {"name": os.environ["EXPECTED_SECRET"], "namespace": "eva-vision"}
+    fixture = state / "existing-secret.json"
+    if args[0] == "replace":
+        assert fixture.exists()
+        metadata = json.loads(fixture.read_text())["metadata"]
+        expected_metadata.update(resourceVersion=metadata["resourceVersion"],
+                                 labels=metadata.get("labels", {}), annotations=metadata.get("annotations", {}))
+    assert data["metadata"] == expected_metadata
     if os.environ["EXPECTED_MODEL_SOURCE"] == "harbor":
-        config = yaml.safe_load((state / "target/etc/rancher/k3s/registries.yaml").read_text())
-        auth = config["configs"][os.environ["EXPECTED_REGISTRY"]]["auth"]
-        assert data["stringData"] == {"HARBOR_USERNAME": auth["username"], "HARBOR_PASSWORD": auth["password"]}
+        import base64
+        auth = json.loads(os.environ["EXPECTED_MODEL_AUTH"])
+        assert data["data"] == {"HARBOR_USERNAME": base64.b64encode(auth["username"].encode()).decode(),
+                                "HARBOR_PASSWORD": base64.b64encode(auth["password"].encode()).decode()}
     else:
         assert data["stringData"] == {"AWS_ACCESS_KEY_ID": "fixture-access", "AWS_SECRET_ACCESS_KEY": "fixture-secret"}
-    assert not (state / "existing-secret.json").exists(), "Existing credentials must not be written"
+    if args[0] == "create":
+        assert not fixture.exists(), "Create must not overwrite existing credentials"
     if os.environ.get("CREATE_RACE") == "1":
-        (state / "existing-secret.json").write_text('{"data":{"HARBOR_USERNAME":"cm9ib3Q=","HARBOR_PASSWORD":"cmFjZQ=="}}')
+        fixture.write_text('{"data":{"HARBOR_USERNAME":"cm9ib3Q=","HARBOR_PASSWORD":"cmFjZQ=="}}')
         raise SystemExit("Secret already exists; preserve concurrent operator credentials")
-    (state / "created").touch()
+    if args[0] == "replace" and os.environ.get("REPLACE_RACE") == "1":
+        raise SystemExit("resourceVersion conflict; preserve concurrent operator credentials")
+    if args[0] == "replace":
+        fixture.write_text(json.dumps(data))
+    (state / ("replaced" if args[0] == "replace" else "created")).touch()
     print("secret/model-secret created")
+elif args[:2] == ["delete", "secret"]:
+    assert args == ["delete", "secret", os.environ["EXPECTED_SECRET"], "-n", "eva-vision", "--ignore-not-found=true"]
+    (state / "existing-secret.json").unlink(missing_ok=True)
+    (state / "deleted").touch()
+    print("secret/model-secret deleted")
 elif args == ["get", "deployment", "eva-vision", "-n", "eva-vision", "-o", "json"]:
     print(json.dumps({"apiVersion": "apps/v1", "kind": "Deployment",
                       "metadata": {"name": "eva-vision", "namespace": "eva-vision"}}))
@@ -153,7 +172,7 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
     lifecycle_tasks = [task for task in main if task["name"] in lifecycle_names]
     harbor_tasks = yaml.safe_load((role / "tasks/harbor_model_secret.yaml").read_text())[0]
     assert harbor_tasks["no_log"] is True
-    registry_read = harbor_tasks["block"][0]
+    registry_read = next(task for task in harbor_tasks["block"] if "ansible.builtin.slurp" in task)
     assert registry_read["ansible.builtin.slurp"]["src"] == "{{ eva_vision_registry_config_path | default('/etc/rancher/k3s/registries.yaml') }}"
     assert "delegate_to" not in harbor_tasks and "delegate_to" not in registry_read
     assert "lookup(" not in (role / "tasks/harbor_model_secret.yaml").read_text()
@@ -230,7 +249,8 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                  packaged=True, models=None, harbor_config=None, home_mode="sudo",
                  interpreter="explicit", missing_helper=False, failure_message=None,
                  registry_config="managed", registry_key=None, registry_auth=None,
-                 existing_data=None, create_race=False):
+                 existing_data=None, create_race=False, replace_race=False,
+                 existing_type="Opaque", explicit_credentials=None):
         global cases
         if not name.startswith(os.environ.get("EVA_VISION_TEST_CASE_PREFIX", "")):
             return
@@ -281,6 +301,9 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
             if setting.startswith("harbor.registry="):
                 selected_registry = setting.split("=", 1)[1]
         selected_registry = re.sub(r"/+$", "", re.sub(r"^https?://", "", selected_registry.strip()))
+        expected_model_auth = (explicit_credentials if explicit_credentials and selected_registry == defaults["repository_registry"]
+                               else registry_auth if registry_auth is not None else {
+                                   "username": "admin", "password": 'fixture-custom-node-password:"$\\with spaces'})
         # Every invocation points at a tiny TARGET fixture, never host or
         # controller registry credentials, including public/Online/none paths.
         registry_path = case / "target/etc/rancher/k3s/registries.yaml"
@@ -296,8 +319,12 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         if existing:
             data = ({"AWS_ACCESS_KEY_ID": "Zml4dHVyZQ==", "AWS_SECRET_ACCESS_KEY": "Zml4dHVyZQ=="}
                     if selected_source == "s3" else
-                    {"HARBOR_USERNAME": "cm9ib3Q=", "HARBOR_PASSWORD": base64.b64encode(b"fixture-existing-operator-password").decode()})
-            existing_secret_contents = json.dumps({"data": existing_data if existing_data is not None else ({} if bad_keys else data)})
+                    {"HARBOR_USERNAME": base64.b64encode(str(node_auth.get("username", "old-reader")).encode()).decode(),
+                     "HARBOR_PASSWORD": base64.b64encode(str(node_auth.get("password", "fixture-existing-operator-password")).encode()).decode()})
+            existing_secret_contents = json.dumps({"type": existing_type,
+                "metadata": {"name": expected_secret, "namespace": "eva-vision", "resourceVersion": "7",
+                             "labels": {"fixture-owner": "operator"}, "annotations": {"fixture-note": "preserve"}},
+                "data": existing_data if existing_data is not None else ({} if bad_keys else data)})
             existing_secret_path.write_text(existing_secret_contents)
         credential_root = case / "credentials"
         credential_root.mkdir()
@@ -311,7 +338,9 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         env.update(PATH=str(fixture_bin) + os.pathsep + os.environ["PATH"],
                    FIXTURE_ROOT=str(case), EXPECTED_SECRET=expected_secret,
                    EXPECTED_MODEL_SOURCE=selected_source, EXPECTED_REGISTRY=selected_registry,
+                   EXPECTED_MODEL_AUTH=json.dumps(expected_model_auth),
                    CREATE_RACE="1" if create_race else "0",
+                   REPLACE_RACE="1" if replace_race else "0",
                    ANSIBLE_NOCOLOR="1", ANSIBLE_STDOUT_CALLBACK="default")
         # Remote/none see a nonexistent helper root and have NO model weights,
         # ORAS or publisher; successful execution proves those paths are gated.
@@ -327,6 +356,8 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         # Keep mock expectations outside the staged payload; real ORAS has no
         # fixture credential literals in its executable either.
         env["EXPECTED_PUBLISH_PASSWORD"] = "fixture-publish-secret"
+        if publish_user != "admin":
+            env["HARBOR_PASSWORD"] = "fixture-publish-secret"
         names = []
         if local_publish:
             for relative in ("publish/push_vision_models_to_harbor.sh", "lib/vision_models.py", "lib/docker_registry_auth.py"):
@@ -372,11 +403,13 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                          eva_vision_name="eva-vision",
                          eva_vision_kubeconfig=str(case / "kubeconfig"), eva_repo_root=str(release),
                          eva_cache_root=str(case / "cache"), eva_workspace_credentials_root=str(credential_root),
-                         repository_username=publish_user,
+                         eva_vision_chart_version="3.3.0", harbor_username=publish_user,
+                         repository_registry=defaults["repository_registry"],
                          ansible_facts={"env": {"HOME": str(case / "become-root"), "USER": "root"},
                                         "user_id": "root", "python": {"executable": sys.executable}})
-        if publish_user != "admin":
-            variables["repository_password"] = "fixture-publish-secret"
+        if explicit_credentials is not None:
+            variables["repository_username"] = explicit_credentials.get("username", "")
+            variables["repository_password"] = explicit_credentials.get("password", "")
         if home_mode == "sudo":
             variables["ansible_facts"]["env"]["SUDO_USER"] = "vision-user"
             variables["ansible_user"] = "not-the-original-sudo-user"
@@ -399,6 +432,11 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         cleanup_checks = [
             "eva_vision_registry_config_raw | default({}) == {}",
             "eva_vision_registry_config | default({}) == {}",
+            "eva_vision_model_auth | default({}) == {}",
+            "eva_vision_model_username | default('') == ''",
+            "eva_vision_model_password | default('') == ''",
+            "eva_vision_model_existing | default({}) == {}",
+            "eva_vision_model_desired_data | default({}) == {}",
             "eva_vision_model_secret | default({}) == {} or eva_vision_model_secret.skipped | default(false)",
             "eva_vision_aws_key_raw | default('') == ''",
             "eva_vision_s3_access_key | default('') == ''",
@@ -411,7 +449,11 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                          "always": [{"name": "Verify transient model credentials were cleared",
                                      "ansible.builtin.assert": {"that": cleanup_checks}}]},
                          {"ansible.builtin.fail": {"msg": "Fixture preserves runtime failure status"},
-                          "when": "fixture_runtime_failed | default(false)"}] + lifecycle_tasks}]
+                          "when": "fixture_runtime_failed | default(false)"},
+                         next(task for task in main if task["name"] == "Select final reconciled EVA Vision Helm inputs"),
+                         {"no_log": True, "ansible.builtin.copy": {
+                             "dest": str(work / "deploy-inputs.json"),
+                             "content": "{{ {'file': eva_vision_helm_values_file, 'set': eva_vision_helm_set} | to_json }}"}}] + lifecycle_tasks}]
         playbook_path = case / "playbook.yaml"
         playbook_path.write_text(yaml.safe_dump(playbook))
         process = subprocess.run([ansible, "-i", "localhost,", str(playbook_path)], env=env,
@@ -424,6 +466,8 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
             canaries.extend(value for key, value in node_auth.items()
                             if isinstance(value, str) and value.strip() and
                             (key == "password" or value != "admin"))
+        if explicit_credentials:
+            canaries.extend(value for value in explicit_credentials.values() if value)
         encoded_canaries = [base64.b64encode(canary.encode()).decode() for canary in canaries]
         canaries.extend(encoded_canaries)
         assert all(canary not in process.stdout for canary in canaries), (name, process.stdout)
@@ -433,12 +477,12 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         kubectl_calls = [json.loads(line) for line in (case / "calls").read_text().splitlines()] if (case / "calls").exists() else []
         secret_calls = [call for call in kubectl_calls if call[:2] == ["get", "secret"]]
         source_allowed = selected_source != "s3" or mode in {"online_repository", "cloud_repository"}
-        reads_registry = selected_source == "harbor" and bool(expected_secret) and not existing and source_allowed
+        reads_registry = selected_source == "harbor" and bool(expected_secret) and source_allowed
         assert ("Read target k3s registry configuration for Vision models" in process.stdout) == reads_registry, (name, process.stdout)
         assert secret_calls == ([["get", "secret", expected_secret, "-n", "eva-vision",
                                   "--ignore-not-found=true", "-o", "json"]]
                     if expected_secret and source_allowed else [])
-        if existing:
+        if existing and not (case / "deleted").exists() and not (case / "replaced").exists():
             assert existing_secret_path.read_text() == existing_secret_contents
         if create_race:
             assert existing_secret_path.read_text() == '{"data":{"HARBOR_USERNAME":"cm9ib3Q=","HARBOR_PASSWORD":"cmFjZQ=="}}'
@@ -448,7 +492,7 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
             assert not any(call[:2] == ["get", "deployment"] for call in kubectl_calls)
             if failure_message:
                 assert failure_message in process.stdout, (name, process.stdout)
-                for guidance in ["Restore or rerun the existing EVA infra registry setup on this target",
+                for guidance in ["existing EVA infra registry setup",
                                  "configs[registry].auth", "nonempty string username/password"]:
                     assert guidance in process.stdout, (name, process.stdout)
                 assert "Create Secret '" not in process.stdout
@@ -457,13 +501,30 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         else:
             resolved = yaml.safe_load((work / "runtime-values.yaml").read_text())
             selected = resolved["modelSource"]["type"]
-            created = selected in {"s3", "harbor"} and bool(expected_secret) and not existing
+            final_secret = resolved.get(selected, {}).get("existingSecret", "")
+            desired_data = {key: base64.b64encode(value.encode()).decode() for key, value in
+                {"HARBOR_USERNAME": expected_model_auth.get("username", ""),
+                 "HARBOR_PASSWORD": expected_model_auth.get("password", "")}.items()}
+            original_data = json.loads(existing_secret_contents)["data"] if existing else {}
+            replaced = selected == "harbor" and bool(final_secret) and existing and original_data != desired_data
+            deleted = selected == "harbor" and bool(expected_secret) and not final_secret and existing
+            created = selected in {"s3", "harbor"} and bool(final_secret) and not existing
+            assert (case / "replaced").exists() == replaced
+            assert (case / "deleted").exists() == deleted
+            if replaced:
+                replacement = json.loads(existing_secret_path.read_text())
+                assert replacement["data"] == desired_data
+                for key in ("labels", "annotations"):
+                    assert replacement["metadata"][key] == json.loads(existing_secret_contents)["metadata"][key]
             assert (case / "created").exists() == created
             assert len([call for call in kubectl_calls if call == ["create", "-f", "-"]]) == int(created)
+            assert len([call for call in kubectl_calls if call == ["replace", "-f", "-"]]) == int(replaced)
             namespace_calls = [call for call in kubectl_calls if call[:2] == ["create", "namespace"]]
-            assert namespace_calls == ([["create", "namespace", "eva-vision", "--dry-run=client", "-o", "yaml"]] if created else [])
-            if not created:
+            assert namespace_calls == ([["create", "namespace", "eva-vision", "--dry-run=client", "-o", "yaml"]] if created or replaced else [])
+            if not (created or replaced or deleted):
                 assert all(call[0] == "get" for call in kubectl_calls[:-1])  # Only lifecycle scale may write.
+            inputs = json.loads((work / "deploy-inputs.json").read_text())
+            assert inputs == {"file": str(work / "runtime-values.yaml"), "set": []}
             assert (case / "published").exists() == local_publish
             if local_publish:
                 staged = work / "model-publisher/scripts"
@@ -501,8 +562,16 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                 renderer.write_text(renderer_template.render(eva_vision_chart_version="3.3.0",
                     eva_vision_progress_deadline_seconds=3600, eva_vision_skip_startup_warmup=True))
                 renderer.chmod(0o755)
-                rendered = subprocess.check_output(["helm", "template", "eva-vision", chart,
-                    "-f", str(work / "runtime-values.yaml"), "--post-renderer", "eva-vision-postrenderer"],
+                command_vars = {**variables, **defaults, "eva_vision_name": "eva-vision", "eva_vision_chart_source": chart,
+                    "eva_cli_chart_path": chart, "eva_vision_helm_values_file": inputs["file"], "eva_vision_helm_set": inputs["set"]}
+                for task in main:
+                    if task["name"].startswith("Deploy EVA Vision from"):
+                        arguments = shlex.split(environment.from_string(task["ansible.builtin.command"]).render(**command_vars))
+                        assert arguments[arguments.index("-f") + 1] == inputs["file"]
+                        assert "--set" not in arguments
+                verify = next(task for task in main if task["name"] == "Render and verify final EVA Vision Helm manifest before deployment")
+                arguments = shlex.split(environment.from_string(verify["ansible.builtin.shell"]).render(**command_vars).split("> /dev/null")[0])
+                rendered = subprocess.check_output(arguments,
                     env={**os.environ, "HELM_PLUGINS": str(case / "plugins"),
                          "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]}, text=True)
                 assert all(canary not in rendered for canary in canaries)
@@ -520,15 +589,15 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
                 assert container["args"] == ["--log-profile", "prod", "--foreground"]
                 runtime_env = {item["name"]: item for item in container["env"]}
                 assert runtime_env["MODEL_SOURCE"]["value"] == selected
-                if expected_secret and selected in {"s3", "harbor"}:
+                if final_secret and selected in {"s3", "harbor"}:
                     keys = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] if selected == "s3" else ["HARBOR_USERNAME", "HARBOR_PASSWORD"]
                     for key in keys:
                         assert runtime_env[key] == {"name": key, "valueFrom": {
-                            "secretKeyRef": {"name": expected_secret, "key": key}}}
+                            "secretKeyRef": {"name": final_secret, "key": key}}}
                 if selected != "s3":
                     assert not any(key.startswith("AWS_") for key in runtime_env)
                     assert not any(doc["kind"] == "Secret" for doc in documents)
-                if selected == "harbor" and not expected_secret:
+                if selected == "harbor" and not final_secret:
                     assert "HARBOR_USERNAME" not in runtime_env and "HARBOR_PASSWORD" not in runtime_env
                 assert {"name": "model-cache", "mountPath": "/app/model_dir"} in container["volumeMounts"]
                 has_models_claim = any(doc["kind"] == "PersistentVolumeClaim" and doc["metadata"]["name"] == "eva-vision-models" for doc in documents)
@@ -565,15 +634,33 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
     run_case("missing-online-credentials", "online_repository", fail=True, registry_config=None)
     run_case("online-workload-identity", "online_repository", secret="", registry_config=None)
     recovery_message = "Cannot prepare Vision Harbor model Secret"
-    run_case("remote-default-private-secret", "remote_repository", existing=True, registry_config="[")
+    run_case("remote-default-private-secret", "remote_repository", existing=True)
     run_case("remote-default-auto-create-from-infra", "remote_repository")
-    run_case("remote-default-private-secret-invalid", "remote_repository", existing=True, bad_keys=True, fail=True, registry_config=None)
+    run_case("remote-default-private-secret-invalid-repaired", "remote_repository", existing=True, bad_keys=True)
+    stale_data = {"HARBOR_USERNAME": "cm9ib3Q=", "HARBOR_PASSWORD": base64.b64encode(b"fixture-existing-operator-password").decode()}
+    run_case("remote-stale-private-secret-replaced", "remote_repository", existing=True, existing_data=stale_data)
+    run_case("remote-public-stale-secret-removed", "remote_repository", existing=True, registry_auth={}, existing_data=stale_data)
+    run_case("remote-public-cli-secret-removed", "remote_repository", existing=True, registry_auth={}, existing_data=stale_data,
+             helm_set=["harbor.existingSecret=cli-harbor-reader", "image.tag=3.3.0rc-test", "modelCache.existingClaim=precreated-weights"])
+    run_case("remote-explicit-current-credentials", "remote_repository", existing=True, existing_data=stale_data,
+             explicit_credentials={"username": "robot$current", "password": "fixture-explicit-current-password"})
+    run_case("remote-explicit-current-credentials-no-node-file", "remote_repository", registry_config=None,
+             explicit_credentials={"username": "robot$current", "password": "fixture-explicit-current-password"})
+    run_case("remote-model-override-does-not-use-other-harbor-credentials", "remote_repository", existing=True, existing_data=stale_data,
+             helm_set=["harbor.registry=override.example:8443"],
+             explicit_credentials={"username": "robot$current", "password": "fixture-explicit-current-password"})
+    run_case("remote-explicit-partial-credentials-rejected", "remote_repository", existing=True, existing_data=stale_data,
+             explicit_credentials={"username": "robot$current"}, fail=True, failure_message=recovery_message)
+    run_case("remote-replace-conflict-preserves-secret", "remote_repository", existing=True, existing_data=stale_data,
+             replace_race=True, fail=True, failure_message=recovery_message)
+    run_case("remote-unrelated-secret-type-preserved", "remote_repository", existing=True, existing_type="kubernetes.io/dockerconfigjson",
+             fail=True, failure_message=recovery_message)
     run_case("remote-public-no-weights-or-aws", "remote_repository", secret="", registry_config=None)
     run_case("remote-cli-public-no-registry-read", "remote_repository", helm_set=["harbor.existingSecret="], registry_config="[")
-    run_case("remote-reuse-model-cache-claim", "remote_repository", existing=True, helm_set=["modelCache.existingClaim=precreated-weights"], registry_config=None)
-    run_case("remote-private-secret", "remote_repository", secret="harbor-reader", existing=True, registry_config=None)
+    run_case("remote-reuse-model-cache-claim", "remote_repository", existing=True, helm_set=["modelCache.existingClaim=precreated-weights"])
+    run_case("remote-private-secret", "remote_repository", secret="harbor-reader", existing=True)
     run_case("remote-cli-private-secret", "remote_repository", existing=True,
-             helm_set=["harbor.existingSecret=cli-harbor-reader"], registry_config="[")
+             helm_set=["harbor.existingSecret=cli-harbor-reader"])
     run_case("remote-custom-secret-auto-create", "remote_repository", secret="harbor-reader")
     run_case("remote-cli-custom-secret-auto-create", "remote_repository", helm_set=["harbor.existingSecret=cli-harbor-reader"])
     run_case("remote-s3-override-rejected", "remote_repository", helm_set=["modelSource.type=s3"], fail=True, registry_config=None)
@@ -581,24 +668,23 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
              helm_set=["harbor.registry=https://override.example:8443///"],
              registry_auth={"username": "robot$node-reader", "password": "fixture-override-node-password"})
     run_case("remote-registry-normalization", "remote_repository", helm_set=["harbor.registry=  http://harbor.example:32080/  "])
-    run_case("remote-other-registry-rejected", "remote_repository", registry_key="other.example:32080", fail=True,
-             registry_auth={"username": "admin", "password": "fixture-other-registry-password"}, failure_message=recovery_message)
-    run_case("remote-substring-registry-rejected", "remote_repository", registry_key="not-harbor.example:32080", fail=True,
-             failure_message=recovery_message)
-    run_case("remote-different-port-rejected", "remote_repository", registry_key="harbor.example:443", fail=True,
-             failure_message=recovery_message)
-    run_case("remote-controller-credentials-not-used", "remote_repository", credentials=True, registry_config=None, fail=True,
-             failure_message=recovery_message)
+    run_case("remote-other-registry-not-reused", "remote_repository", registry_key="other.example:32080",
+             registry_auth={"username": "admin", "password": "fixture-other-registry-password"})
+    run_case("remote-substring-registry-not-reused", "remote_repository", registry_key="not-harbor.example:32080")
+    run_case("remote-different-port-not-reused", "remote_repository", registry_key="harbor.example:443")
+    run_case("remote-controller-credentials-not-used", "remote_repository", credentials=True, registry_config=None)
+    for label, config in [("missing", None), ("configs-missing", "{}"),
+                          ("auth-missing", "configs: {harbor.example:32080: {}}"),
+                          ("mirror-only", "mirrors: {harbor.example:32080: {endpoint: ['http://harbor.example:32080']}}")]:
+        run_case("remote-public-registry-" + label, "remote_repository", registry_config=config)
     for label, config in [
-            ("missing", None), ("empty", ""), ("malformed", "configs: [fixture-custom-node-password:\"$\\with spaces"),
+            ("empty", ""), ("malformed", "configs: [fixture-custom-node-password:\"$\\with spaces"),
             ("scalar", "fixture-other-registry-password"), ("sequence", "[]"),
-            ("configs-missing", "{}"), ("configs-null", "configs: null"),
+            ("configs-null", "configs: null"),
             ("configs-sequence", "configs: []"), ("configs-string", "configs: fixture-other-registry-password"),
             ("entry-null", "configs: {harbor.example:32080: null}"),
             ("entry-sequence", "configs: {harbor.example:32080: []}"),
-            ("auth-missing", "configs: {harbor.example:32080: {}}"),
-            ("auth-scalar", "configs: {harbor.example:32080: {auth: fixture-other-registry-password}}"),
-            ("mirror-only", "mirrors: {harbor.example:32080: {endpoint: ['http://harbor.example:32080']}}")]:
+            ("auth-scalar", "configs: {harbor.example:32080: {auth: fixture-other-registry-password}}")]:
         run_case("remote-registry-" + label, "remote_repository", registry_config=config, fail=True,
                  failure_message=recovery_message)
     for label, auth in [
@@ -612,24 +698,28 @@ with tempfile.TemporaryDirectory(prefix="eva-vision-runtime-test-") as temporary
         config = yaml.safe_dump({"configs": {"harbor.example:32080": {"auth": auth}}})
         run_case("remote-auth-" + label, "remote_repository", registry_config=config, fail=True,
                  failure_message=recovery_message)
-    run_case("remote-existing-empty-decoded-password", "remote_repository", existing=True,
-             existing_data={"HARBOR_USERNAME": "cm9ib3Q=", "HARBOR_PASSWORD": "ICA="}, registry_config=None, fail=True)
-    run_case("remote-existing-nonstring-password", "remote_repository", existing=True,
-             existing_data={"HARBOR_USERNAME": "cm9ib3Q=", "HARBOR_PASSWORD": 123}, registry_config="[", fail=True)
+    run_case("remote-existing-empty-decoded-password-repaired", "remote_repository", existing=True,
+             existing_data={"HARBOR_USERNAME": "cm9ib3Q=", "HARBOR_PASSWORD": "ICA="})
+    run_case("remote-existing-nonstring-password-repaired", "remote_repository", existing=True,
+             existing_data={"HARBOR_USERNAME": "cm9ib3Q=", "HARBOR_PASSWORD": 123})
+    run_case("remote-existing-secret-malformed-registry-preserved", "remote_repository", existing=True,
+             registry_config="[", fail=True, failure_message=recovery_message)
     run_case("remote-create-race-preserves-operator-secret", "remote_repository", create_race=True, fail=True,
              failure_message=recovery_message)
     local_settings = ["harbor.registry=override.example:8443", "harbor.project=models",
                       "harbor.plainHttp=false", "harbor.insecure=true"]
-    run_case("local-packaged-publish-effective-harbor", "local_repository", existing=True, helm_set=local_settings, registry_config="[")
+    run_case("local-packaged-publish-effective-harbor", "local_repository", existing=True, helm_set=local_settings)
     run_case("local-image-tag-override", "local_repository", existing=True,
-             helm_set=local_settings + ["image.tag=3.3.0rc-test"], registry_config="[")
+             helm_set=local_settings + ["image.tag=3.3.0rc-test"])
     run_case("local-default-auto-create-and-publish", "local_repository", helm_set=local_settings, home_mode="ssh")
     run_case("local-cli-custom-secret-auto-create-and-publish", "local_repository", helm_set=local_settings + ["harbor.existingSecret=cli-model-reader"])
-    run_case("local-missing-registry-before-publish", "local_repository", fail=True, helm_set=local_settings,
-             registry_config=None, failure_message=recovery_message)
-    run_case("local-default-private-secret-invalid", "local_repository", existing=True, bad_keys=True, fail=True, helm_set=local_settings, registry_config=None)
+    run_case("local-no-registry-anonymous-before-publish", "local_repository", helm_set=local_settings, registry_config=None)
+    run_case("local-default-private-secret-invalid-repaired", "local_repository", existing=True, bad_keys=True, helm_set=local_settings)
+    run_case("local-stale-model-secret-replaced", "local_repository", existing=True, existing_data=stale_data, helm_set=local_settings)
+    run_case("local-public-stale-model-secret-removed", "local_repository", existing=True, existing_data=stale_data,
+             registry_auth={}, helm_set=local_settings)
     run_case("local-cli-public-publish", "local_repository", helm_set=local_settings + ["harbor.existingSecret="], registry_config="[")
-    run_case("local-checkout-fallback", "local_repository", existing=True, packaged=False, helm_set=local_settings, registry_config=None)
+    run_case("local-checkout-fallback", "local_repository", existing=True, packaged=False, helm_set=local_settings)
     run_case("local-custom-model-selection", "local_repository", existing=True, models=" OmDet, Owl-v2 ", helm_set=local_settings)
     run_case("local-target-home-harbor-fallback", "local_repository", existing=True, home_mode="ssh", helm_set=local_settings)
     run_case("local-target-fact-home-python", "local_repository", existing=True, home_mode="facts", interpreter="facts", helm_set=local_settings)

@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--host", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    components = [name for name in os.environ["EVA_CLUSTER_COMPONENTS"].split(",") if name in {"app", "iam", "agent", "vision"}]
+    components = [name for name in os.environ["EVA_CLUSTER_COMPONENTS"].split(",") if name in {"app", "iam", "agent", "vision", "dock"}]
     context = run(["kubectl", "config", "current-context"]).strip()
     nodes = get("nodes")
     ready = [n for n in nodes if any(c.get("type") == "Ready" and c.get("status") == "True" for c in n.get("status", {}).get("conditions", []))]

@@ -4,6 +4,7 @@
     precondition_tls_target: "{{ ansible_host | default(inventory_hostname) }}"
     precondition_iam_values_file: "{{ eva_site_values_root }}/iam.yaml"
     precondition_app_values_file: "{{ eva_site_values_root }}/app.yaml"
+    precondition_dock_values_file: "{{ eva_site_values_root }}/dock.yaml"
 
 - name: Check Workspace TLS value files
   ansible.builtin.stat:
@@ -11,6 +12,7 @@
   loop:
     - "{{ precondition_iam_values_file }}"
     - "{{ precondition_app_values_file }}"
+    - "{{ precondition_dock_values_file }}"
   register: precondition_tls_values_files
   delegate_to: localhost
   become: false
@@ -33,6 +35,8 @@
          iam_precondition_values | default({})) }}
     precondition_app_values: >-
       {{ (app_precondition_values | default({})).get(precondition_tls_target, {}) }}
+    precondition_dock_values: >-
+      {{ (dock_precondition_values | default({})).get(precondition_tls_target, {}) }}
 
 - name: Build selected ingress certificate checks
   no_log: true
@@ -61,6 +65,19 @@
                and (precondition_app_values.ingress.tls.enabled | default(true) | bool)
                and (precondition_app_values.ingress.tls.create | default(true) | bool)
                and ((precondition_app_values.ingress.tls.authType | default('hostPath')) == 'hostPath')
+             ) else [])
+         + ([{
+               'component': 'Dock',
+               'host': precondition_dock_values.ingress.host | default(precondition_tls_target),
+               'certificate': (precondition_dock_values.ingress.tls.hostPath | default('/home/eva/certs'))
+                 ~ '/' ~ (precondition_dock_values.ingress.tls.certFile | default('tls.crt'))
+             }] if (
+               ('dock' in (eva_enabled_components | default('')).split(','))
+               and (precondition_dock_values.ingress.enabled | default(true) | bool)
+               and (precondition_dock_values.ingress.tls.enabled | default(false) | bool)
+               and (precondition_dock_values.ingress.tls.create
+                    | default(precondition_dock_values.ingress.tls.enabled | default(false)) | bool)
+               and ((precondition_dock_values.ingress.tls.authType | default('hostPath')) == 'hostPath')
              ) else [])
         )
       }}

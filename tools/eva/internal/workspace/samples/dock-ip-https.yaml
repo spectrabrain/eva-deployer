@@ -1,0 +1,16 @@
+# EVA-Dock: App과 같은 IP + Dock 전용 HTTPS 포트. ex) https://192.0.2.10:32020/
+# Dock은 / 와 /api 를 사용하므로 App(/)과 다른 공개 포트로 분리합니다. Deployer가 Traefik listener를 함께 정합화합니다.
+dock:
+  ingress:
+    host: "<PUBLIC_HOST>"  # 필수: scheme, port, path 없는 IP. App과 같은 IP를 사용합니다. ex) 192.0.2.10
+    tls:
+      enabled: true
+      create: true
+      hostPath: "<TLS_CERT_DIRECTORY>"  # 필수: 대상 서버의 IP SAN 인증서 tls.crt + tls.key. App HTTPS와 같은 디렉터리를 재사용할 수 있습니다. ex) /etc/eva/certs
+  config:
+    dockPublicUrl: "https://<PUBLIC_HOST>:32020"  # 필수: 브라우저·EVA 웹훅이 접근할 Dock 외부 주소. 포트를 바꾸면 Traefik 공개 포트도 함께 바뀝니다. ex) https://192.0.2.10:32020
+    dashboardEnabled: true  # DASHBOARD 메뉴
+    liveEnabled: false  # LIVE 메뉴(탐지 알림 이력). 사용하려면 true
+    streamingEnabled: false  # STREAMING 메뉴(카메라 실시간 MJPEG 영상). 사용하려면 true. EVA 서버당 동시 영상 수는 config.livePerEva(기본 16)
+  secrets:
+    dockAccessPassword: "<DOCK_ACCESS_PASSWORD>"  # 필수: Dock 로그인 비밀번호. ex) Demo-Dock-Only!42 (예시 전용). 업데이트 시에도 기존 값을 그대로 입력합니다.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -437,4 +438,75 @@ func createRuntime(t *testing.T) string {
 func fixedClock() func() time.Time {
 	now := time.Date(2026, 9, 12, 1, 2, 4, 0, time.UTC)
 	return func() time.Time { return now }
+}
+
+func TestExecuteRecordsInterruptedStepAsFailed(t *testing.T) {
+	stateRoot := t.TempDir()
+	workspace := createWorkspace(t)
+	releaseRoot := createReleaseSource(t, "")
+	runtimeRoot := createRuntime(t)
+	started := filepath.Join(t.TempDir(), "started")
+	script := "#!/bin/sh\n: > " + started + "\nexec sleep 30\n"
+	if err := os.WriteFile(filepath.Join(runtimeRoot, "venv/bin/ansible-playbook"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	record := createOperation(t, stateRoot, workspace, releaseRoot, []plan.Step{
+		{Component: "infra", Playbook: expectedPlaybooks["infra"]},
+		{Component: "app", Playbook: expectedPlaybooks["app"]},
+	})
+
+	type outcome struct {
+		record operation.Record
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		completed, err := Execute(Options{StateRoot: stateRoot, LogRoot: t.TempDir(), RuntimeRoot: runtimeRoot, Now: fixedClock()}, record)
+		done <- outcome{completed, err}
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("step did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	running, err := operation.Load(stateRoot, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if liveness, err := operation.RunLiveness(stateRoot, running); err != nil || liveness != operation.LivenessActive {
+		t.Fatalf("liveness while running = %q, %v", liveness, err)
+	}
+
+	// What Ctrl+C delivers to the eva process.
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	var result outcome
+	select {
+	case result = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not return after SIGINT")
+	}
+	if result.err == nil || !strings.Contains(result.err.Error(), "interrupted") {
+		t.Fatalf("Execute() error = %v, want interrupted", result.err)
+	}
+	stored, err := operation.Load(stateRoot, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != operation.Failed || stored.ResultPath == "" {
+		t.Fatalf("stored operation = %+v, want failed with result", stored)
+	}
+	contents, err := os.ReadFile(stored.ResultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(contents), "component:") != 1 {
+		t.Fatalf("interrupted run must not continue to later steps: %s", contents)
+	}
 }

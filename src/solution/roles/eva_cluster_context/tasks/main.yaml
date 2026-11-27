@@ -9,6 +9,7 @@
     eva_vision_kubeconfig: "{{ eva_cluster_kubeconfig }}"
     eva_app_kubeconfig: "{{ eva_cluster_kubeconfig }}"
     eva_iam_kubeconfig: "{{ eva_cluster_kubeconfig }}"
+    eva_dock_kubeconfig: "{{ eva_cluster_kubeconfig }}"
     precondition_argocd_kubeconfig_override: "{{ eva_cluster_kubeconfig }}"
     eva_persistent_state_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/sites"
     eva_site_state_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/sites/{{ eva_site_id }}"
@@ -20,10 +21,12 @@
     eva_vision_workdir: "{{ eva_site_deploy_root }}/controller/vision-work"
     eva_app_workdir: "{{ eva_site_deploy_root }}/controller/app-work"
     eva_iam_workdir: "{{ eva_site_deploy_root }}/controller/iam-work"
+    eva_dock_workdir: "{{ eva_site_deploy_root }}/controller/dock-work"
     eva_agent_credentials_root: "{{ ansible_facts.env.HOME }}/.local/state/eva/agent-credentials"
     eva_traefik_ports_manage: false
     eva_app_image_pull_auth_type: secret
     eva_iam_image_pull_auth_type: secret
+    eva_dock_image_pull_auth_type: secret
 
 - name: Inspect existing releases without changing cluster resources
   ansible.builtin.script:

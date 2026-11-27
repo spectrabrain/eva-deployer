@@ -119,6 +119,15 @@ jobs:
           EVA_TEST_HELM_DOWNLOAD: "1"
         run: python3 scripts/test/test_traefik_ports.py
 
+      - name: Test EVA Dock role and release contract
+        run: |
+          version="$(awk '$1 == "eva_dock_chart_version:" {print $2}' src/solution/version.yaml)"
+          chart="$RUNNER_TEMP/eva-dock-${version}.tgz"
+          curl -fsSL --retry 3 -o "$chart" \
+            "https://raw.githubusercontent.com/spectrabrain/eva-dock-chart/main/eva-dock-${version}.tgz"
+          EVA_DOCK_TEST_CHART="$chart" python3 scripts/test/test_eva_dock_values.py
+          EVA_DOCK_TEST_CHART="$chart" bash scripts/test/test_eva_dock_release_contract.sh
+
       - name: Test existing server Solution-only upgrade
         run: python3 scripts/test/test_host_solution_upgrade.py
 

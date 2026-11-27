@@ -129,7 +129,7 @@ func buildOfflineArchive(runtimeArchive, cacheRoot, destination string) (resultE
 func offlineCacheDirectory(name string) bool {
 	switch name {
 	case "aws", "apt", "docker", "nvidia", "cuda", "helm", "k3s", "k8s", "nfs",
-		"eva-app", "eva-vision", "eva-agent", "eva-iam", "qdrant", "tools", "images",
+		"eva-app", "eva-vision", "eva-agent", "eva-iam", "eva-dock", "qdrant", "tools", "images",
 		"display_mode_selector", "models", "python-debs", "wheels", "qdrant-snapshots", "vision-models", "harbor":
 		return true
 	}

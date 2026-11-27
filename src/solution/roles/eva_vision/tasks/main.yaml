@@ -343,6 +343,19 @@
     - not ansible_check_mode
     - eva_vision_chart_version is version('3.3.0', '>=')
 
+# Runtime Values already include Helm --set resolution and model authentication
+# reconciliation. Reapplying CLI flags would restore a deleted public Secret ref.
+- name: Select final reconciled EVA Vision Helm inputs
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_vision_helm_values_file: >-
+      {{ eva_vision_runtime_values_file
+         if (not ansible_check_mode and eva_vision_chart_version is version('3.3.0', '>='))
+         else eva_vision_workdir ~ '/effective-input-values.yaml' }}
+    eva_vision_helm_set: >-
+      {{ [] if (not ansible_check_mode and eva_vision_chart_version is version('3.3.0', '>='))
+         else eva_cli_helm_set | default([]) }}
+
 - name: Ensure EVA Vision Helm post-renderer plugin directory exists
   ansible.builtin.file:
     path: "{{ eva_vision_workdir }}/plugin/eva-vision-postrenderer"
@@ -396,9 +409,9 @@
     helm template {{ eva_vision_name }} {{ eva_vision_chart_source }}
     -n {{ eva_vision_namespace }}
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
-    -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    -f {{ eva_vision_helm_values_file | quote }}
     --post-renderer eva-vision-postrenderer
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    {% for value in eva_vision_helm_set %}--set {{ value | quote }} {% endfor %}
     > /dev/null
   args:
     executable: /bin/bash
@@ -416,7 +429,8 @@
     eva_cluster_guard_workdir: "{{ eva_vision_workdir }}"
     eva_cluster_guard_chart: "{{ eva_vision_chart_source }}"
     eva_cluster_guard_version: "{{ eva_vision_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
-    eva_cluster_guard_values: "{{ [eva_vision_workdir ~ '/effective-input-values.yaml'] }}"
+    eva_cluster_guard_values: "{{ [eva_vision_helm_values_file] }}"
+    eva_cluster_guard_set: "{{ eva_vision_helm_set }}"
     eva_cluster_guard_post_renderer: eva-vision-postrenderer
     eva_cluster_guard_environment:
       HELM_PLUGINS: "{{ eva_vision_workdir }}/plugin"
@@ -503,10 +517,10 @@
     -n {{ eva_vision_namespace }}
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
     --create-namespace
-    -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    -f {{ eva_vision_helm_values_file | quote }}
     --post-renderer eva-vision-postrenderer
     {{ eva_vision_server_side_conflict_args | default('') }}
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    {% for value in eva_vision_helm_set %}--set {{ value | quote }} {% endfor %}
   register: eva_vision_deploy_online
   changed_when: >-
     'has been upgraded' in eva_vision_deploy_online.stdout
@@ -523,10 +537,10 @@
     -n {{ eva_vision_namespace }}
     {% if eva_cli_chart_path | default('') | length == 0 %}--version {{ eva_vision_chart_version }}{% endif %}
     --create-namespace
-    -f {{ eva_vision_workdir }}/effective-input-values.yaml
+    -f {{ eva_vision_helm_values_file | quote }}
     --post-renderer eva-vision-postrenderer
     {{ eva_vision_server_side_conflict_args | default('') }}
-    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    {% for value in eva_vision_helm_set %}--set {{ value | quote }} {% endfor %}
   register: eva_vision_deploy_offline
   changed_when: >-
     'has been upgraded' in eva_vision_deploy_offline.stdout

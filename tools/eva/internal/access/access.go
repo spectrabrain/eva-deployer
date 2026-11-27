@@ -44,6 +44,7 @@ type target struct {
 		Connection string `yaml:"ansible_connection"`
 		AppDir     string `yaml:"eva_app_deploy_values_dir"`
 		IAMDir     string `yaml:"eva_iam_deploy_values_dir"`
+		DockDir    string `yaml:"eva_dock_deploy_values_dir"`
 		N8NDir     string `yaml:"n8n_config_output_dir"`
 		N8NNS      string `yaml:"n8n_namespace"`
 	}
@@ -58,7 +59,7 @@ func Discover(document plan.Document, options Options) []Endpoint {
 	}
 	targets := deploymentTargets(document, options)
 	var endpoints []Endpoint
-	for _, component := range []string{"app", "iam", "n8n"} {
+	for _, component := range []string{"app", "iam", "dock", "n8n"} {
 		for _, step := range document.Steps {
 			if step.Component != component {
 				continue
@@ -78,7 +79,7 @@ func Discover(document plan.Document, options Options) []Endpoint {
 				if address == "" && canQuery && !options.PreferLive {
 					address = liveURL(component, target.vars.N8NNS, options.Run)
 				}
-				name := map[string]string{"app": "App", "iam": "IAM", "n8n": "n8n"}[component]
+				name := map[string]string{"app": "App", "iam": "IAM", "dock": "Dock", "n8n": "n8n"}[component]
 				label := ""
 				if len(targets) > 1 {
 					label = target.name
@@ -100,7 +101,7 @@ func Print(writer io.Writer, endpoints []Endpoint) {
 	}
 	fmt.Fprintln(writer, "\nAccess URLs:")
 	// Keep the display order stable regardless of deployment order.
-	for _, name := range []string{"App", "IAM", "Harbor", "n8n"} {
+	for _, name := range []string{"App", "IAM", "Dock", "Harbor", "n8n"} {
 		for _, endpoint := range endpoints {
 			if endpoint.Name != name {
 				continue
@@ -165,6 +166,9 @@ func savedURL(document plan.Document, target target, component string, options O
 	if component == "iam" {
 		dir = target.vars.IAMDir
 	}
+	if component == "dock" {
+		dir = target.vars.DockDir
+	}
 	if dir == "" {
 		dir = filepath.Join(document.ReleaseRoot, "out", "work", "rendered", document.SiteID, target.identity, component)
 	}
@@ -179,6 +183,7 @@ func savedURL(document plan.Document, target target, component string, options O
 			Host      string `yaml:"host"`
 			PublicURL string `yaml:"publicUrl"`
 			Port      string `yaml:"publicPort"`
+			DockURL   string `yaml:"dockPublicUrl"`
 		} `yaml:"config"`
 		Ingress struct {
 			Enabled *bool  `yaml:"enabled"`
@@ -188,7 +193,14 @@ func savedURL(document plan.Document, target target, component string, options O
 			} `yaml:"tls"`
 		} `yaml:"ingress"`
 	}
-	if !readYAML(filepath.Join(dir, "resolved-values.yaml"), &values, options) || values.Ingress.Enabled != nil && !*values.Ingress.Enabled {
+	if !readYAML(filepath.Join(dir, "resolved-values.yaml"), &values, options) {
+		return ""
+	}
+	if component == "dock" {
+		// DOCK_PUBLIC_URL also names a Cloud LB address when the chart Ingress is off.
+		return normalizeURL(values.Config.DockURL)
+	}
+	if values.Ingress.Enabled != nil && !*values.Ingress.Enabled {
 		return ""
 	}
 	if component == "iam" {
@@ -276,6 +288,8 @@ func liveURL(component, n8nNamespace string, run health.Runner) string {
 				port = resource.Data["BACKEND_SECURE_PORT"]
 			}
 			address = buildURL(resource.Data["BACKEND_HOST"], secure, port, path)
+		} else if component == "dock" && resource.Kind == "ConfigMap" {
+			address = normalizeURL(resource.Data["DOCK_PUBLIC_URL"])
 		} else if component == "iam" && resource.Kind == "ConfigMap" {
 			address = normalizeURL(resource.Data["KC_HOSTNAME_ADMIN_URL"])
 			if address == "" {

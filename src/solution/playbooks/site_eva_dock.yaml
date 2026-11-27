@@ -1,0 +1,37 @@
+# site_eva_dock.yaml
+- name: Deploy EVA Dock
+  hosts: all
+  become: true
+  any_errors_fatal: true
+  serial: 1
+  vars_files:
+    - ../../playbook-vars.yaml
+
+  pre_tasks:
+    - name: Load shared EVA playbook context
+      ansible.builtin.import_tasks: ../../playbook-preflight.yaml
+
+    - name: Validate pinned EVA Dock versions
+      ansible.builtin.assert:
+        that:
+          - eva_dock_chart_version | default('') | string | length > 0
+          - eva_dock_image_tag | default('') | string | length > 0
+        fail_msg: >-
+          src/solution/version.yaml에 eva_dock_chart_version과 eva_dock_image_tag를 설정하세요.
+
+    - name: Resolve repository mode
+      ansible.builtin.set_fact:
+        repository_mode: "{{ repository_mode | default('online_repository') }}"
+        airgap_mode: "{{ (airgap_mode | default(false) | bool) or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}"
+      changed_when: false
+
+  tasks:
+    - name: Install EVA Dock with credential schedule recovery
+      block:
+        - name: STEP 1 - eva-dock
+          ansible.builtin.import_role:
+            name: eva_dock
+      always:
+        - name: Restore ECR schedules after Dock installation
+          ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/online_resume.yaml"
+          when: eva_managed_cluster | default(false) | bool

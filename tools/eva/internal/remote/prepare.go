@@ -116,7 +116,7 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 				return manifestPath, fmt.Errorf("existing Remote preparation failed validation: %w", err)
 			}
 			fmt.Fprintf(options.Streams.Stdout, "[OK] Remote preparation already completed\n[INFO] manifest=%s\n", manifestPath)
-			return manifestPath, nil
+			return manifestPath, printPreparedArtifacts(options.Streams.Stdout, root)
 		case ManifestRunning:
 			return manifestPath, errors.New("Remote preparation is already running or requires operator inspection")
 		case ManifestFailed:
@@ -146,7 +146,16 @@ func (service PrepareService) Prepare(ctx context.Context, options PrepareOption
 		return manifestPath, err
 	}
 	fmt.Fprintf(options.Streams.Stdout, "[OK] Remote preparation completed\n[INFO] manifest=%s\n", manifestPath)
-	return manifestPath, nil
+	return manifestPath, printPreparedArtifacts(options.Streams.Stdout, root)
+}
+
+func printPreparedArtifacts(output io.Writer, root string) error {
+	references, err := PublishedRepositoryArtifacts(root)
+	if err != nil {
+		return err
+	}
+	PrintPublishedRepositoryArtifacts(output, references)
+	return nil
 }
 
 func makePreparationLayout(root string) error {

@@ -69,3 +69,19 @@ agent:
       snapshotPersistence:
         storageClassName: "<QDRANT_SNAPSHOT_STORAGE_CLASS>"  # 필수: snapshot 블록 StorageClass. ex) eva-agent-sc-bs.
         size: 10Gi
+dock:
+  ingress:
+    enabled: false  # Cloud LB가 직접 연결하는 기본 틀. Chart Ingress 사용 시 true와 실제 className/host를 설정합니다.
+    tls:
+      create: false
+  service:
+    type: ClusterIP  # Cloud LB/기존 Ingress가 Service 80번 포트로 연결합니다.
+  imagePullSecret:
+    authType: secret
+    awsCredentialsSecret: aws-credentials
+  persistence:
+    type: pvc
+    storageClassName: "<DOCK_STORAGE_CLASS>"  # 필수: Dock SQLite용 RWO StorageClass. ex) nks-block. 업데이트는 기존 PVC 설정 유지.
+    size: 5Gi
+  config:
+    dockPublicUrl: "<DOCK_PUBLIC_URL>"  # 필수: Cloud LB의 Dock 외부 주소. ex) https://dock.eva.com

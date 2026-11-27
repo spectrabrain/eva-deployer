@@ -98,7 +98,7 @@ func airgapUsage() {
 	fmt.Println("Defaults to Current Release and ~/eva-airgap-bundle_<version>_<os>_<arch>.tar.gz; sudo uses the invoking user's home.")
 	fmt.Println("--driver-package is optional and defaults to nvidia-driver-580 for all profiles; it selects Bundle contents, not the target's installation setting.")
 	fmt.Println("Prepares a verified Local Airgap Bundle on an online Ubuntu 24.04 amd64 host with sudo, Docker, AWS CLI and apt repositories.")
-	fmt.Println("Downloads Infra/App/IAM/Agent/Vision assets, n8n image, selected vLLM profile, models and Harbor Qdrant snapshots.")
+	fmt.Println("Downloads Infra/App/IAM/Agent/Vision/Dock assets, n8n image, selected vLLM profile, models and Harbor Qdrant snapshots.")
 	fmt.Println("Does not deploy Harbor, publish images/snapshots, configure MIG or install the GPU driver on the preparation host.")
 	fmt.Println("Output is verified before atomic publication. Existing output is refused; interrupted preparation must be restarted, not resumed.")
 }

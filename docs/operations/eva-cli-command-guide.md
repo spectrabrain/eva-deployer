@@ -123,7 +123,7 @@ sudo eva inspect config --site customer-a --config-root /custom/config/customer-
 | `resolved` (기본) | 설치 후 `helm get values --all`로 수집한 계산값 | `resolved-values.yaml` |
 | `effective` | Deployer가 병합한 Helm 입력. CLI `--set`은 아직 포함하지 않음 | `effective-input-values.yaml` |
 | `defaults` | Chart에서 추출한 기본 Values | `chart-defaults.yaml` |
-| `override` | Deployer가 렌더링한 k3s override | `<component>-k3s-override.yaml`; IAM은 `eva-iam-k3s-override.yaml` |
+| `override` | Deployer가 렌더링한 k3s override | `<component>-k3s-override.yaml`; IAM은 `eva-iam-k3s-override.yaml`, Dock은 `dock-k3s-override.yaml` |
 | `sources` | Config, Workspace, CLI 등의 사용 여부와 산출물 경로 | `values-sources.yaml` |
 
 ```bash
@@ -241,6 +241,10 @@ Config 기본 파일은 `eva.yaml`이다. 다른 Config는 `inspect files`에 �
 | `eva backup show ... --latest` | 한 release의 최신 백업 메타데이터·경로; Values 원문 제외 | 조회 |
 | `eva backup values --path DIR` | SHA-256 확인 후 선택한 백업 Values 원문 출력 | 민감정보 조회 |
 
+설치 중 Ctrl+C·`kill`·SSH 끊김으로 중단하면 진행 중인 Ansible 단계를 멈추고 작업을 `failed`로 기록하므로
+`eva retry`로 다시 실행할 수 있다. 실행 중인 작업은 작업 디렉터리의 `run.lock`을 잡고 있어, 기록이 `running`으로
+남아도 실제 실행 여부를 구분할 수 있다.
+
 일반 설치자는 sudo 없이 `eva install configure`로 시작한다. Online/Remote/Local → Online/Remote 현재 서버/SSH 설치 →
 타겟별 Infra만/Infra + Solution/Solution만·HTTP/HTTPS·도메인/IP·IAM 함께 설치/외부 IAM을 선택한다.
 Online에서 Bastion을 선택하면 On-premise / Cloud(NKS)를 추가로 선택한다. NKS는 같은 Values 틀을 채우고
@@ -317,6 +321,7 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 | `eva release env [--release PATH \| PATH]` | Release 환경변수 표시 |
 | `eva release prepare --release PATH [--install-root PATH]` | 검증 Release를 실행 소스로 추출 |
 | `eva release import-airgap --bundle PATH [--artifact-root PATH]` | Airgap Bundle 검증·반입 |
+| `sudo eva release prune [--keep N] [--yes]` | 오래된 버전별 Release·Remote payload 디렉터리 정리; 기본은 목록만 표시 |
 | `eva workspace validate --config FILE` | 단일 설정 검증; Workspace 생성 없음 |
 | `eva workspace validate --site ID \| --workspace PATH` | Site 입력 검증 |
 | `eva workspace show --site ID \| --workspace PATH` | Workspace 경로·모드·component 표시 |
@@ -326,6 +331,31 @@ install/plan의 `--release`와 positional Release는 동시에 사용하지 않�
 현재 Git tag나 S3 위치로 Release를 자동 다운로드하는 일반 명령은 제공하지 않는다.
 `--release-root`는 inspect 전용 진단 입력이고 install의 `--release`와 의미가 다르다.
 `release prepare`는 Infra·Solution 실행 소스만 추출하며 `eva-offline`의 `out/cache`는 배치하지 않는다.
+
+`release prune`은 Main과 Remote 타겟에 버전별로 쌓이는 다음 디렉터리를 정리한다. 이 디렉터리들은 설치 후에도
+자동으로 지워지지 않는다.
+
+| 위치 | 서버 |
+| --- | --- |
+| `/var/lib/eva/inbox/releases/<version>` | 타겟(전달된 원본 Release) |
+| `/opt/eva/releases/<version>` | 타겟·Main(실행 소스와 `out/work`) |
+| `/var/lib/eva/artifacts/remote/<version>` | 타겟(풀어 둔 payload cache) |
+| `/var/lib/eva/preparation/remote/<version>` | Main(준비 증적·payload·Runtime artifact) |
+
+- 다음 버전은 항상 남긴다: Current Release(`/var/lib/eva/releases/current.yaml`), 가장 최근 작업, 마지막으로
+  성공한 작업, `planned` 작업이 사용한 버전, 그리고 버전 순으로 최신 `--keep`개(기본 2, 최소 1).
+- 실제로 실행 중인 작업이 있거나 Current Release·작업 기록을 읽을 수 없으면 아무것도 지우지 않고 중단한다.
+  작업 기록은 `running`이지만 프로세스가 이미 끝난 경우(Ctrl+C, SSH 끊김, 이전 Tool로 실행한 작업)는
+  `[WARN]`으로 알리고 그 작업의 버전을 남긴 채 정리한다.
+- 기본 실행은 남길 항목(`[KEEP]`과 이유)과 지울 항목(`[DELETE]`과 크기)만 표시한다. `--yes`를 주면 지운다.
+- 지운 버전을 사용한 과거 작업의 `eva retry`/`apply`/`inspect`는 더 이상 쓸 수 없다. `eva status` 조회는 유지된다.
+- 버전과 무관한 공유 상태는 건드리지 않는다: Remote cache(`/var/lib/eva/cache/remote`), Runtime·Tool, Harbor와
+  게시된 이미지, Workspace, credential, Helm Values·DB 백업, 작업 기록·로그.
+
+```bash
+sudo eva release prune             # 정리 대상 확인(삭제 안 함)
+sudo eva release prune --yes       # 확인한 [DELETE] 항목 삭제
+```
 Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 이미지·snapshot을 준비한다.
 최초 반입과 Tool 설치는 [Local Runbook](../installation/local-repository-runbook.md)을 따른다.
 
@@ -358,7 +388,7 @@ Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 �
 	준비 서버의 도구·대상 kernel·저장공간 조건은 Local Runbook을 따른다.
 - AWS credential은 `/var/lib/eva/credentials/aws_key.ini`를 재사용하고 STS로 검증한다. 없으면
 	대화형 숨김 입력을 사용하며 CLI Secret 옵션은 없다. 비대화형은 승인된 credential 파일이 필요하다.
-- Infra/App/IAM/Agent/Vision 패키지·Chart·helper, n8n 이미지, 모델, Harbor Qdrant snapshot,
+- Infra/App/IAM/Agent/Vision/Dock 패키지·Chart·helper, n8n 이미지, 모델, Harbor Qdrant snapshot,
 	Harbor offline installer도 준비한다. 기존 유효 Runtime은 재사용하며 없으면 **온라인 bootstrap의
 	APT/pip 호스트 변경**을 `--yes`로 승인한다. 손상된 Runtime은 먼저 복구한다.
 - Docker/AWS 설치, Harbor 배포·이미지/snapshot 게시, GPU driver 설치·MIG 전환, Docker daemon
@@ -408,6 +438,17 @@ Local은 `eva local prepare --config FILE --yes`로 캐시·Runtime·Harbor와 �
 Harbor 설치 방식과 HTTP/HTTPS는 bootstrap이 자동 확인한다. 기존 Harbor는 재사용하고,
 저장된 인증이 유효하지 않으면 같은 명령 안에서 게시 계정을 입력받는다. 별도 `docker login`은 필요하지 않다.
 `remote verify`는 준비 자산을 검증하며 실제 타겟 서비스는 설치 후 `eva check`로 확인한다.
+`remote prepare`와 `remote verify`는 성공하면 이번 준비가 Harbor에 게시한 이미지·Qdrant snapshot·Vision
+모델 참조를 정렬해 `Harbor artifacts prepared: count=N` 아래에 표시한다. 목록은 준비 증적(게시 mapping
+보고서)에서 읽으므로 같은 Harbor project의 다른 저장소는 포함하지 않으며, Harbor를 다시 조회하지 않는다.
+
+```text
+[INFO] Harbor artifacts prepared: count=38
+  10.159.56.124:32080/eva/aws-cli:2.33.8
+  10.159.56.124:32080/eva/eva-app:3.3.0
+  10.159.56.124:32080/eva/eva-dock:3.4.0-rc1
+  ...
+```
 `status`·`retry`·`apply`는 Main의 설치 작업을 대상으로 한다. 타겟별 Values·Config·Helm 백업은 타겟에서 조회한다.
 
 개별 Target 관리와 전달만 필요할 때 다음 명령을 사용할 수 있다.

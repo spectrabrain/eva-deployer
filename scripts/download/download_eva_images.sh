@@ -22,6 +22,10 @@ EVA_AGENT_VLLM_CHART_VERSION="${EVA_AGENT_VLLM_CHART_VERSION:?missing EVA_AGENT_
 EVA_AGENT_INIT_CHART_VERSION="${EVA_AGENT_INIT_CHART_VERSION:?missing EVA_AGENT_INIT_CHART_VERSION (set in src/solution/version.yaml)}"
 QDRANT_CHART_VERSION="${QDRANT_CHART_VERSION:?missing QDRANT_CHART_VERSION (set in src/solution/version.yaml)}"
 EVA_IAM_CHART_VERSION="${EVA_IAM_CHART_VERSION:?missing EVA_IAM_CHART_VERSION (set in src/solution/version.yaml)}"
+EVA_DOCK_CHART_VERSION="${EVA_DOCK_CHART_VERSION:?missing EVA_DOCK_CHART_VERSION (set in src/solution/version.yaml)}"
+# roles/eva_dock 은 eva_dock_image_tag 를 image.tag 로 넣습니다. 렌더에도 같은 값을 넣어야
+# 배포할 태그를 받습니다. 카탈로그에 없으면 차트 기본값(appVersion)을 따릅니다.
+EVA_DOCK_IMAGE_TAG="${EVA_DOCK_IMAGE_TAG:-}"
 # 차트가 image.tag 를 생략하면 appVersion 을 쓰지만, roles/eva_app 은 eva_app_deploy_version
 # 을 태그로 박습니다. 렌더에도 같은 값을 넣어야 배포할 태그를 받습니다 — 안 그러면 Harbor 에
 # appVersion 태그만 올라가고 배포는 ImagePullBackOff 로 죽습니다.
@@ -53,7 +57,7 @@ PULL_SOURCE_IMAGES="${PULL_SOURCE_IMAGES:-true}"
 # pull 이 모두 좁혀집니다. vllm 이미지가 커서 app/iam 만 볼 때는 차이가 큽니다.
 #   COMPONENTS="eva-app eva-iam" ./scripts/download/download_eva_images.sh
 COMPONENTS="${COMPONENTS:-all}"
-ALL_COMPONENTS="eva-app eva-vision eva-agent eva-agent-init eva-agent-vllm eva-agent-qdrant eva-iam n8n"
+ALL_COMPONENTS="eva-app eva-vision eva-agent eva-agent-init eva-agent-vllm eva-agent-qdrant eva-iam eva-dock n8n"
 
 # eva-agent는 agent-init·Qdrant·vLLM 릴리스를 함께 배포합니다. 선택 설치에서도
 # 해당 차트가 요구하는 이미지를 빠짐없이 받도록 의존성을 자동으로 포함합니다.
@@ -100,12 +104,14 @@ VLLM_CHART="$EVA_CACHE_ROOT/eva-agent/eva-agent-vllm-${EVA_AGENT_VLLM_CHART_VERS
 INIT_CHART="$EVA_CACHE_ROOT/eva-agent/eva-agent-init-${EVA_AGENT_INIT_CHART_VERSION}.tgz"
 QDRANT_CHART="$EVA_CACHE_ROOT/qdrant/qdrant-${QDRANT_CHART_VERSION}.tgz"
 IAM_CHART="$EVA_CACHE_ROOT/eva-iam/eva-iam-${EVA_IAM_CHART_VERSION}.tgz"
+DOCK_CHART="$EVA_CACHE_ROOT/eva-dock/eva-dock-${EVA_DOCK_CHART_VERSION}.tgz"
 RELEASE_DIR="$EVA_CACHE_ROOT/eva-agent/release/${EVA_AGENT_RELEASE}"
 
 required_files=()
 want eva-app          && required_files+=("$APP_CHART")
 want eva-vision       && required_files+=("$VISION_CHART")
 want eva-iam          && required_files+=("$IAM_CHART")
+want eva-dock         && required_files+=("$DOCK_CHART")
 want eva-agent-init   && required_files+=("$INIT_CHART" "$RELEASE_DIR/eva-agent-init/values-k3s.yaml")
 want eva-agent-qdrant && required_files+=("$QDRANT_CHART" "$RELEASE_DIR/eva-agent-qdrant/${EVA_AGENT_QDRANT_VALUES_FILE}")
 want eva-agent-vllm   && required_files+=("$VLLM_CHART" "$RELEASE_DIR/eva-agent-vllm/${EVA_AGENT_VLLM_VALUES_FILE}")
@@ -146,6 +152,18 @@ want eva-agent        && helm template eva-agent "$AGENT_CHART" -f "$RELEASE_DIR
 # 목록에 들어오는데, airgap 에서는 쓰이지 않습니다.
 want eva-iam          && helm template eva-iam "$IAM_CHART" \
   --set imagePullSecrets.enabled=false --set imagePullSecrets.create=false > "$RENDER_DIR/eva-iam.yaml"
+# eva-dock: imagePullSecret off = airgap 렌더 (ECR refresh CronJob 의 aws-cli/kubectl 제외).
+# Ingress TLS Secret 생성 Job 이 쓰는 kubectl 이미지까지 받도록 TLS create 를 켜고 렌더합니다.
+dock_tag_override=()
+if [[ -n "$EVA_DOCK_IMAGE_TAG" ]]; then
+  dock_tag_override=(--set-string "image.tag=${EVA_DOCK_IMAGE_TAG}")
+fi
+want eva-dock         && helm template eva-dock "$DOCK_CHART" \
+  "${dock_tag_override[@]}" \
+  --set imagePullSecret.enabled=false --set imagePullSecret.create=false \
+  --set ingress.enabled=true --set-string ingress.host=dock.example.com \
+  --set ingress.tls.enabled=true --set ingress.tls.create=true \
+  --set-string ingress.tls.secretName=eva-dock-tls > "$RENDER_DIR/eva-dock.yaml"
 if want n8n; then
   printf 'image: "%s"\n' "${N8N_IMAGE:?missing N8N_IMAGE (set in src/solution/version.yaml)}" > "$RENDER_DIR/n8n.yaml"
 fi

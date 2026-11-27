@@ -159,3 +159,28 @@ func TestGPUPreflightIsOrderedAndScopedInEveryRepositoryMode(t *testing.T) {
 		t.Fatal("GPU preparation accepted a config without GPU components")
 	}
 }
+
+func TestDockRunsAfterAppWithoutGPUOrGeneratedConfig(t *testing.T) {
+	for name, components := range map[string]map[string]bool{
+		"with app":  {"iam": true, "app": true, "dock": true, "n8n": true},
+		"dock only": {"dock": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			document := Build(workspace.Resolved{SiteID: "customer-a", Config: workspace.Config{Components: components}}, release.Resolved{}, time.Now())
+			var got []string
+			for _, step := range document.Steps {
+				got = append(got, step.Component)
+				if step.Component == "dock" && step.Playbook != "src/solution/playbooks/site_eva_dock.yaml" {
+					t.Fatalf("Dock playbook = %s", step.Playbook)
+				}
+			}
+			want := []string{"precondition", "dock"}
+			if components["app"] {
+				want = []string{"precondition", "config", "iam", "app", "dock", "n8n"}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("step order = %v, want %v", got, want)
+			}
+		})
+	}
+}

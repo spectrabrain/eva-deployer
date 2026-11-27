@@ -169,3 +169,20 @@ func writeWorkspace(t *testing.T, content string) string {
 	}
 	return root
 }
+
+func TestDockIsASolutionComponentForManagedClusters(t *testing.T) {
+	config := Config{Deployment: &Deployment{Environment: "nks", Kubeconfig: "/home/eva/.kube/config"}, Components: map[string]bool{"app": true, "dock": true}}
+	config.Site.ID = "customer-a"
+	config.Repository.Mode = "online"
+	if err := validateConfig(config, ""); err != nil {
+		t.Fatalf("NKS Solution-only must accept Dock: %v", err)
+	}
+	resolved := Resolved{Root: "/var/lib/eva/workspaces/customer-a/x", SiteID: "customer-a", Config: config, AnsibleMode: "online_repository"}
+	found := false
+	for _, value := range resolved.AnsibleExtraVars() {
+		found = found || value == "eva_dock_kubeconfig=/var/lib/eva/workspaces/customer-a/x/credentials/kubeconfig"
+	}
+	if !found {
+		t.Fatal("managed clusters must pin the Dock role kubeconfig")
+	}
+}

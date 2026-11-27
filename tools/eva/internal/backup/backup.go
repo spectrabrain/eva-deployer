@@ -72,7 +72,7 @@ func Help(w io.Writer) {
 
   --root PATH          Target-side backup root (default /var/lib/eva/backups/helm-values).
   --site ID            Site filter.
-  --component NAME     app|iam|agent|agent-init|vision|qdrant|vllm (or custom component).
+  --component NAME     app|iam|agent|agent-init|vision|dock|qdrant|vllm (or custom component).
   --namespace NS       Helm namespace filter.
   --version VERSION    OLD deployed App/Chart version, not the desired/Deployer version.
   --release NAME       Full Helm release name filter.

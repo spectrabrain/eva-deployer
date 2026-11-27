@@ -119,7 +119,9 @@ if os.environ.get('FAILED_COPY') == 'true':
 
     def test_cached_product_indices_publish_without_another_pull(self):
         images = [DISPATCHER, 'docker.n8n.io/n8nio/n8n:2.32.7',
-                  '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras:0.1.0']
+                  '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-harbor-oras:0.1.0',
+                  # roles/eva_dock 은 평탄화된 <project>/eva-dock 경로를 image.repository 로 씁니다.
+                  '211722900905.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-dock:3.4.0-rc1']
         result, calls, mapping = self.publish(images)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(any(call[0] == 'pull' for call in calls), 'Remote publication repulled cached images')

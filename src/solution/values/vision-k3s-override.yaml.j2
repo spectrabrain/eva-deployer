@@ -30,9 +30,9 @@ harbor:
   project: {{ repository_project | to_json }}
   insecure: {{ repository_insecure | default(harbor_insecure | default(false)) | bool | lower }}
   plainHttp: {{ repository_plain_http | default(harbor_plain_http | default(true)) | bool | lower }}
-  # Missing private Secret is created automatically from target k3s registry auth.
-  # Existing valid Secrets are reused unchanged.
-  # Explicitly public projects may override existingSecret to "" for anonymous pulls.
+  # Reconcile with explicit install credentials or exact current target registry auth.
+  # Without a credential pair, remove the selected old Secret and use anonymous pulls.
+  # An explicit empty existingSecret also selects anonymous pulls without registry auth.
   existingSecret: "eva-vision-harbor"
 
 modelCache:

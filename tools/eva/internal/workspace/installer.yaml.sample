@@ -16,6 +16,7 @@ components:
   agent: true
   vision: true
   app: true
+  dock: false  # EVA-Dock. eva install configure에서 선택하면 Dock Values 틀이 함께 생성됩니다.
   n8n: false
 
 credentials:

@@ -292,6 +292,7 @@ Online 전체 예시는 `eva config sample --mode online`로 출력한다.
 | `targets.<alias>.values.iam` | target의 IAM Chart Values |
 | `targets.<alias>.values.app` | target의 App Chart Values. Chart의 `app` key는 그대로 유지 |
 | `targets.<alias>.values.agent`, `.vision` | 필요한 경우만 지정하는 Chart override |
+| `targets.<alias>.values.dock` | target의 EVA-Dock Chart Values. 공개 주소·비밀번호는 [EVA-Dock](../operations/eva-dock.md) 참고 |
 
 AWS 항목은 `aws_access_key_id`, `aws_secret_access_key`, `region`이다. 앞의 두 항목은 함께
 지정하며 region 기본값은 `ap-northeast-2`이다. Online AWS CLI 구성 단계가 필요한 설치에서는

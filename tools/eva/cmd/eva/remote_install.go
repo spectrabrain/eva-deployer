@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"eva-deployer/tools/eva/internal/operation"
@@ -95,6 +97,16 @@ func executeRemoteOperation(record operation.Record, document plan.Document, sta
 		return record, err
 	}
 	defer log.Close()
+	// Taken before the record says running; see operation.RunLiveness.
+	runLock, err := operation.AcquireRunLock(stateRoot, record.ID)
+	if err != nil {
+		return record, err
+	}
+	defer runLock.Release()
+	// Ctrl+C or kill stops the target sessions and still records a failed
+	// (retryable) result instead of leaving the operation running.
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stopSignals()
 	record.Status, record.StartedAt, record.UpdatedAt = operation.Running, time.Now().UTC(), time.Now().UTC()
 	record.LogDirectory = logDirectory
 	if err := operation.Update(stateRoot, record); err != nil {
@@ -110,8 +122,11 @@ func executeRemoteOperation(record operation.Record, document plan.Document, sta
 	if document.GPUPreflightOnly {
 		run = service.PreflightGPU
 	}
-	results, installErr := run(context.Background(), input, selected.Resolved, document.TargetInstallArgs,
+	results, installErr := run(ctx, input, selected.Resolved, document.TargetInstallArgs,
 		remote.Streams{Stdin: os.Stdin, Stdout: io.MultiWriter(os.Stdout, log), Stderr: io.MultiWriter(os.Stderr, log)})
+	if ctx.Err() != nil {
+		installErr = errors.Join(errors.New("Remote installation interrupted"), installErr)
+	}
 	record.Status = operation.Succeeded
 	if installErr != nil {
 		record.Status = operation.Failed

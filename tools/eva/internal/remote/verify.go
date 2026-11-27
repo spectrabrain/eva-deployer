@@ -22,6 +22,7 @@ type VerifyResult struct {
 	Project              string
 	ManifestPath         string
 	Categories           []string
+	Artifacts            []string // Harbor references this preparation published.
 	LiveRegistryVerified bool
 }
 
@@ -67,12 +68,17 @@ func (service VerifyService) Verify(options VerifyOptions) (VerifyResult, error)
 	if err := VerifyCompletedPreparation(filepath.Dir(manifestPath), cacheRoot, options.Release, identity, manifest); err != nil {
 		return VerifyResult{ManifestPath: manifestPath}, safeVerifyError(fmt.Errorf("verify Remote preparation: %w", err))
 	}
+	artifacts, err := PublishedRepositoryArtifacts(filepath.Dir(manifestPath))
+	if err != nil {
+		return VerifyResult{ManifestPath: manifestPath}, safeVerifyError(err)
+	}
 	return VerifyResult{
 		ReleaseVersion: identity.ReleaseVersion,
 		Registry:       identity.RepositoryRegistry,
 		Project:        identity.RepositoryProject,
 		ManifestPath:   manifestPath,
 		Categories:     []string{"release", "runtime-packages", "product-images", "infra-images", "models", "qdrant-snapshots", "vision-models"},
+		Artifacts:      artifacts,
 		// This phase verifies local preparation evidence only. It does not claim a
 		// live Harbor query, and it intentionally has no credential side effects.
 		LiveRegistryVerified: false,

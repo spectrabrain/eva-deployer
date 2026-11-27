@@ -118,7 +118,7 @@ func loadDetectionReports(paths []string, siteID string) (Detection, error) {
 func RequiresHandoff(document plan.Document) bool {
 	for _, step := range document.Steps {
 		switch step.Component {
-		case "config", "iam", "agent", "vision", "app", "n8n":
+		case "config", "iam", "agent", "vision", "app", "dock", "n8n":
 			return true
 		}
 	}

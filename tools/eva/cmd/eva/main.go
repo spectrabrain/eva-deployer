@@ -840,6 +840,7 @@ func runRemoteVerify(args []string) error {
 	fmt.Printf("[INFO] release=%s\n", result.ReleaseVersion)
 	fmt.Printf("[INFO] repository=%s/%s\n", result.Registry, result.Project)
 	fmt.Printf("[INFO] manifest=%s\n", result.ManifestPath)
+	remote.PrintPublishedRepositoryArtifacts(os.Stdout, result.Artifacts)
 	return nil
 }
 
@@ -1059,6 +1060,9 @@ func runRelease(args []string) error {
 	}
 
 	command := args[0]
+	if command == "prune" {
+		return runReleasePrune(args[1:], os.Stdout)
+	}
 	flags := flag.NewFlagSet("release "+command, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	input := flags.String("release", "", "release directory or release.yaml path")
@@ -1136,8 +1140,11 @@ func runRelease(args []string) error {
 func releaseUsage() {
 	fmt.Println("Usage: eva release <validate|show|prepare|env> [--release PATH | PATH]")
 	fmt.Println("       eva release import-airgap --bundle PATH [--artifact-root PATH]")
+	fmt.Println("       sudo eva release prune [--keep N] [--yes]")
 	fmt.Println("")
 	fmt.Println("release prepare extracts a verified local Release into /opt/eva/releases/<version>.")
+	fmt.Println("release prune lists (or with --yes deletes) old per-version Release and Remote payload directories,")
+	fmt.Println("keeping the current release, versions used by the latest/last succeeded/planned operations, and the newest N.")
 	fmt.Println("Release tag and S3 resolution are not implemented yet.")
 }
 
@@ -1673,6 +1680,7 @@ func checkComponents(document plan.Document) []health.Component {
 		"agent":  "eva-agent",
 		"vision": "eva-vision",
 		"app":    "eva-app",
+		"dock":   "eva-dock",
 		"n8n":    "n8n",
 	}
 	components := make([]health.Component, 0, len(document.Steps))

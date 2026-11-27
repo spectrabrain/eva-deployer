@@ -1,0 +1,660 @@
+- name: Resolve eva-dock values file
+  ansible.builtin.set_fact:
+    eva_dock_values_host: "{{ ansible_host | default(inventory_hostname) }}"
+    eva_dock_values_file: "{{ eva_dock_values_file | default(eva_site_values_root ~ '/dock.yaml') }}"
+
+- name: Check for eva-dock values file on control node
+  ansible.builtin.stat:
+    path: "{{ eva_dock_values_file }}"
+  register: eva_dock_values_file_stat
+  delegate_to: localhost
+  become: false
+
+# The file is optional like iam.yaml/app.yaml and holds the chart's own Values,
+# keyed by the target's ansible_host identity.
+- name: Load eva-dock values file
+  no_log: true
+  ansible.builtin.include_vars:
+    file: "{{ eva_dock_values_file }}"
+    name: eva_dock_values_loaded
+  when: eva_dock_values_file_stat.stat.exists
+
+- name: Select this host's eva-dock values block
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_dock_values_block: >-
+      {{ ((eva_dock_values_loaded[eva_dock_values_host]
+           if (eva_dock_values_host in eva_dock_values_loaded)
+           else eva_dock_values_loaded)
+          if eva_dock_values_file_stat.stat.exists else {}) | default({}, true) }}
+
+# Everything except the reserved eva_dock_deploy key is an override for the chart.
+- name: Split eva-dock value overrides from ansible deploy options
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_dock_deploy_opts: "{{ eva_dock_values_block.eva_dock_deploy | default({}) }}"
+    eva_dock_user_values: >-
+      {{ eva_dock_values_block
+         | dict2items
+         | rejectattr('key', 'equalto', 'eva_dock_deploy')
+         | list | items2dict }}
+
+- name: Load CLI eva-dock values override
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_dock_cli_values_override: >-
+      {{ lookup('ansible.builtin.file', eva_cli_values_path) | from_yaml | default({}, true) }}
+  when: eva_cli_values_path | default('') | length > 0
+
+- name: Resolve effective eva-dock user values
+  no_log: true
+  ansible.builtin.set_fact:
+    eva_dock_effective_user_values: >-
+      {{ eva_dock_user_values | combine(eva_dock_cli_values_override | default({}), recursive=true) }}
+
+- name: Apply eva-dock deploy options from values file
+  ansible.builtin.set_fact:
+    "eva_dock_{{ item.key }}": "{{ item.value }}"
+  loop: "{{ eva_dock_deploy_opts | dict2items }}"
+  loop_control:
+    label: "eva_dock_{{ item.key }}"
+  when: eva_dock_deploy_opts | length > 0
+
+- name: Resolve node-side user for eva-dock hostPath defaults
+  ansible.builtin.set_fact:
+    eva_dock_node_user: "{{ eva_dock_node_user | default(ansible_user | default(ansible_ssh_user | default('eva'))) }}"
+
+- name: Resolve node-side home for eva-dock hostPath defaults
+  ansible.builtin.set_fact:
+    eva_dock_node_home: "{{ eva_dock_node_home | default('/home/' ~ eva_dock_node_user) }}"
+
+# Deploy-level knobs plus the variables that drive values/dock-k3s-override.yaml.j2.
+# Site-specific chart values go in the installer targets.<alias>.values.dock block,
+# which Helm applies after the rendered override.
+- name: Set EVA Dock install defaults
+  ansible.builtin.set_fact:
+    repository_mode: "{{ repository_mode | default('online_repository') }}"
+    repository_project: "{{ repository_project | default('eva') }}"
+    repository_registry: >-
+      {{
+        repository_registry
+        | default(harbor_registry | default(((repository_mode | default('online_repository')) == 'local_repository') | ternary('localhost:32080', '')))
+        | regex_replace('^https?://', '')
+        | regex_replace('/+$', '')
+      }}
+    airgap_mode: >-
+      {{ (airgap_mode | default(false) | bool)
+         or ((repository_mode | default('online_repository')) in ['remote_repository', 'local_repository']) }}
+    eva_dock_namespace: "{{ eva_dock_namespace | default('eva-dock') }}"
+    eva_dock_name: "{{ eva_dock_name | default('eva-dock') }}"
+    eva_dock_kubeconfig: "{{ eva_dock_kubeconfig | default(ansible_facts['env']['HOME'] ~ '/.kube/config') }}"
+    eva_dock_base_dir: "{{ eva_dock_base_dir | default(ansible_facts['env']['HOME'] ~ '/.eva-dock') }}"
+    eva_dock_chart_repo_name: "{{ eva_dock_chart_repo_name | default('eva-dock') }}"
+    eva_dock_chart_repo_url: >-
+      {{ eva_dock_chart_repo_url | default('https://raw.githubusercontent.com/spectrabrain/eva-dock-chart/main') }}
+    eva_dock_chart_ref: "{{ eva_dock_chart_ref | default('eva-dock/eva-dock') }}"
+    eva_dock_chart_version: "{{ eva_dock_chart_version | mandatory }}"
+    eva_dock_image_tag: "{{ eva_dock_image_tag | mandatory }}"
+    eva_dock_ecr_account: "{{ eva_dock_ecr_account | default('211722900905') }}"
+    eva_dock_tls_secret_name: "{{ eva_dock_tls_secret_name | default('eva-dock-tls') }}"
+    eva_dock_tls_host_path: "{{ eva_dock_tls_host_path | default(eva_dock_node_home ~ '/certs') }}"
+    # Same default as the chart's on-premise profile and EVA App: /<release>.
+    eva_dock_persistence_host_path: "{{ eva_dock_persistence_host_path | default('/' ~ (eva_dock_name | default('eva-dock'))) }}"
+    eva_dock_image_pull_auth_type: "{{ eva_dock_image_pull_auth_type | default('hostPath') }}"
+    eva_dock_image_pull_host_path: "{{ eva_dock_image_pull_host_path | default(eva_dock_node_home ~ '/.aws') }}"
+    eva_dock_image_pull_secret_name: "{{ eva_dock_image_pull_secret_name | default('aws-credentials') }}"
+    eva_dock_rollout_timeout: "{{ eva_dock_rollout_timeout | default(600) | int }}"
+
+- name: Resolve eva-dock workspace paths and image repositories
+  ansible.builtin.set_fact:
+    eva_dock_workdir: "{{ eva_dock_workdir | default(eva_dock_base_dir) }}"
+    eva_dock_deploy_values_dir: >-
+      {{ eva_dock_deploy_values_dir
+         | default(eva_site_deploy_root ~ '/' ~ (ansible_host | default(inventory_hostname)) ~ '/dock') }}
+    eva_dock_offline_chart_tgz: >-
+      {{ eva_dock_offline_chart_tgz
+         | default((eva_dock_offline_dir | default(eva_cache_root ~ '/eva-dock')) ~ '/eva-dock-' ~ eva_dock_chart_version ~ '.tgz') }}
+    # Harbor names follow scripts/publish/push_images_to_repository.sh, which
+    # flattens every source image to <registry>/<project>/<last path element>:<tag>.
+    eva_dock_image_repository: >-
+      {{
+        eva_dock_image_repository | default(
+          (repository_mode in ['online_repository', 'cloud_repository'])
+          | ternary(eva_dock_ecr_account ~ '.dkr.ecr.ap-northeast-2.amazonaws.com/spectrabrain/eva-dock',
+                    repository_registry ~ '/' ~ repository_project ~ '/eva-dock'))
+      }}
+    eva_dock_kubectl_image_repository: >-
+      {{
+        eva_dock_kubectl_image_repository | default(
+          (repository_mode in ['online_repository', 'cloud_repository'])
+          | ternary('bitnami/kubectl', repository_registry ~ '/' ~ repository_project ~ '/kubectl'))
+      }}
+
+- name: Resolve eva-dock target value destination
+  ansible.builtin.set_fact:
+    eva_dock_values_dest: "{{ eva_dock_workdir ~ '/eva-dock-host-override.yaml' }}"
+
+- name: Validate repository mode for EVA Dock
+  ansible.builtin.assert:
+    that:
+      - repository_mode in ['online_repository', 'cloud_repository', 'remote_repository', 'local_repository']
+      - repository_mode in ['online_repository', 'cloud_repository'] or repository_registry | length > 0
+    fail_msg: >-
+      repository_mode 는 online_repository, remote_repository, local_repository 중 하나여야 합니다 (cloud_repository는 호환 입력).
+      remote_repository/local_repository 모드에서는 repository_registry 또는 harbor_registry 가 필요합니다.
+
+- name: Validate EVA Dock chart version
+  ansible.builtin.assert:
+    that:
+      - eva_dock_chart_version is version('3.3.2', '>=')
+    fail_msg: >-
+      eva_dock_chart_version={{ eva_dock_chart_version }} 은 지원하지 않습니다.
+      IP host를 hostless Ingress로 렌더링하고 TLS Secret Job 이미지를 values로 바꿀 수 있는
+      eva-dock chart 3.3.2 이상이 필요합니다. src/solution/version.yaml 을 확인하세요.
+
+- name: Resolve default EVA Dock public host and port
+  ansible.builtin.set_fact:
+    # Like IAM config.host: the target IP unless the installer names a host.
+    eva_dock_host: >-
+      {{ eva_dock_host | default(ansible_facts.get('default_ipv4', {}).get('address', '127.0.0.1')) }}
+    # App uses / on the default listener of a shared IP, so an IP Dock gets its
+    # own public port unless config.dockPublicUrl names one explicitly.
+    eva_dock_public_port: "{{ eva_dock_public_port | default('32020') | string }}"
+
+- name: Resolve effective EVA Dock public endpoint inputs
+  ansible.builtin.set_fact:
+    eva_dock_effective_ingress_enabled: "{{ eva_dock_effective_user_values.ingress.enabled | default(true) | bool }}"
+    eva_dock_effective_host: "{{ eva_dock_effective_user_values.ingress.host | default(eva_dock_host, true) | string }}"
+    eva_dock_effective_tls_enabled: "{{ eva_dock_effective_user_values.ingress.tls.enabled | default(false) | bool }}"
+    eva_dock_effective_tls_create: "{{ eva_dock_effective_user_values.ingress.tls.create | default(eva_dock_effective_user_values.ingress.tls.enabled | default(false)) | bool }}"
+    eva_dock_effective_public_url: "{{ eva_dock_effective_user_values.config.dockPublicUrl | default('') | string }}"
+    # Mirrors the chart's eva-dock.fullname helper (no release-name dedup).
+    eva_dock_effective_fullname: >-
+      {{ ((eva_dock_effective_user_values.fullnameOverride | default('', true)
+           or (eva_dock_name ~ '-' ~ (eva_dock_effective_user_values.nameOverride | default('eva-dock', true))))
+          | string)[:63] | regex_replace('-+$', '') }}
+    eva_dock_has_access_password: >-
+      {{ (eva_dock_effective_user_values.secrets.dockAccessPassword | default('') | string | length > 0)
+         or (eva_dock_effective_user_values.secrets.existingSecret | default('') | string | length > 0) }}
+
+# EVA servers send event-recipient webhooks to DOCK_PUBLIC_URL and the Traefik
+# listener management reads the public scheme/host/port from it, so derive it
+# from the Ingress when the installer left it empty.
+- name: Derive the EVA Dock public URL from the Ingress
+  vars:
+    eva_dock_ip_host: "{{ eva_dock_effective_host is search('^[0-9.]+$') or ':' in eva_dock_effective_host }}"
+  ansible.builtin.set_fact:
+    eva_dock_host_is_ip: "{{ eva_dock_ip_host | bool }}"
+    eva_dock_public_url: >-
+      {{ eva_dock_effective_public_url
+         if (eva_dock_effective_public_url | length > 0)
+         else ((('https://' if (eva_dock_effective_tls_enabled | bool) else 'http://')
+                ~ ('[' ~ eva_dock_effective_host ~ ']' if (':' in eva_dock_effective_host) else eva_dock_effective_host)
+                ~ ((':' ~ eva_dock_public_port) if ((eva_dock_ip_host | bool) and eva_dock_public_port | length > 0) else ''))
+               if (eva_dock_effective_ingress_enabled | bool and eva_dock_effective_host | length > 0) else '') }}
+
+- name: Validate EVA Dock ingress host and public URL
+  ansible.builtin.assert:
+    that:
+      - not (eva_dock_effective_ingress_enabled | bool) or eva_dock_effective_host | length > 0
+      - eva_dock_effective_host is not search('^[a-zA-Z][a-zA-Z0-9+.-]*://')
+      - eva_dock_effective_host is not search('/')
+      - "':' not in eva_dock_effective_host or eva_dock_effective_host is search('^[0-9a-fA-F:]+$')"
+      - eva_dock_public_url | length == 0 or eva_dock_public_url is search('^https?://[^/?#]+/?$')
+      - >-
+        eva_dock_public_url | length == 0
+        or not (eva_dock_effective_ingress_enabled | bool)
+        or ((eva_dock_public_url is search('^https://')) == (eva_dock_effective_tls_enabled | bool))
+    fail_msg: >-
+      EVA Dock 공개 주소가 올바르지 않습니다. ingress.host 에는 scheme, port, path 없이 도메인 또는 IP만
+      넣고, 포트는 config.dockPublicUrl 에 지정합니다 (예: https://192.0.2.10:32020).
+      dockPublicUrl 의 scheme 은 ingress.tls.enabled 와 일치해야 하며 path 를 포함하지 않습니다.
+      현재 ingress.host={{ eva_dock_effective_host }}, dockPublicUrl={{ eva_dock_public_url }}
+
+# The Ingress host routes requests while DOCK_PUBLIC_URL is the browser/webhook
+# address and the source of the Traefik public port, so both must name one host.
+- name: Require the EVA Dock public URL to use the Ingress host
+  vars:
+    eva_dock_url_host: "{{ (eva_dock_public_url | urlsplit('hostname') | default('', true)) | lower }}"
+    eva_dock_ingress_host: "{{ eva_dock_effective_host | regex_replace('^\\[|\\]$', '') | lower }}"
+  ansible.builtin.assert:
+    that:
+      - eva_dock_url_host == eva_dock_ingress_host
+    fail_msg: >-
+      config.dockPublicUrl 의 host({{ eva_dock_url_host }})가 ingress.host({{ eva_dock_ingress_host }})와 다릅니다.
+      브라우저와 EVA 웹훅은 dockPublicUrl 로 접속하고 Traefik 은 ingress.host 로 라우팅하므로 같은 도메인/IP를 넣으세요.
+      NAT·외부 LB 뒤처럼 의도적으로 다르면 -e eva_dock_allow_public_host_mismatch=true 로 통과시킬 수 있습니다.
+  when:
+    - eva_dock_effective_ingress_enabled | bool
+    - eva_dock_public_url | length > 0
+    - not (eva_dock_allow_public_host_mismatch | default(false) | bool)
+
+- name: Require an EVA Dock access password
+  ansible.builtin.assert:
+    that:
+      - eva_dock_has_access_password | bool
+    fail_msg: >-
+      EVA Dock 접속 비밀번호가 없습니다. 설치 설정의 targets.<alias>.values.dock.secrets.dockAccessPassword
+      를 입력하거나 secrets.existingSecret 으로 미리 만든 Secret을 지정하세요.
+      Helm upgrade는 이전 Values를 재사용하지 않으므로 기존 설치를 업데이트할 때도 같은 비밀번호를 입력해야 합니다.
+      (비밀번호 없이 공개하려면 -e eva_dock_allow_empty_password=true)
+  when: not (eva_dock_allow_empty_password | default(false) | bool)
+
+- name: Preserve existing EVA Dock Helm user Values
+  ansible.builtin.include_role:
+    name: eva_helm_values_backup
+  vars:
+    eva_helm_backup_namespace: "{{ eva_dock_namespace }}"
+    eva_helm_backup_release: "{{ eva_dock_name }}"
+    eva_helm_backup_component: dock
+    eva_helm_backup_kubeconfig: "{{ eva_dock_kubeconfig }}"
+
+- name: Ensure EVA Dock workspace exists on target
+  ansible.builtin.file:
+    path: "{{ eva_dock_workdir }}"
+    state: directory
+    mode: "0700"
+
+- name: Copy CLI eva-dock chart override to target workspace
+  ansible.builtin.copy:
+    src: "{{ eva_cli_chart_path }}"
+    dest: "{{ eva_dock_workdir }}/cli-chart.tgz"
+    mode: "0644"
+  when: eva_cli_chart_path | default('') | length > 0
+
+- name: Resolve the eva-dock chart reference to install from
+  ansible.builtin.set_fact:
+    eva_dock_chart_source: >-
+      {{
+        (eva_cli_chart_path | default('') | length > 0)
+        | ternary(
+            eva_dock_workdir ~ '/cli-chart.tgz',
+            eva_dock_offline_chart_tgz if (airgap_mode | bool) else eva_dock_chart_ref
+          )
+      }}
+    # A local .tgz is already version-pinned; --version on a local file is an error.
+    eva_dock_chart_version_arg: >-
+      {{
+        ''
+        if ((eva_cli_chart_path | default('') | length > 0) or (airgap_mode | bool))
+        else ('--version ' ~ eva_dock_chart_version)
+      }}
+
+- name: Add Helm repository for eva-dock
+  ansible.builtin.command: helm repo add {{ eva_dock_chart_repo_name }} {{ eva_dock_chart_repo_url }} --force-update
+  register: eva_dock_repo_add
+  changed_when: "'already exists' not in (eva_dock_repo_add.stdout + eva_dock_repo_add.stderr)"
+  failed_when:
+    - eva_dock_repo_add.rc != 0
+    - "'already exists' not in (eva_dock_repo_add.stdout + eva_dock_repo_add.stderr)"
+  check_mode: false
+  when:
+    - not (airgap_mode | bool)
+    - eva_cli_chart_path | default('') | length == 0
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Update Helm repository for eva-dock
+  ansible.builtin.command: helm repo update {{ eva_dock_chart_repo_name }}
+  changed_when: true
+  check_mode: false
+  when:
+    - not (airgap_mode | bool)
+    - eva_cli_chart_path | default('') | length == 0
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Check the offline eva-dock chart on target
+  ansible.builtin.stat:
+    path: "{{ eva_dock_offline_chart_tgz }}"
+  register: eva_dock_offline_chart
+  check_mode: false
+  when:
+    - airgap_mode | bool
+    - eva_cli_chart_path | default('') | length == 0
+
+- name: Assert the offline eva-dock chart is prepared
+  ansible.builtin.assert:
+    that:
+      - eva_dock_offline_chart.stat.exists
+    fail_msg: >-
+      airgap 모드에서는 {{ eva_dock_offline_chart_tgz }} 파일이 필요합니다.
+      인터넷이 가능한 준비 서버에서 Release의 오프라인 자산(eva-dock chart 포함)을 준비한 뒤
+      out/cache/ 전체를 대상 서버로 복사하세요.
+  when:
+    - airgap_mode | bool
+    - eva_cli_chart_path | default('') | length == 0
+
+# Ask the chart what it accepts instead of keeping a list here.
+- name: Read the eva-dock chart's own default values
+  ansible.builtin.command: >-
+    helm show values {{ eva_dock_chart_source }} {{ eva_dock_chart_version_arg }}
+  register: eva_dock_chart_defaults
+  changed_when: false
+  check_mode: false
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Reject unknown top-level keys in the eva-dock values
+  vars:
+    eva_dock_chart_keys: "{{ (eva_dock_chart_defaults.stdout | from_yaml).keys() | list }}"
+    eva_dock_unknown_keys: "{{ eva_dock_effective_user_values.keys() | list | difference(eva_dock_chart_keys) }}"
+  ansible.builtin.assert:
+    that:
+      - eva_dock_unknown_keys | length == 0
+    fail_msg: >-
+      {{ eva_dock_values_file }} 에 차트 {{ eva_dock_chart_version }} 가 모르는 최상위 키가 있습니다:
+      {{ eva_dock_unknown_keys }}.
+      host key '{{ eva_dock_values_host }}' 블록이 없어서 파일 전체가 차트 values 로
+      취급됐거나 단순 오타일 수 있습니다. 차트가 받는 키: {{ eva_dock_chart_keys }}
+      (의도한 키라면 -e eva_dock_allow_unknown_keys=true 로 통과시킬 수 있습니다)
+  when: not (eva_dock_allow_unknown_keys | default(false) | bool)
+
+- name: Export default values.yaml from eva-dock chart
+  ansible.builtin.copy:
+    content: "{{ eva_dock_chart_defaults.stdout }}"
+    dest: "{{ eva_dock_workdir }}/values.yaml"
+    mode: "0644"
+  when: not ansible_check_mode
+
+- name: Ensure EVA Dock deploy values directory exists on control node
+  ansible.builtin.file:
+    path: "{{ eva_dock_deploy_values_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+
+- name: Clear previous EVA Dock resolved values before deployment
+  no_log: true
+  ansible.builtin.file:
+    path: "{{ eva_dock_deploy_values_dir }}/resolved-values.yaml"
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA Dock chart defaults on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_dock_chart_defaults.stdout }}"
+    dest: "{{ eva_dock_deploy_values_dir }}/chart-defaults.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Render eva-dock k3s override values on control node
+  no_log: true
+  ansible.builtin.template:
+    src: "{{ eva_template_values_root }}/dock-k3s-override.yaml.j2"
+    dest: "{{ eva_dock_deploy_values_dir }}/dock-k3s-override.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Resolve EVA Dock effective input values
+  no_log: true
+  ansible.builtin.set_fact:
+    # Chart defaults are a separate first -f layer; --set is applied by Helm.
+    eva_dock_effective_values: >-
+      {{ (lookup('ansible.builtin.file', eva_dock_deploy_values_dir ~ '/dock-k3s-override.yaml') | from_yaml)
+         | combine(eva_dock_effective_user_values, recursive=true) }}
+  when: not ansible_check_mode
+
+- name: Record private EVA Dock effective input values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_dock_effective_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_dock_deploy_values_dir }}/effective-input-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Record EVA Dock values source metadata on control node
+  ansible.builtin.copy:
+    content: |
+      workspace_override: {{ (eva_dock_user_values | length > 0) | lower }}
+      cli_override: {{ ((eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0)) | lower }}
+      rendered_artifacts:
+        chart_defaults: {{ (eva_dock_deploy_values_dir ~ '/chart-defaults.yaml') | to_json }}
+        role_override: {{ (eva_dock_deploy_values_dir ~ '/dock-k3s-override.yaml') | to_json }}
+        effective_input_values: {{ (eva_dock_deploy_values_dir ~ '/effective-input-values.yaml') | to_json }}
+        resolved_values: {{ (eva_dock_deploy_values_dir ~ '/resolved-values.yaml') | to_json }}
+    dest: "{{ eva_dock_deploy_values_dir }}/values-sources.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+- name: Copy eva-dock k3s override values to remote workspace
+  no_log: true
+  ansible.builtin.copy:
+    src: "{{ eva_dock_deploy_values_dir }}/dock-k3s-override.yaml"
+    dest: "{{ eva_dock_workdir }}/dock-k3s-override.yaml"
+    mode: "0600"
+  when: not ansible_check_mode
+
+# Site-specific/CLI Values are applied last so they win over the rendered override.
+- name: Copy host-specific eva-dock values to remote workspace
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_dock_effective_user_values | to_nice_yaml(indent=2, sort_keys=false) }}"
+    dest: "{{ eva_dock_values_dest }}"
+    mode: "0600"
+  when:
+    - not ansible_check_mode
+    - eva_dock_effective_user_values | length > 0
+
+- name: Resolve EVA Dock Helm value files
+  ansible.builtin.set_fact:
+    eva_dock_helm_value_files: >-
+      {{ [eva_dock_workdir ~ '/values.yaml', eva_dock_workdir ~ '/dock-k3s-override.yaml']
+         + ([eva_dock_values_dest] if (eva_dock_effective_user_values | length > 0) else []) }}
+
+# Dock uses / and /api, so on a shared IP it must have its own public port.
+# The shared listener manager allocates and isolates that port next to App/IAM.
+- name: Reconcile EVA Dock public Traefik listeners
+  ansible.builtin.include_role:
+    name: eva_traefik_ports
+  vars:
+    eva_traefik_ports_component: dock
+    eva_traefik_ports_namespace: "{{ eva_dock_namespace }}"
+    eva_traefik_ports_release: "{{ eva_dock_name }}"
+    eva_traefik_ports_workdir: "{{ eva_dock_workdir }}"
+    eva_traefik_ports_chart: "{{ eva_dock_chart_source }}"
+    eva_traefik_ports_version: "{{ eva_dock_chart_version if (eva_dock_chart_version_arg | length > 0) else '' }}"
+    eva_traefik_ports_values: "{{ eva_dock_helm_value_files }}"
+    eva_traefik_ports_set: "{{ eva_cli_helm_set | default([]) }}"
+    eva_traefik_ports_kubeconfig: "{{ eva_dock_kubeconfig }}"
+  when: not ansible_check_mode
+
+- name: Use verified EVA Dock ingress post-renderer
+  ansible.builtin.set_fact:
+    eva_dock_traefik_args: >-
+      {{ ('--post-renderer ' ~ (eva_traefik_ports_result.renderer | quote)
+          ~ ' --post-renderer-args ' ~ ((eva_dock_workdir ~ '/traefik-router.json') | quote))
+         if (eva_traefik_ports_result.isolated | default(false)) else '' }}
+    eva_dock_traefik_env: "{{ eva_traefik_ports_result.environment | default({}) }}"
+  when: not ansible_check_mode
+
+- name: Check k3s API accessibility for eva-dock
+  ansible.builtin.command:
+    cmd: kubectl get nodes --no-headers
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+  register: eva_dock_k3s_check
+  changed_when: false
+
+# Browsers send no SNI for an IP, so an IP HTTPS router serves Traefik's default
+# certificate. The shared helper reads only tls.crt/tls.key from the directory.
+- name: Resolve whether the Dock certificate can become Traefik's default
+  ansible.builtin.set_fact:
+    eva_dock_default_cert_files: >-
+      {{ (eva_dock_effective_user_values.ingress.tls.certFile | default('tls.crt')) == 'tls.crt'
+         and (eva_dock_effective_user_values.ingress.tls.keyFile | default('tls.key')) == 'tls.key' }}
+
+- name: Explain Traefik default TLS certificate requirement for custom Dock certificate names
+  ansible.builtin.debug:
+    msg: >-
+      Dock 인증서 파일명이 tls.crt/tls.key가 아니므로 Traefik 기본 TLS 인증서를 변경하지 않습니다.
+      IP HTTPS 접속에는 kube-system/default TLSStore의 기본 인증서가 Dock IP SAN을 포함해야 합니다.
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
+    - eva_dock_effective_ingress_enabled | bool
+    - eva_dock_effective_tls_enabled | bool
+    - eva_dock_host_is_ip | bool
+    - not (eva_dock_default_cert_files | bool)
+
+- name: Configure Traefik default TLS certificate for an IP-based Dock host
+  ansible.builtin.import_role:
+    name: eva_traefik_tls
+  vars:
+    eva_traefik_tls_host: "{{ eva_traefik_ports_result.endpoint.host if (eva_traefik_ports_result.isolated | default(false)) else eva_dock_effective_host }}"
+    eva_traefik_tls_host_path: "{{ eva_traefik_ports_result.tls_host_path if (eva_traefik_ports_result.isolated | default(false)) else (eva_dock_effective_user_values.ingress.tls.hostPath | default(eva_dock_tls_host_path)) }}"
+    eva_traefik_tls_kubeconfig: "{{ eva_dock_kubeconfig }}"
+  when:
+    - not ansible_check_mode
+    - not (eva_managed_cluster | default(false) | bool)
+    - eva_dock_effective_ingress_enabled | bool
+    - eva_dock_default_cert_files | bool
+    - "(eva_traefik_ports_result.endpoint.scheme == 'https') if (eva_traefik_ports_result.isolated | default(false)) else (eva_dock_effective_tls_enabled | bool)"
+    - "eva_traefik_ports_result.tls_job_enabled if (eva_traefik_ports_result.isolated | default(false)) else (eva_dock_effective_tls_create | bool)"
+    - >-
+      (eva_traefik_ports_result.tls_host_path | length > 0)
+      if (eva_traefik_ports_result.isolated | default(false))
+      else ((eva_dock_effective_user_values.ingress.tls.authType | default('hostPath')) == 'hostPath')
+
+- name: Detect EVA Dock NodePort collision from another namespace
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    kubectl get svc -A
+    -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{" "}{.spec.ports[*].nodePort}{"\n"}{end}'
+    | awk '$0 ~ /(^| ){{ eva_dock_effective_user_values.service.nodePort | int }}( |$)/ && $1 != "{{ eva_dock_namespace }}"'
+  args:
+    executable: /bin/bash
+  register: eva_dock_nodeport_conflict
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_dock_effective_user_values.service.nodePort | default(none) is not none
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Fail fast on EVA Dock NodePort collision
+  ansible.builtin.assert:
+    that:
+      - (eva_dock_nodeport_conflict.stdout | default('')) | trim | length == 0
+    fail_msg: >-
+      NodePort {{ eva_dock_effective_user_values.service.nodePort | default('') }} 가 이미 다른 서비스에서
+      사용 중입니다: [{{ eva_dock_nodeport_conflict.stdout | default('') | trim }}].
+      dock.service.nodePort 를 다른 포트로 바꾸거나 점유 중인 서비스를 정리하세요.
+  when:
+    - not ansible_check_mode
+    - eva_dock_nodeport_conflict is not skipped
+    - eva_dock_nodeport_conflict.stdout is defined
+
+- name: Synchronize managed-cluster credentials before Dock workload changes
+  ansible.builtin.include_tasks: "{{ eva_solution_root }}/roles/eva_cluster_context/tasks/online_credentials.yaml"
+  vars:
+    eva_online_component: dock
+    eva_online_action: prepare
+    eva_online_input_values: "{{ eva_dock_effective_values }}"
+  when: eva_managed_cluster | default(false) | bool
+
+- name: Validate EVA Dock inputs against the existing cluster
+  ansible.builtin.include_role:
+    name: eva_cluster_guard
+  vars:
+    eva_cluster_guard_component: dock
+    eva_cluster_guard_workdir: "{{ eva_dock_workdir }}"
+    eva_cluster_guard_chart: "{{ eva_dock_chart_source }}"
+    eva_cluster_guard_version: "{{ eva_dock_chart_version if (eva_cli_chart_path | default('') | length == 0) else '' }}"
+    eva_cluster_guard_values: "{{ [eva_dock_workdir ~ '/values.yaml', eva_dock_workdir ~ '/dock-k3s-override.yaml', eva_dock_values_dest] }}"
+  when: eva_managed_cluster | default(false) | bool
+
+- name: Install/upgrade eva-dock from Helm repo or offline chart
+  ansible.builtin.command: >-
+    helm upgrade --install {{ eva_dock_name }} {{ eva_dock_chart_source }}
+    -n {{ eva_dock_namespace }}
+    {{ eva_dock_chart_version_arg }}
+    --create-namespace
+    {% for path in eva_dock_helm_value_files %}-f {{ path }} {% endfor %}
+    {% for value in eva_cli_helm_set | default([]) %}--set {{ value | quote }} {% endfor %}
+    {{ eva_dock_traefik_args | default('') }}
+  no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
+  register: eva_dock_install
+  changed_when: >-
+    'has been upgraded' in eva_dock_install.stdout
+    or 'has been installed' in eva_dock_install.stdout
+  when: not ansible_check_mode
+  environment: "{{ {'KUBECONFIG': eva_dock_kubeconfig} | combine(eva_dock_traefik_env | default({})) }}"
+
+- name: Capture effective EVA Dock Helm values
+  no_log: true
+  ansible.builtin.command:
+    argv: [helm, get, values, "{{ eva_dock_name }}", --namespace, "{{ eva_dock_namespace }}", --all, --output, yaml]
+  register: eva_dock_resolved_values_result
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Record private EVA Dock resolved values on control node
+  no_log: true
+  ansible.builtin.copy:
+    content: "{{ eva_dock_resolved_values_result.stdout }}"
+    dest: "{{ eva_dock_deploy_values_dir }}/resolved-values.yaml"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  when: not ansible_check_mode
+
+# Inline Secret/ConfigMap changes roll the Pod through chart checksums, but an
+# externally managed secrets.existingSecret does not. Restart to load it.
+- name: Restart EVA Dock to load an externally managed Secret
+  ansible.builtin.command:
+    argv: [kubectl, rollout, restart, "deployment/{{ eva_dock_effective_fullname }}", --namespace, "{{ eva_dock_namespace }}"]
+  changed_when: true
+  when:
+    - not ansible_check_mode
+    - eva_dock_effective_user_values.secrets.existingSecret | default('') | string | length > 0
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Wait for EVA Dock rollout
+  ansible.builtin.command: >-
+    kubectl rollout status deployment/{{ eva_dock_effective_fullname }}
+    -n {{ eva_dock_namespace }}
+    --timeout={{ eva_dock_rollout_timeout }}s
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Check eva-dock resources
+  ansible.builtin.command: kubectl get all,ingress -n {{ eva_dock_namespace }}
+  register: eva_dock_resources
+  changed_when: false
+  when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_dock_kubeconfig }}"
+
+- name: Show eva-dock deployment summary
+  ansible.builtin.debug:
+    msg:
+      - "namespace/release : {{ eva_dock_namespace }}/{{ eva_dock_name }}"
+      - >-
+        chart             : {{ eva_dock_chart_source }}
+        {{ '(offline chart)' if (airgap_mode | bool) else eva_dock_chart_version }}
+      - "image             : {{ eva_dock_image_repository }}:{{ eva_dock_image_tag }}"
+      - "repository mode   : {{ repository_mode }}{{ ' / ' ~ repository_registry if (airgap_mode | bool) else '' }}"
+      - "values (-f 순서)  : values.yaml -> dock-k3s-override.yaml{{ ' -> eva-dock-host-override.yaml (' ~ eva_dock_values_file ~ ')' if (eva_dock_effective_user_values | length > 0) else ' (host values 없음)' }}"
+      - "public URL        : {{ eva_dock_public_url if (eva_dock_public_url | length > 0) else '(Ingress 미사용 — Service/LB 설정 확인)' }}"
+      - "EVA 연동          : 각 EVA App의 event-recipient 웹훅 대상은 위 public URL 입니다. Dock #/servers 에서 EVA를 등록하세요."
+      - "resources:"
+      - "{{ eva_dock_resources.stdout_lines | default([]) }}"
+  when: not ansible_check_mode

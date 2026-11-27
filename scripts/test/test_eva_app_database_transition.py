@@ -742,12 +742,17 @@ class DatabaseTransitionTests(unittest.TestCase):
         inner = [t["name"] for t in block["block"]]
         self.assertLess(names.index("Wait until EVA App pods are terminated before reinstall"), names.index(block["name"]))
         self.assertLess(inner.index("Preserve EVA App database identity and legacy local users before upgrade"), inner.index("Install EVA App from online Helm repo"))
+        self.assertLess(inner.index("Preserve EVA App database identity and legacy local users before upgrade"),
+                inner.index("Reconcile EVA App pull Secret references while existing App is stopped"))
         self.assertLess(names.index("Validate EVA App DB transition before stopping workloads"),
                         names.index("Scale down existing EVA App deployment before reinstall"))
         self.assertLess(names.index("Prepare EVA App database transition tooling"),
                         names.index("Validate EVA App DB transition before stopping workloads"))
         preparation = next(t for t in block["block"] if t["name"] == "Preserve EVA App database identity and legacy local users before upgrade")
         self.assertEqual(preparation["when"], "not ansible_check_mode")
+        argv = preparation["ansible.builtin.command"]["argv"]
+        self.assertIn("--required-registry", argv)
+        self.assertNotIn("--required-registry", argv[argv.index("--client-image") + 1])
         render = next(task for task in yaml.safe_load((ROOT / "src/solution/roles/eva_app/tasks/prepare_database.yaml").read_text())
                   if task["name"] == "Render exact EVA App target manifest for DB preparation")
         self.assertTrue(render["no_log"])
@@ -757,6 +762,129 @@ class DatabaseTransitionTests(unittest.TestCase):
 
 class DatabaseTaskFailureTests(unittest.TestCase):
     """Execute the real registered task and rescue, without Helm or a cluster."""
+
+    def test_helm_failure_restores_original_pull_auth_before_restarting_app(self):
+        self.check_helm_failure(repository_mode="online_repository")
+
+    def test_remote_failure_keeps_reader_and_recovery_on_main_harbor(self):
+        self.check_helm_failure(repository_mode="remote_repository")
+
+    def check_helm_failure(self, *, repository_mode):
+        remote = repository_mode == "remote_repository"
+        digest = "sha256:" + "a" * 64
+        harbor_image = "main.example:32080/eva/eva-app@" + digest
+        tasks = yaml.safe_load((ROOT / "src/solution/roles/eva_app/tasks/main.yaml").read_text())
+        selected = [copy.deepcopy(next(t for t in tasks if t["name"] == name)) for name in (
+            "Record existing EVA App deployment identity and replicas",
+            "Set existing EVA App deployment recovery facts",
+            "Scale down existing EVA App deployment before reinstall")]
+        if remote:
+            selected.insert(2, copy.deepcopy(next(t for t in tasks if t["name"] ==
+                            "Verify existing EVA App image content in the selected Harbor before stopping workloads")))
+        block = copy.deepcopy(next(t for t in tasks if t["name"] ==
+                                   "Install EVA App and restore prior replicas if Helm fails"))
+        block["block"] = [t for t in block["block"] if t["name"] in (
+            "Relocate stopped EVA App to identical images in the selected Harbor",
+            "Select Harbor-only EVA App recovery images and pull references",
+            "Preserve EVA App database identity and legacy local users before upgrade",
+            "Reconcile EVA App pull Secret references while existing App is stopped")]
+        with tempfile.TemporaryDirectory(prefix="eva-app-auth-recovery-") as temporary:
+            root = Path(temporary)
+            binary = root / "bin"
+            binary.mkdir()
+            state = root / "deployment.json"
+            deployment = {"metadata": {"uid": "app-uid", "resourceVersion": "1"}, "spec": {
+                "replicas": 2, "selector": {"matchLabels": {"app": "eva-app"}}, "template": {"spec": {
+                    "containers": [{"name": "eva-app", "image": "ecr.example/eva-app:old"}],
+                    "initContainers": [{"name": "init", "image": "ecr.example/eva-app:old"}],
+                    "imagePullSecrets": [{"name": "ecr-registry"}]}}}}
+            state.write_text(json.dumps(deployment))
+            log = root / "calls.log"
+            kubectl = binary / "kubectl"
+            kubectl.write_text("#!" + sys.executable + "\n"
+                               "import json,sys\nfrom pathlib import Path\n"
+                               "state=Path(" + repr(str(state)) + ")\n"
+                               "obj=json.loads(state.read_text())\nargs=sys.argv[1:]\n"
+                               "with Path(" + repr(str(log)) + ").open('a') as out:\n"
+                               "    out.write(' '.join(args)+'\\n')\n"
+                               "if args[:1]==['-n']:\n    args=args[2:]\n"
+                               "if args[:2]==['get','deployment']:\n"
+                               "    print(obj['metadata']['uid'] if any('jsonpath=' in a for a in args) else json.dumps(obj))\n"
+                               "elif args[:2]==['get','nodes']:\n    print('{\"items\":[{\"metadata\":{\"name\":\"node-1\"}}]}')\n"
+                               "elif args[:2]==['get','pods']:\n    print('{\"items\": []}')\n"
+                               "elif args[:1]==['create']:\n"
+                               "    pod=json.load(sys.stdin)\n"
+                               "    assert all(c['image'].startswith('main.example:32080/') for c in pod['spec']['containers'])\n"
+                               "    assert 'volumes' not in pod['spec']\n    print('created')\n"
+                               "elif args[:1] in (['wait'],['delete']):\n    print('ok')\n"
+                               "elif args[:2]==['patch','deployment']:\n"
+                               "    body=json.load(sys.stdin)\n"
+                               "    assert body['metadata']==obj['metadata']\n"
+                               "    assert obj['spec']['replicas']==body['spec']['replicas']==0\n"
+                               "    obj['spec']['template']['spec'].update(body['spec']['template']['spec'])\n"
+                               "    obj['metadata']['resourceVersion']=str(int(obj['metadata']['resourceVersion'])+1)\n"
+                               "    state.write_text(json.dumps(obj))\n    print('patched')\n"
+                               "elif args[:2]==['scale','deployment']:\n"
+                               "    replicas=int(next(a.split('=',1)[1] for a in args if a.startswith('--replicas=')))\n"
+                               "    expected=[] if " + repr(remote) + " else [{'name':'ecr-registry'}]\n"
+                               "    assert replicas==0 or obj['spec']['template']['spec']['imagePullSecrets']==expected\n"
+                               "    assert replicas==0 or not " + repr(remote) + " or obj['spec']['template']['spec']['containers'][0]['image']==" + repr(harbor_image) + "\n"
+                               "    obj['spec']['replicas']=replicas\n    state.write_text(json.dumps(obj))\n    print('scaled')\n"
+                               "elif args[:2]==['rollout','status']:\n    print('successfully rolled out')\n"
+                               "else:\n    sys.exit(99)\n")
+            kubectl.chmod(0o700)
+            k3s = binary / "k3s"
+            k3s.write_text("#!" + sys.executable + "\nimport sys,json\n"
+                           "assert sys.argv[1:3]==['crictl','inspecti']\n"
+                           "print(json.dumps({'status':{'id': 'sha256:'+'b'*64,'repoDigests': ["
+                           + repr("ecr.example/eva-app@" + digest) + "]}}))\n")
+            k3s.chmod(0o700)
+            manifest = root / "db-target-manifest.yaml"
+            manifest.write_text(yaml.safe_dump({"kind": "Deployment", "metadata": {"name": "eva-app"},
+                                               "spec": {"template": {"spec": {"imagePullSecrets": [], "containers": [
+                                                   {"name": "eva-app", "image": "main.example:32080/eva/eva-app:new"}],
+                                                   "initContainers": [{"name": "init", "image": "main.example:32080/eva/eva-app:new"}]}}}}))
+            shutil.copyfile(HELPER.with_name("reconcile_pull_secrets.py"), root / "reconcile_pull_secrets.py")
+            preserve = root / "preserve.py"
+            preserve.write_text("import json\nfrom pathlib import Path\n"
+                                "obj=json.loads(Path(" + repr(str(state)) + ").read_text())\n"
+                                "assert obj['spec']['replicas']==0\n"
+                                "assert obj['spec']['template']['spec']['imagePullSecrets']==" + repr([] if remote else [{"name": "ecr-registry"}]) + "\n"
+                                "assert obj['spec']['template']['spec']['containers'][0]['image']==" + repr(harbor_image if remote else "ecr.example/eva-app:old") + "\n"
+                                "print('{\"changed\": false}')\n")
+            for task in block["block"]:
+                if task["name"].startswith("Preserve"):
+                    task["ansible.builtin.command"]["argv"] = [sys.executable, str(preserve)]
+                elif task["name"].startswith("Reconcile"):
+                    task["ansible.builtin.command"]["argv"][-1] = str(manifest)
+            failure = root / "fail.py"
+            failure.write_text("import sys\nprint('simulated Helm failure',file=sys.stderr)\nsys.exit(1)\n")
+            block["block"].append({"name": "Install sentinel", "ansible.builtin.command": {
+                "argv": [sys.executable, str(failure)]}})
+            selected.append(block)
+            playbook = root / "play.yaml"
+            playbook.write_text(yaml.safe_dump([{"hosts": "localhost", "connection": "local", "gather_facts": False,
+                "environment": {"PATH": str(binary) + os.pathsep + str(Path(sys.executable).parent)
+                                       + os.pathsep + os.environ["PATH"]},
+                "vars": {"ansible_python_interpreter": sys.executable, "eva_app_name": "eva-app",
+                         "eva_app_namespace": "eva-app", "eva_app_kubeconfig": str(root / "unused"),
+                         "eva_app_deployment_exists": {"rc": 0}, "eva_app_workdir": str(root),
+                         "repository_mode": repository_mode, "repository_registry": "main.example:32080"},
+                "tasks": selected}], sort_keys=False))
+            ansible = shutil.which("ansible-playbook") or str(Path(sys.executable).parent / "ansible-playbook")
+            result = subprocess.run([ansible, "-i", "localhost,", str(playbook)], text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("simulated Helm failure", result.stdout)
+            self.assertIn("replica restoration rc=0, rollout rc=0", result.stdout)
+            self.assertIn("pull reference restoration rc=0", result.stdout)
+            restored = json.loads(state.read_text())
+            if remote:
+                deployment["spec"]["template"]["spec"]["containers"][0].update(image=harbor_image, imagePullPolicy="IfNotPresent")
+                deployment["spec"]["template"]["spec"]["initContainers"][0].update(image=harbor_image, imagePullPolicy="IfNotPresent")
+                deployment["spec"]["template"]["spec"]["imagePullSecrets"] = []
+            self.assertEqual(restored["spec"], deployment["spec"])
+            self.assertEqual(sum(line.startswith("patch deployment") for line in log.read_text().splitlines()), 1 if remote else 2)
 
     def test_failed_helper_preserves_original_error_and_restores_replicas(self):
         self.check_helper_failure(rollout_error=False)
@@ -770,6 +898,8 @@ class DatabaseTaskFailureTests(unittest.TestCase):
                                    "Install EVA App and restore prior replicas if Helm fails"))
         task = next(task for task in block["block"] if task["name"] ==
                     "Preserve EVA App database identity and legacy local users before upgrade")
+        reconciliation = next(task for task in block["block"] if task["name"] ==
+                      "Reconcile EVA App pull Secret references while existing App is stopped")
         with tempfile.TemporaryDirectory(prefix="eva-db-failure-test-") as temporary:
             root = Path(temporary)
             binary = root / "bin"
@@ -778,6 +908,10 @@ class DatabaseTaskFailureTests(unittest.TestCase):
             message = "Legacy eva and destination have different eva_id values; refuse automatic overwrite."
             helper.write_text("import sys\nprint(" + repr(message)
                               + ", file=sys.stderr)\nsys.exit(1)\n")
+            reconciled = root / "pull-references-removed"
+            reconciler = root / "reconcile.py"
+            reconciler.write_text("from pathlib import Path\nPath(" + repr(str(reconciled))
+                                  + ").touch()\nprint('{\"changed\": true}')\n")
             log = root / "kubectl-calls.log"
             kubectl = binary / "kubectl"
             kubectl.write_text("#!" + sys.executable + "\n"
@@ -795,8 +929,10 @@ class DatabaseTaskFailureTests(unittest.TestCase):
                                "else:\n    sys.exit(99)\n")
             kubectl.chmod(0o700)
             task["ansible.builtin.command"]["argv"] = [sys.executable, str(helper)]
-            block["block"] = [task, {"name": "Install sentinel", "ansible.builtin.debug":
-                                      {"msg": "MUST-NOT-RUN-INSTALL"}}]
+            reconciliation["ansible.builtin.command"]["argv"] = [sys.executable, str(reconciler)]
+            block["block"] = [t for t in block["block"] if t["name"] in (task["name"], reconciliation["name"])]
+            block["block"].append({"name": "Install sentinel", "ansible.builtin.debug":
+                                   {"msg": "MUST-NOT-RUN-INSTALL"}})
             playbook = root / "play.yaml"
             playbook.write_text(yaml.safe_dump([{
                 "hosts": "localhost", "connection": "local", "gather_facts": False,
@@ -805,6 +941,7 @@ class DatabaseTaskFailureTests(unittest.TestCase):
                          "eva_app_name": "eva-app", "eva_app_namespace": "eva-app",
                          "eva_app_kubeconfig": str(root / "unused-kubeconfig"),
                          "eva_app_deployment_exists": {"rc": 0},
+                         "repository_mode": "online_repository",
                          "eva_app_preinstall_deployment_uid": "original-deployment-uid",
                          "eva_app_preinstall_replicas": 2},
                 "tasks": [block],
@@ -817,6 +954,7 @@ class DatabaseTaskFailureTests(unittest.TestCase):
             self.assertNotIn("from_json", result.stdout)
             self.assertNotIn("Expecting value", result.stdout)
             self.assertNotIn("MUST-NOT-RUN-INSTALL", result.stdout)
+            self.assertFalse(reconciled.exists(), "DB failure must retain the old image's authenticated pull references")
             self.assertIn('"changed": false', result.stdout)
             self.assertIn("replica restoration rc=0, rollout rc=" + ("1" if rollout_error else "0"), result.stdout)
             if rollout_error:
@@ -944,9 +1082,30 @@ class LicenseProbeTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload).encode())
 
                 with patch.object(t, "env", return_value=environment), patch.object(t, "run_command", side_effect=command):
-                    with self.assertRaises(MODULE.UnsafeTransition):
+                    with self.assertRaises(MODULE.UnsafeTransition) as raised:
                         MODULE.Transition.cached_license(t, app, environment)
+                if failure == "wait":
+                    self.assertIn("License reader Pod did not become ready", str(raised.exception))
+                    self.assertIn("selected-registry pull access", str(raised.exception))
+                    self.assertNotIn("Injected", str(raised.exception))
                 self.assertEqual(deleted, ["pod", "networkpolicy"])
+
+    def test_closed_network_reader_and_external_client_refuse_non_harbor_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            t = fixture(Path(directory) / "backups")
+            t.required_registry = "main.example:32080"
+            app = t.objects[("deployment", "eva-app")]
+            app["spec"]["template"]["spec"]["containers"][0]["image"] = "private.ecr.example/eva-app:old"
+            environment = {"LICENSE_PRODUCT_CODE": "test-product"}
+            with patch.object(t, "env", return_value=environment), patch.object(t, "run_command") as command:
+                with self.assertRaisesRegex(MODULE.UnsafeTransition, "no external-registry fallback"):
+                    MODULE.Transition.cached_license(t, app, environment)
+                command.assert_not_called()
+            with patch.object(t, "run_command") as command:
+                with self.assertRaisesRegex(MODULE.UnsafeTransition, "no external-registry fallback"):
+                    with t.external_client({}, {}):
+                        self.fail("must not create an external image Pod")
+                command.assert_not_called()
 
     def test_multinode_hostpath_is_refused_before_creating_any_probe(self):
         with tempfile.TemporaryDirectory() as directory:

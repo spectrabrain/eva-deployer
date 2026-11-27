@@ -39,7 +39,7 @@ func Help(output io.Writer) {
   paths       Show installation context and artifact locations (default).
   operations  List operations, newest-created first.
   files       List generated YAML files, including targets and components.
-  values      Print raw Values; --component app|iam|agent|vision|vllm|qdrant|n8n is required.
+  values      Print raw Values; --component app|iam|agent|vision|dock|vllm|qdrant|n8n is required.
   config      Print generated eva.yaml (or --file precondition.yaml).
   plan        Print the saved operation Plan.
   result      Print the recorded execution result.
@@ -220,7 +220,7 @@ func validateOptions(command string, o options) error {
 	}
 	if o.component != "" {
 		switch o.component {
-		case "app", "iam", "agent", "vision", "vllm", "qdrant", "n8n":
+		case "app", "iam", "agent", "vision", "dock", "vllm", "qdrant", "n8n":
 		default:
 			return fmt.Errorf("unknown Values component %q", o.component)
 		}

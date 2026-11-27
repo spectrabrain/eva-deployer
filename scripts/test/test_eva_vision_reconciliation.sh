@@ -281,10 +281,12 @@ print("[OK] Vision reconciliation precedes Helm deployment")
 resolve_name = "Resolve EVA Vision Helm field ownership reconciliation arguments"
 check_name = "Check existing EVA Vision deployment"
 scale_name = "Scale down existing EVA Vision deployment before reinstall"
+inputs_name = "Select final reconciled EVA Vision Helm inputs"
 assert task_names.index(check_name) < task_names.index(resolve_name) < task_names.index(scale_name)
+assert task_names.index(inputs_name) < task_names.index(check_name)
 selected_tasks = [next(task for task in main_tasks if task.get("name") == name)
-                  for name in (check_name, resolve_name, online_name, offline_name)]
-assert selected_tasks[0]["no_log"] is True
+                  for name in (inputs_name, check_name, resolve_name, online_name, offline_name)]
+assert next(task for task in selected_tasks if task["name"] == check_name)["no_log"] is True
 
 command_fields = {"f:command": {}}
 for field in ('k:{"name":"eva-vision"}', "f:containers", "f:spec", "f:template", "f:spec"):
@@ -338,6 +340,9 @@ assert force == expected, args
 assert ("--server-side=true" in args) == expected, args
 assert "--force-replace" not in args and "--take-ownership" not in args, args
 assert args[args.index("--post-renderer") + 1] == "eva-vision-postrenderer"
+assert args[args.index("-f") + 1] == os.environ["VISION_UPGRADE_VALUES"], args
+assert pathlib.Path(os.environ["VISION_UPGRADE_VALUES"]).is_file()
+assert "--set" not in args, "Reconciled runtime Values must not reapply CLI Secret overrides"
 pathlib.Path(os.environ["VISION_UPGRADE_CALL"]).write_text(json.dumps(args))
 print("Release eva-vision has been upgraded")
 ''')
@@ -352,15 +357,20 @@ print("Release eva-vision has been upgraded")
             if fixture is not None:
                 fixture_path.write_text(json.dumps(fixture))
             chart = "/cache/eva-vision-3.3.0.tgz" if offline else "eva-vision/eva-vision"
+            runtime_values = case / "runtime-values.yaml"
+            runtime_values.write_text(yaml.safe_dump({"harbor": {"existingSecret": ""}}))
             playbook = case / "play.yaml"
             playbook.write_text(yaml.safe_dump([{"hosts": "localhost", "connection": "local", "gather_facts": False,
                 "vars": {"eva_vision_name": "eva-vision", "eva_vision_namespace": "eva-vision",
                          "eva_vision_kubeconfig": str(case / "absent-kubeconfig"), "eva_vision_workdir": str(case),
+                         "eva_vision_runtime_values_file": str(runtime_values),
+                         "eva_cli_helm_set": ["harbor.existingSecret=previous-harbor-secret"],
                          "eva_vision_chart_source": chart, "eva_vision_chart_version": "3.3.0",
                          "airgap_mode": offline}, "tasks": selected_tasks}]))
             environment = {**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"],
                 "ANSIBLE_NOCOLOR": "1", "ANSIBLE_STDOUT_CALLBACK": "default",
                 "VISION_UPGRADE_FIXTURE": str(fixture_path), "VISION_UPGRADE_FORCE": "1" if force else "0",
+                "VISION_UPGRADE_VALUES": str(runtime_values),
                 "VISION_UPGRADE_CALL": str(case / "helm-call.json")}
             process = subprocess.run([ansible, "-i", "localhost,", str(playbook)], env=environment,
                                      text=True, capture_output=True, timeout=60)

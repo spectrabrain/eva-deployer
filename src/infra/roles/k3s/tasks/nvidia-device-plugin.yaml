@@ -152,15 +152,27 @@
     var: k3s_nvidia_device_plugin_pods.stdout_lines
   when: not ansible_check_mode
 
+# Diagnostic only: the GPU allocatable checks below are the real gate. Right
+# after a k3s restart the API server answers pods/log with NotFound until its
+# kubelet connection is back, so retry briefly and never fail the install here.
+# daemonset/ lets kubectl pick a current pod instead of a terminating one.
 - name: Read NVIDIA device plugin pod logs
-  ansible.builtin.command:
-    cmd: >-
-      kubectl logs -n kube-system
-      {{ k3s_nvidia_device_plugin_pods.stdout_lines[0] }} --tail=50
+  ansible.builtin.shell: |
+    for attempt in $(seq 1 12); do
+      if output=$(kubectl logs -n kube-system daemonset/nvidia-device-plugin-daemonset --tail=50 2>&1); then
+        printf '%s\n' "$output"
+        exit 0
+      fi
+      sleep 5
+    done
+    printf '[WARN] NVIDIA device plugin logs unavailable after retries (diagnostic only): %s\n' "$output"
+  args:
+    executable: /bin/bash
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   register: k3s_nvidia_device_plugin_logs
   changed_when: false
+  failed_when: false
   when:
     - not ansible_check_mode
     - k3s_nvidia_device_plugin_pods.stdout_lines | length > 0

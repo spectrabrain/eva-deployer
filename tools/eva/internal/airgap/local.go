@@ -52,7 +52,7 @@ func NewLocalService() LocalService {
 		PrepareRelease: release.Prepare, MaterializeCache: MaterializeLocalCache,
 		EnsureRuntime: ensureLocalRuntime, NewBootstrap: func() remote.BootstrapService {
 			bootstrap := remote.NewBootstrapService()
-			bootstrap.EnsurePublication = remote.EnsureHarborPublicationPreservingVisibility
+			bootstrap.EnsurePublication = remote.EnsureHarborPublication
 			return bootstrap
 		},
 		DockerReady: func(ctx context.Context) bool {

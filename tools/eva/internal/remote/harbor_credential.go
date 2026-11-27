@@ -88,16 +88,16 @@ func readHarborDockerCredential(ctx context.Context, registry string) (HarborCre
 	return HarborCredential{Username: credential.Username, Password: credential.Secret}, nil
 }
 
-// Prepare only the selected EVA project. Existing repositories and artifacts
-// are preserved; the token scope verifies publication without pushing a probe.
-func ensureHarborPublication(ctx context.Context, receipt HarborReceipt, credential HarborCredential) error {
+// EnsureHarborPublication prepares only the selected EVA project for Remote
+// and Local preparation. Existing repositories and artifacts are preserved, and
+// an existing project's visibility is never changed: targets that pull from a
+// public project without registry credentials keep working. A missing project
+// is created public, so targets need no pull credentials by default; operators
+// who want a private project set it in Harbor and give targets
+// repository_username/repository_password. The token scope verifies
+// publication without pushing a probe.
+func EnsureHarborPublication(ctx context.Context, receipt HarborReceipt, credential HarborCredential) error {
 	return ensureHarborPublicationWithClient(ctx, harborPublicationClient(), receipt, credential)
-}
-
-// Local installations reuse an existing project's visibility. Newly created
-// projects remain private, and pull/push permissions are checked in both cases.
-func EnsureHarborPublicationPreservingVisibility(ctx context.Context, receipt HarborReceipt, credential HarborCredential) error {
-	return ensureHarborPublicationWithPolicy(ctx, harborPublicationClient(), receipt, credential, false)
 }
 
 func harborPublicationClient() *http.Client {
@@ -113,10 +113,6 @@ func harborPublicationClient() *http.Client {
 }
 
 func ensureHarborPublicationWithClient(ctx context.Context, client *http.Client, receipt HarborReceipt, credential HarborCredential) error {
-	return ensureHarborPublicationWithPolicy(ctx, client, receipt, credential, true)
-}
-
-func ensureHarborPublicationWithPolicy(ctx context.Context, client *http.Client, receipt HarborReceipt, credential HarborCredential, requirePrivate bool) error {
 	if credential.Username == "" || credential.Password == "" {
 		return ErrHarborCredentialRequired
 	}
@@ -154,7 +150,7 @@ func ensureHarborPublicationWithPolicy(ctx context.Context, client *http.Client,
 	}
 	response.Body.Close()
 	if status == http.StatusNotFound {
-		body, _ := json.Marshal(map[string]any{"project_name": receipt.Project, "metadata": map[string]string{"public": "false"}})
+		body, _ := json.Marshal(map[string]any{"project_name": receipt.Project, "metadata": map[string]string{"public": "true"}})
 		response, err = request(http.MethodPost, "/api/v2.0/projects", body)
 		if err != nil {
 			return err
@@ -164,7 +160,7 @@ func ensureHarborPublicationWithPolicy(ctx context.Context, client *http.Client,
 		if status != http.StatusCreated && status != http.StatusConflict {
 			return errors.New("Harbor EVA project creation failed")
 		}
-		// Re-read even after a concurrent creation, so the private setting is verified.
+		// Re-read even after a concurrent creation, so the project is verified.
 		response, err = request(http.MethodGet, projectPath, nil)
 		if err != nil {
 			return err
@@ -176,29 +172,8 @@ func ensureHarborPublicationWithPolicy(ctx context.Context, client *http.Client,
 	if status != http.StatusOK || err != nil {
 		return errors.New("Harbor EVA project could not be validated")
 	}
-	if project.Metadata["public"] == "true" && requirePrivate {
-		body := []byte(`{"metadata":{"public":"false"}}`)
-		response, err = request(http.MethodPut, projectPath, body)
-		if err != nil {
-			return err
-		}
-		status = response.StatusCode
-		response.Body.Close()
-		if status != http.StatusOK {
-			return errors.New("Harbor EVA project private setting could not be applied")
-		}
-		response, err = request(http.MethodGet, projectPath, nil)
-		if err != nil {
-			return err
-		}
-		status = response.StatusCode
-		err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&project)
-		response.Body.Close()
-		if status != http.StatusOK || err != nil || project.Metadata["public"] != "false" {
-			return errors.New("Harbor EVA project private setting did not become effective")
-		}
-	} else if project.Metadata["public"] != "false" && project.Metadata["public"] != "true" {
-		return errors.New("Harbor EVA project private setting could not be confirmed")
+	if project.Metadata["public"] != "false" && project.Metadata["public"] != "true" {
+		return errors.New("Harbor EVA project visibility could not be confirmed")
 	}
 	repository := receipt.Project + "/eva-bootstrap-check"
 	query := url.Values{"service": {"harbor-registry"}, "scope": {"repository:" + repository + ":pull,push"}}

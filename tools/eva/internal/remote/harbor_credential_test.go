@@ -39,14 +39,11 @@ func TestReadHarborCredentialReusesDockerAuthAndHelpers(t *testing.T) {
 	}
 }
 
-func TestHarborPublicationEnsuresPrivateProjectAndValidatesPushScope(t *testing.T) {
-	for _, state := range []string{"private", "missing", "public", "denied", "public-preserved"} {
+func TestHarborPublicationCreatesPublicProjectPreservesVisibilityAndValidatesPushScope(t *testing.T) {
+	for _, state := range []string{"private", "missing", "public", "denied"} {
 		t.Run(state, func(t *testing.T) {
 			current := state
-			if state == "public-preserved" {
-				current = "public"
-			}
-			creates, updates, tokens := 0, 0, 0
+			creates, tokens := 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				user, password, _ := r.BasicAuth()
 				if user != "robot-user" || password != "private-token" {
@@ -72,14 +69,11 @@ func TestHarborPublicationEnsuresPrivateProjectAndValidatesPushScope(t *testing.
 						Metadata map[string]string `json:"metadata"`
 					}
 					_ = json.NewDecoder(r.Body).Decode(&project)
-					if project.Name != "eva" || project.Metadata["public"] != "false" {
-						t.Error("created project is not private EVA")
+					if project.Name != "eva" || project.Metadata["public"] != "true" {
+						t.Error("created project is not public EVA")
 					}
-					current = "private"
+					current = "public"
 					w.WriteHeader(http.StatusCreated)
-				case r.URL.Path == "/api/v2.0/projects/eva" && r.Method == http.MethodPut:
-					updates++
-					current = "private"
 				case r.URL.Path == "/service/token":
 					tokens++
 					if r.URL.Query().Get("scope") != "repository:eva/eva-bootstrap-check:pull,push" {
@@ -99,12 +93,13 @@ func TestHarborPublicationEnsuresPrivateProjectAndValidatesPushScope(t *testing.
 			defer server.Close()
 			receipt := testReceipt()
 			receipt.Registry = strings.TrimPrefix(server.URL, "http://")
-			err := ensureHarborPublicationWithPolicy(context.Background(), server.Client(), receipt, HarborCredential{Username: "robot-user", Password: "private-token"}, state != "public-preserved")
+			// Any PUT (visibility change) hits the default branch and fails.
+			err := ensureHarborPublicationWithClient(context.Background(), server.Client(), receipt, HarborCredential{Username: "robot-user", Password: "private-token"})
 			if (state == "denied") != errors.Is(err, ErrHarborCredentialRequired) || state != "denied" && err != nil {
 				t.Fatalf("publication validation failed: %v", err)
 			}
-			if tokens != 1 || (creates == 1) != (state == "missing") || (updates == 1) != (state == "public") {
-				t.Fatalf("unexpected project/token operations: creates=%d updates=%d tokens=%d", creates, updates, tokens)
+			if tokens != 1 || (creates == 1) != (state == "missing") {
+				t.Fatalf("unexpected project/token operations: creates=%d tokens=%d", creates, tokens)
 			}
 		})
 	}

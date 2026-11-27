@@ -28,6 +28,8 @@ type ConfigureTarget struct {
 	Address      string
 	Agent        bool
 	Vision       bool
+	Dock         bool
+	DockProtocol string      // http or https; defaults to Protocol.
 	Deployment   *Deployment // NKS controller connection; endpoint/Values questions stay shared.
 }
 
@@ -56,7 +58,7 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 	root := document.Content[0]
 	targetMapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	setSampleMappingValue(root, "targets", targetMapping)
-	global := map[string]bool{"infra": false, "iam": false, "app": false, "agent": false, "vision": false, "n8n": false}
+	global := map[string]bool{"infra": false, "iam": false, "app": false, "agent": false, "vision": false, "dock": false, "n8n": false}
 	configured := make(map[string]configuredSampleTarget, len(targets))
 	seen := make(map[string]bool)
 	for index, options := range targets {
@@ -78,7 +80,7 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 			}
 		}
 		var target *yaml.Node
-		components := map[string]bool{"infra": !options.SolutionOnly, "iam": false, "app": false, "agent": false, "vision": false, "n8n": false}
+		components := map[string]bool{"infra": !options.SolutionOnly, "iam": false, "app": false, "agent": false, "vision": false, "dock": false, "n8n": false}
 		if options.Solution {
 			contents, err := InstallerSampleFor(profile)
 			if err != nil {
@@ -91,6 +93,12 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 			target = sampleMappingValue(sampleMappingValue(selected.Content[0], "targets"), "server-a")
 			components["iam"], components["app"] = options.IAM != "external", true
 			components["agent"], components["vision"] = options.Agent, options.Vision
+			if options.Dock {
+				components["dock"] = true
+				if err := mergeDockSample(sampleMappingValue(target, "values"), options); err != nil {
+					return nil, err
+				}
+			}
 		} else {
 			base, err := readSampleNode(basePath)
 			if err != nil {
@@ -106,7 +114,7 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 			}
 			values := sampleMappingValue(target, "values")
 			// Only overlay components selected through the existing questions.
-			for _, component := range []string{"iam", "app", "agent", "vision"} {
+			for _, component := range []string{"iam", "app", "agent", "vision", "dock"} {
 				if !components[component] {
 					continue
 				}
@@ -204,6 +212,31 @@ func ConfigureSample(mode string, targets []ConfigureTarget) ([]byte, error) {
 		return nil, err
 	}
 	return output.Bytes(), encoder.Close()
+}
+
+// Dock serves / and /api: an IP target gets a dedicated port on the shared
+// IP, while domain targets need a Dock-only domain.
+func mergeDockSample(values *yaml.Node, options ConfigureTarget) error {
+	if values == nil {
+		return errors.New("embedded installer sample is missing target values")
+	}
+	protocol := options.DockProtocol
+	if protocol == "" {
+		protocol = options.Protocol
+	}
+	if protocol != "http" && protocol != "https" {
+		return errors.New("Dock protocol must be http or https")
+	}
+	address := "domain"
+	if options.Address == "ip" {
+		address = "ip"
+	}
+	profile, err := readSampleNode("samples/dock-" + address + "-" + protocol + ".yaml")
+	if err != nil {
+		return err
+	}
+	mergeSampleMapping(values, profile.Content[0])
+	return nil
 }
 
 func equalBoolMap(left, right map[string]bool) bool {

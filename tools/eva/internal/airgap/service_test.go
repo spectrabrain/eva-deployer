@@ -284,7 +284,7 @@ func (f *serviceTestFixture) writeStepAssets(step string, options remote.Process
 			"manifest.txt", "apt/debs/manifest.txt", "apt/debs/a.deb", "docker/debs/manifest.txt", "docker/debs/a.deb",
 			"nvidia/container-toolkit-debs/manifest.txt", "nvidia/container-toolkit-debs/a.deb", "tools/oras",
 			"k3s/k3s-v1-linux-amd64", "k3s/k3s-airgap-images-amd64.tar.zst",
-			"eva-app/app.tgz", "eva-vision/vision.tgz", "eva-iam/iam.tgz", "eva-agent/agent.tgz",
+			"eva-app/app.tgz", "eva-vision/vision.tgz", "eva-iam/iam.tgz", "eva-dock/eva-dock-3.4.0.tgz", "eva-agent/agent.tgz",
 			"eva-agent/eva-agent-init-3.2.0.tgz", "eva-agent/eva-agent-vllm-3.2.0.tgz", "qdrant/qdrant.tgz",
 			"eva-agent/release/3.2.0/plugins/eva-agent-qdrant/post-renderer.sh",
 			"eva-agent/release/3.2.0/plugins/eva-agent-qdrant/plugin.yaml",
@@ -820,7 +820,7 @@ func TestServicePrepareStopsAtIncompleteImageDownload(t *testing.T) {
 func TestServicePrepareRejectsIncompleteAssets(t *testing.T) {
 	for _, relative := range []string{
 		"manifest.txt", "apt/debs/a.deb", "docker/debs/a.deb", "nvidia/container-toolkit-debs/a.deb", "tools/oras",
-		"eva-app/app.tgz", "eva-vision/vision.tgz", "eva-agent/release/3.2.0/plugins/eva-agent-qdrant/plugin.yaml",
+		"eva-app/app.tgz", "eva-vision/vision.tgz", "eva-dock/eva-dock-3.4.0.tgz", "eva-agent/release/3.2.0/plugins/eva-agent-qdrant/plugin.yaml",
 		"python-debs/python3-venv.deb", "harbor/harbor-offline-installer-v2.12.2.tgz", "nvidia/nvidia-driver-repo.tar.gz",
 		"nvidia/nvidia-driver-repo.manifest.txt", "eva-iam/iam.tgz", "eva-agent/eva-agent-init-3.2.0.tgz",
 		"eva-agent/eva-agent-vllm-3.2.0.tgz", "qdrant/qdrant.tgz", "k3s/k3s-airgap-images-amd64.tar.zst",

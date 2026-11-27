@@ -209,9 +209,9 @@ func (input Installer) validate(requestedSiteID string) error {
 		identities[identity] = true
 		for component := range target.Values {
 			switch component {
-			case "iam", "app", "agent", "vision":
+			case "iam", "app", "agent", "vision", "dock":
 			default:
-				return errors.New("target values support only iam, app, agent and vision; use ansible variables for Infra/n8n")
+				return errors.New("target values support only iam, app, agent, vision and dock; use ansible variables for Infra/n8n")
 			}
 		}
 	}

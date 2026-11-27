@@ -26,7 +26,7 @@ const DefaultTargetPayloadRoot = "/var/lib/eva/artifacts/remote"
 
 var payloadCacheRoots = []string{
 	"apt", "docker", "nvidia", "cuda", "helm", "k3s", "k8s", "nfs",
-	"eva-app", "eva-vision", "eva-agent", "eva-iam", "qdrant", "tools",
+	"eva-app", "eva-vision", "eva-agent", "eva-iam", "eva-dock", "qdrant", "tools",
 	"display_mode_selector", "models", "python-debs", "wheels",
 }
 

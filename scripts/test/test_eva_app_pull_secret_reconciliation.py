@@ -31,6 +31,8 @@ class Cluster:
         self.pods = []
         self.calls = []
         self.reject_patch = False
+        self.track_fields = False
+        self.reject_release = False
 
     def run(self, args, input=None, **kwargs):
         self.calls.append((args, input))
@@ -45,11 +47,33 @@ class Cluster:
             if self.reject_patch:
                 return subprocess.CompletedProcess(args, 1, "", "private-credential conflict")
             patch = json.loads(input)
-            assert patch["metadata"] == self.deployment["metadata"]
+            assert "--field-manager=" + MODULE.PREINSTALL_MANAGER in args
+            if "--type=json" in args:
+                assert patch[:2] == [
+                    {"op": "test", "path": "/metadata/uid", "value": self.deployment["metadata"]["uid"]},
+                    {"op": "test", "path": "/metadata/resourceVersion", "value": self.deployment["metadata"]["resourceVersion"]}]
+                assert patch[2]["op"] == "replace" and patch[2]["path"] == "/metadata/managedFields"
+                if self.reject_release:
+                    return subprocess.CompletedProcess(args, 1, "", "private-credential concurrent update")
+                self.deployment["metadata"]["managedFields"] = patch[2]["value"]
+                self.deployment["metadata"]["resourceVersion"] = "19"
+                return subprocess.CompletedProcess(args, 0, "patched", "")
+            assert patch["metadata"] == {key: self.deployment["metadata"][key] for key in ("uid", "resourceVersion")}
             assert patch["spec"]["replicas"] == self.deployment["spec"]["replicas"] == 0
             assert set(patch["spec"]) == {"replicas", "template"}
             assert set(patch["spec"]["template"]["spec"]) <= {"imagePullSecrets", "containers", "initContainers"}
             self.deployment["spec"]["template"]["spec"].update(patch["spec"]["template"]["spec"])
+            if self.track_fields:
+                fields = {"f:imagePullSecrets": {}}
+                for kind in ("containers", "initContainers"):
+                    if kind in patch["spec"]["template"]["spec"]:
+                        fields["f:" + kind] = {
+                            "k:" + json.dumps({"name": c["name"]}, separators=(",", ":")): {
+                                "f:image": {}, "f:imagePullPolicy": {}}
+                            for c in patch["spec"]["template"]["spec"][kind]}
+                self.deployment["metadata"].setdefault("managedFields", []).append({
+                    "manager": MODULE.PREINSTALL_MANAGER, "operation": "Update", "apiVersion": "apps/v1",
+                    "fieldsType": "FieldsV1", "fieldsV1": {"f:spec": {"f:template": {"f:spec": fields}}}})
             self.deployment["metadata"]["resourceVersion"] = "18"
             return subprocess.CompletedProcess(args, 0, "patched", "")
         raise AssertionError(args)
@@ -252,7 +276,7 @@ class HarborImageRelocationTests(unittest.TestCase):
         self.commands.append(args)
         if args[:3] == ["k3s", "crictl", "inspecti"]:
             ref = args[3]
-            status = {"id": self.image_id, "repoDigests": [MODULE.repository(self.old_image) + "@" + self.digest]}
+            status = {"id": self.image_id, "repoDigests": [MODULE.repository(ref) + "@" + self.digest]}
             if self.no_digest:
                 status["repoDigests"] = []
             if self.mismatch and ref != self.old_image:
@@ -330,6 +354,91 @@ class HarborImageRelocationTests(unittest.TestCase):
             MODULE.reconcile("eva-app", "eva-app", "app-uid", [{"name": "old-ecr"}], run=self.cluster.run,
                              expected_images={"eva-app": self.old_image}, required_registry=self.registry)
         self.assertEqual(self.cluster.deployment, before)
+        self.assertFalse(any(command[1] == "patch" for command, _ in self.cluster.calls))
+
+    def relocate(self):
+        plan = self.prepare()
+        self.cluster.deployment["spec"]["replicas"] = 0
+        return MODULE.reconcile("eva-app", "eva-app", "app-uid", plan["pull_references"], run=self.cluster.run,
+                                expected_images=plan["original_images"], replacement_images=plan["images"], registry=self.registry)
+
+    def field_entry(self, manager="kubectl-patch", operation="Update", subresource=""):
+        fields = {"f:containers": {"k:{\"name\":\"eva-app\"}": {
+            "f:image": {}, "f:imagePullPolicy": {}, "f:env": {"k:{\"name\":\"PRIVATE\"}": {"f:value": {}}}}},
+            "f:imagePullSecrets": {}, "f:initContainers": {"k:{\"name\":\"init\"}": {
+                "f:image": {}, "f:imagePullPolicy": {}, "f:volumeMounts": {}}}}
+        return {"manager": manager, "operation": operation, "apiVersion": "apps/v1", "fieldsType": "FieldsV1",
+                "subresource": subresource, "time": "2026-11-27T05:16:32Z",
+                "fieldsV1": {"f:spec": {"f:template": {"f:spec": fields}}, "f:metadata": {"f:labels": {"f:custom": {}}}}}
+
+    def test_relocation_releases_only_its_update_fields_for_regular_and_init_images(self):
+        self.cluster.track_fields = True
+        self.cluster.deployment["spec"]["template"]["spec"]["initContainers"] = [
+            {"name": "init", "image": self.old_image, "imagePullPolicy": "Always"}]
+        self.proposed["spec"]["template"]["spec"]["initContainers"] = [
+            {"name": "init", "image": self.registry + "/new-project/eva-app:new-version"}]
+        self.manifest.write_text(yaml.safe_dump(self.proposed))
+        foreign = self.field_entry("operator")
+        self.cluster.deployment["metadata"]["managedFields"] = [copy.deepcopy(foreign)]
+        result = self.relocate()
+        self.assertTrue(result["changed"])
+        self.assertEqual(self.cluster.deployment["metadata"]["managedFields"], [foreign])
+        patches = [args for args, _ in self.cluster.calls if args[1] == "patch"]
+        self.assertEqual(len(patches), 2)
+        self.assertIn("--type=merge", patches[0])
+        self.assertIn("--type=json", patches[1])
+        self.assertFalse(any("--force-conflicts" in args for args, _ in self.cluster.calls))
+
+    def test_alpha12_retry_releases_legacy_image_fields_but_preserves_env_and_other_managers(self):
+        self.relocate()
+        legacy = self.field_entry()
+        # Missing init containers are not affected: their ownership is unrelated.
+        foreign = [self.field_entry("operator"), self.field_entry(operation="Apply"),
+                   self.field_entry(subresource="status")]
+        self.cluster.deployment["metadata"]["managedFields"] = [copy.deepcopy(legacy), *copy.deepcopy(foreign)]
+        before_spec = copy.deepcopy(self.cluster.deployment["spec"])
+        self.cluster.calls.clear()
+        self.assertTrue(self.relocate()["changed"])
+        entries = self.cluster.deployment["metadata"]["managedFields"]
+        self.assertEqual(entries[1:], foreign)
+        expected = copy.deepcopy(legacy)
+        fields = expected["fieldsV1"]["f:spec"]["f:template"]["f:spec"]
+        del fields["f:imagePullSecrets"]
+        del fields["f:containers"]["k:{\"name\":\"eva-app\"}"]["f:image"]
+        del fields["f:containers"]["k:{\"name\":\"eva-app\"}"]["f:imagePullPolicy"]
+        self.assertEqual(entries[0], expected)
+        self.assertEqual(self.cluster.deployment["spec"], before_spec)
+        patches = [args for args, _ in self.cluster.calls if args[1] == "patch"]
+        self.assertEqual(len(patches), 1)
+        self.assertIn("--type=json", patches[0])
+        self.assertFalse(self.relocate()["changed"])
+
+    def test_failed_field_release_keeps_concurrency_guard_and_controlled_error(self):
+        self.cluster.track_fields = True
+        self.cluster.reject_release = True
+        with self.assertRaises(MODULE.UnsafeReconciliation) as error:
+            self.relocate()
+        self.assertNotIn("private-credential", str(error.exception))
+        self.assertEqual(self.cluster.deployment["spec"]["replicas"], 0)
+        self.assertEqual(self.cluster.deployment["metadata"]["managedFields"][0]["manager"], MODULE.PREINSTALL_MANAGER)
+        self.cluster.reject_release = False
+        self.assertTrue(self.relocate()["changed"])
+        self.assertEqual(self.cluster.deployment["metadata"]["managedFields"], [])
+
+    def test_pull_only_reconciliation_never_releases_legacy_image_ownership(self):
+        self.relocate()
+        legacy = self.field_entry()
+        self.cluster.deployment["metadata"]["managedFields"] = [copy.deepcopy(legacy)]
+        self.cluster.track_fields = True
+        result = MODULE.reconcile("eva-app", "eva-app", "app-uid", [], run=self.cluster.run)
+        self.assertTrue(result["changed"])
+        self.assertEqual(self.cluster.deployment["metadata"]["managedFields"], [legacy])
+
+    def test_absent_pull_references_equal_empty_rendered_list(self):
+        self.cluster.deployment["spec"]["replicas"] = 0
+        del self.cluster.deployment["spec"]["template"]["spec"]["imagePullSecrets"]
+        result = MODULE.reconcile("eva-app", "eva-app", "app-uid", [], run=self.cluster.run)
+        self.assertFalse(result["changed"])
         self.assertFalse(any(command[1] == "patch" for command, _ in self.cluster.calls))
 
 

@@ -209,7 +209,23 @@ case "$1 $2" in
           [[ ! -f "$FAKE_APP_REPLICAS" ]] || replicas="$(cat "$FAKE_APP_REPLICAS")"
           # A real Deployment has named containers and image identities even
           # when this Values-only fixture has no existing DB to preserve.
-          printf '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"eva-app","namespace":"eva-app","uid":"test-deployment-uid","resourceVersion":"17"},"spec":{"replicas":%s,"selector":{"matchLabels":{"app.kubernetes.io/instance":"eva-app","component":"eva-app"}},"template":{"spec":{"containers":[{"name":"eva-app","image":"registry.example.test/eva-app:3.1.3-rc.3","imagePullPolicy":"Always"}],"imagePullSecrets":[{"name":"legacy-secret"},{"name":"ecr-registry"}]}}}}\n' "$replicas"
+          # Return persisted patch state when the reconciler verifies its CAS
+          # update, rather than returning stale pre-patch references forever.
+          python3 - "$replicas" "${FAKE_APP_PULL_PATCH:?}" <<'PY_DEPLOYMENT'
+import json,sys
+from pathlib import Path
+obj={'apiVersion':'apps/v1','kind':'Deployment','metadata':{
+  'name':'eva-app','namespace':'eva-app','uid':'test-deployment-uid','resourceVersion':'17'},'spec':{
+  'replicas':int(sys.argv[1]),'selector':{'matchLabels':{
+    'app.kubernetes.io/instance':'eva-app','component':'eva-app'}},'template':{'spec':{
+    'containers':[{'name':'eva-app','image':'registry.example.test/eva-app:3.1.3-rc.3','imagePullPolicy':'Always'}],
+    'imagePullSecrets':[{'name':'legacy-secret'},{'name':'ecr-registry'}]}}}}
+patch=Path(sys.argv[2])
+if patch.exists():
+  obj['spec']['template']['spec'].update(json.loads(patch.read_text())['spec']['template']['spec'])
+  obj['metadata']['resourceVersion']='18'
+print(json.dumps(obj))
+PY_DEPLOYMENT
           ;;
       esac
       exit 0

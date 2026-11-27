@@ -12,6 +12,9 @@ from pathlib import Path
 import yaml
 
 
+PREINSTALL_MANAGER = "eva-app-preinstall"
+
+
 class UnsafeReconciliation(RuntimeError):
     pass
 
@@ -147,6 +150,57 @@ def prepare_harbor(namespace, release, expected_uid, manifest, registry, run=sub
             "original_images": original, "images": verified, "pull_references": refs, "registry": registry}
 
 
+def released_fields(deployment, replacement_images):
+    """Release only preinstall fields, never other managers or workload settings.
+
+    Merge-patch Update ownership conflicts even with same-name Helm Apply
+    ownership. Do not apply a sparse object as Helm (it deletes omitted fields),
+    reset managedFields, or force the entire chart. The next Helm apply claims
+    these now-unowned fields. Also repair alpha.12's kubectl-patch image ownership
+    only while the exact verified Harbor images remain installed and stopped.
+    """
+    entries = deployment.get("metadata", {}).get("managedFields", [])
+    require(isinstance(entries, list), "Invalid App field ownership metadata.")
+    spec = deployment["spec"]["template"]["spec"]
+    paths = [("f:spec", "f:template", "f:spec", "f:imagePullSecrets")]
+    if replacement_images is not None:
+        require(image_map(spec) == replacement_images, "App images changed before field ownership release.")
+        for kind in ("containers", "initContainers"):
+            for container in spec.get(kind, []):
+                require(container.get("imagePullPolicy") == "IfNotPresent",
+                        "App image policy changed before field ownership release.")
+                key = "k:" + json.dumps({"name": container["name"]}, separators=(",", ":"))
+                for field in ("f:image", "f:imagePullPolicy"):
+                    paths.append(("f:spec", "f:template", "f:spec", "f:" + kind, key, field))
+
+    def remove(node, path):
+        if not isinstance(node, dict) or path[0] not in node:
+            return
+        if len(path) == 1:
+            del node[path[0]]
+        else:
+            child = node[path[0]]
+            remove(child, path[1:])
+            if child == {}:
+                del node[path[0]]
+
+    result = []
+    for original in entries:
+        entry = copy.deepcopy(original)
+        eligible = (entry.get("manager") == PREINSTALL_MANAGER
+                    or (replacement_images is not None and entry.get("manager") == "kubectl-patch"))
+        if (eligible and entry.get("operation") == "Update" and not entry.get("subresource")
+                and entry.get("apiVersion") == "apps/v1" and entry.get("fieldsType") == "FieldsV1"):
+            fields = entry.get("fieldsV1")
+            require(isinstance(fields, dict), "Invalid App preinstall field ownership.")
+            for path in paths:
+                remove(fields, path)
+            if not fields:
+                continue
+        result.append(entry)
+    return result
+
+
 def reconcile(namespace, release, expected_uid, desired, run=subprocess.run, expected_images=None,
               replacement_images=None, registry=None, required_registry=None):
     command = ["kubectl"]
@@ -157,7 +211,7 @@ def reconcile(namespace, release, expected_uid, desired, run=subprocess.run, exp
         return result.stdout
 
     try:
-        deployment = json.loads(invoke(["get", "deployment", release, "-o", "json"]))
+        deployment = json.loads(invoke(["get", "deployment", release, "-o", "json", "--show-managed-fields=true"]))
     except (ValueError, TypeError) as exc:
         raise UnsafeReconciliation("Invalid existing App Deployment response.") from exc
     require(isinstance(deployment, dict), "Invalid existing App Deployment response.")
@@ -195,7 +249,7 @@ def reconcile(namespace, release, expected_uid, desired, run=subprocess.run, exp
     require(isinstance(pods.get("items"), list) and not pods["items"],
             "App Pods must be fully terminated before pull Secret reconciliation.")
     value = spec.get("template", {}).get("spec", {}).get("imagePullSecrets")
-    current = references([] if value is None else value)
+    references([] if value is None else value)
     desired = references(desired)
     updates = {"imagePullSecrets": desired}
     if replacement_images is not None:
@@ -211,12 +265,36 @@ def reconcile(namespace, release, expected_uid, desired, run=subprocess.run, exp
                 for container in updates[kind]:
                     key = ("init:" if kind == "initContainers" else "") + container["name"]
                     container.update(image=replacement_images[key], imagePullPolicy="IfNotPresent")
-    if all(spec["template"]["spec"].get(key) == value for key, value in updates.items()):
-        return {"changed": False, "status": "pull-references-already-match-rendered-chart"}
-    patch = {"metadata": {"uid": expected_uid, "resourceVersion": version},
-             "spec": {"replicas": 0, "template": {"spec": updates}}}
-    invoke(["patch", "deployment", release, "--type=merge", "--patch-file=/dev/stdin"], json.dumps(patch))
-    return {"changed": True, "status": "pull-references-reconciled-with-app-stopped"}
+
+    def matches_updates(obj):
+        pod_spec = obj["spec"]["template"]["spec"]
+        return all((references(pod_spec.get(key) or []) if key == "imagePullSecrets" else pod_spec.get(key)) == value
+                   for key, value in updates.items())
+
+    changed = not matches_updates(deployment)
+    if changed:
+        patch = {"metadata": {"uid": expected_uid, "resourceVersion": version},
+                 "spec": {"replicas": 0, "template": {"spec": updates}}}
+        invoke(["patch", "deployment", release, "--type=merge", "--field-manager=" + PREINSTALL_MANAGER,
+                "--patch-file=/dev/stdin"], json.dumps(patch))
+        deployment = json.loads(invoke(["get", "deployment", release, "-o", "json", "--show-managed-fields=true"]))
+    metadata = deployment.get("metadata", {})
+    require(metadata.get("uid") == expected_uid and deployment.get("spec", {}).get("replicas") == 0,
+            "App identity or replicas changed before field ownership release.")
+    version = metadata.get("resourceVersion")
+    require(isinstance(version, str) and version, "App Deployment resourceVersion is missing.")
+    require(matches_updates(deployment),
+            "App Pod specification changed before field ownership release.")
+    fields = released_fields(deployment, replacement_images)
+    if fields != metadata.get("managedFields", []):
+        patch = [{"op": "test", "path": "/metadata/uid", "value": expected_uid},
+                 {"op": "test", "path": "/metadata/resourceVersion", "value": version},
+                 {"op": "replace", "path": "/metadata/managedFields", "value": fields}]
+        invoke(["patch", "deployment", release, "--type=json", "--field-manager=" + PREINSTALL_MANAGER,
+                "--patch-file=/dev/stdin"], json.dumps(patch))
+        changed = True
+    return {"changed": changed, "status": ("pull-references-reconciled-with-app-stopped" if changed
+                                          else "pull-references-already-match-rendered-chart")}
 
 
 def main():

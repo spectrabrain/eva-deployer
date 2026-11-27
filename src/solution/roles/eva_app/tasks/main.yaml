@@ -1007,6 +1007,17 @@
   ansible.builtin.set_fact:
     eva_app_preinstall_deployment_uid: "{{ (eva_app_deployment_before_install.stdout | from_json).metadata.uid }}"
     eva_app_preinstall_replicas: "{{ (eva_app_deployment_before_install.stdout | from_json).spec.replicas | default(1) }}"
+    eva_app_preinstall_images: >-
+      {{ (eva_app_deployment_before_install.stdout | from_json).spec.template.spec.containers
+         | items2dict(key_name='name', value_name='image')
+         | combine(dict(
+             ((eva_app_deployment_before_install.stdout | from_json).spec.template.spec.initContainers
+              | default([]) | map(attribute='name') | map('regex_replace', '^', 'init:'))
+             | zip((eva_app_deployment_before_install.stdout | from_json).spec.template.spec.initContainers
+                   | default([]) | map(attribute='image')))) }}
+    eva_app_preinstall_pull_secret_refs: >-
+      {{ (eva_app_deployment_before_install.stdout | from_json).spec.template.spec.imagePullSecrets
+         | default([], true) }}
   changed_when: false
   when:
     - not ansible_check_mode
@@ -1034,6 +1045,31 @@
       - --preflight
   changed_when: false
   when: not ansible_check_mode
+  environment:
+    KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+- name: Verify existing EVA App image content in the selected Harbor before stopping workloads
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ eva_app_workdir }}/reconcile_pull_secrets.py"
+      - --namespace
+      - "{{ eva_app_namespace }}"
+      - --release
+      - "{{ eva_app_name }}"
+      - --expected-uid
+      - "{{ eva_app_preinstall_deployment_uid }}"
+      - --manifest
+      - "{{ eva_app_workdir }}/db-target-manifest.yaml"
+      - --prepare-harbor
+      - --registry
+      - "{{ repository_registry }}"
+  register: eva_app_harbor_image_plan
+  changed_when: false
+  when:
+    - not ansible_check_mode
+    - eva_app_deployment_exists.rc == 0
+    - repository_mode in ['remote_repository', 'local_repository']
   environment:
     KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
@@ -1087,6 +1123,80 @@
 
 - name: Install EVA App and restore prior replicas if Helm fails
   block:
+    - name: Relocate stopped EVA App to identical images in the selected Harbor
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ eva_app_workdir }}/reconcile_pull_secrets.py"
+          - --namespace
+          - "{{ eva_app_namespace }}"
+          - --release
+          - "{{ eva_app_name }}"
+          - --expected-uid
+          - "{{ eva_app_preinstall_deployment_uid }}"
+          - --harbor-plan
+          - "{{ eva_app_harbor_image_plan.stdout }}"
+          - --registry
+          - "{{ repository_registry }}"
+      register: eva_app_harbor_relocation
+      changed_when: >-
+        ((eva_app_harbor_relocation.stdout | from_json).changed | bool)
+        if eva_app_harbor_relocation.rc == 0 else false
+      when:
+        - not ansible_check_mode
+        - eva_app_deployment_exists.rc == 0
+        - repository_mode in ['remote_repository', 'local_repository']
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Select Harbor-only EVA App recovery images and pull references
+      ansible.builtin.set_fact:
+        eva_app_preinstall_images: "{{ (eva_app_harbor_image_plan.stdout | from_json).images }}"
+        eva_app_preinstall_pull_secret_refs: "{{ (eva_app_harbor_image_plan.stdout | from_json).pull_references }}"
+      changed_when: false
+      when:
+        - not ansible_check_mode
+        - eva_app_deployment_exists.rc == 0
+        - repository_mode in ['remote_repository', 'local_repository']
+
+    # Closed-network reader and rescue now use identical OLD bytes via Harbor,
+    # never an ECR reference or an arbitrary newer image's encryption defaults.
+    - name: Preserve EVA App database identity and legacy local users before upgrade
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ eva_app_workdir }}/database_transition.py"
+          - --namespace
+          - "{{ eva_app_namespace }}"
+          - --release
+          - "{{ eva_app_name }}"
+          - --manifest
+          - "{{ eva_app_workdir }}/db-target-manifest.yaml"
+          - --backup-root
+          - "{{ eva_app_db_backup_root | default('/var/lib/eva/backups/app-db/' ~ eva_site_id ~ '/' ~ eva_app_name) }}"
+          - --source
+          - "{{ eva_app_db_migration_source | default('') }}"
+          - --auto-migrate
+          - "{{ eva_app_db_auto_migrate | default(true) | bool | lower }}"
+          - --required-registry
+          - "{{ repository_registry if repository_mode in ['remote_repository', 'local_repository'] else '' }}"
+          - --client-image
+          - >-
+            {{ (eva_app_effective_values.database.internal.image.repository | default(eva_app_mysql_image_repository))
+               ~ ':' ~ (eva_app_effective_values.database.internal.image.tag | default(eva_app_mysql_image_tag)) }}
+      register: eva_app_database_transition
+      changed_when: >-
+        ((eva_app_database_transition.stdout | from_json).changed | bool)
+        if eva_app_database_transition.rc == 0 else false
+      when: not ansible_check_mode
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
+    - name: Show private EVA App DB backup location
+      ansible.builtin.debug:
+        msg: "{{ eva_app_database_transition.stdout | from_json }}"
+      when: not ansible_check_mode
+
     - name: Reconcile EVA App pull Secret references while existing App is stopped
       ansible.builtin.command:
         argv:
@@ -1109,40 +1219,6 @@
         - eva_app_deployment_exists.rc == 0
       environment:
         KUBECONFIG: "{{ eva_app_kubeconfig }}"
-
-    - name: Preserve EVA App database identity and legacy local users before upgrade
-      ansible.builtin.command:
-        argv:
-          - python3
-          - "{{ eva_app_workdir }}/database_transition.py"
-          - --namespace
-          - "{{ eva_app_namespace }}"
-          - --release
-          - "{{ eva_app_name }}"
-          - --manifest
-          - "{{ eva_app_workdir }}/db-target-manifest.yaml"
-          - --backup-root
-          - "{{ eva_app_db_backup_root | default('/var/lib/eva/backups/app-db/' ~ eva_site_id ~ '/' ~ eva_app_name) }}"
-          - --source
-          - "{{ eva_app_db_migration_source | default('') }}"
-          - --auto-migrate
-          - "{{ eva_app_db_auto_migrate | default(true) | bool | lower }}"
-          - --client-image
-          - >-
-            {{ (eva_app_effective_values.database.internal.image.repository | default(eva_app_mysql_image_repository))
-               ~ ':' ~ (eva_app_effective_values.database.internal.image.tag | default(eva_app_mysql_image_tag)) }}
-      register: eva_app_database_transition
-      changed_when: >-
-        ((eva_app_database_transition.stdout | from_json).changed | bool)
-        if eva_app_database_transition.rc == 0 else false
-      when: not ansible_check_mode
-      environment:
-        KUBECONFIG: "{{ eva_app_kubeconfig }}"
-
-    - name: Show private EVA App DB backup location
-      ansible.builtin.debug:
-        msg: "{{ eva_app_database_transition.stdout | from_json }}"
-      when: not ansible_check_mode
 
     - name: Install EVA App from online Helm repo
       no_log: "{{ (eva_cli_values_path | default('') | length > 0) or (eva_cli_helm_set | default([]) | length > 0) }}"
@@ -1196,6 +1272,36 @@
       environment:
         KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
+    - name: Restore prior EVA App pull references if the original image is still stopped
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ eva_app_workdir }}/reconcile_pull_secrets.py"
+          - --namespace
+          - "{{ eva_app_namespace }}"
+          - --release
+          - "{{ eva_app_name }}"
+          - --expected-uid
+          - "{{ eva_app_preinstall_deployment_uid }}"
+          - --restore-images
+          - "{{ eva_app_preinstall_images | to_json }}"
+          - --restore-references
+          - "{{ eva_app_preinstall_pull_secret_refs | to_json }}"
+          - --required-registry
+          - "{{ repository_registry if repository_mode in ['remote_repository', 'local_repository'] else '' }}"
+      register: eva_app_pull_secret_restore
+      changed_when: >-
+        ((eva_app_pull_secret_restore.stdout | from_json).changed | bool)
+        if eva_app_pull_secret_restore.rc == 0 else false
+      failed_when: false
+      when:
+        - eva_app_deployment_exists.rc == 0
+        - eva_app_restore_identity.stdout | default('') == eva_app_preinstall_deployment_uid
+        - eva_app_preinstall_images is defined
+        - eva_app_preinstall_pull_secret_refs is defined
+      environment:
+        KUBECONFIG: "{{ eva_app_kubeconfig }}"
+
     - name: Restore EVA App replicas after Helm installation failure
       ansible.builtin.command: >-
         kubectl scale deployment {{ eva_app_name }} -n {{ eva_app_namespace }} --replicas={{ eva_app_preinstall_replicas }}
@@ -1205,6 +1311,9 @@
       when:
         - eva_app_deployment_exists.rc == 0
         - eva_app_restore_identity.stdout | default('') == eva_app_preinstall_deployment_uid
+        - >-
+          repository_mode not in ['remote_repository', 'local_repository']
+          or (eva_app_pull_secret_restore.rc | default(1)) == 0
       environment:
         KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
@@ -1218,6 +1327,7 @@
         - eva_app_deployment_exists.rc == 0
         - eva_app_restore_identity.stdout | default('') == eva_app_preinstall_deployment_uid
         - eva_app_preinstall_replicas | int > 0
+        - (eva_app_replica_restore.rc | default(1)) == 0
       environment:
         KUBECONFIG: "{{ eva_app_kubeconfig }}"
 
@@ -1232,6 +1342,7 @@
           observed UID={{ eva_app_restore_identity.stdout | default('not-checked') }}.
           replica restoration rc={{ eva_app_replica_restore.rc | default('not-attempted') }},
           rollout rc={{ eva_app_replica_restore_rollout.rc | default('not-attempted') }}.
+          pull reference restoration rc={{ eva_app_pull_secret_restore.rc | default('not-attempted') }}.
 
           {{ ('Replica restoration details: ' ~ (eva_app_replica_restore.stderr | default('')))
              if (eva_app_replica_restore.rc | default(0)) != 0 else '' }}
@@ -1328,8 +1439,7 @@
             "terminated"
           elif any($pods[]; (.status.phase // "") == "Failed" or (.status.phase // "") == "Unknown") then
             "failed-phase"
-          elif any($pods[];
-            (.status.phase // "") != "Running"
+          elif any($pods[]; (.status.phase // "") != "Running"
             or ([.status.containerStatuses[]?] | length) == 0
             or any(.status.containerStatuses[]?; .ready != true or .state.running == null)
             or (any(.status.conditions[]?; .type == "Ready" and .status == "True") | not)

@@ -81,7 +81,7 @@ def sha256(path):
 
 class Transition:
     def __init__(self, namespace, release, resources, backup_root, source="", auto=True,
-                 client_image="mysql:8.0.42-bookworm"):
+                 client_image="mysql:8.0.42-bookworm", required_registry=""):
         self.namespace = namespace
         self.release = release
         self.resources = resources
@@ -95,6 +95,7 @@ class Transition:
         self.identity_updated = False
         self.client_image = client_image
         self.external = False
+        self.required_registry = required_registry
 
     def preflight(self):
         """Reject unsupported connection/storage changes while App is still running."""
@@ -143,6 +144,8 @@ class Transition:
     @contextmanager
     def external_client(self, desired, proposed):
         """A short-lived MySQL client; credentials travel through stdin/Secret refs."""
+        require(not self.required_registry or self.client_image.startswith(self.required_registry + "/"),
+            "Closed-network DB client must use the selected Harbor; no external-registry fallback allowed.")
         name = "eva-db-backup-" + uuid.uuid4().hex[:16]
         values = {"HOST": desired["MYSQL_HOST"], "PORT": desired["MYSQL_PORT"],
                   "USER": desired["MYSQL_USER"], "PASSWORD": desired["MYSQL_PSWD"]}
@@ -232,6 +235,8 @@ class Transition:
         require(product and current.get("LICENSE_PRODUCT_CODE") == product,
                 "License product change requires manual review before DB preparation.")
         container = self.app_container(current_app)
+        require(not self.required_registry or container["image"].startswith(self.required_registry + "/"),
+            "Closed-network license reader must use the verified selected-Harbor image; no external-registry fallback allowed.")
         spec = current_app["spec"]["template"]["spec"]
         mounts = [copy.deepcopy(m) for m in container["volumeMounts"]
                   if m["mountPath"] == "/apps/backend/app/.license/LicenseSpring"]
@@ -292,7 +297,10 @@ class Transition:
             for resource in (policy, pod):
                 self.run_command(self.kubectl("create", "-f", "-"), input=json.dumps(resource).encode(), stdout=subprocess.PIPE)
                 created.append(resource["kind"].lower())
-            self.run_command(self.kubectl("wait", "--for=condition=Ready", "pod/" + name, "--timeout=120s"), stdout=subprocess.PIPE)
+            try:
+                self.run_command(self.kubectl("wait", "--for=condition=Ready", "pod/" + name, "--timeout=120s"), stdout=subprocess.PIPE)
+            except UnsafeTransition as exc:
+                raise UnsafeTransition("License reader Pod did not become ready; verify the preserved App image and its selected-registry pull access. No identity correction allowed.") from exc
             try:
                 raw = self.run_command(self.kubectl("exec", "-i", name, "-c", "reader", "--",
                                                     "python", "-B", "-"), input=source, stdout=subprocess.PIPE).stdout
@@ -791,13 +799,14 @@ def main():
     parser.add_argument("--source", default="")
     parser.add_argument("--auto-migrate", choices=("true", "false"), default="true")
     parser.add_argument("--client-image", default="mysql:8.0.42-bookworm")
+    parser.add_argument("--required-registry", default="")
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     try:
         resources = [r for r in yaml.safe_load_all(Path(args.manifest).read_text()) if isinstance(r, dict)]
         transition = Transition(args.namespace, args.release, resources, args.backup_root,
-                                args.source, args.auto_migrate == "true", args.client_image)
+                                args.source, args.auto_migrate == "true", args.client_image, args.required_registry)
         result = transition.preflight() if args.preflight else transition.run()
         print(json.dumps(result))
     except UnsafeTransition as exc:

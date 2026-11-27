@@ -126,6 +126,15 @@ sudo eva remote prepare
 성공하면 Remote Runtime과 Target의 패키지·Chart·helper·Agent 모델 자산이 준비되고,
 제품 이미지(n8n 포함)·Infra 이미지와 Qdrant snapshot은 Main Harbor에 게시됩니다.
 
+### 기존 App 재설치·업그레이드
+
+기존 App이 있으면 라이선스 조회와 실패 복구에 사용할 **기존 이미지와 동일한 digest**가
+선택한 Main Harbor의 App 저장소에 있어야 합니다. 새 버전 이미지로 대체하지 않습니다.
+설치는 기존 App을 중지하기 전에 Harbor 접근과 이미지 동일성을 검증한 뒤, 라이선스 조회와
+복구 이미지도 Main Harbor로 자동 전환합니다. 이미지가 없거나 검증되지 않으면 App을 중지하지
+않고 실패하며 ECR로 fallback하지 않습니다. 이 자동 전환은 기존 이미지 캐시가 있는 단일 노드
+k3s에 적용됩니다. DB·라이선스 캐시·PV/PVC를 삭제하지 않습니다.
+
 ### Agent 이미지·모델 공급
 
 Main은 선택한 Release에 필요한 Agent 이미지·모델·snapshot을 자동 준비합니다.

@@ -207,7 +207,9 @@ case "$1 $2" in
         *' -o json '*)
           replicas=1
           [[ ! -f "$FAKE_APP_REPLICAS" ]] || replicas="$(cat "$FAKE_APP_REPLICAS")"
-          printf '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"eva-app","namespace":"eva-app","uid":"test-deployment-uid","resourceVersion":"17"},"spec":{"replicas":%s,"selector":{"matchLabels":{"app.kubernetes.io/instance":"eva-app","component":"eva-app"}},"template":{"spec":{"imagePullSecrets":[{"name":"legacy-secret"},{"name":"ecr-registry"}]}}}}\n' "$replicas"
+          # A real Deployment has named containers and image identities even
+          # when this Values-only fixture has no existing DB to preserve.
+          printf '{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"eva-app","namespace":"eva-app","uid":"test-deployment-uid","resourceVersion":"17"},"spec":{"replicas":%s,"selector":{"matchLabels":{"app.kubernetes.io/instance":"eva-app","component":"eva-app"}},"template":{"spec":{"containers":[{"name":"eva-app","image":"registry.example.test/eva-app:3.1.3-rc.3","imagePullPolicy":"Always"}],"imagePullSecrets":[{"name":"legacy-secret"},{"name":"ecr-registry"}]}}}}\n' "$replicas"
           ;;
       esac
       exit 0
